@@ -1,0 +1,31 @@
+node_modules
+.venv
+.next
+out
+dist
+coverage
+.env
+.env.local
+.env.*
+!.env.example
+.data
+*.log
+.DS_Store
+*.tsbuildinfo
+
+# Sensitive local files
+Tokenhub info.txt
+ASR、区分说话人相关接口文档.pdf
+*.sqlite
+*.sqlite-*
+
+# Local development tool state
+.codex/
+.claude/
+.agents/
+config.yml
+daybrief.html
+
+# Local test and sample audio
+fixtures/audio/
+sample*.mp3

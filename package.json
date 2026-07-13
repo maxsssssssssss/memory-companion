@@ -1,0 +1,45 @@
+{
+  "name": "long-time-record-analyze",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "lint": "next typegen && tsc --noEmit --incremental false",
+    "fixtures:audio": "node scripts/generate-audio-fixtures.mjs",
+    "validate:pipeline": "node scripts/validate-pipeline.mjs",
+    "test:e2e": "node scripts/run-playwright-e2e.mjs",
+    "test:e2e:spec": "playwright test",
+    "memory:migrate": "tsx scripts/migrate-memory.ts",
+    "memory:upgrade": "tsx scripts/upgrade-memory.ts"
+  },
+  "dependencies": {
+    "better-sqlite3": "^12.11.1",
+    "ffmpeg-static": "^5.3.0",
+    "ffprobe-static": "^3.1.0",
+    "next": "^15.3.0",
+    "openai": "^5.0.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "uuid": "^11.1.0",
+    "zod": "^3.24.4"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.61.1",
+    "@testing-library/jest-dom": "^6.6.3",
+    "@testing-library/react": "^16.3.0",
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/node": "^22.15.0",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "@vitejs/plugin-react": "^6.0.2",
+    "jsdom": "^26.1.0",
+    "tsx": "^4.23.0",
+    "typescript": "^5.8.0",
+    "vitest": "^4.1.8"
+  }
+}
