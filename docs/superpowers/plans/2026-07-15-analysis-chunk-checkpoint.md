@@ -107,4 +107,3 @@
 - [ ] Invalidate one source fingerprint and verify only the affected stage/chunk executes.
 - [ ] Verify Evidence First metrics remain zero.
 - [ ] Run focused tests, `npm run lint`, `npm test`, `git diff --check`, and `git status --short`; classify only known unrelated full-suite failures separately.
-

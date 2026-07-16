@@ -29,3 +29,11 @@ daybrief.html
 # Local test and sample audio
 fixtures/audio/
 sample*.mp3
+*.wav
+*.mp3
+*.m4a
+
+# Local Redis / Docker runtime data
+.redis-data/
+redis-data/
+docker-data/

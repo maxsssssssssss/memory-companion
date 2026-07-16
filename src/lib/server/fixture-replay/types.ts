@@ -70,4 +70,3 @@ export type FixtureDataset = {
   manifest: FixtureManifest;
   expected: FixtureExpectedResults;
 };
-
