@@ -1,7 +1,26 @@
 import type { AudioInsight, RelationshipSignalCard, SemanticSegment, TranscriptSegment } from "@/lib/domain/types";
-import { buildConservativeRelationshipSignalFallbackCards } from "@/lib/processing/relationship-signals";
+import {
+  buildConservativeRelationshipSignalFallbackCards,
+  type RawRelationshipSignalItem
+} from "@/lib/processing/relationship-signals";
 import { emptyRelationshipSignalProvider } from "./empty-provider";
 import { openaiRelationshipSignalProvider } from "./openai-provider";
+import type { StructuredJsonDiagnostics } from "@/lib/server/openai/structured-json";
+
+export type RelationshipSignalRequestMetrics = {
+  responseMode: "json";
+  model: string;
+  promptCharacterCount: number;
+  unoptimizedContextCharacterCount: number;
+  optimizedContextCharacterCount: number;
+  transcriptCharacterCount: number;
+  semanticCharacterCount: number;
+  semanticSegmentCount: number;
+  insightCharacterCount: number;
+  systemPromptCharacterCount: number;
+  jsonInstructionCharacterCount: number;
+  maxOutputTokens: number;
+};
 
 export type RelationshipSignalProviderInput = {
   uploadId: string;
@@ -9,10 +28,14 @@ export type RelationshipSignalProviderInput = {
   segments: TranscriptSegment[];
   semanticSegments: SemanticSegment[];
   audioInsights: AudioInsight[];
+  signal?: AbortSignal;
+  onDiagnostics?: (diagnostics: StructuredJsonDiagnostics) => void;
+  onRequestMetrics?: (metrics: RelationshipSignalRequestMetrics) => void;
 };
 
 export type RelationshipSignalProvider = {
   analyze(input: RelationshipSignalProviderInput): Promise<RelationshipSignalCard[]>;
+  extractCandidates?(input: RelationshipSignalProviderInput): Promise<RawRelationshipSignalItem[]>;
 };
 
 type ProviderName = "openai" | "none";
@@ -57,7 +80,7 @@ function wrapWithFallback(providerName: ProviderName, fallbackName: ProviderName
 
   const fallbackProvider = providers[fallbackName];
 
-  return {
+  const wrapped: RelationshipSignalProvider = {
     async analyze(input) {
       try {
         return await primaryProvider.analyze(input);
@@ -74,6 +97,25 @@ function wrapWithFallback(providerName: ProviderName, fallbackName: ProviderName
       }
     }
   };
+
+  if (primaryProvider.extractCandidates) {
+    wrapped.extractCandidates = async (input) => {
+      try {
+        return await primaryProvider.extractCandidates!(input);
+      } catch (error) {
+        if (fallbackProvider.extractCandidates) {
+          console.warn(
+            `[relationship signal provider fallback] ${providerName} candidate extraction failed, fallback provider ${fallbackName} will be used.`,
+            error instanceof Error ? error.message : error
+          );
+          return await fallbackProvider.extractCandidates(input);
+        }
+        throw error;
+      }
+    };
+  }
+
+  return wrapped;
 }
 
 export function getRelationshipSignalProvider(): RelationshipSignalProvider {

@@ -14,13 +14,6 @@ export type ProactiveQaSuggestion = {
   sourceIds: string[];
   sourceUploadIds: string[];
   priority: number;
-  origin?: "rule" | "agent";
-  observation?: string;
-  confidence?: number;
-  evidenceCount?: number;
-  memoryAware?: boolean;
-  insightType?: "reminder" | "reflection" | "follow_up" | "pattern_observation";
-  caution?: string;
 };
 
 type BuildProactiveQaSuggestionsInput = {

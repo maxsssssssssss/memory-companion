@@ -117,7 +117,12 @@ export function normalizeAiAudioInsightItems(input: {
       return [];
     }
 
-    const sourceSegments = unique(parsedItem.data.sourceSegmentIds).flatMap((segmentId) => {
+    const requestedSourceIds = unique(parsedItem.data.sourceSegmentIds);
+    if (requestedSourceIds.some((segmentId) => !segmentById.has(segmentId))) {
+      return [];
+    }
+
+    const sourceSegments = requestedSourceIds.flatMap((segmentId) => {
       const segment = segmentById.get(segmentId);
       return segment ? [segment] : [];
     });

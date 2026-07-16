@@ -47,22 +47,25 @@ describe("processUpload emotion signal provider integration", () => {
     const originalAudioInsightProvider = process.env.AUDIO_INSIGHT_PROVIDER;
     const originalAudioInsightFallbackProvider = process.env.AUDIO_INSIGHT_FALLBACK_PROVIDER;
     const originalEmotionSignalProvider = process.env.EMOTION_SIGNAL_PROVIDER;
-    const openaiAnalyze = vi.spyOn(openaiAudioInsightProvider, "analyze").mockResolvedValue([
-      {
-        id: "openai_insight_neutral",
-        uploadId: "upload_openai_default_emotion",
-        sourceSegmentIds: ["seg_risk_1"],
-        sourceTimeRange: { startSeconds: 5400, endSeconds: 5520 },
-        speaker: { id: "speaker_2", role: "other", confidence: 0.72 },
-        voice: { pace: "normal", volume: "unknown", pause: "unknown", overlap: false, confidence: 0.5 },
-        toneLabels: ["unknown"],
-        emotionLabels: ["neutral"],
-        interactionLabels: ["unknown"],
-        summary: "OpenAI provider returned a neutral interaction signal.",
-        evidence: "The model did not identify a strong atmosphere signal.",
-        confidence: 0.82
+    const openaiAnalyze = vi.spyOn(openaiAudioInsightProvider, "analyze").mockImplementation(
+      async (uploadId, segments) => {
+        const source = segments[0];
+        return [{
+          id: `openai_insight_${source.id}`,
+          uploadId,
+          sourceSegmentIds: [source.id],
+          sourceTimeRange: { startSeconds: source.startSeconds, endSeconds: source.endSeconds },
+          speaker: { id: source.speaker ?? "speaker_unknown", role: "other", confidence: 0.72 },
+          voice: { pace: "normal", volume: "unknown", pause: "unknown", overlap: false, confidence: 0.5 },
+          toneLabels: ["unknown"],
+          emotionLabels: ["neutral"],
+          interactionLabels: ["unknown"],
+          summary: "OpenAI provider returned a neutral interaction signal.",
+          evidence: source.text,
+          confidence: 0.82
+        }];
       }
-    ]);
+    );
 
     const upload: AudioUpload = {
       id: "upload_openai_default_emotion",
@@ -84,17 +87,13 @@ describe("processUpload emotion signal provider integration", () => {
       const result = await processUpload({ uploadId: upload.id, store });
       const storedAudioInsights = await store.read<AudioInsight[]>("audio-insights", upload.id);
 
-      expect(openaiAudioInsightProvider.analyze).toHaveBeenCalledTimes(1);
-      expect(result.audioInsights[0]).toMatchObject({
-        id: "openai_insight_neutral",
-        atmosphereLabels: ["unknown"],
-        emotionEvidence: []
-      });
-      expect(storedAudioInsights?.[0]).toMatchObject({
-        id: "openai_insight_neutral",
-        atmosphereLabels: ["unknown"],
-        emotionEvidence: []
-      });
+      expect(openaiAudioInsightProvider.analyze).toHaveBeenCalledTimes(4);
+      expect(result.audioInsights).toHaveLength(4);
+      expect(result.audioInsights.every((insight) =>
+        (insight.atmosphereLabels ?? []).includes("unknown") &&
+        (insight.emotionEvidence ?? []).length === 0
+      )).toBe(true);
+      expect(storedAudioInsights).toEqual(result.audioInsights);
     } finally {
       openaiAnalyze.mockRestore();
       restoreEnv("TRANSCRIPTION_PROVIDER", originalTranscriptionProvider);

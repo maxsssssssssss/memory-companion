@@ -1,16 +1,28 @@
 import fs from "fs";
-import { execFile } from "child_process";
-import { tmpdir } from "os";
-import { extname, join } from "path";
-import { promisify } from "util";
+import { extname } from "path";
+import {
+  AudioChunkSchema,
+  buildAudioChunkId,
+  type AudioChunk,
+  type TranscriptChunk
+} from "@/lib/domain/chunks";
 import type { TranscriptSegment } from "@/lib/domain/types";
 import { getOpenRouterErrorMessage } from "@/lib/openrouter/errors";
 import { classifySegment } from "@/lib/processing/classifier";
-import { getFfmpegExecutable, getFfprobeExecutable } from "@/lib/server/ffmpeg";
 import type { TranscriptionProvider } from "./provider";
 import { createOpenAIClient } from "@/lib/server/openai/client";
 import { getOpenAIClientRuntimeConfig } from "@/lib/server/settings/provider-config";
 import type OpenAI from "openai";
+import {
+  cleanupGeneratedAudioChunks,
+  planAudioChunks,
+  probeAudioDurationSeconds
+} from "./chunks/audio-planner";
+import {
+  createTranscriptChunkFromLocalSegments,
+  mergeTranscriptChunks,
+  type TranscriptMergeResult
+} from "./chunks/transcript-merge";
 
 type DiarizedSegment = {
   start: number;
@@ -47,8 +59,6 @@ const MAX_OPENROUTER_TRANSCRIBE_CHUNK_SECONDS = 60;
 const MIN_OPENROUTER_TRANSCRIBE_CHUNK_SECONDS = 30;
 const TARGET_TRANSCRIPT_CHUNK_LENGTH = 180;
 const ESTIMATED_TRANSCRIPT_CHARS_PER_SECOND = 4;
-const execFileAsync = promisify(execFile);
-
 const mimeTypeToOpenRouterFormat: Record<string, string> = {
   "audio/aac": "aac",
   "audio/flac": "flac",
@@ -178,7 +188,7 @@ function getSyntheticDurationSeconds(text: string, chunks: string[], reportedSec
 function buildSegmentsFromText(
   input: { uploadId: string },
   text: string,
-  options?: { durationSeconds?: number; confidence?: number; startOffsetSeconds?: number; segmentIndexOffset?: number }
+  options?: { durationSeconds?: number; confidence?: number }
 ) {
   const chunks = splitTranscriptText(text);
   if (chunks.length === 0) {
@@ -188,18 +198,16 @@ function buildSegmentsFromText(
   const totalDurationSeconds = getSyntheticDurationSeconds(text, chunks, options?.durationSeconds);
   const secondsPerChunk = totalDurationSeconds / chunks.length;
   const confidence = options?.confidence ?? 0.6;
-  const startOffsetSeconds = options?.startOffsetSeconds ?? 0;
-  const segmentIndexOffset = options?.segmentIndexOffset ?? 0;
 
   return chunks.map((chunk, index) => {
-    const startSeconds = startOffsetSeconds + Math.floor(index * secondsPerChunk);
+    const startSeconds = Math.floor(index * secondsPerChunk);
     const isLastChunk = index === chunks.length - 1;
     const endSeconds = isLastChunk
-      ? startOffsetSeconds + Math.max(Math.floor(index * secondsPerChunk) + 1, Math.round(totalDurationSeconds))
-      : startOffsetSeconds + Math.max(Math.floor(index * secondsPerChunk) + 1, Math.floor((index + 1) * secondsPerChunk));
+      ? Math.max(Math.floor(index * secondsPerChunk) + 1, Math.round(totalDurationSeconds))
+      : Math.max(Math.floor(index * secondsPerChunk) + 1, Math.floor((index + 1) * secondsPerChunk));
 
     return classifySegment({
-      id: `${input.uploadId}_seg_${segmentIndexOffset + index + 1}`,
+      id: `${input.uploadId}_seg_${index + 1}`,
       uploadId: input.uploadId,
       startSeconds,
       endSeconds,
@@ -288,127 +296,133 @@ async function requestOpenRouterTranscription(input: { filePath: string; mimeTyp
   return payload;
 }
 
-async function probeAudioDurationSeconds(filePath: string) {
+async function tryProbeAudioDurationSeconds(filePath: string) {
   try {
-    const result = await execFileAsync(getFfprobeExecutable(), [
-      "-v",
-      "error",
-      "-show_entries",
-      "format=duration",
-      "-of",
-      "default=noprint_wrappers=1:nokey=1",
-      filePath
-    ]);
-    const stdout = typeof result === "string" ? result : result.stdout;
-    const durationSeconds = Number.parseFloat(String(stdout).trim());
-    return Number.isFinite(durationSeconds) && durationSeconds > 0 ? durationSeconds : null;
+    return await probeAudioDurationSeconds(filePath);
   } catch {
     return null;
   }
 }
 
-async function createAudioChunks(filePath: string, chunkSeconds: number) {
-  const chunkDir = await fs.promises.mkdtemp(join(tmpdir(), "long-time-record-analyze-openrouter-"));
-  const outputPattern = join(chunkDir, "chunk_%05d.mp3");
-
-  try {
-    await execFileAsync(getFfmpegExecutable(), [
-      "-y",
-      "-v",
-      "error",
-      "-i",
-      filePath,
-      "-vn",
-      "-f",
-      "segment",
-      "-segment_time",
-      String(chunkSeconds),
-      "-reset_timestamps",
-      "1",
-      "-ac",
-      "1",
-      "-ar",
-      "16000",
-      "-codec:a",
-      "libmp3lame",
-      "-b:a",
-      "32k",
-      outputPattern
-    ]);
-
-    const chunkFiles = (await fs.promises.readdir(chunkDir))
-      .filter((fileName) => fileName.startsWith("chunk_"))
-      .sort()
-      .map((fileName) => join(chunkDir, fileName));
-
-    if (chunkFiles.length === 0) {
-      throw new Error("ffmpeg did not create any audio chunks");
-    }
-
-    return { chunkDir, chunkFiles };
-  } catch (error) {
-    await fs.promises.rm(chunkDir, { recursive: true, force: true });
-    throw error;
-  }
+function chunkMimeType(chunk: AudioChunk, fallback: string) {
+  const mimeType = chunk.metadata.mimeType;
+  return typeof mimeType === "string" && mimeType.trim() ? mimeType : fallback;
 }
 
-async function transcribeOpenRouterFile(input: { uploadId: string; filePath: string; mimeType: string }, model: string) {
-  const payload = await requestOpenRouterTranscription(input, model);
-  return buildSegmentsFromText(input, payload.text ?? "", {
-    durationSeconds: payload.usage?.seconds,
+async function transcribeOpenRouterChunk(chunk: AudioChunk, model: string) {
+  const filePath = chunk.source.path;
+  if (!filePath) {
+    throw new Error(`OpenRouter audio chunk ${chunk.id} has no local path`);
+  }
+  const payload = await requestOpenRouterTranscription(
+    { filePath, mimeType: chunkMimeType(chunk, "audio/mpeg") },
+    model
+  );
+  const reportedDuration = payload.usage?.seconds;
+  const localSegments = buildSegmentsFromText({ uploadId: chunk.uploadId }, payload.text ?? "", {
+    durationSeconds:
+      typeof reportedDuration === "number" && Number.isFinite(reportedDuration)
+        ? Math.min(reportedDuration, chunk.durationSeconds)
+        : chunk.durationSeconds,
     confidence: 0.55
+  });
+
+  return createTranscriptChunkFromLocalSegments({
+    chunk,
+    localSegments,
+    providerMetadata: {
+      provider: "openrouter",
+      model
+    }
   });
 }
 
-async function transcribeOpenRouterChunks(
-  input: { uploadId: string; filePath: string; mimeType: string },
-  model: string,
-  chunkSeconds: number
-) {
-  const { chunkDir, chunkFiles } = await createAudioChunks(input.filePath, chunkSeconds);
-  const segments: TranscriptSegment[] = [];
-
-  try {
-    for (const [chunkIndex, chunkFilePath] of chunkFiles.entries()) {
-      const payload = await requestOpenRouterTranscription(
-        {
-          filePath: chunkFilePath,
-          mimeType: "audio/mpeg"
-        },
-        model
-      );
-      segments.push(
-        ...buildSegmentsFromText(input, payload.text ?? "", {
-          durationSeconds: payload.usage?.seconds ?? chunkSeconds,
-          confidence: 0.55,
-          startOffsetSeconds: chunkIndex * chunkSeconds,
-          segmentIndexOffset: segments.length
-        })
-      );
+function uploadedAudioChunk(input: { uploadId: string; filePath: string; mimeType: string }, durationSeconds: number) {
+  const createdAt = new Date().toISOString();
+  return AudioChunkSchema.parse({
+    id: buildAudioChunkId(input.uploadId, 0),
+    uploadId: input.uploadId,
+    index: 0,
+    startSeconds: 0,
+    endSeconds: durationSeconds,
+    durationSeconds,
+    source: { type: "uploaded_audio", path: input.filePath },
+    status: "created",
+    retryCount: 0,
+    createdAt,
+    updatedAt: createdAt,
+    metadata: {
+      strategy: "single_file_fallback",
+      mimeType: input.mimeType,
+      originalMimeType: input.mimeType
     }
-  } finally {
-    await fs.promises.rm(chunkDir, { recursive: true, force: true });
-  }
-
-  return segments;
+  });
 }
 
-async function transcribeWithOpenRouter(input: { uploadId: string; filePath: string; mimeType: string }, model: string) {
+async function transcribeOpenRouterWithoutDuration(
+  input: { uploadId: string; filePath: string; mimeType: string },
+  model: string
+) {
+  const payload = await requestOpenRouterTranscription(input, model);
+  const localSegments = buildSegmentsFromText(input, payload.text ?? "", {
+    durationSeconds: payload.usage?.seconds,
+    confidence: 0.55
+  });
+  const durationSeconds = Math.max(
+    1,
+    payload.usage?.seconds ?? 0,
+    ...localSegments.map((segment) => segment.endSeconds)
+  );
+  const chunk = uploadedAudioChunk(input, durationSeconds);
+  return createTranscriptChunkFromLocalSegments({
+    chunk,
+    localSegments,
+    providerMetadata: { provider: "openrouter", model, durationSource: "response_or_text" }
+  });
+}
+
+export async function transcribeOpenRouterToMergeResult(
+  input: { uploadId: string; filePath: string; mimeType: string },
+  model: string
+): Promise<TranscriptMergeResult> {
   const chunkSeconds = getOpenRouterChunkSeconds();
-  const durationSeconds = await probeAudioDurationSeconds(input.filePath);
+  const durationSeconds = await tryProbeAudioDurationSeconds(input.filePath);
+  let audioChunks: AudioChunk[] = [];
 
-  if (durationSeconds !== null && durationSeconds > chunkSeconds) {
-    return await transcribeOpenRouterChunks(input, model, chunkSeconds);
+  try {
+    const transcriptChunks: TranscriptChunk[] = [];
+    if (durationSeconds === null) {
+      transcriptChunks.push(await transcribeOpenRouterWithoutDuration(input, model));
+    } else {
+      audioChunks = await planAudioChunks(
+        {
+          uploadId: input.uploadId,
+          filePath: input.filePath,
+          mimeType: input.mimeType,
+          chunkDurationSeconds: chunkSeconds
+        },
+        { probeDurationSeconds: async () => durationSeconds }
+      );
+      for (const chunk of audioChunks) {
+        transcriptChunks.push(await transcribeOpenRouterChunk(chunk, model));
+      }
+    }
+
+    const merged = mergeTranscriptChunks(transcriptChunks);
+    console.info(
+      `[openrouter-transcript-merge] upload_id=${input.uploadId} chunks=${merged.stats.chunkCount} input_segments=${merged.stats.inputSegmentCount} segments=${merged.stats.segmentCount} duplicates_removed=${merged.stats.duplicateRemoved} warnings=${merged.warnings.length}`
+    );
+    return merged;
+  } finally {
+    await cleanupGeneratedAudioChunks(audioChunks);
   }
-
-  return await transcribeOpenRouterFile(input, model);
 }
 
 export const openaiTranscriptionProvider: TranscriptionProvider = {
   async transcribe(input) {
     const model = getTranscriptionModel();
     if ((await resolveOpenAICompatibleRouting()).usesOpenRouter) {
-      return await transcribeWithOpenRouter(input, model);
+      return (await transcribeOpenRouterToMergeResult(input, model)).segments;
     }
 
     const client = createOpenAIClient(await getOpenAIClientRuntimeConfig());

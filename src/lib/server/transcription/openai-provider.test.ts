@@ -34,7 +34,7 @@ vi.mock("@/lib/server/settings/provider-config", () => ({
   getOpenAIClientRuntimeConfig: getOpenAIClientRuntimeConfigMock
 }));
 
-import { openaiTranscriptionProvider } from "./openai-provider";
+import { openaiTranscriptionProvider, transcribeOpenRouterToMergeResult } from "./openai-provider";
 
 const inputTemplate = {
   uploadId: "upload_test",
@@ -293,19 +293,19 @@ describe("openai transcription provider", () => {
     });
     expect(segments).toEqual([
       expect.objectContaining({
-        id: "upload_test_seg_1",
+        id: "upload_test_chunk_00000_seg_00001",
         startSeconds: 0,
         endSeconds: 30,
         text: "第一句形成关键决策。"
       }),
       expect.objectContaining({
-        id: "upload_test_seg_2",
+        id: "upload_test_chunk_00000_seg_00002",
         startSeconds: 30,
         endSeconds: 60,
         text: "第二句提出新的增长想法。"
       }),
       expect.objectContaining({
-        id: "upload_test_seg_3",
+        id: "upload_test_chunk_00000_seg_00003",
         startSeconds: 60,
         endSeconds: 90,
         text: "第三句确认后续待办。"
@@ -460,25 +460,38 @@ describe("openai transcription provider", () => {
       }
     );
 
-    const segments = await openaiTranscriptionProvider.transcribe(input);
+    const mergeResult = await transcribeOpenRouterToMergeResult(input, "openai/gpt-4o-transcribe");
+    const segments = mergeResult.segments;
 
     expect(execFileMock).toHaveBeenCalledWith("ffprobe", expect.any(Array), expect.any(Function));
     expect(execFileMock).toHaveBeenCalledWith("ffmpeg", expect.any(Array), expect.any(Function));
     expect(fetchMock).toHaveBeenCalledTimes(2);
     expect(segments).toEqual([
       expect.objectContaining({
-        id: "upload_long_seg_1",
+        id: "upload_long_chunk_00000_seg_00001",
         startSeconds: 0,
         endSeconds: 60,
         text: "第一段形成关键决策。"
       }),
       expect.objectContaining({
-        id: "upload_long_seg_2",
+        id: "upload_long_chunk_00001_seg_00001",
         startSeconds: 60,
         endSeconds: 120,
         text: "第二段确认后续待办。"
       })
     ]);
+    expect(mergeResult.stats).toEqual({
+      chunkCount: 2,
+      inputSegmentCount: 2,
+      segmentCount: 2,
+      duplicateRemoved: 0
+    });
+    expect(mergeResult.segmentSources.upload_long_chunk_00001_seg_00001).toEqual({
+      chunkId: "upload_long_transcript_chunk_00001",
+      chunkIndex: 1,
+      originalSegmentId: "upload_long_seg_1",
+      speakerIdScope: "chunk"
+    });
   });
 
   it("caps legacy OpenRouter STT chunk config and sends compressed mp3 chunks", async () => {

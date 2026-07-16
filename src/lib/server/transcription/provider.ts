@@ -13,21 +13,21 @@ export type TranscriptionProvider = {
   transcribe(input: TranscriptionInput): Promise<TranscriptSegment[]>;
 };
 
-type ProviderName = "fixture" | "openai" | "speaker-asr";
+export type TranscriptionProviderName = "fixture" | "openai" | "speaker-asr";
 
-const providers: Record<ProviderName, TranscriptionProvider> = {
+const providers: Record<TranscriptionProviderName, TranscriptionProvider> = {
   fixture: fixtureTranscriptionProvider,
   openai: openaiTranscriptionProvider,
   "speaker-asr": speakerAsrTranscriptionProvider
 };
 
-const TRANSCRIPTION_DEFAULT_FALLBACK: ProviderName = "fixture";
+const TRANSCRIPTION_DEFAULT_FALLBACK: TranscriptionProviderName = "fixture";
 
 function normalizeProviderName(value: string | undefined): string {
   return (value ?? "").trim().toLowerCase();
 }
 
-function getProviderNameByEnv(): ProviderName {
+function getProviderNameByEnv(): TranscriptionProviderName {
   const rawProvider = normalizeProviderName(process.env.TRANSCRIPTION_PROVIDER);
   if (!rawProvider || rawProvider === "fixture") {
     return "fixture";
@@ -41,7 +41,7 @@ function getProviderNameByEnv(): ProviderName {
   throw new Error(`Unknown transcription provider: ${rawProvider}`);
 }
 
-function getFallbackProviderName(primaryName: ProviderName): ProviderName | null {
+function getFallbackProviderName(primaryName: TranscriptionProviderName): TranscriptionProviderName | null {
   const rawFallback = normalizeProviderName(process.env.TRANSCRIPTION_FALLBACK_PROVIDER);
   if (!rawFallback) {
     return TRANSCRIPTION_DEFAULT_FALLBACK === primaryName ? null : TRANSCRIPTION_DEFAULT_FALLBACK;
@@ -55,7 +55,10 @@ function getFallbackProviderName(primaryName: ProviderName): ProviderName | null
   throw new Error(`Unknown transcription fallback provider: ${rawFallback}`);
 }
 
-function wrapWithFallback(providerName: ProviderName, fallbackName: ProviderName | null): TranscriptionProvider {
+function wrapWithFallback(
+  providerName: TranscriptionProviderName,
+  fallbackName: TranscriptionProviderName | null
+): TranscriptionProvider {
   const primaryProvider = providers[providerName];
 
   if (!fallbackName) {
@@ -83,4 +86,15 @@ export function getTranscriptionProvider(): TranscriptionProvider {
   const providerName = getProviderNameByEnv();
   const fallbackProviderName = getFallbackProviderName(providerName);
   return wrapWithFallback(providerName, fallbackProviderName);
+}
+
+export function getTranscriptionProviderRuntime() {
+  const name = getProviderNameByEnv();
+  const fallbackName = getFallbackProviderName(name);
+  return {
+    name,
+    provider: providers[name],
+    fallbackName,
+    fallbackProvider: fallbackName ? providers[fallbackName] : null
+  };
 }

@@ -5,7 +5,21 @@ import { openaiAudioInsightProvider } from "./openai-provider";
 import { ruleAudioInsightProvider } from "./rule-provider";
 
 export type AudioInsightProvider = {
-  analyze(uploadId: string, segments: TranscriptSegment[]): Promise<AudioInsight[]>;
+  analyze(
+    uploadId: string,
+    segments: TranscriptSegment[],
+    options?: AudioInsightAnalyzeOptions
+  ): Promise<AudioInsight[]>;
+};
+
+export type AudioInsightAnalyzeOptions = {
+  signal?: AbortSignal;
+  diagnostics?: {
+    chunkIndex: number;
+    attempt: number;
+    concurrency: number;
+    attemptTimeoutMs: number;
+  };
 };
 
 type ProviderName = "rule" | "openai" | "deepseek";
@@ -60,9 +74,9 @@ function wrapWithFallback(providerName: ProviderName, fallbackName: ProviderName
   const fallbackProvider = providers[fallbackName];
 
   return {
-    async analyze(uploadId, segments) {
+    async analyze(uploadId, segments, options) {
       try {
-        const insights = await primaryProvider.analyze(uploadId, segments);
+        const insights = await primaryProvider.analyze(uploadId, segments, options);
         if (insights.length > 0 || segments.length === 0) {
           return insights;
         }
@@ -70,13 +84,13 @@ function wrapWithFallback(providerName: ProviderName, fallbackName: ProviderName
         console.error(
           `[audio insight provider fallback] ${providerName} returned no valid insights, fallback provider ${fallbackName} will be used.`
         );
-        return await fallbackProvider.analyze(uploadId, segments);
+        return await fallbackProvider.analyze(uploadId, segments, options);
       } catch (error) {
         console.error(
           `[audio insight provider fallback] ${providerName} failed, fallback provider ${fallbackName} will be used.`,
           error
         );
-        return await fallbackProvider.analyze(uploadId, segments);
+        return await fallbackProvider.analyze(uploadId, segments, options);
       }
     }
   };
@@ -86,4 +100,16 @@ export function getAudioInsightProvider(): AudioInsightProvider {
   const providerName = getProviderNameByEnv();
   const fallbackProviderName = getFallbackProviderName(providerName);
   return wrapWithFallback(providerName, fallbackProviderName);
+}
+
+export function getAudioInsightChunkProviders(): {
+  provider: AudioInsightProvider;
+  fallbackProvider: AudioInsightProvider;
+} {
+  const providerName = getProviderNameByEnv();
+  const fallbackProviderName = getFallbackProviderName(providerName);
+  return {
+    provider: providers[providerName],
+    fallbackProvider: fallbackProviderName ? providers[fallbackProviderName] : ruleAudioInsightProvider
+  };
 }

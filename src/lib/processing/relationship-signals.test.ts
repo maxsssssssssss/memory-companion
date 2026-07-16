@@ -1,8 +1,11 @@
 import { describe, expect, it } from "vitest";
 import type { AudioInsight, SemanticSegment, TranscriptSegment } from "@/lib/domain/types";
 import {
+  RelationshipSignalModelItemsSchema,
   buildConservativeRelationshipSignalFallbackCards,
   hasRelationshipSignalContext,
+  normalizeEvidenceField,
+  normalizeRelationshipSignalModelResponse,
   normalizeRelationshipSignalItems
 } from "./relationship-signals";
 
@@ -48,7 +51,92 @@ const technicalSegments: TranscriptSegment[] = [
 const semanticSegments: SemanticSegment[] = [];
 const audioInsights: AudioInsight[] = [];
 
+function validModelItem(overrides: Record<string, unknown> = {}) {
+  return {
+    signalType: "boundary_respect",
+    signalCategory: "positive",
+    severity: "low",
+    confidence: 0.84,
+    summary: "对方接受了先停一下的边界表达。",
+    explanation: "这只是基于当下两句对话的互动线索，不代表长期关系结论。",
+    involvedSpeakers: ["speaker_1", "speaker_2"],
+    evidenceSegmentIds: ["seg_1", "seg_2"],
+    evidenceSegments: [],
+    textEvidence: ["我想先停一下", "我们可以先停一下"],
+    suggestedReflection: "可以留意后续对方是否也能持续尊重类似表达。",
+    ...overrides
+  };
+}
+
 describe("relationship signal processing", () => {
+  it("normalizes string evidence containers before strict model validation", () => {
+    expect(normalizeEvidenceField("他说话比较积极")).toEqual(["他说话比较积极"]);
+
+    const normalized = normalizeRelationshipSignalModelResponse({
+      items: [
+        validModelItem({
+          counterEvidence: "也有一次没有回应",
+          acousticEvidence: "语气比较积极",
+          interactionEvidence: "主动询问情况"
+        })
+      ]
+    });
+    const parsed = RelationshipSignalModelItemsSchema.parse(normalized);
+
+    expect(parsed.items[0].counterEvidence).toEqual(["也有一次没有回应"]);
+    expect(parsed.items[0].acousticEvidence).toEqual([]);
+    expect(parsed.items[0].interactionEvidence).toEqual([]);
+  });
+
+  it("keeps array evidence containers unchanged", () => {
+    const evidence = ["他说话比较积极", "主动询问情况"];
+
+    expect(normalizeEvidenceField(evidence)).toBe(evidence);
+  });
+
+  it("normalizes missing, null, and unsupported evidence values to empty arrays", () => {
+    expect(normalizeEvidenceField(undefined)).toEqual([]);
+    expect(normalizeEvidenceField(null)).toEqual([]);
+    expect(normalizeEvidenceField(42)).toEqual([]);
+    expect(normalizeEvidenceField({ detail: "unsupported" })).toEqual([]);
+
+    const parsed = RelationshipSignalModelItemsSchema.parse(
+      normalizeRelationshipSignalModelResponse({
+        items: [validModelItem({ counterEvidence: null })]
+      })
+    );
+
+    expect(parsed.items[0].counterEvidence).toEqual([]);
+    expect(parsed.items[0].acousticEvidence).toEqual([]);
+    expect(parsed.items[0].interactionEvidence).toEqual([]);
+  });
+
+  it("does not change an already valid relationship signal model response", () => {
+    const response = {
+      items: [
+        validModelItem({
+          counterEvidence: ["也有一次没有回应"],
+          acousticEvidence: [
+            {
+              audioInsightId: "audio_1",
+              detail: "语速和音量保持平稳",
+              confidence: 0.72
+            }
+          ],
+          interactionEvidence: [
+            {
+              sourceId: "semantic_1",
+              detail: "边界表达后出现了明确回应",
+              confidence: 0.78
+            }
+          ]
+        })
+      ]
+    };
+
+    expect(normalizeRelationshipSignalModelResponse(response)).toEqual(response);
+  });
+
   it("normalizes model evidence using real transcript segment timing and text", () => {
     const cards = normalizeRelationshipSignalItems({
       uploadId: "upload_1",

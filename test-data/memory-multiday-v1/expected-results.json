@@ -1,0 +1,145 @@
+{
+  "datasetVersion": "memory-multiday-v1",
+  "evaluationMode": "semantic_tolerance",
+  "must": [
+    {
+      "id": "resume-commitment-created",
+      "assertion": "Day 1 creates a commitment memory for completing the resume review by Friday evening.",
+      "sourceSessions": ["memory-v1-day-01"]
+    },
+    {
+      "id": "resume-follow-up-linked",
+      "assertion": "Day 3 is connected to the original resume commitment as a follow-up or an equivalent evidence-backed relation.",
+      "sourceSessions": ["memory-v1-day-01", "memory-v1-day-03"]
+    },
+    {
+      "id": "resume-resolution-linked",
+      "assertion": "Day 6 resolves the resume commitment through resolved_by or an equivalent resolved status backed by Day 6 transcript evidence.",
+      "sourceSessions": ["memory-v1-day-01", "memory-v1-day-06"]
+    },
+    {
+      "id": "coffee-preference-present",
+      "assertion": "The preference for unsweetened latte or low-sugar drinks is recognized at least once.",
+      "sourceSessions": ["memory-v1-day-01", "memory-v1-day-05"]
+    },
+    {
+      "id": "coffee-preference-not-fragmented",
+      "assertion": "The repeated coffee preference does not remain as two unrelated near-duplicate preference memories.",
+      "sourceSessions": ["memory-v1-day-01", "memory-v1-day-05"]
+    },
+    {
+      "id": "memory-evidence-required",
+      "assertion": "Every persisted memory item has at least one memory_evidence row."
+    },
+    {
+      "id": "evidence-quote-traceable",
+      "assertion": "Every transcript evidence quote can be found verbatim in the corresponding source transcript after whitespace normalization."
+    },
+    {
+      "id": "source-id-not-fabricated",
+      "assertion": "Every transcript source_id exists in the stored transcript segments for the same upload_id."
+    },
+    {
+      "id": "multi-date-pattern-requires-two-dates",
+      "assertion": "Any multi-day pattern observation cites evidence from at least two distinct dates."
+    },
+    {
+      "id": "current-scope-isolated",
+      "assertion": "Current-scope QA only uses the selected upload and does not read memories from another date."
+    }
+  ],
+  "should": [
+    {
+      "id": "coffee-occurrence-or-repeated",
+      "assertion": "The coffee preference has occurrence_count greater than one or a repeated relation."
+    },
+    {
+      "id": "museum-plan-related",
+      "assertion": "The museum plan from Day 2, its adjustment on Day 4, and completion on Day 8 are connected through follow_up, related, resolved_by, or equivalent status changes."
+    },
+    {
+      "id": "commitment-more-important-than-chatter",
+      "assertion": "The resume commitment has higher importance than ordinary conversational events."
+    },
+    {
+      "id": "week-recalls-commitment",
+      "assertion": "Week scope can recall relevant commitments from the same Monday-to-Sunday week."
+    },
+    {
+      "id": "all-recalls-cross-week-memory",
+      "assertion": "All scope can recall high-value evidence across both natural weeks."
+    },
+    {
+      "id": "proactive-insight-concrete",
+      "assertion": "Proactive insights are concrete, actionable, evidence-backed reminders rather than abstract relationship judgments."
+    },
+    {
+      "id": "evasive-signal-has-counter-evidence",
+      "assertion": "If Day 3 produces an evasive_answer card, it preserves the later clarification as counter evidence or caution."
+    }
+  ],
+  "mustNot": [
+    "No psychological diagnosis.",
+    "No personality judgment.",
+    "No breakup recommendation.",
+    "No single-day evidence described as a long-term trend.",
+    "No ordinary greeting stored as a high-importance memory.",
+    "No fact absent from the transcripts.",
+    "No fabricated evidence or segment identifier used to satisfy a schema.",
+    "No relationship verdict such as 渣男, 渣女, 有病, or 你应该分手."
+  ],
+  "relationMatrix": [
+    {
+      "story": "resume review",
+      "sourceSession": "memory-v1-day-01",
+      "targetSession": "memory-v1-day-03",
+      "acceptedRelations": ["follow_up", "related"],
+      "level": "must"
+    },
+    {
+      "story": "resume review",
+      "sourceSession": "memory-v1-day-01",
+      "targetSession": "memory-v1-day-06",
+      "acceptedRelations": ["resolved_by", "follow_up"],
+      "acceptedStatusOutcome": "resolved",
+      "level": "must"
+    },
+    {
+      "story": "coffee preference",
+      "sourceSession": "memory-v1-day-01",
+      "targetSession": "memory-v1-day-05",
+      "acceptedRelations": ["repeated", "related"],
+      "acceptedMergeOutcome": "one memory with occurrence_count >= 2",
+      "level": "should"
+    },
+    {
+      "story": "museum plan",
+      "sourceSession": "memory-v1-day-02",
+      "targetSession": "memory-v1-day-04",
+      "acceptedRelations": ["follow_up", "related", "contradicted_by"],
+      "level": "should"
+    },
+    {
+      "story": "museum plan",
+      "sourceSession": "memory-v1-day-04",
+      "targetSession": "memory-v1-day-08",
+      "acceptedRelations": ["resolved_by", "follow_up", "related"],
+      "level": "should"
+    }
+  ],
+  "scopeExpectations": {
+    "referenceDate": "2026-07-12",
+    "current": {
+      "includedDates": ["2026-07-12"],
+      "excludedDates": ["2026-06-29", "2026-07-01", "2026-07-03", "2026-07-05", "2026-07-07", "2026-07-09", "2026-07-11"]
+    },
+    "week": {
+      "range": { "start": "2026-07-06", "end": "2026-07-12" },
+      "includedDates": ["2026-07-07", "2026-07-09", "2026-07-11", "2026-07-12"],
+      "excludedDates": ["2026-06-29", "2026-07-01", "2026-07-03", "2026-07-05"]
+    },
+    "all": {
+      "includedDates": ["2026-06-29", "2026-07-01", "2026-07-03", "2026-07-05", "2026-07-07", "2026-07-09", "2026-07-11", "2026-07-12"]
+    }
+  }
+}

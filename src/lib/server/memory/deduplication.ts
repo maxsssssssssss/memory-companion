@@ -1,4 +1,5 @@
 import { calculateImportance, combineImportanceReasons } from "./importance";
+import { meaningfulTextTokens, sharedTokenCount } from "../text-features";
 import { MemoryItemSchema, type MemoryEvidence, type MemoryItem } from "./types";
 
 export type MemorySimilarityMatch = {
@@ -82,9 +83,24 @@ export function findSimilarMemories(candidate: MemoryItem, existing: MemoryItem[
       const daysApart = daysBetweenDates(candidate.firstSeenDate, memory.lastSeenDate);
       const exactTitle = normalizeMemoryText(candidate.title) === normalizeMemoryText(memory.title);
       const exactSummary = normalizeMemoryText(candidate.summary) === normalizeMemoryText(memory.summary);
-      const similar =
-        (exactSummary || exactTitle && summaryScore >= 0.2) && daysApart <= MAX_EXACT_MATCH_DAYS ||
-        score >= MIN_SIMILARITY && titleScore >= 0.35 && summaryScore >= 0.2 && daysApart <= MAX_SIMILAR_MATCH_DAYS;
+      const preferenceSubject = (value: MemoryItem) => meaningfulTextTokens(
+        [
+          value.title,
+          value.summary,
+          ...value.evidence
+            .filter((evidence) => evidence.sourceType === "transcript")
+            .map((evidence) => evidence.quote)
+        ]
+          .join(" ")
+          .replace(/不喜欢|更喜欢|最喜欢|喜欢|更倾向|偏好|平时|通常|一般|习惯|会选|选择|prefer|usually|habit/giu, " ")
+      );
+      const preferenceShared = candidate.type === "preference"
+        ? sharedTokenCount(preferenceSubject(candidate), preferenceSubject(memory))
+        : 0;
+      const similar = candidate.type === "preference"
+        ? preferenceShared >= 2 && daysApart <= MAX_EXACT_MATCH_DAYS * 2
+        : (exactSummary || exactTitle && summaryScore >= 0.2) && daysApart <= MAX_EXACT_MATCH_DAYS ||
+          score >= MIN_SIMILARITY && titleScore >= 0.35 && summaryScore >= 0.2 && daysApart <= MAX_SIMILAR_MATCH_DAYS;
       return similar ? { memory, score, daysApart } : null;
     })
     .filter((match): match is MemorySimilarityMatch => match !== null)
@@ -129,7 +145,8 @@ export function mergeMemories(primary: MemoryItem, incoming: MemoryItem): Memory
     status: primary.status,
     occurrenceCount,
     evidenceDates,
-    evidenceSourceTypes: evidence.map((item) => item.sourceType)
+    evidenceSourceTypes: evidence.map((item) => item.sourceType),
+    evidenceCount: evidence.length
   });
   const firstSeenDate = evidenceDates[0] ?? primary.firstSeenDate;
   const lastSeenDate = evidenceDates.at(-1) ?? primary.lastSeenDate;

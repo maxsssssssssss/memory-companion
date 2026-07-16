@@ -43,91 +43,110 @@ describe("QaPanel", () => {
     expect(screen.getByText("基于当天证据")).toBeInTheDocument();
   });
 
-  it("renders proactive suggestions before the static scope suggestions", async () => {
+  it("renders suggested questions in their own section before static scope suggestions", async () => {
     vi.stubGlobal("fetch", mockSettingsFetch());
 
     render(
       <QaPanel
         uploadId="upload_1"
         scope="current"
-        proactiveSuggestions={[
+        suggestedQuestions={[
           {
             id: "suggestion_relationship_1",
             scope: "current",
-            category: "relationship",
             question: "这次录音里的关系信号，原文证据是什么？",
             reason: "积极信号：对方先回应了疲惫感，再讨论下一步安排。",
             sourceType: "relationship_signal",
             sourceIds: ["signal_1"],
-            sourceUploadIds: ["upload_1"],
-            priority: 100
+            sourceUploadIds: ["upload_1"]
           }
         ]}
       />
     );
 
-    expect(screen.getByText("AI 主动观察")).toBeInTheDocument();
+    expect(screen.getByText("你可能想问")).toBeInTheDocument();
+    expect(screen.queryByText("AI 主动观察")).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: /这次录音里的关系信号，原文证据是什么？/ })).toBeInTheDocument();
     expect(screen.getByText("积极信号：对方先回应了疲惫感，再讨论下一步安排。")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /杩欎竴澶╂渶鍊煎緱鎴戣浣忕殑鏄粈涔堬紵/ })).not.toBeInTheDocument();
   });
 
-  it("renders evidence-driven agent context without changing the suggestion action", async () => {
+  it("renders Agent observations and questions as independent records", async () => {
     vi.stubGlobal("fetch", mockSettingsFetch());
 
     render(
       <QaPanel
         uploadId="upload_1"
         scope="current"
-        proactiveSuggestions={[
+        proactiveObservations={[
           {
             id: "agent_insight_1",
             scope: "current",
-            category: "relationship",
+            type: "reminder",
+            title: "可以确认",
+            content: "对话里出现了下一次见面的意向，但时间还没有落定。",
+            evidenceRefs: [
+              {
+                evidenceId: "relationship_signal:signal_1",
+                kind: "relationship_signal",
+                sourceType: "relationship_signal",
+                sourceId: "signal_1",
+                uploadId: "upload_1",
+                recordingDate: "2026-07-09",
+                sourceSegmentIds: ["seg_1"],
+                timeRange: { startSeconds: 10, endSeconds: 20 },
+                title: "见面时间仍待确认",
+                summary: "双方提到下次见面，但时间尚未落定。",
+                excerpt: "那我们之后再确认具体时间。"
+              }
+            ],
+            relatedQuestions: ["这次互动里还有什么需要继续确认？"],
+            memoryAware: true,
+            caution: "这只是当前录音中的互动线索，需要结合后续沟通继续确认。"
+          }
+        ]}
+        suggestedQuestions={[
+          {
+            id: "agent_insight_1_question",
+            scope: "current",
             question: "这次互动里还有什么需要继续确认？",
             reason: "安排已经被提到，但具体时间仍需确认。",
             sourceType: "relationship_signal",
-            sourceIds: ["signal_1", "brief_1"],
+            sourceIds: ["signal_1"],
             sourceUploadIds: ["upload_1"],
-            priority: 120,
-            origin: "agent",
-            observation: "对话里出现了下一次见面的意向，但时间还没有落定。",
-            confidence: 0.76,
-            evidenceCount: 2,
-            memoryAware: true,
-            insightType: "reminder",
-            caution: "这只是当前录音中的互动线索，需要结合后续沟通继续确认。"
+            relatedObservationId: "agent_insight_1"
           }
         ]}
       />
     );
 
     expect(screen.getByText("AI 主动观察")).toBeInTheDocument();
-    expect(screen.getByText("📝 可以确认")).toBeInTheDocument();
+    expect(screen.getByText("可以确认")).toBeInTheDocument();
     expect(screen.getByText("对话里出现了下一次见面的意向，但时间还没有落定。")).toBeInTheDocument();
     expect(screen.queryByText(/置信度/)).not.toBeInTheDocument();
     expect(screen.getByText("结合当前记录和已有记忆")).toBeInTheDocument();
     expect(screen.getByText("这只是当前录音中的互动线索，需要结合后续沟通继续确认。")).toBeInTheDocument();
+    expect(screen.getByText("你可能想问")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /这次互动里还有什么需要继续确认？/ })).toBeInTheDocument();
+    fireEvent.click(screen.getByText(/查看依据/));
+    expect(screen.getByText("那我们之后再确认具体时间。")).toBeInTheDocument();
   });
 
-  it("caps the proactive observation area at three cards", async () => {
+  it("caps the suggested-question area at three cards", async () => {
     vi.stubGlobal("fetch", mockSettingsFetch());
 
     render(
       <QaPanel
         uploadId="upload_1"
         scope="current"
-        proactiveSuggestions={Array.from({ length: 5 }, (_, index) => ({
+        suggestedQuestions={Array.from({ length: 5 }, (_, index) => ({
           id: `suggestion_${index + 1}`,
           scope: "current" as const,
-          category: "summary" as const,
           question: `具体问题 ${index + 1}？`,
           reason: `对应事件 ${index + 1}`,
           sourceType: "brief" as const,
           sourceIds: [`brief_${index + 1}`],
-          sourceUploadIds: ["upload_1"],
-          priority: 100 - index
+          sourceUploadIds: ["upload_1"]
         }))}
       />
     );
@@ -138,7 +157,7 @@ describe("QaPanel", () => {
     expect(screen.queryByRole("button", { name: /具体问题 5？/ })).not.toBeInTheDocument();
   });
 
-  it("keeps proactive suggestions visible with history and submits one through existing QA", async () => {
+  it("keeps suggested questions visible with history and fills the composer before explicit submit", async () => {
     const fetchMock = vi.fn((url: string | URL | Request, init?: RequestInit) => {
       if (url === "/api/settings") {
         return Promise.resolve({
@@ -189,17 +208,15 @@ describe("QaPanel", () => {
       <QaPanel
         uploadId="upload_1"
         scope="current"
-        proactiveSuggestions={[
+        suggestedQuestions={[
           {
             id: "suggestion_relationship_1",
             scope: "current",
-            category: "relationship",
             question: "这次录音里的关系信号，原文证据是什么？",
             reason: "积极信号：对方先回应了疲惫感，再讨论下一步安排。",
             sourceType: "relationship_signal",
             sourceIds: ["signal_1"],
-            sourceUploadIds: ["upload_1"],
-            priority: 100
+            sourceUploadIds: ["upload_1"]
           }
         ]}
       />
@@ -207,6 +224,12 @@ describe("QaPanel", () => {
 
     expect(await screen.findByText("之前保存的回答")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: /这次录音里的关系信号，原文证据是什么？/ }));
+
+    expect(screen.getByLabelText("问题")).toHaveValue("这次录音里的关系信号，原文证据是什么？");
+    expect(screen.getByLabelText("问题")).toHaveFocus();
+    expect(fetchMock.mock.calls.some(([url, init]) => url === "/api/days/upload_1/qa" && init?.method === "POST")).toBe(false);
+
+    fireEvent.click(screen.getByRole("button", { name: "提问" }));
 
     await waitFor(() => {
       const postCall = fetchMock.mock.calls.find(([url, init]) => url === "/api/days/upload_1/qa" && init?.method === "POST");

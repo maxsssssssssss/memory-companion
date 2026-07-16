@@ -6,6 +6,12 @@ import type {
   MemoryItemType,
   MemoryWriteInput
 } from "./types";
+import { meaningfulTextTokens, sharedTokenCount, tokenSetSimilarity } from "@/lib/server/text-features";
+import {
+  evaluateMemoryAdmission,
+  isStablePreferenceText,
+  type MemoryAdmissionDecision
+} from "./admission";
 
 export type ExtractUploadMemoriesInput = {
   userId: string;
@@ -51,6 +57,15 @@ function clamp(value: number) {
 
 function cleanText(value: string, maxLength = 4_000) {
   return value.replace(/\s+/g, " ").trim().slice(0, maxLength);
+}
+
+function verbatimQuote(value: string, maxLength = 4_000) {
+  return value.slice(0, maxLength);
+}
+
+function semanticMemorySummary(value: string) {
+  const conciseIntro = value.match(/^围绕[^。！？!?]{1,240}展开[。！？!?]/u)?.[0];
+  return conciseIntro ?? value;
 }
 
 function stableId(prefix: "memory" | "evidence", parts: string[]) {
@@ -130,9 +145,8 @@ function createMemory(input: {
   summary: string;
   importance: number;
   extractionReason: string;
-  structuredSourceType: Exclude<MemoryEvidenceSourceType, "transcript" | "audio_insight">;
-  structuredSourceId: string;
-  structuredQuote: string;
+  structuredSourceType?: Exclude<MemoryEvidenceSourceType, "transcript" | "audio_insight">;
+  structuredSourceId?: string;
   sourceSegmentIds: string[];
   segmentById: Map<string, TranscriptSegment>;
   now: string;
@@ -152,26 +166,27 @@ function createMemory(input: {
     input.userId,
     input.uploadId,
     input.type,
-    input.structuredSourceType,
-    input.structuredSourceId
+    input.structuredSourceType ?? "transcript",
+    input.structuredSourceId ?? sourceSegments[0].id
   ]);
+  const canonicalQuote = verbatimQuote(sourceSegments[0].text);
   const evidence: MemoryEvidenceWrite[] = [
-    {
+    ...(input.structuredSourceType && input.structuredSourceId ? [{
       id: stableId("evidence", [memoryId, input.structuredSourceType, input.structuredSourceId]),
       sourceType: input.structuredSourceType,
       sourceId: input.structuredSourceId,
       uploadId: input.uploadId,
       date: input.recordingDate,
-      quote: cleanText(input.structuredQuote),
+      quote: canonicalQuote,
       createdAt: input.now
-    },
+    }] : []),
     ...sourceSegments.map((segment) => ({
       id: stableId("evidence", [memoryId, "transcript", segment.id]),
       sourceType: "transcript" as const,
       sourceId: segment.id,
       uploadId: input.uploadId,
       date: input.recordingDate,
-      quote: cleanText(segment.text),
+      quote: verbatimQuote(segment.text),
       createdAt: input.now
     }))
   ];
@@ -190,82 +205,213 @@ function createMemory(input: {
   };
 }
 
-export function extractUploadMemories(input: ExtractUploadMemoriesInput): MemoryWriteInput[] {
+function transcriptPreferenceGroups(segments: TranscriptSegment[]) {
+  const candidates = segments.filter((segment) => isStablePreferenceText(segment.text));
+  const groups: TranscriptSegment[][] = [];
+  for (const candidate of candidates) {
+    const candidateTokens = meaningfulTextTokens(candidate.text);
+    const group = groups.find((items) => {
+      const groupTokens = meaningfulTextTokens(items.map((item) => item.text).join(" "));
+      return sharedTokenCount(candidateTokens, groupTokens) >= 2 && tokenSetSimilarity(candidateTokens, groupTokens) >= 0.08;
+    });
+    if (group) group.push(candidate);
+    else groups.push([candidate]);
+  }
+  return groups;
+}
+
+export type MemoryExtractionAudit = {
+  candidateCount: number;
+  persistedCount: number;
+  rejectedCount: number;
+  decisions: MemoryAdmissionDecision[];
+  preferenceCandidates: Array<{
+    memoryId: string;
+    sourceSegmentIds: string[];
+    persisted: boolean;
+  }>;
+  relationshipSignals: Array<{
+    signalId: string;
+    signalType: RelationshipSignalCard["signalType"];
+    memoryTier: MemoryAdmissionDecision["memoryTier"];
+    score: number;
+    reasons: string[];
+  }>;
+};
+
+type MemoryCandidate = {
+  memory: MemoryWriteInput;
+  relationshipSignal?: RelationshipSignalCard;
+  sourceSegmentCount: number;
+  preferenceSourceSegmentIds?: string[];
+};
+
+function transcriptEvidenceIds(memory: MemoryWriteInput) {
+  return new Set(memory.evidence.filter((item) => item.sourceType === "transcript").map((item) => item.sourceId));
+}
+
+function deduplicateExtractionCandidates(candidates: MemoryCandidate[]) {
+  const deduplicated: MemoryCandidate[] = [];
+  for (const candidate of candidates) {
+    if (candidate.memory.type !== "preference") {
+      deduplicated.push(candidate);
+      continue;
+    }
+    const ids = transcriptEvidenceIds(candidate.memory);
+    const existing = deduplicated.find((item) => {
+      if (item.memory.type !== "preference") return false;
+      return sharedTokenCount(ids, transcriptEvidenceIds(item.memory)) > 0;
+    });
+    if (!existing) {
+      deduplicated.push(candidate);
+      continue;
+    }
+    const evidenceByKey = new Map(
+      [...existing.memory.evidence, ...candidate.memory.evidence]
+        .map((evidence) => [`${evidence.sourceType}\u001f${evidence.sourceId}`, evidence] as const)
+    );
+    const preferred = candidate.preferenceSourceSegmentIds ? candidate.memory : existing.memory;
+    existing.memory = {
+      ...preferred,
+      importanceReasons: [
+        ...new Set([...(existing.memory.importanceReasons ?? []), ...(candidate.memory.importanceReasons ?? [])])
+      ],
+      evidence: [...evidenceByKey.values()]
+    };
+    existing.sourceSegmentCount = transcriptEvidenceIds(existing.memory).size;
+    existing.preferenceSourceSegmentIds = [
+      ...new Set([...(existing.preferenceSourceSegmentIds ?? []), ...(candidate.preferenceSourceSegmentIds ?? [])])
+    ];
+  }
+  return deduplicated;
+}
+
+export function extractUploadMemoriesWithAudit(input: ExtractUploadMemoriesInput): {
+  memories: MemoryWriteInput[];
+  audit: MemoryExtractionAudit;
+} {
   const now = input.now ?? new Date().toISOString();
   const segmentById = new Map(input.segments.map((segment) => [segment.id, segment]));
-  const candidates: Array<MemoryWriteInput | null> = [];
+  const candidates: MemoryCandidate[] = [];
+  const addCandidate = (
+    memory: MemoryWriteInput | null,
+    metadata: Omit<MemoryCandidate, "memory"> = { sourceSegmentCount: 0 }
+  ) => {
+    if (memory) candidates.push({ memory, ...metadata });
+  };
   let recentSemanticEventCount = 0;
 
   for (const semanticSegment of input.semanticSegments) {
     const classification = classifySemanticSegment(semanticSegment);
-    if (!classification) {
-      continue;
-    }
+    if (!classification) continue;
     if (classification.reason === "extraction: contains a dated or completed activity") {
-      if (recentSemanticEventCount >= MAX_RECENT_SEMANTIC_EVENTS) {
-        continue;
-      }
+      if (recentSemanticEventCount >= MAX_RECENT_SEMANTIC_EVENTS) continue;
       recentSemanticEventCount += 1;
     }
-    candidates.push(
-      createMemory({
-        ...input,
-        type: classification.type,
-        title: semanticSegment.title,
-        summary: semanticSegment.summary,
-        importance: 0.45 + semanticSegment.confidence * 0.35,
-        extractionReason: classification.reason,
-        structuredSourceType: "timeline",
-        structuredSourceId: semanticSegment.id,
-        structuredQuote: semanticSegment.transcriptExcerpt,
-        sourceSegmentIds: semanticSegment.sourceSegmentIds,
-        segmentById,
-        now
-      })
-    );
+    addCandidate(createMemory({
+      ...input,
+      type: classification.type,
+      title: semanticSegment.title,
+      summary: semanticMemorySummary(semanticSegment.summary),
+      importance: 0.45 + semanticSegment.confidence * 0.35,
+      extractionReason: classification.reason,
+      structuredSourceType: "timeline",
+      structuredSourceId: semanticSegment.id,
+      sourceSegmentIds: semanticSegment.sourceSegmentIds,
+      segmentById,
+      now
+    }), { sourceSegmentCount: semanticSegment.sourceSegmentIds.length });
   }
 
   for (const briefItem of input.briefItems) {
     const classification = classifyBriefItem(briefItem);
-    if (!classification) {
-      continue;
-    }
-    candidates.push(
-      createMemory({
-        ...input,
-        type: classification.type,
-        title: briefItem.title,
-        summary: briefItem.body,
-        importance: priorityImportance[briefItem.priority] * 0.7 + briefItem.confidence * 0.3,
-        extractionReason: classification.reason,
-        structuredSourceType: "brief",
-        structuredSourceId: briefItem.id,
-        structuredQuote: briefItem.transcriptExcerpt,
-        sourceSegmentIds: briefItem.sourceSegmentIds,
-        segmentById,
-        now
-      })
-    );
+    if (!classification) continue;
+    addCandidate(createMemory({
+      ...input,
+      type: classification.type,
+      title: briefItem.title,
+      summary: briefItem.body,
+      importance: priorityImportance[briefItem.priority] * 0.7 + briefItem.confidence * 0.3,
+      extractionReason: classification.reason,
+      structuredSourceType: "brief",
+      structuredSourceId: briefItem.id,
+      sourceSegmentIds: briefItem.sourceSegmentIds,
+      segmentById,
+      now
+    }), { sourceSegmentCount: briefItem.sourceSegmentIds.length });
+  }
+
+  for (const preferenceSegments of transcriptPreferenceGroups(input.segments)) {
+    const representative = [...preferenceSegments].sort(
+      (left, right) => right.text.length - left.text.length || left.startSeconds - right.startSeconds
+    )[0];
+    const memory = createMemory({
+      ...input,
+      type: "preference",
+      title: `明确偏好表达：${cleanText(representative.text, 120)}`,
+      summary: representative.text,
+      importance: 0.7,
+      extractionReason: "extraction: explicit stable preference from transcript",
+      sourceSegmentIds: preferenceSegments.map((segment) => segment.id),
+      segmentById,
+      now
+    });
+    addCandidate(memory, {
+      sourceSegmentCount: preferenceSegments.length,
+      preferenceSourceSegmentIds: preferenceSegments.map((segment) => segment.id)
+    });
   }
 
   for (const relationshipSignal of input.relationshipSignals) {
-    candidates.push(
-      createMemory({
-        ...input,
-        type: "relationship_signal",
-        title: relationshipSignal.summary,
-        summary: relationshipSignal.explanation,
-        importance: severityImportance[relationshipSignal.severity] * 0.6 + relationshipSignal.confidence * 0.4,
-        extractionReason: `extraction: relationship signal ${relationshipSignal.signalType}`,
-        structuredSourceType: "relationship_signal",
-        structuredSourceId: relationshipSignal.id,
-        structuredQuote: relationshipSignal.textEvidence.join(" "),
-        sourceSegmentIds: relationshipSignal.evidenceSegments.map((evidence) => evidence.segmentId),
-        segmentById,
-        now
-      })
-    );
+    addCandidate(createMemory({
+      ...input,
+      type: "relationship_signal",
+      title: relationshipSignal.summary,
+      summary: relationshipSignal.explanation,
+      importance: severityImportance[relationshipSignal.severity] * 0.6 + relationshipSignal.confidence * 0.4,
+      extractionReason: `extraction: relationship signal ${relationshipSignal.signalType}`,
+      structuredSourceType: "relationship_signal",
+      structuredSourceId: relationshipSignal.id,
+      sourceSegmentIds: relationshipSignal.evidenceSegments.map((evidence) => evidence.segmentId),
+      segmentById,
+      now
+    }), {
+      relationshipSignal,
+      sourceSegmentCount: relationshipSignal.evidenceSegments.length
+    });
   }
 
-  return candidates.filter((memory): memory is MemoryWriteInput => memory !== null);
+  const normalizedCandidates = deduplicateExtractionCandidates(candidates);
+  const evaluated = normalizedCandidates.map((candidate) => ({
+    ...candidate,
+    decision: evaluateMemoryAdmission(candidate)
+  }));
+  const memories = evaluated
+    .filter((candidate) => candidate.decision.shouldPersist)
+    .map((candidate) => candidate.memory);
+  return {
+    memories,
+    audit: {
+      candidateCount: normalizedCandidates.length,
+      persistedCount: memories.length,
+      rejectedCount: normalizedCandidates.length - memories.length,
+      decisions: evaluated.map((candidate) => candidate.decision),
+      preferenceCandidates: evaluated.flatMap((candidate) => candidate.preferenceSourceSegmentIds ? [{
+        memoryId: candidate.memory.id,
+        sourceSegmentIds: candidate.preferenceSourceSegmentIds,
+        persisted: candidate.decision.shouldPersist
+      }] : []),
+      relationshipSignals: evaluated.flatMap((candidate) => candidate.relationshipSignal ? [{
+        signalId: candidate.relationshipSignal.id,
+        signalType: candidate.relationshipSignal.signalType,
+        memoryTier: candidate.decision.memoryTier,
+        score: candidate.decision.score,
+        reasons: candidate.decision.reasons
+      }] : [])
+    }
+  };
+}
+
+export function extractUploadMemories(input: ExtractUploadMemoriesInput): MemoryWriteInput[] {
+  return extractUploadMemoriesWithAudit(input).memories;
 }

@@ -177,4 +177,60 @@ describe("memory deduplication", () => {
     expect(consolidated).toHaveLength(2);
     expect(consolidated.find((item) => item.id === "memory_1")?.occurrenceCount).toBe(2);
   });
+
+  it("merges repeated stable preferences by their subject without relying on a specific domain", () => {
+    const first = memory({
+      id: "preference_1",
+      uploadId: "upload_1",
+      date: "2026-07-01",
+      type: "preference",
+      title: "明确偏好表达",
+      summary: "我不喜欢音乐音量太高。"
+    });
+    const repeated = memory({
+      id: "preference_2",
+      uploadId: "upload_2",
+      date: "2026-07-08",
+      type: "preference",
+      title: "明确偏好表达",
+      summary: "音乐的音量我通常会调低。"
+    });
+    const unrelated = memory({
+      id: "preference_3",
+      uploadId: "upload_3",
+      date: "2026-07-08",
+      type: "preference",
+      title: "明确偏好表达",
+      summary: "我更喜欢步行去公园。"
+    });
+
+    expect(findSimilarMemories(repeated, [first, unrelated])).toEqual([
+      expect.objectContaining({ memory: first })
+    ]);
+  });
+
+  it("uses verbatim transcript evidence when preference summaries are paraphrased", () => {
+    const first = memory({
+      id: "preference_evidence_1",
+      uploadId: "upload_1",
+      date: "2026-07-01",
+      type: "preference",
+      title: "Stable drink choice",
+      summary: "A low-sugar drink is the usual choice."
+    });
+    first.evidence[0].quote = "I usually choose a low-sugar oat drink without syrup.";
+    const repeated = memory({
+      id: "preference_evidence_2",
+      uploadId: "upload_2",
+      date: "2026-07-08",
+      type: "preference",
+      title: "Sweetness preference",
+      summary: "The sweetness preference remains unchanged."
+    });
+    repeated.evidence[0].quote = "I do not like very sweet drinks; choose low-sugar without syrup.";
+
+    expect(findSimilarMemories(repeated, [first])).toEqual([
+      expect.objectContaining({ memory: first })
+    ]);
+  });
 });

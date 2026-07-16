@@ -2,7 +2,10 @@ import OpenAI from "openai";
 import { z } from "zod";
 
 import { normalizeAiAudioInsightItems } from "@/lib/processing/ai-audio-insights";
-import { parseJsonObjectFromModelText } from "@/lib/server/openai/structured-json";
+import {
+  parseJsonObjectFromModelText,
+  StructuredJsonResponseError
+} from "@/lib/server/openai/structured-json";
 
 import type { AudioInsightProvider } from "./provider";
 
@@ -13,8 +16,10 @@ export type DeepseekAudioInsightFailureCode =
   | "invalid_base_url"
   | "invalid_model"
   | "empty_response"
+  | "incomplete_response"
   | "invalid_json"
   | "invalid_schema"
+  | "invalid_evidence"
   | "timeout"
   | "api_error";
 
@@ -29,7 +34,12 @@ type DeepseekClient = {
   chat: {
     completions: {
       create: (request: Record<string, unknown>) => Promise<{
-        choices?: Array<{ message?: { content?: string | null } }>;
+        choices?: Array<{
+          finish_reason?: string | null;
+          message?: {
+            content?: string | Array<{ type?: string; text?: string }> | null;
+          };
+        }>;
       }>;
     };
   };
@@ -94,6 +104,30 @@ function segmentPrompt(segments: TranscriptSegment[]) {
     .join("\n");
 }
 
+function responseContentText(content: string | Array<{ type?: string; text?: string }> | null | undefined) {
+  if (typeof content === "string") {
+    return content.trim();
+  }
+  if (!Array.isArray(content)) {
+    return "";
+  }
+  return content
+    .flatMap((item) => (typeof item?.text === "string" ? [item.text] : []))
+    .join("\n")
+    .trim();
+}
+
+function hasFabricatedSourceId(items: unknown[], segments: TranscriptSegment[]) {
+  const allowed = new Set(segments.map((segment) => segment.id));
+  return items.some((item) => {
+    if (!item || typeof item !== "object" || !("sourceSegmentIds" in item)) {
+      return false;
+    }
+    const ids = (item as { sourceSegmentIds?: unknown }).sourceSegmentIds;
+    return Array.isArray(ids) && ids.some((id) => typeof id !== "string" || !allowed.has(id));
+  });
+}
+
 function promptFor(segments: TranscriptSegment[]) {
   const exampleSegmentId = segments[0]?.id ?? "source_segment_id";
   const example = {
@@ -119,7 +153,7 @@ function promptFor(segments: TranscriptSegment[]) {
   };
   const system = [
     "You analyze interaction clues in transcript segments.",
-    "Return exactly one JSON object with an items array. Do not use Markdown.",
+    "Return exactly one JSON object with an items array. Do not use Markdown or explanatory text.",
     "Every item must cite only supplied sourceSegmentIds.",
     "Treat tone and emotion as uncertain clues, not diagnoses or personality conclusions.",
     "Do not recommend ending a relationship and do not invent timestamps, speakers, or evidence.",
@@ -133,7 +167,8 @@ function promptFor(segments: TranscriptSegment[]) {
     "interactionLabels: agreement | disagreement | follow_up_question | interruption | silence | topic_shift | tension | rapport | flirtation_or_testing | decision_moment | unknown"
   ].join("\n");
   const user = [
-    "For each useful segment, return an item with:",
+    "Return only high-value observations, at most 12 items for this chunk.",
+    "Each item must contain:",
     "sourceSegmentIds, speaker{id,displayName?,role,confidence}, voice{pace,volume,pause,overlap,confidence},",
     "toneLabels, emotionLabels, interactionLabels, summary, evidence, confidence.",
     "If evidence is weak, use unknown/neutral labels or return fewer items.",
@@ -165,20 +200,25 @@ export function createDeepseekAudioInsightProvider(deps: {
   const logger = deps.logger ?? console;
 
   return {
-    async analyze(uploadId, segments) {
+    async analyze(uploadId, segments, options) {
       const startedAt = now();
       const model = readStringEnv("DEEPSEEK_AUDIO_INSIGHT_MODEL") ?? DEFAULT_MODEL;
       const fallback = resolveFallbackName();
+      const chunkIndex = options?.diagnostics?.chunkIndex ?? -1;
+      const attempt = options?.diagnostics?.attempt ?? 1;
+      const concurrency = options?.diagnostics?.concurrency ?? 1;
+      const attemptTimeoutMs = options?.diagnostics?.attemptTimeoutMs ?? resolveTimeoutMs();
+      let inputCharacterCount = 0;
+      let responseTextLength = 0;
+      let finishReason = "unknown";
+      let parseResult = "not_started";
+      let validationResult = "not_started";
       const fail = (code: DeepseekAudioInsightFailureCode): never => {
         logger.warn(
-          `[audio-insight] provider=deepseek model=${model} segments=${segments.length} error=${code} fallback=${fallback} elapsed_ms=${Math.max(0, now() - startedAt)}`
+          `[audio-insight] upload_id=${uploadId} chunk_index=${chunkIndex} provider=deepseek model=${model} segments=${segments.length} input_chars=${inputCharacterCount} attempt=${attempt} concurrency=${concurrency} attempt_timeout_ms=${attemptTimeoutMs} provider_status=failed response_text_length=${responseTextLength} finish_reason=${finishReason} parse_result=${parseResult} validation_result=${validationResult} retry_reason=${code} fallback=${fallback} elapsed_ms=${Math.max(0, now() - startedAt)}`
         );
         throw new DeepseekAudioInsightError(code);
       };
-
-      logger.info(
-        `[audio-insight] provider=deepseek model=${model} segments=${segments.length} started=true`
-      );
 
       if (segments.length === 0) {
         logger.info(
@@ -207,7 +247,11 @@ export function createDeepseekAudioInsightProvider(deps: {
           maxRetries: 0
         });
         const prompt = promptFor(segments);
-        const response = await client.chat.completions.create({
+        inputCharacterCount = prompt.system.length + prompt.user.length;
+        logger.info(
+          `[audio-insight] upload_id=${uploadId} chunk_index=${chunkIndex} provider=deepseek model=${model} segments=${segments.length} input_chars=${inputCharacterCount} attempt=${attempt} concurrency=${concurrency} attempt_timeout_ms=${attemptTimeoutMs} provider_status=started`
+        );
+        const request = {
           model,
           stream: false,
           response_format: { type: "json_object" },
@@ -220,8 +264,22 @@ export function createDeepseekAudioInsightProvider(deps: {
             DEFAULT_MAX_OUTPUT_TOKENS
           ),
           thinking: { type: "disabled" }
-        });
-        const content = response.choices?.[0]?.message?.content?.trim();
+        };
+        const response = options?.signal
+          ? await (client.chat.completions.create as (
+              request: Record<string, unknown>,
+              options: { signal: AbortSignal }
+            ) => ReturnType<DeepseekClient["chat"]["completions"]["create"]>)(request, {
+              signal: options.signal
+            })
+          : await client.chat.completions.create(request);
+        const choice = response.choices?.[0];
+        finishReason = choice?.finish_reason ?? "unknown";
+        const content = responseContentText(choice?.message?.content);
+        responseTextLength = content.length;
+        if (finishReason === "length") {
+          return fail("incomplete_response");
+        }
         if (!content) {
           return fail("empty_response");
         }
@@ -229,12 +287,23 @@ export function createDeepseekAudioInsightProvider(deps: {
         let raw: unknown;
         try {
           raw = parseJsonObjectFromModelText(content);
-        } catch {
-          return fail("invalid_json");
+          parseResult = "success";
+        } catch (error) {
+          parseResult = "failed";
+          return fail(
+            error instanceof StructuredJsonResponseError && error.code === "incomplete_json"
+              ? "incomplete_response"
+              : "invalid_json"
+          );
         }
         const parsed = DeepseekAudioInsightResponseSchema.safeParse(raw);
         if (!parsed.success) {
+          validationResult = "failed";
           return fail("invalid_schema");
+        }
+        if (hasFabricatedSourceId(parsed.data.items, segments)) {
+          validationResult = "failed";
+          return fail("invalid_evidence");
         }
         const insights = normalizeAiAudioInsightItems({
           uploadId,
@@ -242,11 +311,13 @@ export function createDeepseekAudioInsightProvider(deps: {
           items: parsed.data.items
         });
         if (insights.length === 0) {
+          validationResult = "failed";
           return fail("invalid_schema");
         }
+        validationResult = "success";
 
         logger.info(
-          `[audio-insight] provider=deepseek model=${model} segments=${segments.length} completed=true accepted=${insights.length} rejected=${Math.max(0, parsed.data.items.length - insights.length)} elapsed_ms=${Math.max(0, now() - startedAt)} fallback=false`
+          `[audio-insight] upload_id=${uploadId} chunk_index=${chunkIndex} provider=deepseek model=${model} segments=${segments.length} input_chars=${inputCharacterCount} attempt=${attempt} concurrency=${concurrency} attempt_timeout_ms=${attemptTimeoutMs} provider_status=success response_text_length=${responseTextLength} finish_reason=${finishReason} parse_result=${parseResult} validation_result=${validationResult} completed=true accepted=${insights.length} rejected=${Math.max(0, parsed.data.items.length - insights.length)} elapsed_ms=${Math.max(0, now() - startedAt)} fallback=false`
         );
         return insights;
       } catch (error) {

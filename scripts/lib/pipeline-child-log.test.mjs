@@ -12,6 +12,9 @@ describe("pipeline child log forwarder", () => {
         "[pipeline] brief stored items=7\n" +
         "[audio-insight] provider=deepseek model=deepseek-v4-flash completed=true elapsed_ms=20 fallback=false\n" +
         "[audio-insights] completed count=22 elapsed_ms=15\n" +
+        "[asr-chunks] chunk completed chunk_id=u_chunk_00000 index=0 retry_count=0 segments=12 elapsed_ms=40\n" +
+        "[transcript-merge] upload_id=u chunks=2 input_segments=20 segments=20 duplicates_removed=0 warnings=1\n" +
+        "[analysis-parallel] completed audio_insight_duration_ms=20 acoustic_duration_ms=10 emotion_duration_ms=5 elapsed_ms=20\n" +
         "[ffmpeg-features] completed count=22 elapsed_ms=20\n" +
         "[semantic-segments] completed count=4 elapsed_ms=2\n" +
         "GET / 200\n"
@@ -22,6 +25,9 @@ describe("pipeline child log forwarder", () => {
       "[pipeline] brief stored items=7\n",
       "[audio-insight] provider=deepseek model=deepseek-v4-flash completed=true elapsed_ms=20 fallback=false\n",
       "[audio-insights] completed count=22 elapsed_ms=15\n",
+      "[asr-chunks] chunk completed chunk_id=u_chunk_00000 index=0 retry_count=0 segments=12 elapsed_ms=40\n",
+      "[transcript-merge] upload_id=u chunks=2 input_segments=20 segments=20 duplicates_removed=0 warnings=1\n",
+      "[analysis-parallel] completed audio_insight_duration_ms=20 acoustic_duration_ms=10 emotion_duration_ms=5 elapsed_ms=20\n",
       "[ffmpeg-features] completed count=22 elapsed_ms=20\n",
       "[semantic-segments] completed count=4 elapsed_ms=2\n"
     ]);

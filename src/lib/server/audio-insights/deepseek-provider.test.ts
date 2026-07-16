@@ -8,7 +8,10 @@ import {
 } from "./deepseek-provider";
 
 type CreateResponse = {
-  choices?: Array<{ message?: { content?: string | null } }>;
+  choices?: Array<{
+    finish_reason?: string | null;
+    message?: { content?: string | Array<{ type?: string; text?: string }> | null };
+  }>;
 };
 
 type CreateRequest = Record<string, unknown>;
@@ -134,9 +137,10 @@ describe("createDeepseekAudioInsightProvider", () => {
     expect(userPrompt).toContain('"sourceSegmentIds": [');
     expect(userPrompt).toContain('"seg_1"');
     expect(userPrompt).toContain('"toneLabels": [');
-    expect(String(logger.info.mock.calls.at(-1)?.[0])).toContain(
-      "provider=deepseek model=deepseek-v4-flash segments=1 completed=true"
-    );
+    const completionLog = String(logger.info.mock.calls.at(-1)?.[0]);
+    expect(completionLog).toContain("provider=deepseek model=deepseek-v4-flash");
+    expect(completionLog).toContain("segments=1");
+    expect(completionLog).toContain("completed=true");
   });
 
   it("keeps valid items when another candidate has an invalid schema", async () => {
@@ -167,6 +171,46 @@ describe("createDeepseekAudioInsightProvider", () => {
       code: "invalid_json"
     });
     expect(create).toHaveBeenCalledTimes(1);
+  });
+
+  it("parses multiple content blocks and conservative trailing-comma cleanup", async () => {
+    const content = String(validResponse().choices?.[0]?.message?.content).replace(/}\s*$/, ",}");
+    const create = vi.fn<(request: CreateRequest) => Promise<CreateResponse>>().mockResolvedValue({
+      choices: [{ message: { content: [{ type: "text", text: "```json\n" }, { type: "text", text: `${content}\n\`\`\`` }] } }]
+    });
+    const provider = createDeepseekAudioInsightProvider({
+      clientFactory: vi.fn(() => ({ chat: { completions: { create } } })),
+      logger: { info: vi.fn(), warn: vi.fn() }
+    });
+
+    await expect(provider.analyze("upload_1", segments)).resolves.toHaveLength(1);
+  });
+
+  it("classifies truncated completion separately from generic invalid JSON", async () => {
+    const create = vi.fn<(request: CreateRequest) => Promise<CreateResponse>>().mockResolvedValue({
+      choices: [{ finish_reason: "length", message: { content: '{"items":[' } }]
+    });
+    const provider = createDeepseekAudioInsightProvider({
+      clientFactory: vi.fn(() => ({ chat: { completions: { create } } })),
+      logger: { info: vi.fn(), warn: vi.fn() }
+    });
+
+    await expect(provider.analyze("upload_1", segments)).rejects.toMatchObject({ code: "incomplete_response" });
+  });
+
+  it("rejects an item when any cited source segment id is fabricated", async () => {
+    const response = validResponse();
+    const payload = JSON.parse(String(response.choices?.[0]?.message?.content));
+    payload.items[0].sourceSegmentIds.push("invented_segment");
+    const create = vi.fn<(request: CreateRequest) => Promise<CreateResponse>>().mockResolvedValue({
+      choices: [{ message: { content: JSON.stringify(payload) } }]
+    });
+    const provider = createDeepseekAudioInsightProvider({
+      clientFactory: vi.fn(() => ({ chat: { completions: { create } } })),
+      logger: { info: vi.fn(), warn: vi.fn() }
+    });
+
+    await expect(provider.analyze("upload_1", segments)).rejects.toMatchObject({ code: "invalid_evidence" });
   });
 
   it("classifies timeouts and never logs the key or transcript", async () => {

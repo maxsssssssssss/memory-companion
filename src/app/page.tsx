@@ -8,7 +8,7 @@ import { Timeline } from "@/components/timeline";
 import { formatLocalDateInputValue, UploadPanel } from "@/components/upload-panel";
 import { combineDayPayloads, type DayRecording } from "@/lib/client/day-aggregation";
 import { buildMemoryContextPayload, type MemoryContextPayload } from "@/lib/client/memory-context";
-import { mergeProactiveInsightSuggestions } from "@/lib/client/proactive-insight-suggestions";
+import { buildProactiveQaPresentation } from "@/lib/client/proactive-qa-presentation";
 import { buildProactiveQaSuggestions } from "@/lib/client/proactive-qa-suggestions";
 import { buildQaScopeMeta } from "@/lib/client/qa-scope-metadata";
 import {
@@ -2051,7 +2051,7 @@ function DailyBriefApp({ user, onLogout }: { user: AuthUser; onLogout: () => Pro
         }
       }[memoryScope]
     : undefined;
-  const currentProactiveQaSuggestions = useMemo(
+  const currentProactiveQaPresentation = useMemo(
     () => {
       const ruleSuggestions = buildProactiveQaSuggestions({
         scope: "current",
@@ -2059,7 +2059,7 @@ function DailyBriefApp({ user, onLogout }: { user: AuthUser; onLogout: () => Pro
         payload: displayPayload && isQuestionReadyPayload(displayPayload) ? toLocalDayPayload(displayPayload) : null
       });
 
-      return mergeProactiveInsightSuggestions({
+      return buildProactiveQaPresentation({
         agentInsights: displayPayload?.proactiveInsights ?? [],
         ruleSuggestions
       });
@@ -2075,15 +2075,21 @@ function DailyBriefApp({ user, onLogout }: { user: AuthUser; onLogout: () => Pro
       }),
     [displayPayload, selectedDate]
   );
-  const memoryProactiveQaSuggestions = useMemo(
-    () =>
-      buildProactiveQaSuggestions({
+  const memoryProactiveQaPresentation = useMemo(
+    () => {
+      const ruleSuggestions = buildProactiveQaSuggestions({
         scope: memoryScope === "all" ? "all" : "week",
         referenceDate: selectedDate,
         memoryPayloads: localMemoryPayloads,
         memoryContext: activeLocalMemoryContext,
         hasServerScopeData: memoryScope === "all" ? hasAllScopeData : hasWeekScopeData
-      }),
+      });
+
+      return buildProactiveQaPresentation({
+        agentInsights: [],
+        ruleSuggestions
+      });
+    },
     [activeLocalMemoryContext, hasAllScopeData, hasWeekScopeData, localMemoryPayloads, memoryScope, selectedDate]
   );
   const memoryQaScopeMeta = useMemo(
@@ -2501,7 +2507,8 @@ function DailyBriefApp({ user, onLogout }: { user: AuthUser; onLogout: () => Pro
             referenceDate={selectedDate}
             isActive
             emptyState={activeQaEmptyState}
-            proactiveSuggestions={memoryProactiveQaSuggestions}
+            proactiveObservations={memoryProactiveQaPresentation.observations}
+            suggestedQuestions={memoryProactiveQaPresentation.suggestedQuestions}
             scopeMeta={memoryQaScopeMeta}
             onLocalQuestion={activeLocalMemoryContext ? handleMemoryContextQuestion : undefined}
             loadQuestionHistory={activeLocalMemoryContext ? loadMemoryQuestionHistory : undefined}
@@ -2545,7 +2552,8 @@ function DailyBriefApp({ user, onLogout }: { user: AuthUser; onLogout: () => Pro
               scope="current"
               isActive={activeView === "qa"}
               emptyState={activeQaEmptyState}
-              proactiveSuggestions={currentProactiveQaSuggestions}
+              proactiveObservations={currentProactiveQaPresentation.observations}
+              suggestedQuestions={currentProactiveQaPresentation.suggestedQuestions}
               scopeMeta={currentQaScopeMeta}
               onLocalQuestion={isLocalFirstMode ? handleLocalQuestion : handleServerContextQuestion}
               loadQuestionHistory={loadCurrentQuestionHistory}

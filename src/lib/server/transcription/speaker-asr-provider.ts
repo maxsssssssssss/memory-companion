@@ -1,7 +1,8 @@
 import { randomUUID } from "crypto";
-import { sep } from "path";
 import type { TranscriptSegment } from "@/lib/domain/types";
 import { classifySegment } from "@/lib/processing/classifier";
+import { ChunkTranscriptionError, type ChunkTranscriptionAdapter } from "./chunks/adapter";
+import { createTranscriptChunkFromLocalSegments } from "./chunks/transcript-merge";
 import type { TranscriptionProvider } from "./provider";
 
 type SpeakerAsrSubmitResponse = {
@@ -62,8 +63,22 @@ function readNumberEnv(name: string, defaultValue: number) {
   return Number.isFinite(parsed) ? parsed : defaultValue;
 }
 
-function sleep(ms: number) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+function sleep(ms: number, signal?: AbortSignal) {
+  return new Promise<void>((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(new ChunkTranscriptionError("speaker_asr_aborted", "speaker-asr request was aborted", true));
+      return;
+    }
+    const timeout = setTimeout(resolve, ms);
+    signal?.addEventListener(
+      "abort",
+      () => {
+        clearTimeout(timeout);
+        reject(new ChunkTranscriptionError("speaker_asr_aborted", "speaker-asr request was aborted", true));
+      },
+      { once: true }
+    );
+  });
 }
 
 function trimBaseUrl(url: string) {
@@ -97,23 +112,41 @@ function getLanguageList() {
 }
 
 function parseUserIdFromUploadPath(filePath: string) {
-  const parts = filePath.split(sep);
+  const parts = filePath.split(/[\\/]+/);
   const usersIndex = parts.lastIndexOf("users");
   const userId = usersIndex >= 0 ? parts[usersIndex + 1] : undefined;
 
   return userId && SAFE_ID_PATTERN.test(userId) ? userId : undefined;
 }
 
-function buildAudioUrl(input: { uploadId: string; filePath: string }) {
-  const userId = parseUserIdFromUploadPath(input.filePath);
+function appendChunkId(url: string, chunkId: string | undefined) {
+  if (!chunkId) {
+    return url;
+  }
+  const parsed = new URL(url);
+  parsed.searchParams.set("chunkId", chunkId);
+  return parsed.toString();
+}
+
+function buildAudioUrl(input: { uploadId: string; filePath: string; userId?: string; chunkId?: string }) {
+  const userId = input.userId ?? parseUserIdFromUploadPath(input.filePath);
   const accessToken = readStringEnv(AUDIO_ACCESS_TOKEN_ENV);
   const template = readStringEnv(AUDIO_URL_TEMPLATE_ENV);
 
   if (template) {
-    return template
+    if (input.chunkId && !template.includes("{chunkId}")) {
+      throw new ChunkTranscriptionError(
+        "speaker_asr_chunk_url_template_invalid",
+        `${AUDIO_URL_TEMPLATE_ENV} must include {chunkId} for chunked transcription`,
+        false
+      );
+    }
+    const expanded = template
       .replaceAll("{uploadId}", encodeURIComponent(input.uploadId))
       .replaceAll("{userId}", encodeURIComponent(userId ?? ""))
+      .replaceAll("{chunkId}", encodeURIComponent(input.chunkId ?? ""))
       .replaceAll("{token}", encodeURIComponent(accessToken ?? ""));
+    return expanded;
   }
 
   const audioBaseUrl = readStringEnv(AUDIO_BASE_URL_ENV);
@@ -123,7 +156,8 @@ function buildAudioUrl(input: { uploadId: string; filePath: string }) {
     );
   }
 
-  return `${trimBaseUrl(audioBaseUrl)}/api/internal/audio/${encodeURIComponent(userId)}/${encodeURIComponent(input.uploadId)}?token=${encodeURIComponent(accessToken)}`;
+  const url = `${trimBaseUrl(audioBaseUrl)}/api/internal/audio/${encodeURIComponent(userId)}/${encodeURIComponent(input.uploadId)}?token=${encodeURIComponent(accessToken)}`;
+  return appendChunkId(url, input.chunkId);
 }
 
 async function parseJsonResponse<T>(response: Response): Promise<T> {
@@ -139,20 +173,37 @@ async function parseJsonResponse<T>(response: Response): Promise<T> {
   }
 }
 
-function assertAccepted(payload: SpeakerAsrSubmitResponse, action: string) {
+function assertAccepted(payload: SpeakerAsrSubmitResponse, action: "submit" | "query") {
   if (payload.code !== 0) {
-    throw new Error(`speaker-asr ${action} failed: code=${payload.code ?? "unknown"} message=${payload.message ?? "unknown"}`);
+    throw new ChunkTranscriptionError(
+      `speaker_asr_${action}_failed`,
+      `speaker-asr ${action} failed: code=${payload.code ?? "unknown"} message=${payload.message ?? "unknown"}`,
+      true
+    );
   }
 }
 
-async function submitSpeakerAsr(input: { uploadId: string; filePath: string; userId?: string; reqId: string }) {
+function isRetryableHttpStatus(status: number) {
+  return status === 408 || status === 429 || status >= 500;
+}
+
+async function submitSpeakerAsr(input: {
+  uploadId: string;
+  recordId?: string;
+  filePath: string;
+  userId?: string;
+  chunkId?: string;
+  reqId: string;
+  signal?: AbortSignal;
+}) {
   const response = await fetch(`${requireBaseUrl()}/api/ai/non-realtime-asr`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
+    signal: input.signal,
     body: JSON.stringify({
       req_id: input.reqId,
       audio_url: buildAudioUrl(input),
-      record_id: input.uploadId,
+      record_id: input.recordId ?? input.uploadId,
       user_id: input.userId ?? parseUserIdFromUploadPath(input.filePath) ?? input.uploadId,
       language: getLanguageList(),
       speaker: getSpeakerCount()
@@ -161,43 +212,61 @@ async function submitSpeakerAsr(input: { uploadId: string; filePath: string; use
   const payload = await parseJsonResponse<SpeakerAsrSubmitResponse>(response);
 
   if (!response.ok) {
-    throw new Error(`speaker-asr submit failed: http=${response.status} message=${payload.message ?? response.statusText}`);
+    throw new ChunkTranscriptionError(
+      "speaker_asr_submit_http",
+      `speaker-asr submit failed: http=${response.status} message=${payload.message ?? response.statusText}`,
+      isRetryableHttpStatus(response.status)
+    );
   }
   assertAccepted(payload, "submit");
 
   return payload;
 }
 
-async function querySpeakerAsr(reqId: string) {
-  const response = await fetch(`${requireBaseUrl()}/api/ai/non-realtime-asr/query?reqid=${encodeURIComponent(reqId)}`);
+async function querySpeakerAsr(reqId: string, signal?: AbortSignal) {
+  const response = await fetch(`${requireBaseUrl()}/api/ai/non-realtime-asr/query?reqid=${encodeURIComponent(reqId)}`, {
+    signal
+  });
   const payload = await parseJsonResponse<SpeakerAsrQueryResponse>(response);
 
   if (!response.ok) {
-    throw new Error(`speaker-asr query failed: http=${response.status} message=${payload.message ?? response.statusText}`);
+    throw new ChunkTranscriptionError(
+      "speaker_asr_query_http",
+      `speaker-asr query failed: http=${response.status} message=${payload.message ?? response.statusText}`,
+      isRetryableHttpStatus(response.status)
+    );
   }
 
   return payload;
 }
 
-async function waitForSpeakerAsr(reqId: string) {
+async function waitForSpeakerAsr(reqId: string, signal?: AbortSignal) {
   const startedAt = Date.now();
   const timeoutMs = Math.max(30_000, readNumberEnv(TIMEOUT_MS_ENV, DEFAULT_TIMEOUT_MS));
   const pollIntervalMs = Math.max(500, readNumberEnv(POLL_INTERVAL_MS_ENV, DEFAULT_POLL_INTERVAL_MS));
 
   while (Date.now() - startedAt <= timeoutMs) {
-    const payload = await querySpeakerAsr(reqId);
+    const payload = await querySpeakerAsr(reqId, signal);
     if (payload.code === 0) {
       return payload.data ?? {};
     }
     if (payload.code === 2) {
-      await sleep(pollIntervalMs);
+      await sleep(pollIntervalMs, signal);
       continue;
     }
 
-    throw new Error(`speaker-asr query failed: code=${payload.code ?? "unknown"} message=${payload.message ?? "unknown"}`);
+    throw new ChunkTranscriptionError(
+      "speaker_asr_query_failed",
+      `speaker-asr query failed: code=${payload.code ?? "unknown"} message=${payload.message ?? "unknown"}`,
+      true
+    );
   }
 
-  throw new Error(`speaker-asr query timed out after ${timeoutMs}ms`);
+  throw new ChunkTranscriptionError(
+    "speaker_asr_query_timeout",
+    `speaker-asr query timed out after ${timeoutMs}ms`,
+    true
+  );
 }
 
 function normalizeText(text: string) {
@@ -307,15 +376,29 @@ function buildSegmentsFromSpeakerAsr(uploadId: string, data: SpeakerAsrResultDat
   });
 }
 
+async function executeSpeakerAsr(input: {
+  uploadId: string;
+  recordId?: string;
+  filePath: string;
+  userId?: string;
+  chunkId?: string;
+  reqId: string;
+  signal?: AbortSignal;
+}) {
+  const submitted = await submitSpeakerAsr(input);
+  return submitted.data?.asr_result || submitted.data?.speaker_result
+    ? (submitted.data ?? {})
+    : await waitForSpeakerAsr(input.reqId, input.signal);
+}
+
 export const speakerAsrTranscriptionProvider: TranscriptionProvider = {
   async transcribe(input) {
     const reqId = `daily_brief_${input.uploadId}_${randomUUID()}`;
-    const submitted = await submitSpeakerAsr({
+    const data = await executeSpeakerAsr({
       ...input,
       userId: parseUserIdFromUploadPath(input.filePath),
       reqId
     });
-    const data = submitted.data?.asr_result || submitted.data?.speaker_result ? submitted.data : await waitForSpeakerAsr(reqId);
     const segments = buildSegmentsFromSpeakerAsr(input.uploadId, data ?? {});
 
     if (segments.length === 0) {
@@ -323,5 +406,42 @@ export const speakerAsrTranscriptionProvider: TranscriptionProvider = {
     }
 
     return segments;
+  }
+};
+
+export const speakerAsrChunkTranscriptionAdapter: ChunkTranscriptionAdapter = {
+  name: "speaker-asr",
+  async transcribeChunk({ chunk, userId, signal }) {
+    const filePath = chunk.source.path;
+    if (!filePath) {
+      throw new ChunkTranscriptionError("chunk_audio_missing", "audio chunk path is missing", false);
+    }
+    const reqId = `daily_brief_${chunk.id}_${randomUUID()}`;
+    const data = await executeSpeakerAsr({
+      uploadId: chunk.uploadId,
+      recordId: chunk.id,
+      filePath,
+      userId: userId ?? parseUserIdFromUploadPath(filePath),
+      chunkId: chunk.source.type === "generated_chunk" ? chunk.id : undefined,
+      reqId,
+      signal
+    });
+    const localSegments = buildSegmentsFromSpeakerAsr(chunk.uploadId, data ?? {});
+    if (localSegments.length === 0) {
+      throw new ChunkTranscriptionError(
+        "speaker_asr_empty_transcript",
+        "speaker-asr provider returned no transcript segments for chunk",
+        true
+      );
+    }
+
+    return createTranscriptChunkFromLocalSegments({
+      chunk,
+      localSegments,
+      providerMetadata: {
+        provider: "speaker-asr",
+        requestId: reqId
+      }
+    });
   }
 };

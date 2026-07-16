@@ -5,7 +5,7 @@ import { sampleTranscriptSegments } from "@/lib/processing/sample-transcript";
 
 import { deepseekAudioInsightProvider } from "./deepseek-provider";
 import { openaiAudioInsightProvider } from "./openai-provider";
-import { getAudioInsightProvider } from "./provider";
+import { getAudioInsightChunkProviders, getAudioInsightProvider } from "./provider";
 import { ruleAudioInsightProvider } from "./rule-provider";
 
 function restoreEnv(name: string, value: string | undefined) {
@@ -134,6 +134,23 @@ describe("audio insight providers", () => {
       expect(insights.every((insight) => insight.sourceSegmentIds.length > 0)).toBe(true);
     } finally {
       deepseekAnalyze.mockRestore();
+      restoreEnv("AUDIO_INSIGHT_PROVIDER", originalProvider);
+      restoreEnv("AUDIO_INSIGHT_FALLBACK_PROVIDER", originalFallbackProvider);
+    }
+  });
+
+  it("exposes the unwrapped primary provider to chunk retry orchestration", () => {
+    const originalProvider = process.env.AUDIO_INSIGHT_PROVIDER;
+    const originalFallbackProvider = process.env.AUDIO_INSIGHT_FALLBACK_PROVIDER;
+    try {
+      process.env.AUDIO_INSIGHT_PROVIDER = "deepseek";
+      process.env.AUDIO_INSIGHT_FALLBACK_PROVIDER = "rule";
+
+      expect(getAudioInsightChunkProviders()).toEqual({
+        provider: deepseekAudioInsightProvider,
+        fallbackProvider: ruleAudioInsightProvider
+      });
+    } finally {
       restoreEnv("AUDIO_INSIGHT_PROVIDER", originalProvider);
       restoreEnv("AUDIO_INSIGHT_FALLBACK_PROVIDER", originalFallbackProvider);
     }

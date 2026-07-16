@@ -2,10 +2,11 @@ import {
   RelationshipSignalModelItemsSchema,
   buildConservativeRelationshipSignalFallbackCards,
   hasRelationshipSignalContext,
+  normalizeRelationshipSignalModelResponse,
   normalizeRelationshipSignalItems
 } from "@/lib/processing/relationship-signals";
 import { createOpenAIClient } from "@/lib/server/openai/client";
-import { parseStructuredJsonResponse } from "@/lib/server/openai/structured-json";
+import { jsonOnlyInstruction, parseStructuredJsonResponse } from "@/lib/server/openai/structured-json";
 import { getOpenAIClientRuntimeConfig } from "@/lib/server/settings/provider-config";
 import type { RelationshipSignalProvider } from "./provider";
 
@@ -17,21 +18,32 @@ function getModel() {
   );
 }
 
-function compactText(text: string, maxLength = 500) {
+function compactText(text: string, maxLength = 320) {
   const normalized = text.replace(/\s+/g, " ").trim();
   return normalized.length > maxLength ? `${normalized.slice(0, maxLength - 1)}...` : normalized;
 }
 
-function segmentPrompt(input: Parameters<RelationshipSignalProvider["analyze"]>[0]) {
+function normalizedText(text: string) {
+  return text.replace(/\s+/g, " ").trim();
+}
+
+function readPositiveInteger(name: string, fallback: number) {
+  const value = Number.parseInt(process.env[name]?.trim() ?? "", 10);
+  return Number.isFinite(value) && value > 0 ? value : fallback;
+}
+
+function unoptimizedRelationshipContextCharacterCount(
+  input: Parameters<RelationshipSignalProvider["analyze"]>[0]
+) {
   const transcript = input.segments
-    .map((segment) => `[${segment.id}] ${segment.startSeconds}-${segment.endSeconds}s ${segment.speaker ?? "speaker_unknown"}: ${compactText(segment.text)}`)
+    .map((segment) => `[${segment.id}] ${segment.startSeconds}-${segment.endSeconds}s ${segment.speaker ?? "speaker_unknown"}: ${compactText(segment.text, 500)}`)
     .join("\n");
   const semantic = input.semanticSegments
-    .slice(0, 12)
-    .map((segment) => `[${segment.id}] ${segment.sourceTimeRange.startSeconds}-${segment.sourceTimeRange.endSeconds}s ${compactText(segment.title)}: ${compactText(segment.summary)}`)
+    .slice(0, 4)
+    .map((segment) => `[${segment.id}] ${segment.sourceTimeRange.startSeconds}-${segment.sourceTimeRange.endSeconds}s ${compactText(segment.title, 500)}: ${compactText(segment.summary, 500)}`)
     .join("\n");
   const insights = input.audioInsights
-    .slice(0, 30)
+    .slice(0, 12)
     .map((insight) => {
       const labels = [
         ...insight.toneLabels,
@@ -39,10 +51,9 @@ function segmentPrompt(input: Parameters<RelationshipSignalProvider["analyze"]>[
         ...insight.interactionLabels,
         ...(insight.atmosphereLabels ?? [])
       ].join(",");
-      return `[${insight.id}] ${insight.sourceTimeRange.startSeconds}-${insight.sourceTimeRange.endSeconds}s ${insight.speaker.id} labels=${labels}: ${compactText(insight.summary)} evidence=${compactText(insight.evidence)}`;
+      return `[${insight.id}] ${insight.sourceTimeRange.startSeconds}-${insight.sourceTimeRange.endSeconds}s ${insight.speaker.id} labels=${labels}: ${compactText(insight.summary, 500)} evidence=${compactText(insight.evidence, 500)}`;
     })
     .join("\n");
-
   return [
     `uploadId=${input.uploadId}`,
     `recordingDate=${input.recordingDate}`,
@@ -52,9 +63,47 @@ function segmentPrompt(input: Parameters<RelationshipSignalProvider["analyze"]>[
     semantic,
     insights ? "\nAudio insights:" : "",
     insights
+  ].filter(Boolean).join("\n").length;
+}
+
+export function buildRelationshipSignalPrompt(input: Parameters<RelationshipSignalProvider["analyze"]>[0]) {
+  const currentSegmentIds = new Set(input.segments.map((segment) => segment.id));
+  const transcript = input.segments
+    .map((segment) => `[${segment.id}] ${segment.startSeconds}-${segment.endSeconds}s ${segment.speaker ?? "speaker_unknown"}: ${normalizedText(segment.text)}`)
+    .join("\n");
+  const insights = input.audioInsights
+    .slice(0, 12)
+    .map((insight) => {
+      const labels = [
+        ...insight.toneLabels,
+        ...insight.emotionLabels,
+        ...insight.interactionLabels,
+        ...(insight.atmosphereLabels ?? [])
+      ].join(",");
+      const sourceSegmentIds = insight.sourceSegmentIds.filter((segmentId) => currentSegmentIds.has(segmentId));
+      return `[${insight.id}] ${insight.sourceTimeRange.startSeconds}-${insight.sourceTimeRange.endSeconds}s ${insight.speaker.id} sourceSegmentIds=${sourceSegmentIds.join(",")} labels=${compactText(labels, 120)} summary=${compactText(insight.summary, 180)}`;
+    })
+    .join("\n");
+
+  const content = [
+    `uploadId=${input.uploadId}`,
+    `recordingDate=${input.recordingDate}`,
+    "Transcript segments:",
+    transcript,
+    insights ? "\nCurrent chunk audio insights:" : "",
+    insights
   ]
     .filter(Boolean)
     .join("\n");
+
+  return {
+    content,
+    unoptimizedContextCharacterCount: unoptimizedRelationshipContextCharacterCount(input),
+    transcriptCharacterCount: transcript.length,
+    semanticCharacterCount: 0,
+    semanticSegmentCount: 0,
+    insightCharacterCount: insights.length
+  };
 }
 
 const systemPrompt = [
@@ -72,20 +121,38 @@ const systemPrompt = [
 
 const jsonInstruction = [
   "输出 relationship_signal_cards JSON 对象，根字段 items 为数组。",
-  "每个 item 包含 signalType、signalCategory、severity、confidence、summary、explanation、involvedSpeakers、evidenceSegmentIds、textEvidence、suggestedReflection。",
+  "每个 item 只需包含 signalType、signalCategory、severity、confidence、summary、explanation、evidenceSegmentIds、suggestedReflection；speaker、逐字 quote 和时间由服务端按 segment id 重建。",
   "risk 或 uncertain 必须包含 caution。",
-  "可选字段：counterEvidence、acousticEvidence、interactionEvidence。",
-  "只能引用输入里存在的 transcript segment id；不要自己编造时间戳。没有足够关系语境或证据时输出 {\"items\":[]}。"
+  "counterEvidence、acousticEvidence、interactionEvidence 仅在有直接增量证据时输出，并且必须是 JSON 数组；不要重复 transcript 原文。",
+  "acousticEvidence 和 interactionEvidence 只能引用输入中的 audio insight id，无法引用时省略。",
+  "只能引用输入里存在的 transcript segment id；不要自己编造时间戳。没有足够关系语境或证据时输出 {\"items\":[]}。",
+  "只返回有具体对象、动作、边界、承诺、计划或具体担忧的高信息量候选；普通寒暄、即时点餐决定、泛泛支持和简单赞同不要生成。",
+  "只返回彼此独立、具有新增信息的高价值候选；summary 和 explanation 保持简洁，不要逐句生成卡片。"
 ].join("\n");
 
-export const openaiRelationshipSignalProvider: RelationshipSignalProvider = {
-  async analyze(input) {
-    if (!hasRelationshipSignalContext(input)) {
-      return [];
-    }
-
-    const client = createOpenAIClient(await getOpenAIClientRuntimeConfig());
-    const parsed = await parseStructuredJsonResponse({
+async function extractCandidates(input: Parameters<RelationshipSignalProvider["analyze"]>[0]) {
+  if (!hasRelationshipSignalContext(input)) {
+    return [];
+  }
+  const client = createOpenAIClient(await getOpenAIClientRuntimeConfig());
+  const prompt = buildRelationshipSignalPrompt(input);
+  const maxOutputTokens = readPositiveInteger("RELATIONSHIP_SIGNAL_CHUNK_MAX_OUTPUT_TOKENS", 2_000);
+  const jsonPrompt = jsonOnlyInstruction(jsonInstruction);
+  input.onRequestMetrics?.({
+    responseMode: "json",
+    model: getModel(),
+    promptCharacterCount: systemPrompt.length + jsonPrompt.length + prompt.content.length,
+    unoptimizedContextCharacterCount: prompt.unoptimizedContextCharacterCount,
+    optimizedContextCharacterCount: prompt.content.length,
+    transcriptCharacterCount: prompt.transcriptCharacterCount,
+    semanticCharacterCount: prompt.semanticCharacterCount,
+    semanticSegmentCount: prompt.semanticSegmentCount,
+    insightCharacterCount: prompt.insightCharacterCount,
+    systemPromptCharacterCount: systemPrompt.length,
+    jsonInstructionCharacterCount: jsonPrompt.length,
+    maxOutputTokens
+  });
+  const parsed = await parseStructuredJsonResponse({
       client,
       model: getModel(),
       name: "relationship_signal_cards",
@@ -97,11 +164,31 @@ export const openaiRelationshipSignalProvider: RelationshipSignalProvider = {
         },
         {
           role: "user",
-          content: segmentPrompt(input)
+          content: prompt.content
         }
       ],
-      jsonInstruction
+      jsonInstruction,
+      normalize: normalizeRelationshipSignalModelResponse,
+      mode: "json",
+      maxOutputTokens,
+      requestOptions: {
+        maxRetries: 0,
+        ...(input.signal ? { signal: input.signal } : {})
+      },
+      ...(input.onDiagnostics ? { onDiagnostics: input.onDiagnostics } : {})
     });
+
+  return parsed.items ?? [];
+}
+
+export const openaiRelationshipSignalProvider: RelationshipSignalProvider = {
+  extractCandidates,
+  async analyze(input) {
+    if (!hasRelationshipSignalContext(input)) {
+      return [];
+    }
+
+    const items = await extractCandidates(input);
 
     const cards = normalizeRelationshipSignalItems({
       uploadId: input.uploadId,
@@ -109,7 +196,7 @@ export const openaiRelationshipSignalProvider: RelationshipSignalProvider = {
       segments: input.segments,
       semanticSegments: input.semanticSegments,
       audioInsights: input.audioInsights,
-      items: parsed.items ?? []
+      items
     });
 
     return cards.length > 0 ? cards : buildConservativeRelationshipSignalFallbackCards(input);

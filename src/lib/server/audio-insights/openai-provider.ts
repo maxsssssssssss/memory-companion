@@ -26,7 +26,7 @@ function getModel() {
 }
 
 export const openaiAudioInsightProvider: AudioInsightProvider = {
-  async analyze(uploadId, segments) {
+  async analyze(uploadId, segments, options) {
     const client = createOpenAIClient(await getOpenAIClientRuntimeConfig());
     const parsed = await parseStructuredJsonResponse({
       client,
@@ -55,7 +55,8 @@ export const openaiAudioInsightProvider: AudioInsightProvider = {
         "toneLabels 使用 firm、hesitant、explaining、questioning、pushing_back、comforting、excited、perfunctory、playful、serious、unknown。" +
         "emotionLabels 使用 relaxed、happy、interested、neutral、tense、anxious、confused、dissatisfied、tired、unknown。" +
         "interactionLabels 使用 agreement、disagreement、follow_up_question、interruption、silence、topic_shift、tension、rapport、flirtation_or_testing、decision_moment、unknown。" +
-        "只引用给定片段 id；无法判断时输出 unknown 标签。"
+        "只引用给定片段 id；无法判断时输出 unknown 标签。",
+      ...(options?.signal ? { requestOptions: { signal: options.signal } } : {})
     });
 
     const insights = normalizeAiAudioInsightItems({

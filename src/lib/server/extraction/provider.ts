@@ -1,4 +1,5 @@
 import type { BriefItem, SemanticSegment, TranscriptSegment } from "@/lib/domain/types";
+import type { JsonAnalysisChunkCheckpointStore } from "@/lib/server/analysis-chunks/checkpoint";
 import { openaiExtractionProvider } from "./openai-provider";
 import { ruleExtractionProvider } from "./rule-provider";
 
@@ -36,14 +37,16 @@ export type ExtractionProgressEvent =
       phase: "chunk_completed";
       chunkIndex: number;
       chunkCount: number;
+      completedCount?: number;
       itemCount: number;
       elapsedMs: number;
-      provider: "openai";
+      provider: "openai" | "checkpoint" | "fixture";
     }
   | {
       phase: "chunk_fallback";
       chunkIndex: number;
       chunkCount: number;
+      completedCount?: number;
       itemCount: number;
       elapsedMs: number;
       reason: ExtractionFallbackReason;
@@ -61,6 +64,13 @@ export type ExtractionProgressEvent =
 export type ExtractionOptions = {
   semanticSegments?: SemanticSegment[];
   onProgress?: (event: ExtractionProgressEvent) => void | Promise<void>;
+  analysisCheckpoint?: {
+    store: JsonAnalysisChunkCheckpointStore;
+    userId: string;
+    recordingDate?: string;
+    processorFingerprint?: string;
+    staleAfterMs?: number;
+  };
 };
 
 export type ExtractionProvider = {

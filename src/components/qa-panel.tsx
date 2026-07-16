@@ -1,7 +1,7 @@
 "use client";
 
 import { Fragment, type FormEvent, type KeyboardEvent, useEffect, useRef, useState } from "react";
-import type { ProactiveQaSuggestion } from "@/lib/client/proactive-qa-suggestions";
+import type { ProactiveObservation, SuggestedQuestion } from "@/lib/client/proactive-qa-presentation";
 import type { QaScopeMeta } from "@/lib/client/qa-scope-metadata";
 import { formatTime } from "@/lib/domain/time";
 
@@ -10,7 +10,8 @@ type QaPanelProps = {
   isActive?: boolean;
   scope?: "current" | "week" | "all";
   referenceDate?: string;
-  proactiveSuggestions?: ProactiveQaSuggestion[];
+  proactiveObservations?: ProactiveObservation[];
+  suggestedQuestions?: SuggestedQuestion[];
   scopeMeta?: QaScopeMeta;
   onLocalQuestion?: (input: {
     question: string;
@@ -84,21 +85,16 @@ type DisplaySuggestion = {
   id: string;
   question: string;
   helper: string;
-  origin?: "rule" | "agent";
-  observation?: string;
-  memoryAware?: boolean;
-  insightType?: ProactiveQaSuggestion["insightType"];
-  caution?: string;
 };
 
-function insightTypeLabel(insightType: ProactiveQaSuggestion["insightType"]) {
+function insightTypeLabel(insightType: ProactiveObservation["type"]) {
   if (insightType === "reminder" || insightType === "follow_up") {
-    return "📝 可以确认";
+    return "可以确认";
   }
   if (insightType === "pattern_observation") {
-    return "🔎 值得关注";
+    return "值得关注";
   }
-  return insightType === "reflection" ? "💬 一个小发现" : undefined;
+  return "一个小发现";
 }
 
 const MAX_CONTEXT_MESSAGES = 8;
@@ -245,7 +241,8 @@ export function QaPanel({
   isActive = true,
   scope = "current",
   referenceDate,
-  proactiveSuggestions = [],
+  proactiveObservations = [],
+  suggestedQuestions = [],
   scopeMeta,
   onLocalQuestion,
   loadQuestionHistory,
@@ -261,7 +258,10 @@ export function QaPanel({
   };
   const isDataEmpty = Boolean(emptyState);
   const shouldIncludeLoadedHistoryInConversation = includeLoadedHistoryInConversation ?? !loadQuestionHistory;
-  const activeProactiveSuggestions = proactiveSuggestions
+  const activeProactiveObservations = proactiveObservations
+    .filter((observation) => observation.scope === scope)
+    .slice(0, MAX_DISPLAYED_SUGGESTIONS);
+  const activeSuggestedQuestions = suggestedQuestions
     .filter((suggestion) => suggestion.scope === scope)
     .slice(0, MAX_DISPLAYED_SUGGESTIONS);
   const [question, setQuestion] = useState("");
@@ -279,6 +279,7 @@ export function QaPanel({
   const [promptMessage, setPromptMessage] = useState("");
   const requestIdRef = useRef(0);
   const threadRef = useRef<HTMLDivElement>(null);
+  const questionInputRef = useRef<HTMLTextAreaElement>(null);
 
   useEffect(() => {
     requestIdRef.current += 1;
@@ -575,6 +576,12 @@ export function QaPanel({
     void submitQuestion(question);
   }
 
+  function fillQuestionInput(nextQuestion: string) {
+    setQuestion(nextQuestion);
+    setErrorMessage("");
+    questionInputRef.current?.focus();
+  }
+
   async function saveQaModel(nextModel: string) {
     if (!nextModel) {
       return;
@@ -682,16 +689,11 @@ export function QaPanel({
   }
 
   const displayedSuggestions: DisplaySuggestion[] =
-    activeProactiveSuggestions.length > 0
-      ? activeProactiveSuggestions.map((suggestion) => ({
+    activeSuggestedQuestions.length > 0
+      ? activeSuggestedQuestions.map((suggestion) => ({
           id: suggestion.id,
           question: suggestion.question,
-          helper: suggestion.reason,
-          origin: suggestion.origin,
-          observation: suggestion.observation,
-          memoryAware: suggestion.memoryAware,
-          insightType: suggestion.insightType,
-          caution: suggestion.caution
+          helper: suggestion.reason ?? "填入输入框后，可以先修改再发送。"
         }))
       : turns.length === 0
         ? copy.suggestions.slice(0, MAX_DISPLAYED_SUGGESTIONS).map((suggestion) => ({
@@ -700,7 +702,6 @@ export function QaPanel({
             helper: suggestion.helper
           }))
         : [];
-  const suggestionTitle = "AI 主动观察";
   const scopeMetaFacts = scopeMeta
     ? [
         effectiveScopeMeta.recordingCount !== undefined ? `${effectiveScopeMeta.recordingCount} 条录音` : "",
@@ -747,33 +748,61 @@ export function QaPanel({
               ))}
             </div>
           ) : null}
+          {!isDataEmpty && activeProactiveObservations.length > 0 ? (
+            <section className="proactive-observation-block" aria-labelledby="proactive-observation-title">
+              <div id="proactive-observation-title" className="suggest-title">
+                AI 主动观察
+              </div>
+              <div className="proactive-observation-list">
+                {activeProactiveObservations.map((observation) => (
+                  <article key={observation.id} className="proactive-observation-card">
+                    <div className="proactive-observation-heading">
+                      <span className="sg-insight-type">{insightTypeLabel(observation.type)}</span>
+                      {observation.memoryAware ? <span className="sg-agent-meta">结合当前记录和已有记忆</span> : null}
+                    </div>
+                    <p className="proactive-observation-content">{observation.content}</p>
+                    {observation.caution ? <p className="sg-caution">{observation.caution}</p> : null}
+                    <details className="proactive-observation-evidence">
+                      <summary>查看依据 · {observation.evidenceRefs.length} 条</summary>
+                      <div className="proactive-observation-evidence-list">
+                        {observation.evidenceRefs.map((evidence) => (
+                          <div key={evidence.evidenceId} className="proactive-observation-evidence-item">
+                            <span>
+                              {evidence.recordingDate} · {formatTime(evidence.timeRange.startSeconds)}-{formatTime(evidence.timeRange.endSeconds)}
+                            </span>
+                            <strong>{evidence.title}</strong>
+                            <p>{evidence.excerpt}</p>
+                          </div>
+                        ))}
+                      </div>
+                    </details>
+                    {observation.relatedQuestions[0] ? (
+                      <button className="observation-question-action" type="button" onClick={() => fillQuestionInput(observation.relatedQuestions[0]!)}>
+                        基于此提问
+                      </button>
+                    ) : null}
+                  </article>
+                ))}
+              </div>
+            </section>
+          ) : null}
           {!isDataEmpty && displayedSuggestions.length > 0 ? (
             <div className="suggest-block">
-              <div className="suggest-title">{suggestionTitle}</div>
+              <div className="suggest-title">你可能想问</div>
               <div className="suggest">
                 {displayedSuggestions.map((suggestion) => (
                   <button
                     key={suggestion.id}
                     className="sg"
                     type="button"
-                    onClick={() => {
-                      void submitQuestion(suggestion.question);
-                    }}
+                    onClick={() => fillQuestionInput(suggestion.question)}
                   >
                     <span className="si" aria-hidden="true">
                       ?
                     </span>
                     <span className="sg-copy">
-                      {suggestion.origin === "agent" && insightTypeLabel(suggestion.insightType) ? (
-                        <span className="sg-insight-type">{insightTypeLabel(suggestion.insightType)}</span>
-                      ) : null}
-                      {suggestion.observation ? <span className="sg-observation">{suggestion.observation}</span> : null}
-                      {suggestion.memoryAware ? (
-                        <span className="sg-agent-meta">结合当前记录和已有记忆</span>
-                      ) : null}
                       <b>{suggestion.question}</b>
                       <span className="sg-reason">{suggestion.helper}</span>
-                      {suggestion.caution ? <span className="sg-caution">{suggestion.caution}</span> : null}
                     </span>
                   </button>
                 ))}
@@ -852,6 +881,7 @@ export function QaPanel({
       <form className="compose" aria-label="QA composer" onSubmit={handleSubmit}>
         <div className="cbox">
           <textarea
+            ref={questionInputRef}
             aria-label="问题"
             name="question"
             rows={1}

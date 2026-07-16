@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { fixtureTranscriptionProvider } from "./fixture-provider";
 import { openaiTranscriptionProvider } from "./openai-provider";
-import { getTranscriptionProvider } from "./provider";
+import { getTranscriptionProvider, getTranscriptionProviderRuntime } from "./provider";
 import { speakerAsrTranscriptionProvider } from "./speaker-asr-provider";
 
 describe("transcription providers", () => {
@@ -62,6 +62,27 @@ describe("transcription providers", () => {
       } else {
         process.env.TRANSCRIPTION_PROVIDER = originalProvider;
       }
+    }
+  });
+
+  it("exposes the primary and fallback providers for chunk orchestration", () => {
+    const originalProvider = process.env.TRANSCRIPTION_PROVIDER;
+    const originalFallbackProvider = process.env.TRANSCRIPTION_FALLBACK_PROVIDER;
+
+    try {
+      process.env.TRANSCRIPTION_PROVIDER = "speaker-asr";
+      process.env.TRANSCRIPTION_FALLBACK_PROVIDER = "none";
+      expect(getTranscriptionProviderRuntime()).toMatchObject({
+        name: "speaker-asr",
+        provider: speakerAsrTranscriptionProvider,
+        fallbackName: null,
+        fallbackProvider: null
+      });
+    } finally {
+      if (originalProvider === undefined) delete process.env.TRANSCRIPTION_PROVIDER;
+      else process.env.TRANSCRIPTION_PROVIDER = originalProvider;
+      if (originalFallbackProvider === undefined) delete process.env.TRANSCRIPTION_FALLBACK_PROVIDER;
+      else process.env.TRANSCRIPTION_FALLBACK_PROVIDER = originalFallbackProvider;
     }
   });
 

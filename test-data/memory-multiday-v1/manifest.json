@@ -1,0 +1,112 @@
+{
+  "datasetVersion": "memory-multiday-v1",
+  "description": "Privacy-safe synthetic Chinese two-speaker conversations for deterministic multi-day memory evaluation.",
+  "timezone": "Asia/Shanghai",
+  "productionDateField": "recordingDate",
+  "sessions": [
+    {
+      "datasetVersion": "memory-multiday-v1",
+      "sessionId": "memory-v1-day-01",
+      "userId": "memory-eval-user",
+      "recordedAt": "2026-06-29T19:30:00+08:00",
+      "date": "2026-06-29",
+      "audioFile": "audio/day-01.wav",
+      "transcriptFile": "scripts/day-01.txt",
+      "speakers": ["A", "B"],
+      "expectedThemes": ["resume review commitment", "coffee preference"],
+      "expectedMemoryTypes": ["commitment", "preference"],
+      "expectedRelationshipSignals": ["clear_commitment"]
+    },
+    {
+      "datasetVersion": "memory-multiday-v1",
+      "sessionId": "memory-v1-day-02",
+      "userId": "memory-eval-user",
+      "recordedAt": "2026-07-01T20:00:00+08:00",
+      "date": "2026-07-01",
+      "audioFile": "audio/day-02.wav",
+      "transcriptFile": "scripts/day-02.txt",
+      "speakers": ["A", "B"],
+      "expectedThemes": ["museum plan", "departure time open question"],
+      "expectedMemoryTypes": ["event", "question", "commitment"],
+      "expectedRelationshipSignals": []
+    },
+    {
+      "datasetVersion": "memory-multiday-v1",
+      "sessionId": "memory-v1-day-03",
+      "userId": "memory-eval-user",
+      "recordedAt": "2026-07-03T21:10:00+08:00",
+      "date": "2026-07-03",
+      "audioFile": "audio/day-03.wav",
+      "transcriptFile": "scripts/day-03.txt",
+      "speakers": ["A", "B"],
+      "expectedThemes": ["resume commitment follow-up", "revised delivery time"],
+      "expectedMemoryTypes": ["commitment", "question", "relationship_signal"],
+      "expectedRelationshipSignals": ["evasive_answer"]
+    },
+    {
+      "datasetVersion": "memory-multiday-v1",
+      "sessionId": "memory-v1-day-04",
+      "userId": "memory-eval-user",
+      "recordedAt": "2026-07-05T18:40:00+08:00",
+      "date": "2026-07-05",
+      "audioFile": "audio/day-04.wav",
+      "transcriptFile": "scripts/day-04.txt",
+      "speakers": ["A", "B"],
+      "expectedThemes": ["museum plan changed", "advance notice boundary"],
+      "expectedMemoryTypes": ["event", "commitment", "question", "relationship_signal"],
+      "expectedRelationshipSignals": ["boundary_respect"]
+    },
+    {
+      "datasetVersion": "memory-multiday-v1",
+      "sessionId": "memory-v1-day-05",
+      "userId": "memory-eval-user",
+      "recordedAt": "2026-07-07T09:10:00+08:00",
+      "date": "2026-07-07",
+      "audioFile": "audio/day-05.wav",
+      "transcriptFile": "scripts/day-05.txt",
+      "speakers": ["A", "B"],
+      "expectedThemes": ["remembered coffee preference", "quiet study time"],
+      "expectedMemoryTypes": ["preference"],
+      "expectedRelationshipSignals": ["active_listening"]
+    },
+    {
+      "datasetVersion": "memory-multiday-v1",
+      "sessionId": "memory-v1-day-06",
+      "userId": "memory-eval-user",
+      "recordedAt": "2026-07-09T20:20:00+08:00",
+      "date": "2026-07-09",
+      "audioFile": "audio/day-06.wav",
+      "transcriptFile": "scripts/day-06.txt",
+      "speakers": ["A", "B"],
+      "expectedThemes": ["resume review completed", "specific resume feedback"],
+      "expectedMemoryTypes": ["event", "relationship_signal"],
+      "expectedRelationshipSignals": ["emotional_support"]
+    },
+    {
+      "datasetVersion": "memory-multiday-v1",
+      "sessionId": "memory-v1-day-07",
+      "userId": "memory-eval-user",
+      "recordedAt": "2026-07-11T16:30:00+08:00",
+      "date": "2026-07-11",
+      "audioFile": "audio/day-07.wav",
+      "transcriptFile": "scripts/day-07.txt",
+      "speakers": ["A", "B"],
+      "expectedThemes": ["interview stress support", "museum departure confirmed"],
+      "expectedMemoryTypes": ["commitment", "relationship_signal"],
+      "expectedRelationshipSignals": ["emotional_support", "boundary_respect"]
+    },
+    {
+      "datasetVersion": "memory-multiday-v1",
+      "sessionId": "memory-v1-day-08",
+      "userId": "memory-eval-user",
+      "recordedAt": "2026-07-12T19:15:00+08:00",
+      "date": "2026-07-12",
+      "audioFile": "audio/day-08.wav",
+      "transcriptFile": "scripts/day-08.txt",
+      "speakers": ["A", "B"],
+      "expectedThemes": ["museum visit completed", "maritime silk road exhibition"],
+      "expectedMemoryTypes": ["event"],
+      "expectedRelationshipSignals": []
+    }
+  ]
+}

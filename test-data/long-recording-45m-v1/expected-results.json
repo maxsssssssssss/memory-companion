@@ -1,0 +1,49 @@
+{
+  "datasetVersion": "long-recording-45m-v1",
+  "must": [
+    { "id": "pipeline_ready", "description": "Pipeline reaches ready." },
+    { "id": "nine_audio_chunks", "description": "Exactly nine 300-second-planned AudioChunks are created." },
+    { "id": "all_asr_chunks_completed", "description": "Every ASR chunk completes without a silently missing chunk." },
+    { "id": "unique_segment_ids", "description": "Final transcript segment IDs are globally unique." },
+    { "id": "ordered_global_timestamps", "description": "Transcript timestamps are monotonic and remain inside the recording duration." },
+    { "id": "traceable_segment_sources", "description": "Every final segment can be traced to a real transcript chunk checkpoint." },
+    { "id": "zero_orphan_memory_evidence", "description": "Memory evidence has no orphan rows." },
+    { "id": "all_memories_have_evidence", "description": "Every saved Memory item has at least one evidence row." },
+    { "id": "relationship_evidence_source_exists", "description": "Every Relationship Signal evidence sourceId exists in the transcript." },
+    { "id": "relationship_quote_matches", "description": "Every Relationship Signal evidence quote matches its transcript segment." },
+    { "id": "resume_commitment", "description": "At least one explicit resume-review commitment is recognized." },
+    { "id": "coffee_preference", "description": "The no-sugar or low-sugar coffee preference is recognized." },
+    { "id": "museum_plan_or_question", "description": "At least one museum plan/event or unresolved/resolved question is stored." },
+    { "id": "recording_date_consistent", "description": "Upload, Memory, and evidence dates use 2026-07-15." },
+    { "id": "memory_quotes_traceable", "description": "Every Memory evidence quote is an exact normalized substring of the transcript." },
+    { "id": "no_fabricated_evidence", "description": "No fabricated evidence ID or quote is accepted." },
+    { "id": "safe_relationship_language", "description": "No personality verdict, diagnosis, breakup advice, or absolute relationship ruling appears." }
+  ],
+  "should": [
+    { "id": "support_signal", "description": "Work-pressure section yields active listening or emotional support." },
+    { "id": "clear_commitment_signal", "description": "Resume arrangement yields clear commitment." },
+    { "id": "boundary_repair_signal", "description": "Conflict repair section yields boundary respect or equivalent evidence-backed support." },
+    { "id": "coffee_preference_dedup", "description": "Repeated coffee preference is merged or tracked instead of stored as unrelated duplicates." },
+    { "id": "museum_follow_up", "description": "Museum question is later followed up, resolved, or equivalently updated." },
+    { "id": "candidate_reduction", "description": "Similar cross-chunk relationship candidates are reduced." },
+    { "id": "few_high_value_cards", "description": "Relationship Signal Cards remain selective instead of one card per chunk." },
+    { "id": "low_value_chat_filtered", "description": "Ordinary small talk is not promoted to high-importance long-term memory." },
+    { "id": "specific_proactive_insight", "description": "Proactive Insight uses concrete evidence rather than abstract judgment." }
+  ],
+  "mustNot": [
+    { "id": "no_evasion_personality", "description": "A single mild evasive answer is not turned into a stable personality trait." },
+    { "id": "no_relationship_failure_verdict", "description": "Conflict concern is not described as proof that the relationship has failed." },
+    { "id": "no_small_talk_memory_flood", "description": "Ordinary small talk is not all persisted as Memory." },
+    { "id": "no_missing_relationship_source", "description": "No Relationship evidence is saved without a sourceId." },
+    { "id": "no_non_transcript_memory", "description": "No content absent from the transcript is saved as Memory evidence." },
+    { "id": "no_fallback_fabrication", "description": "A fallback chunk never pretends to be a full successful remote analysis." }
+  ],
+  "warningThresholds": {
+    "relationshipSignalCardsGreaterThan": 12,
+    "newMemoryItemsGreaterThan": 25,
+    "analysisFallbackChunkRatioGreaterThan": 0.2,
+    "chunkRetryCountGreaterThan": 1,
+    "transcriptMergeWarningsGreaterThan": 5,
+    "apiRateLimitDetected": true
+  }
+}

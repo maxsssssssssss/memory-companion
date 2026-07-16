@@ -1072,8 +1072,12 @@ describe("HomePage", () => {
 
     expect(await screen.findByText("AI 主动观察")).toBeInTheDocument();
     expect(screen.getByText("这次回应先接住了疲惫感，再讨论下一步安排。")).toBeInTheDocument();
+    expect(screen.getByText("你可能想问")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /这次回应中，哪句话最值得继续确认？/ })).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: /这次回应中，哪句话最值得继续确认？/ }));
+    expect(screen.getByLabelText("问题")).toHaveValue("这次回应中，哪句话最值得继续确认？");
+    expect(fetchMock.mock.calls.some(([url, init]) => url === "/api/days/context/qa" && init?.method === "POST")).toBe(false);
+    fireEvent.click(screen.getByRole("button", { name: "提问" }));
     expect(await screen.findByText("这次互动里有一条情绪接住的积极线索，并引用了原文证据。")).toBeInTheDocument();
   });
 

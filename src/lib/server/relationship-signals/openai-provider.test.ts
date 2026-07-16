@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { AudioInsight, SemanticSegment, TranscriptSegment } from "@/lib/domain/types";
+import { AudioInsightSchema, type AudioInsight, type SemanticSegment, type TranscriptSegment } from "@/lib/domain/types";
 
 const { createMock, getOpenAIClientRuntimeConfigMock, openAIMock, parseMock } = vi.hoisted(() => ({
   createMock: vi.fn(),
@@ -28,7 +28,7 @@ vi.mock("@/lib/server/settings/provider-config", () => ({
   getOpenAIClientRuntimeConfig: getOpenAIClientRuntimeConfigMock
 }));
 
-import { openaiRelationshipSignalProvider } from "./openai-provider";
+import { buildRelationshipSignalPrompt, openaiRelationshipSignalProvider } from "./openai-provider";
 
 const relationshipSegments: TranscriptSegment[] = [
   {
@@ -138,9 +138,57 @@ describe("openai relationship signal provider", () => {
     expect(createMock).not.toHaveBeenCalled();
   });
 
-  it("returns normalized relationship signal cards from structured model output", async () => {
-    parseMock.mockResolvedValue({
-      output_parsed: {
+  it("builds a compact chunk-only prompt without semantic duplication or insight evidence text", () => {
+    const semantic: SemanticSegment = {
+      id: "semantic_verbose",
+      uploadId: "upload_1",
+      title: "重复语义摘要",
+      summary: "这段很长的语义摘要重复了 transcript 中已经存在的关系互动内容。".repeat(8),
+      startSeconds: 12,
+      endSeconds: 40,
+      tags: ["relationship"],
+      sceneLabels: ["unknown"],
+      valueLabels: [],
+      confidence: 0.8,
+      sourceSegmentIds: ["seg_1", "seg_2"],
+      sourceTimeRange: { startSeconds: 12, endSeconds: 40 },
+      transcriptExcerpt: relationshipSegments.map((segment) => segment.text).join(" ")
+    };
+    const insight = AudioInsightSchema.parse({
+      id: "insight_1",
+      uploadId: "upload_1",
+      sourceSegmentIds: ["seg_1", "seg_2"],
+      sourceTimeRange: { startSeconds: 12, endSeconds: 40 },
+      speaker: { id: "speaker_2", role: "unknown", confidence: 0.7 },
+      voice: { pace: "normal", volume: "unknown", pause: "unknown", overlap: false, confidence: 0.5 },
+      toneLabels: ["comforting"],
+      emotionLabels: ["neutral"],
+      interactionLabels: ["rapport"],
+      summary: "放慢节奏并确认了具体的不舒服。",
+      evidence: "不应再次发送的重复逐字 evidence。".repeat(12),
+      confidence: 0.8
+    });
+
+    const prompt = buildRelationshipSignalPrompt({
+      uploadId: "upload_1",
+      recordingDate: "2026-07-16",
+      segments: relationshipSegments,
+      semanticSegments: [semantic],
+      audioInsights: [insight]
+    });
+
+    expect(prompt.content).toContain("insight_1");
+    expect(prompt.content).toContain("sourceSegmentIds=seg_1,seg_2");
+    expect(prompt.content).not.toContain("semantic_verbose");
+    expect(prompt.content).not.toContain("不应再次发送的重复逐字 evidence");
+    expect(prompt.semanticCharacterCount).toBe(0);
+    expect(prompt.unoptimizedContextCharacterCount).toBeGreaterThan(prompt.content.length);
+  });
+
+  it("uses one JSON request and returns normalized relationship signal cards", async () => {
+    const onRequestMetrics = vi.fn();
+    createMock.mockResolvedValue({
+      output_text: JSON.stringify({
         items: [
           {
             signalType: "boundary_respect",
@@ -155,7 +203,66 @@ describe("openai relationship signal provider", () => {
             suggestedReflection: "可以观察这种尊重边界的回应是否稳定出现。"
           }
         ]
-      }
+      })
+    });
+
+    const cards = await openaiRelationshipSignalProvider.analyze({
+      uploadId: "upload_1",
+      recordingDate: "2026-07-09",
+      segments: relationshipSegments,
+      semanticSegments,
+      audioInsights,
+      onRequestMetrics
+    });
+
+    expect(cards).toHaveLength(1);
+    expect(cards[0]).toMatchObject({
+      signalType: "boundary_respect",
+      timeRange: { startSeconds: 12, endSeconds: 40 }
+    });
+    const request = createMock.mock.calls[0][0];
+    const promptText = request.input.map((item: { content?: string }) => item.content ?? "").join("\n");
+    const requestContentChars = request.input.reduce(
+      (total: number, item: { content?: string }) => total + (item.content?.length ?? 0),
+      0
+    );
+    expect(request.model).toBe("gpt-test");
+    expect(promptText).toContain("不做人格判断");
+    expect(promptText).toContain("非关系语境");
+    expect(promptText).toContain("evidenceSegmentIds");
+    expect(onRequestMetrics).toHaveBeenCalledWith(expect.objectContaining({
+      responseMode: "json",
+      model: "gpt-test",
+      semanticCharacterCount: 0,
+      semanticSegmentCount: 0,
+      maxOutputTokens: 2000,
+      promptCharacterCount: requestContentChars
+    }));
+    expect(parseMock).not.toHaveBeenCalled();
+    expect(createMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("normalizes string evidence from the JSON fallback before validation", async () => {
+    createMock.mockResolvedValue({
+      output_text: JSON.stringify({
+        items: [
+          {
+            signalType: "boundary_respect",
+            signalCategory: "positive",
+            severity: "low",
+            confidence: 0.83,
+            summary: "对方放慢节奏并回应了不舒服的表达。",
+            explanation: "这是当前片段里的积极互动线索，不代表长期关系结论。",
+            involvedSpeakers: ["speaker_1", "speaker_2"],
+            evidenceSegmentIds: ["seg_1", "seg_2"],
+            counterEvidence: "也有一次没有及时回应",
+            acousticEvidence: "语气比较平稳",
+            interactionEvidence: "主动询问情况",
+            textEvidence: ["我有点不舒服", "我先慢一点"],
+            suggestedReflection: "可以观察这种尊重边界的回应是否稳定出现。"
+          }
+        ]
+      })
     });
 
     const cards = await openaiRelationshipSignalProvider.analyze({
@@ -167,23 +274,16 @@ describe("openai relationship signal provider", () => {
     });
 
     expect(cards).toHaveLength(1);
-    expect(cards[0]).toMatchObject({
-      signalType: "boundary_respect",
-      timeRange: { startSeconds: 12, endSeconds: 40 }
-    });
-    const request = parseMock.mock.calls[0][0];
-    expect(request.model).toBe("gpt-test");
-    expect(request.input[0].content).toContain("不做人格判断");
-    expect(request.input[0].content).toContain("非关系语境");
-    expect(request.input[0].content).toContain("evidenceSegmentIds");
+    expect(cards[0].counterEvidence).toEqual(["也有一次没有及时回应"]);
+    expect(cards[0].acousticEvidence).toBeUndefined();
+    expect(cards[0].interactionEvidence).toBeUndefined();
+    expect(createMock).toHaveBeenCalledTimes(1);
+    const jsonRequest = createMock.mock.calls[0][0];
+    expect(jsonRequest.input[0].content).toContain("必须是 JSON 数组");
   });
 
   it("uses conservative fallback cards when the model returns no items despite explicit evidence", async () => {
-    parseMock.mockResolvedValue({
-      output_parsed: {
-        items: []
-      }
-    });
+    createMock.mockResolvedValue({ output_text: JSON.stringify({ items: [] }) });
 
     const cards = await openaiRelationshipSignalProvider.analyze({
       uploadId: "upload_1",

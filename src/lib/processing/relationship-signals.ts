@@ -30,6 +30,8 @@ const RawInteractionEvidenceSchema = z.object({
   confidence: z.number().min(0).max(1).default(0.5)
 });
 
+const RawCounterEvidenceSchema = z.string().min(1);
+
 const RawEvidenceSegmentSchema = z.object({
   segmentId: z.string().min(1),
   speaker: z.string().optional(),
@@ -38,7 +40,7 @@ const RawEvidenceSegmentSchema = z.object({
   text: z.string().optional()
 });
 
-const RawRelationshipSignalItemSchema = z.object({
+export const RawRelationshipSignalItemSchema = z.object({
   signalType: RelationshipSignalTypeSchema,
   signalCategory: RelationshipSignalCategorySchema,
   severity: RelationshipSignalSeveritySchema.default("low"),
@@ -48,7 +50,7 @@ const RawRelationshipSignalItemSchema = z.object({
   involvedSpeakers: z.array(z.string().min(1)).default([]),
   evidenceSegmentIds: z.array(z.string().min(1)).default([]),
   evidenceSegments: z.array(RawEvidenceSegmentSchema).default([]),
-  counterEvidence: z.array(z.string().min(1)).optional(),
+  counterEvidence: z.array(RawCounterEvidenceSchema).optional(),
   acousticEvidence: z.array(RawAcousticEvidenceSchema).optional(),
   textEvidence: z.array(z.string().min(1)).default([]),
   interactionEvidence: z.array(RawInteractionEvidenceSchema).optional(),
@@ -61,6 +63,43 @@ export const RelationshipSignalModelItemsSchema = z.object({
 });
 
 export type RawRelationshipSignalItem = z.infer<typeof RawRelationshipSignalItemSchema>;
+
+export function normalizeEvidenceField(value: unknown): unknown[] {
+  if (typeof value === "string") {
+    return value.trim() ? [value] : [];
+  }
+  return Array.isArray(value) ? value : [];
+}
+
+function normalizeEvidenceItems(value: unknown, itemSchema: z.ZodTypeAny): unknown[] {
+  return normalizeEvidenceField(value).filter((item) => itemSchema.safeParse(item).success);
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+export function normalizeRelationshipSignalModelResponse(value: unknown): unknown {
+  if (!isRecord(value) || !Array.isArray(value.items)) {
+    return value;
+  }
+
+  return {
+    ...value,
+    items: value.items.map((item) => {
+      if (!isRecord(item)) {
+        return item;
+      }
+
+      return {
+        ...item,
+        counterEvidence: normalizeEvidenceItems(item.counterEvidence, RawCounterEvidenceSchema),
+        acousticEvidence: normalizeEvidenceItems(item.acousticEvidence, RawAcousticEvidenceSchema),
+        interactionEvidence: normalizeEvidenceItems(item.interactionEvidence, RawInteractionEvidenceSchema)
+      };
+    })
+  };
+}
 
 function unique<T>(items: T[]) {
   return [...new Set(items)];

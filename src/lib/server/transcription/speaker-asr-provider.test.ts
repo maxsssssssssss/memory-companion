@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { speakerAsrTranscriptionProvider } from "./speaker-asr-provider";
+import { buildAudioChunkId, type AudioChunk } from "@/lib/domain/chunks";
+import { speakerAsrChunkTranscriptionAdapter, speakerAsrTranscriptionProvider } from "./speaker-asr-provider";
 
 const originalEnv = { ...process.env };
 
@@ -110,5 +111,69 @@ describe("speaker-asr transcription provider", () => {
     ).rejects.toThrow("SPEAKER_ASR_AUDIO_BASE_URL");
 
     expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("submits a chunk URL and returns a global-timeline TranscriptChunk", async () => {
+    process.env.SPEAKER_ASR_BASE_URL = "http://14.103.196.9:8300";
+    process.env.SPEAKER_ASR_AUDIO_BASE_URL = "https://daydiary.example.com";
+    process.env.SPEAKER_ASR_AUDIO_ACCESS_TOKEN = "audio_token";
+    const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
+      if (url.endsWith("/api/ai/non-realtime-asr")) {
+        const body = JSON.parse(String(init?.body));
+        expect(body.audio_url).toBe(
+          "https://daydiary.example.com/api/internal/audio/user_1/upload_1?token=audio_token&chunkId=upload_1_audio_chunk_00001"
+        );
+        expect(body.record_id).toBe("upload_1_audio_chunk_00001");
+        return new Response(
+          JSON.stringify({
+            code: 0,
+            data: {
+              asr_result: {
+                sentences: [{ text: "chunk text", timestamp: [{ start: 1_000, end: 4_000 }] }]
+              },
+              speaker_result: [{ speaker: "speaker_1", text: "chunk text" }]
+            }
+          }),
+          { status: 200 }
+        );
+      }
+      return new Response("not found", { status: 404 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const chunk: AudioChunk = {
+      id: buildAudioChunkId("upload_1", 1),
+      uploadId: "upload_1",
+      index: 1,
+      startSeconds: 300,
+      endSeconds: 600,
+      durationSeconds: 300,
+      source: { type: "generated_chunk", path: "C:/data/users/user_1/uploads/upload_1-chunks/chunk_00001.mp3" },
+      status: "processing",
+      retryCount: 0,
+      createdAt: "2026-07-14T08:00:00.000Z",
+      updatedAt: "2026-07-14T08:00:00.000Z",
+      startedAt: "2026-07-14T08:00:00.000Z",
+      metadata: { mimeType: "audio/mpeg" }
+    };
+
+    const result = await speakerAsrChunkTranscriptionAdapter.transcribeChunk({
+      chunk,
+      userId: "user_1",
+      signal: new AbortController().signal
+    });
+
+    expect(result).toMatchObject({
+      uploadId: "upload_1",
+      audioChunkId: chunk.id,
+      index: 1,
+      status: "completed",
+      metadata: { provider: "speaker-asr" }
+    });
+    expect(result.segments[0]).toMatchObject({
+      id: "upload_1_chunk_00001_seg_00001",
+      startSeconds: 301,
+      endSeconds: 304,
+      speaker: "speaker_1"
+    });
   });
 });

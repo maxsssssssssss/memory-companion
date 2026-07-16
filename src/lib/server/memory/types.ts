@@ -1,4 +1,5 @@
 import { z } from "zod";
+import type { TranscriptSegment } from "@/lib/domain/types";
 
 const DateKeySchema = z.string().regex(/^\d{4}-\d{2}-\d{2}$/);
 const RecordIdSchema = z.string().trim().min(1).max(512);
@@ -38,7 +39,9 @@ export const MemoryEvidenceWriteSchema = z.object({
   sourceId: RecordIdSchema,
   uploadId: RecordIdSchema,
   date: DateKeySchema,
-  quote: z.string().trim().min(1).max(4_000),
+  quote: z.string().min(1).max(4_000).refine((value) => value.trim().length > 0, {
+    message: "Evidence quote cannot be blank"
+  }),
   createdAt: z.string().datetime()
 });
 
@@ -117,6 +120,7 @@ export type ReplaceUploadMemoriesInput = {
   userId: string;
   uploadId: string;
   memories: MemoryWriteInput[];
+  sourceSegments?: TranscriptSegment[];
 };
 
 export type MemoryIndexUpdateResult = {

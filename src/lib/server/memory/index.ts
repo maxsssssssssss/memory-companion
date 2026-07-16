@@ -7,6 +7,7 @@ export function getMemoryRepository() {
 
 export * from "./db";
 export * from "./deduplication";
+export * from "./admission";
 export * from "./extractor";
 export * from "./importance";
 export * from "./relations";

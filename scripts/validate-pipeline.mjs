@@ -255,14 +255,17 @@ async function authenticate(baseUrl, options) {
   throw new Error(`Authentication failed: status=${register.response.status} body=${redactSensitiveUrl(register.text)}`);
 }
 
-async function uploadAudio(baseUrl, cookie, audioPath, recordingDate) {
+async function uploadAudio(baseUrl, cookie, audioPath, recordingDate, evaluationRetention) {
   const bytes = await fs.promises.readFile(audioPath);
   const form = new FormData();
   form.append("file", new Blob([bytes], { type: "audio/wav" }), path.basename(audioPath));
   form.append("recordingDate", recordingDate);
   const response = await fetch(`${baseUrl}/api/uploads`, {
     method: "POST",
-    headers: { cookie },
+    headers: {
+      cookie,
+      ...(evaluationRetention ? { "x-evaluation-retention": "true" } : {})
+    },
     body: form
   });
   const text = await response.text();
@@ -313,6 +316,10 @@ async function pollJob(baseUrl, cookie, jobId, timeoutSeconds, logger) {
 async function main() {
   const options = parseArgs(process.argv.slice(2));
   const logger = createStageLogger();
+  const envValues = loadEnvFile();
+  const evaluationRetention = (process.env.EVALUATION_MODE ?? envValues.EVALUATION_MODE ?? "")
+    .trim()
+    .toLowerCase() === "true";
   if (options.help) {
     printHelp();
     return;
@@ -360,6 +367,11 @@ async function main() {
 
     await waitForHttp(localBaseUrl, 60000);
     logger.log("Next.js ready", { url: localBaseUrl });
+    if (options.tunnel !== "none") {
+      logger.log("checking public tunnel", { host: new URL(tunnel.baseUrl).host });
+      await waitForHttp(tunnel.baseUrl, 60000);
+      logger.log("public tunnel reachable", { host: new URL(tunnel.baseUrl).host });
+    }
     logger.log("authenticating", { email: options.email });
     const auth = await authenticate(localBaseUrl, options);
     logger.log("authenticated", {
@@ -368,9 +380,19 @@ async function main() {
     });
     logger.log("uploading audio", {
       fileName: path.basename(audioPath),
-      recordingDate: options.recordingDate
+      recordingDate: options.recordingDate,
+      evaluationRetention
     });
-    const upload = await uploadAudio(localBaseUrl, auth.cookie, audioPath, options.recordingDate);
+    const upload = await uploadAudio(
+      localBaseUrl,
+      auth.cookie,
+      audioPath,
+      options.recordingDate,
+      evaluationRetention
+    );
+    if (evaluationRetention && upload.evaluationRetention !== true) {
+      throw new Error("Evaluation retention was requested but the upload was not marked for retention");
+    }
     logger.log("upload created", {
       uploadId: upload.uploadId,
       jobId: upload.jobId

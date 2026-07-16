@@ -45,6 +45,116 @@ afterEach(() => {
 });
 
 describe("memory repository", () => {
+  it("rejects mismatched and cross-upload transcript evidence when source segments are supplied", () => {
+    database = openMemoryDatabase({ filePath: ":memory:" });
+    const repository = createMemoryRepository(database);
+    const sourceSegments = [{
+      id: "segment_1",
+      uploadId: "upload_1",
+      startSeconds: 0,
+      endSeconds: 5,
+      speaker: "speaker_1",
+      text: "这是逐字原文。",
+      confidence: 0.9,
+      sceneLabels: [],
+      valueLabels: []
+    }];
+
+    repository.replaceUploadMemories({
+      userId: "user_1",
+      uploadId: "upload_1",
+      sourceSegments,
+      memories: [
+        {
+          ...memoryFixture({ id: "memory_mismatch" }),
+          evidence: [
+            { ...memoryFixture({ id: "memory_mismatch" }).evidence[0], quote: "模型改写后的内容。" },
+            { ...memoryFixture({ id: "memory_mismatch" }).evidence[0], id: "cross", sourceId: "other", uploadId: "upload_2" }
+          ]
+        }
+      ]
+    });
+
+    expect(repository.getRelevantMemories({ userId: "user_1" })).toEqual([]);
+  });
+
+  it("deduplicates the same transcript source id before persistence", () => {
+    database = openMemoryDatabase({ filePath: ":memory:" });
+    const repository = createMemoryRepository(database);
+    const memory = memoryFixture({ id: "memory_duplicate" });
+    repository.replaceUploadMemories({
+      userId: "user_1",
+      uploadId: "upload_1",
+      sourceSegments: [{
+        id: "segment_1",
+        uploadId: "upload_1",
+        startSeconds: 0,
+        endSeconds: 5,
+        speaker: "speaker_1",
+        text: memory.evidence[0].quote,
+        confidence: 0.9,
+        sceneLabels: [],
+        valueLabels: []
+      }],
+      memories: [{ ...memory, evidence: [...memory.evidence, { ...memory.evidence[0], id: "duplicate_id" }] }]
+    });
+
+    expect(repository.getRelevantMemories({ userId: "user_1" })[0]?.evidence).toHaveLength(1);
+  });
+
+  it("keeps derived evidence grounded in its matching source segment instead of the first memory segment", () => {
+    database = openMemoryDatabase({ filePath: ":memory:" });
+    const repository = createMemoryRepository(database);
+    const memory = memoryFixture({ id: "memory_derived" });
+    const firstText = "第一段是背景信息。";
+    const secondText = "第二段给出了明确安排。";
+    memory.evidence = [
+      { ...memory.evidence[0], sourceId: "segment_1", quote: firstText },
+      { ...memory.evidence[0], id: "segment_2_evidence", sourceId: "segment_2", quote: secondText },
+      { ...memory.evidence[0], id: "brief_evidence", sourceType: "brief", sourceId: "brief_1", quote: secondText }
+    ];
+
+    repository.replaceUploadMemories({
+      userId: "user_1",
+      uploadId: "upload_1",
+      sourceSegments: [
+        { id: "segment_1", uploadId: "upload_1", startSeconds: 0, endSeconds: 5, speaker: "speaker_1", text: firstText, confidence: 0.9, sceneLabels: [], valueLabels: [] },
+        { id: "segment_2", uploadId: "upload_1", startSeconds: 6, endSeconds: 11, speaker: "speaker_2", text: secondText, confidence: 0.9, sceneLabels: [], valueLabels: [] }
+      ],
+      memories: [memory]
+    });
+
+    const derived = repository.getRelevantMemories({ userId: "user_1" })[0]?.evidence
+      .find((evidence) => evidence.sourceType === "brief");
+    expect(derived?.quote).toBe(secondText);
+  });
+
+  it("accepts whitespace-only comparison differences but persists the verbatim source text", () => {
+    database = openMemoryDatabase({ filePath: ":memory:" });
+    const repository = createMemoryRepository(database);
+    const memory = memoryFixture({ id: "memory_whitespace" });
+    memory.evidence[0].quote = "这是 逐字 原文。";
+
+    repository.replaceUploadMemories({
+      userId: "user_1",
+      uploadId: "upload_1",
+      sourceSegments: [{
+        id: "segment_1",
+        uploadId: "upload_1",
+        startSeconds: 0,
+        endSeconds: 5,
+        speaker: "speaker_1",
+        text: "这是  逐字\n原文。",
+        confidence: 0.9,
+        sceneLabels: [],
+        valueLabels: []
+      }],
+      memories: [memory]
+    });
+
+    expect(repository.getRelevantMemories({ userId: "user_1" })[0]?.evidence[0].quote).toBe("这是  逐字\n原文。");
+  });
+
   it("replaces an upload index idempotently and returns evidence-backed memories", () => {
     database = openMemoryDatabase({ filePath: ":memory:" });
     const repository = createMemoryRepository(database);
@@ -240,5 +350,41 @@ describe("memory repository", () => {
     `).run();
 
     expect(repository.getActiveCommitments("user_1").map((item) => item.id)).toEqual(["commitment_50"]);
+  });
+
+  it("propagates resolution through a follow-up lifecycle chain", () => {
+    database = openMemoryDatabase({ filePath: ":memory:" });
+    const repository = createMemoryRepository(database);
+    repository.replaceUploadMemories({
+      userId: "user_1",
+      uploadId: "upload_plan",
+      memories: [{
+        ...memoryFixture({ id: "museum_plan", uploadId: "upload_plan", date: "2026-07-01", type: "commitment", title: "Museum visit plan" }),
+        summary: "The museum visit time still needs confirmation."
+      }]
+    });
+    repository.replaceUploadMemories({
+      userId: "user_1",
+      uploadId: "upload_update",
+      memories: [{
+        ...memoryFixture({ id: "museum_update", uploadId: "upload_update", date: "2026-07-05", type: "event", title: "Museum visit plan updated" }),
+        summary: "The museum visit was rescheduled and the entry time was updated."
+      }]
+    });
+    repository.replaceUploadMemories({
+      userId: "user_1",
+      uploadId: "upload_complete",
+      memories: [{
+        ...memoryFixture({ id: "museum_complete", uploadId: "upload_complete", date: "2026-07-12", type: "event", title: "Museum visit completed" }),
+        summary: "The museum visit was completed."
+      }]
+    });
+
+    const rows = database.prepare("SELECT id, status FROM memory_items ORDER BY id").all() as Array<{ id: string; status: string }>;
+    expect(rows).toEqual(expect.arrayContaining([
+      { id: "museum_plan", status: "resolved" },
+      { id: "museum_update", status: "resolved" },
+      { id: "museum_complete", status: "active" }
+    ]));
   });
 });

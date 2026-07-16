@@ -6,12 +6,10 @@ import {
   type BriefItem,
   type TranscriptSegment
 } from "@/lib/domain/types";
-import { formatExtractionSegments, planExtractionChunks, type ExtractionChunk } from "./chunks";
-import { mergeBriefItemsWithStats } from "./merge";
+import { formatExtractionSegments, type ExtractionChunk } from "./chunks";
 import type {
   ExtractionFallbackReason,
   ExtractionOptions,
-  ExtractionProgressEvent,
   ExtractionProvider
 } from "./provider";
 import { ruleExtractionProvider } from "./rule-provider";
@@ -21,6 +19,8 @@ import {
   type StructuredJsonResponseMode
 } from "@/lib/server/openai/structured-json";
 import { getOpenAIClientRuntimeConfig } from "@/lib/server/settings/provider-config";
+import { fingerprintAnalysisInput } from "@/lib/server/analysis-chunks/checkpoint";
+import { processDailyBriefChunks, resolveDailyBriefChunkConcurrency } from "./chunk-processing";
 
 const DEFAULT_CHUNK_TIMEOUT_MS = 45_000;
 const DEFAULT_MAX_RETRIES = 1;
@@ -88,10 +88,6 @@ function fallbackReason(error: unknown): ExtractionFallbackReason {
     return "network";
   }
   return "provider_error";
-}
-
-async function emitProgress(options: ExtractionOptions | undefined, event: ExtractionProgressEvent) {
-  await options?.onProgress?.(event);
 }
 
 function awaitWithAbort<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
@@ -201,55 +197,9 @@ async function extractChunk(input: {
   return normalizeChunkItems({ uploadId: input.uploadId, chunk: input.chunk, parsedItems: parsed.items });
 }
 
-async function fallbackChunk(input: {
-  uploadId: string;
-  chunk: ExtractionChunk;
-  chunkCount: number;
-  reason: ExtractionFallbackReason;
-  startedAt: number;
-  options?: ExtractionOptions;
-}) {
-  const items = await ruleExtractionProvider.extract(input.uploadId, input.chunk.segments);
-  await emitProgress(input.options, {
-    phase: "chunk_fallback",
-    chunkIndex: input.chunk.index + 1,
-    chunkCount: input.chunkCount,
-    itemCount: items.length,
-    elapsedMs: Date.now() - input.startedAt,
-    reason: input.reason
-  });
-  return items;
-}
-
 export const openaiExtractionProvider: ExtractionProvider = {
   async extract(uploadId, segments, options) {
     const extractionStartedAt = Date.now();
-    const plan = planExtractionChunks({ segments, semanticSegments: options?.semanticSegments });
-    await emitProgress(options, {
-      phase: "planned",
-      segmentCount: plan.segmentCount,
-      inputChars: plan.inputChars,
-      inputBytes: plan.inputBytes,
-      estimatedTokensMin: plan.estimatedTokensMin,
-      estimatedTokensMax: plan.estimatedTokensMax,
-      chunkCount: plan.chunks.length,
-      longForm: plan.longForm,
-      oversizedChunkCount: plan.oversizedChunkCount
-    });
-
-    if (plan.chunks.length === 0) {
-      await emitProgress(options, {
-        phase: "merged",
-        rawItemCount: 0,
-        validItemCount: 0,
-        deduplicatedItemCount: 0,
-        finalItemCount: 0,
-        fallbackChunks: 0,
-        elapsedMs: Date.now() - extractionStartedAt
-      });
-      return [];
-    }
-
     const client = createOpenAIClient(await getOpenAIClientRuntimeConfig());
     const model = process.env.OPENAI_TEXT_MODEL ?? "gpt-4.1-mini";
     const mode = responseMode();
@@ -262,44 +212,44 @@ export const openaiExtractionProvider: ExtractionProvider = {
       () => deadlineController.abort(),
       Math.max(0, deadline - Date.now())
     );
-    const rawItems: BriefItem[] = [];
-    let fallbackChunks = 0;
+    const processorFingerprint = options?.analysisCheckpoint?.processorFingerprint ?? fingerprintAnalysisInput({
+      kind: "daily_brief",
+      provider: process.env.EXTRACTION_PROVIDER ?? "openai",
+      model,
+      responseMode: mode,
+      promptVersion: "founder_daily_brief_chunk_v1",
+      schemaVersion: "extracted_brief_v1",
+      normalizationVersion: "daily_brief_evidence_v1"
+    });
 
     try {
-      for (const chunk of plan.chunks) {
-        const chunkStartedAt = Date.now();
-        await emitProgress(options, {
-          phase: "chunk_started",
-          chunkIndex: chunk.index + 1,
-          chunkCount: plan.chunks.length,
-          segmentCount: chunk.segments.length,
-          inputChars: chunk.inputChars,
-          startSeconds: chunk.startSeconds,
-          endSeconds: chunk.endSeconds
-        });
-
-        const remainingMs = deadline - Date.now();
-        if (remainingMs <= 0 || deadlineController.signal.aborted) {
-          fallbackChunks += 1;
-          rawItems.push(
-            ...(await fallbackChunk({
-              uploadId,
-              chunk,
-              chunkCount: plan.chunks.length,
-              reason: "deadline",
-              startedAt: chunkStartedAt,
-              options
-            }))
+      const result = await processDailyBriefChunks({
+        uploadId,
+        segments,
+        semanticSegments: options?.semanticSegments,
+        concurrency: resolveDailyBriefChunkConcurrency(),
+        onProgress: options?.onProgress,
+        ...(options?.analysisCheckpoint ? {
+          checkpoint: {
+            store: options.analysisCheckpoint.store,
+            userId: options.analysisCheckpoint.userId,
+            recordingDate: options.analysisCheckpoint.recordingDate,
+            processorFingerprint,
+            staleAfterMs: options.analysisCheckpoint.staleAfterMs ?? Math.max(
+              totalTimeoutMs + 60_000,
+              chunkTimeoutMs * Math.max(1, maxRetries + 1) + 60_000
+            )
+          }
+        } : {}),
+        executeChunk: async (chunk) => {
+          const remainingMs = deadline - Date.now();
+          if (remainingMs <= 0 || deadlineController.signal.aborted) {
+            throw new ExtractionDeadlineError();
+          }
+          const requestTimeout = Math.max(
+            1,
+            Math.min(chunkTimeoutMs, Math.floor(remainingMs / Math.max(1, maxRetries + 1)))
           );
-          continue;
-        }
-
-        const requestTimeout = Math.max(
-          1,
-          Math.min(chunkTimeoutMs, Math.floor(remainingMs / Math.max(1, maxRetries + 1)))
-        );
-
-        try {
           const items = await awaitWithAbort(
             extractChunk({
               client,
@@ -313,43 +263,20 @@ export const openaiExtractionProvider: ExtractionProvider = {
             }),
             deadlineController.signal
           );
-          rawItems.push(...items);
-          await emitProgress(options, {
-            phase: "chunk_completed",
-            chunkIndex: chunk.index + 1,
-            chunkCount: plan.chunks.length,
-            itemCount: items.length,
-            elapsedMs: Date.now() - chunkStartedAt,
-            provider: "openai"
-          });
-        } catch (error) {
-          fallbackChunks += 1;
-          rawItems.push(
-            ...(await fallbackChunk({
-              uploadId,
-              chunk,
-              chunkCount: plan.chunks.length,
-              reason:
-                deadlineController.signal.aborted || error instanceof ExtractionDeadlineError
-                  ? "deadline"
-                  : fallbackReason(error),
-              startedAt: chunkStartedAt,
-              options
-            }))
-          );
-        }
-      }
+          return { items, resultSource: "provider_success" };
+        },
+        fallbackChunk: async (chunk, error) => ({
+          items: await ruleExtractionProvider.extract(uploadId, chunk.segments),
+          resultSource: "rule_fallback",
+          fallbackReason:
+            deadlineController.signal.aborted || error instanceof ExtractionDeadlineError
+              ? "deadline"
+              : fallbackReason(error)
+        })
+      });
+      return result.items;
     } finally {
       clearTimeout(deadlineTimer);
     }
-
-    const merged = mergeBriefItemsWithStats({ uploadId, segments, items: rawItems });
-    await emitProgress(options, {
-      phase: "merged",
-      ...merged.stats,
-      fallbackChunks,
-      elapsedMs: Date.now() - extractionStartedAt
-    });
-    return merged.items;
   }
 };

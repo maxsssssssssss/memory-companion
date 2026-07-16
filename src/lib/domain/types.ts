@@ -24,7 +24,8 @@ export const ValueLabelSchema = z.enum([
 export const BriefCategorySchema = ValueLabelSchema;
 export const PrioritySchema = z.enum(["high", "medium", "low"]);
 export const ItemStatusSchema = z.enum(["candidate", "confirmed", "dismissed"]);
-export const JobStatusSchema = z.enum(["uploaded", "waiting", "transcribing", "extracting", "ready", "failed"]);
+export const JobStatusSchema = z.enum(["uploaded", "waiting", "processing", "transcribing", "extracting", "ready", "failed"]);
+export const PipelineExecutionModeSchema = z.enum(["inline", "queue"]);
 export const SpeakerRoleSchema = z.enum(["self", "other", "customer", "teammate", "teacher", "unknown"]);
 export const VoicePaceSchema = z.enum(["slow", "normal", "fast", "unknown"]);
 export const VoiceVolumeSchema = z.enum(["low", "normal", "high", "unknown"]);
@@ -305,6 +306,12 @@ export const ProcessingJobSchema = z.object({
   uploadId: z.string().min(1),
   status: JobStatusSchema,
   progress: z.number().min(0).max(100),
+  executionMode: PipelineExecutionModeSchema.optional(),
+  queueJobId: z.string().min(1).optional(),
+  queuedAt: z.string().datetime().optional(),
+  updatedAt: z.string().datetime().optional(),
+  workerStartedAt: z.string().datetime().optional(),
+  queueAttempt: z.number().int().nonnegative().optional(),
   errorCode: z.string().optional(),
   errorMessage: z.string().optional(),
   startedAt: z.string().datetime().optional(),

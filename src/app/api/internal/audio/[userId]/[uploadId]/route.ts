@@ -5,6 +5,7 @@ import { Readable } from "stream";
 import { NextResponse } from "next/server";
 import type { AudioUpload } from "@/lib/domain/types";
 import { getUserScopedStore, getUserUploadsRootDir } from "@/lib/server/auth/session";
+import { readAudioChunkCheckpoint } from "@/lib/server/transcription/chunks/checkpoint-store";
 
 type StoredUpload = AudioUpload & {
   filePath?: string;
@@ -33,7 +34,8 @@ function unauthorized() {
 
 export async function GET(request: Request, { params }: { params: Promise<{ userId: string; uploadId: string }> }) {
   const token = configuredToken();
-  const requestToken = new URL(request.url).searchParams.get("token")?.trim();
+  const requestUrl = new URL(request.url);
+  const requestToken = requestUrl.searchParams.get("token")?.trim();
 
   if (!token || requestToken !== token) {
     return unauthorized();
@@ -50,21 +52,31 @@ export async function GET(request: Request, { params }: { params: Promise<{ user
     return NextResponse.json({ error: "audio_not_found" }, { status: 404 });
   }
 
+  const chunkId = requestUrl.searchParams.get("chunkId")?.trim();
+  if (chunkId && !isSafeKey(chunkId)) {
+    return NextResponse.json({ error: "invalid_audio_request" }, { status: 400 });
+  }
+  const chunk = chunkId ? await readAudioChunkCheckpoint(store, chunkId) : null;
+  if (chunkId && (!chunk || chunk.uploadId !== uploadId || !chunk.source.path)) {
+    return NextResponse.json({ error: "audio_not_found" }, { status: 404 });
+  }
+  const filePath = chunk?.source.path ?? upload.filePath;
   const uploadsRootDir = getUserUploadsRootDir(userId);
-  if (!isUploadFilePath(upload.filePath, uploadsRootDir)) {
+  if (!isUploadFilePath(filePath, uploadsRootDir)) {
     return NextResponse.json({ error: "invalid_audio_path" }, { status: 403 });
   }
 
-  const fileStat = await stat(upload.filePath).catch(() => null);
+  const fileStat = await stat(filePath).catch(() => null);
   if (!fileStat?.isFile()) {
     return NextResponse.json({ error: "audio_not_found" }, { status: 404 });
   }
 
-  const stream = Readable.toWeb(createReadStream(upload.filePath)) as ReadableStream;
+  const stream = Readable.toWeb(createReadStream(filePath)) as ReadableStream;
+  const chunkMimeType = typeof chunk?.metadata.mimeType === "string" ? chunk.metadata.mimeType : undefined;
 
   return new Response(stream, {
     headers: {
-      "Content-Type": upload.mimeType || "application/octet-stream",
+      "Content-Type": chunkMimeType || upload.mimeType || "application/octet-stream",
       "Content-Length": String(fileStat.size),
       "Cache-Control": "private, max-age=300"
     }

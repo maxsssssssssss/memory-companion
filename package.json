@@ -3,6 +3,9 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
   "scripts": {
     "dev": "next dev",
     "build": "next build",
@@ -15,16 +18,25 @@
     "test:e2e": "node scripts/run-playwright-e2e.mjs",
     "test:e2e:spec": "playwright test",
     "memory:migrate": "tsx scripts/migrate-memory.ts",
-    "memory:upgrade": "tsx scripts/upgrade-memory.ts"
+    "memory:upgrade": "tsx scripts/upgrade-memory.ts",
+    "memory:replay-fixtures": "tsx scripts/replay-memory-fixtures.ts",
+    "memory:evaluate-quality": "tsx scripts/evaluate-memory-quality.ts",
+    "analysis:verify-checkpoints": "tsx scripts/verify-analysis-checkpoints.ts",
+    "worker": "tsx src/worker/pipeline-worker.ts",
+    "queue:health": "tsx scripts/queue-health.ts",
+    "queue:smoke": "tsx scripts/queue-worker-smoke.ts"
   },
   "dependencies": {
     "better-sqlite3": "^12.11.1",
+    "bullmq": "^5.80.5",
     "ffmpeg-static": "^5.3.0",
     "ffprobe-static": "^3.1.0",
+    "ioredis": "^5.11.1",
     "next": "^15.3.0",
     "openai": "^5.0.0",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
+    "tsx": "^4.23.0",
     "uuid": "^11.1.0",
     "zod": "^3.24.4"
   },
@@ -38,7 +50,6 @@
     "@types/react-dom": "^19.0.0",
     "@vitejs/plugin-react": "^6.0.2",
     "jsdom": "^26.1.0",
-    "tsx": "^4.23.0",
     "typescript": "^5.8.0",
     "vitest": "^4.1.8"
   }

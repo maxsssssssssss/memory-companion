@@ -163,4 +163,110 @@ describe("memory relations", () => {
 
     expect(detectMemoryRelations([first, second])).toEqual([]);
   });
+
+  it.each([
+    ["博物馆参观计划", "博物馆计划调整到周日", "已经参观完博物馆"],
+    ["看医生的安排", "看医生改到周四", "已经完成看医生的预约"],
+    ["购买演出票计划", "演出票购买时间改到晚上", "演出票已经购买完成"],
+    ["提交简历计划", "提交简历调整到周五", "简历已经提交完成"]
+  ])("connects plan, update and completion lifecycle for %s", (planTitle, updateTitle, completionTitle) => {
+    const plan = memory({
+      id: `plan_${planTitle}`,
+      type: "commitment",
+      date: "2026-07-01",
+      title: planTitle,
+      summary: `${planTitle}仍需要确认。`
+    });
+    const update = memory({
+      id: `update_${planTitle}`,
+      type: "event",
+      date: "2026-07-05",
+      title: updateTitle,
+      summary: `${updateTitle}，这是原计划的后续调整。`
+    });
+    const completion = memory({
+      id: `completion_${planTitle}`,
+      type: "event",
+      date: "2026-07-12",
+      title: completionTitle,
+      summary: `${completionTitle}。`
+    });
+    const relations = detectMemoryRelations([plan, update, completion]);
+
+    expect(relations).toEqual(expect.arrayContaining([
+      expect.objectContaining({ sourceMemoryId: plan.id, targetMemoryId: update.id, relationType: "follow_up" }),
+      expect.objectContaining({ sourceMemoryId: update.id, targetMemoryId: completion.id, relationType: "resolved_by" })
+    ]));
+  });
+
+  it("does not connect unrelated lifecycle events that only share generic plan language", () => {
+    const museum = memory({
+      id: "museum_plan",
+      type: "commitment",
+      date: "2026-07-01",
+      title: "周末博物馆计划",
+      summary: "计划周末参观博物馆。"
+    });
+    const doctor = memory({
+      id: "doctor_completed",
+      type: "event",
+      date: "2026-07-02",
+      title: "看医生已经完成",
+      summary: "今天已经完成看医生。"
+    });
+
+    expect(detectMemoryRelations([museum, doctor])).toEqual([]);
+  });
+
+  it("does not treat a negative boundary instruction as cancellation", () => {
+    const boundaryPlan = memory({
+      id: "pause_plan",
+      type: "commitment",
+      date: "2026-07-15",
+      title: "Pause and resume communication plan",
+      summary: "We agreed not to send repeated messages during a short pause."
+    });
+    const boundaryDetail = memory({
+      id: "pause_detail",
+      type: "event",
+      date: "2026-07-15",
+      title: "Pause and resume communication details",
+      summary: "The pause includes a clear return time and no repeated follow-up messages."
+    });
+
+    expect(detectMemoryRelations([boundaryPlan, boundaryDetail]))
+      .not.toEqual(expect.arrayContaining([expect.objectContaining({ relationType: "contradicted_by" })]));
+  });
+
+  it("keeps one strongest predecessor per target lifecycle relation", () => {
+    const firstPlan = memory({
+      id: "museum_plan_first",
+      type: "commitment",
+      date: "2026-07-01",
+      title: "Museum visit plan",
+      summary: "The museum visit time still needs confirmation."
+    });
+    const updatedPlan = memory({
+      id: "museum_plan_update",
+      type: "event",
+      date: "2026-07-05",
+      title: "Museum visit plan updated",
+      summary: "The museum visit was rescheduled and the entry time was updated."
+    });
+    const completion = memory({
+      id: "museum_visit_complete",
+      type: "event",
+      date: "2026-07-12",
+      title: "Museum visit completed",
+      summary: "The museum visit was completed."
+    });
+    const relations = detectMemoryRelations([firstPlan, updatedPlan, completion]);
+    const completionRelations = relations.filter((relation) =>
+      relation.targetMemoryId === completion.id && relation.relationType === "resolved_by"
+    );
+
+    expect(completionRelations).toEqual([
+      expect.objectContaining({ sourceMemoryId: updatedPlan.id, targetMemoryId: completion.id })
+    ]);
+  });
 });

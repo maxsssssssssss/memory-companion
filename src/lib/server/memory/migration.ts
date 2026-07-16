@@ -107,7 +107,12 @@ export async function migrateLegacyMemoryIndex(input: {
             relationshipSignals
           });
 
-          repository.replaceUploadMemories({ userId, uploadId: upload.id, memories });
+          repository.replaceUploadMemories({
+            userId,
+            uploadId: upload.id,
+            sourceSegments: segments,
+            memories
+          });
           result.uploadsIndexed += 1;
           result.memoriesIndexed += memories.length;
         } catch (error) {

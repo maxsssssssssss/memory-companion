@@ -67,6 +67,84 @@ function assertIdentifier(value: string, name: string) {
   return normalized;
 }
 
+function normalizedQuote(value: string) {
+  return value
+    .normalize("NFKC")
+    .replace(/\r\n?/g, "\n")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function sanitizeIncomingMemories(input: ReplaceUploadMemoriesInput) {
+  const segmentById = input.sourceSegments
+    ? new Map(input.sourceSegments.map((segment) => [segment.id, segment]))
+    : undefined;
+
+  return input.memories.flatMap((rawMemory) => {
+    const parsed = MemoryWriteInputSchema.parse(rawMemory);
+    const seen = new Set<string>();
+    const transcriptEvidence = parsed.evidence.flatMap((evidence) => {
+      if (evidence.sourceType !== "transcript" || evidence.uploadId !== input.uploadId) {
+        return [];
+      }
+      const key = `${evidence.sourceType}\u001f${evidence.sourceId}`;
+      if (seen.has(key)) {
+        return [];
+      }
+      if (!segmentById) {
+        seen.add(key);
+        return [evidence];
+      }
+      const segment = segmentById.get(evidence.sourceId);
+      if (!segment || segment.uploadId !== input.uploadId) {
+        return [];
+      }
+      const expected = normalizedQuote(segment.text);
+      const actual = normalizedQuote(evidence.quote);
+      if (!actual || !expected.includes(actual)) {
+        return [];
+      }
+      seen.add(key);
+      return [{ ...evidence, quote: segment.text.slice(0, 4_000) }];
+    });
+
+    if (transcriptEvidence.length === 0) {
+      console.warn(
+        `[memory-evidence] memory rejected memory_id=${parsed.id} upload_id=${input.uploadId} reason=no_valid_transcript_evidence`
+      );
+      return [];
+    }
+
+    const derivedEvidence = parsed.evidence.flatMap((evidence) => {
+      if (evidence.sourceType === "transcript" || evidence.uploadId !== input.uploadId) {
+        return [];
+      }
+      const key = `${evidence.sourceType}\u001f${evidence.sourceId}`;
+      if (seen.has(key)) {
+        return [];
+      }
+      const actual = normalizedQuote(evidence.quote);
+      const groundedTranscript = transcriptEvidence.find((item) => {
+        const source = normalizedQuote(item.quote);
+        return actual.length > 0 && source.includes(actual);
+      });
+      if (!groundedTranscript) {
+        console.warn(
+          `[memory-evidence] derived evidence rejected memory_id=${parsed.id} upload_id=${input.uploadId} source_type=${evidence.sourceType} reason=quote_not_grounded`
+        );
+        return [];
+      }
+      seen.add(key);
+      return [{ ...evidence, quote: groundedTranscript.quote }];
+    });
+
+    return [MemoryWriteInputSchema.parse({
+      ...parsed,
+      evidence: [...transcriptEvidence, ...derivedEvidence]
+    })];
+  });
+}
+
 function boundedLimit(value: number | undefined, fallback = 50) {
   return Math.max(1, Math.min(10_000, Math.floor(value ?? fallback)));
 }
@@ -145,7 +223,8 @@ function recalculateMemory(memory: MemoryItem, input: { resetResolved?: boolean 
     status,
     occurrenceCount,
     evidenceDates: dates,
-    evidenceSourceTypes: memory.evidence.map((item) => item.sourceType)
+    evidenceSourceTypes: memory.evidence.map((item) => item.sourceType),
+    evidenceCount: memory.evidence.length
   });
   return MemoryItemSchema.parse({
     ...memory,
@@ -175,7 +254,8 @@ function incomingMemory(userId: string, input: NormalizedMemoryWriteInput): Memo
     status,
     occurrenceCount,
     evidenceDates: dates,
-    evidenceSourceTypes: evidence.map((item) => item.sourceType)
+    evidenceSourceTypes: evidence.map((item) => item.sourceType),
+    evidenceCount: evidence.length
   });
   return MemoryItemSchema.parse({
     ...input,
@@ -203,6 +283,20 @@ function buildManagedIndex(memories: MemoryItem[]) {
       .filter((relation) => relation.relationType === "resolved_by")
       .map((relation) => relation.sourceMemoryId)
   );
+  let propagated = true;
+  while (propagated) {
+    propagated = false;
+    for (const relation of relations) {
+      if (
+        relation.relationType === "follow_up" &&
+        resolvedIds.has(relation.targetMemoryId) &&
+        !resolvedIds.has(relation.sourceMemoryId)
+      ) {
+        resolvedIds.add(relation.sourceMemoryId);
+        propagated = true;
+      }
+    }
+  }
   const managed = consolidated.map((memory) =>
     recalculateMemory({
       ...memory,
@@ -295,12 +389,7 @@ export function createMemoryRepository(database: Database.Database): MemoryRepos
   const replaceUploadMemories = database.transaction((input: ReplaceUploadMemoriesInput): MemoryIndexUpdateResult => {
     const userId = assertIdentifier(input.userId, "user id");
     const uploadId = assertIdentifier(input.uploadId, "upload id");
-    const parsedInputs = input.memories.map((memory) => MemoryWriteInputSchema.parse(memory));
-    for (const memory of parsedInputs) {
-      if (memory.evidence.some((item) => item.uploadId !== uploadId)) {
-        throw new Error(`Memory ${memory.id} references a different upload`);
-      }
-    }
+    const parsedInputs = sanitizeIncomingMemories({ ...input, uploadId });
 
     const existing = loadUserMemories(userId);
     const remaining = existing

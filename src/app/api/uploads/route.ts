@@ -5,12 +5,17 @@ import { after, NextResponse } from "next/server";
 import { mimeTypeToAudioExtension, normalizeAudioForTranscription } from "@/lib/audio/compat";
 import type { AudioUpload } from "@/lib/domain/types";
 import { isUnauthenticatedError, requireAuthContext, unauthorizedResponse } from "@/lib/server/auth/request-context";
-import { createJob } from "@/lib/server/jobs/job-store";
+import { shouldMarkUploadForEvaluationRetention } from "@/lib/server/evaluation/retention";
+import { createJob, updateJob } from "@/lib/server/jobs/job-store";
 import { isUploadProcessingCancelled, processUpload } from "@/lib/server/pipeline/process-upload";
+import { resolvePipelineExecutionMode } from "@/lib/server/queue/config";
+import { enqueuePipelineJob } from "@/lib/server/queue/producer";
+import { buildPipelineJobId } from "@/lib/server/queue/types";
 import { validateAudioUpload } from "@/lib/server/uploads/validation";
 
 type StoredUpload = AudioUpload & {
   filePath: string;
+  evaluationRetention?: boolean;
 };
 
 const mimeTypeToExtension: Record<string, string> = {
@@ -69,6 +74,7 @@ export async function POST(request: Request) {
   }
 
   const uploadId = randomUUID();
+  const executionMode = resolvePipelineExecutionMode();
   const uploadDir = authContext.uploadsRootDir;
   const originalBytes = new Uint8Array(await file.arrayBuffer());
   const normalizedAudio = normalizeAudioForTranscription({
@@ -77,6 +83,7 @@ export async function POST(request: Request) {
     bytes: originalBytes
   });
   const filePath = join(uploadDir, `${uploadId}${extensionForUpload(normalizedAudio.name, normalizedAudio.mimeType)}`);
+  const evaluationRetention = shouldMarkUploadForEvaluationRetention(request);
   const upload: StoredUpload = {
     id: uploadId,
     originalName: file.name,
@@ -85,32 +92,99 @@ export async function POST(request: Request) {
     recordingDate: normalizeRecordingDate(formData.get("recordingDate")),
     createdAt: new Date().toISOString(),
     status: "uploaded",
-    filePath
+    filePath,
+    ...(evaluationRetention ? { evaluationRetention: true } : {})
   };
 
   await fs.mkdir(uploadDir, { recursive: true });
   await fs.writeFile(filePath, normalizedAudio.bytes);
   await authContext.store.write("uploads", uploadId, upload);
-  const job = await createJob(authContext.store, uploadId);
+
+  if (executionMode === "queue") {
+    const queuedAt = new Date().toISOString();
+    const queuePayload = {
+      version: 1 as const,
+      uploadId,
+      userRef: authContext.user.id
+    };
+    const queueJobId = buildPipelineJobId(queuePayload);
+    let job = await createJob(authContext.store, uploadId, {
+      executionMode: "queue",
+      queueJobId,
+      queuedAt,
+      now: () => queuedAt
+    });
+
+    try {
+      const queued = await enqueuePipelineJob(queuePayload);
+      if (queued.jobId !== queueJobId) {
+        throw new Error("Queue returned an unexpected stable job id");
+      }
+    } catch (error) {
+      const failedAt = new Date().toISOString();
+      const errorMessage = "Pipeline queue is unavailable";
+      job = await updateJob(authContext.store, job, {
+        status: "failed",
+        errorCode: "queue_unavailable",
+        errorMessage,
+        finishedAt: failedAt
+      });
+      await authContext.store.write("uploads", uploadId, {
+        ...upload,
+        status: "failed",
+        errorCode: "queue_unavailable",
+        errorMessage
+      });
+      console.error(
+        `[pipeline-queue] enqueue failed upload_id=${uploadId} error_name=${error instanceof Error ? error.name : "unknown"}`
+      );
+      return NextResponse.json(
+        {
+          error: "pipeline_queue_unavailable",
+          uploadId,
+          jobId: job.id,
+          status: "failed"
+        },
+        { status: 503 }
+      );
+    }
+
+    console.info(`[pipeline-queue] enqueued upload_id=${uploadId} queue_job_id=${queueJobId}`);
+    return NextResponse.json(
+      {
+        uploadId,
+        jobId: job.id,
+        status: "waiting",
+        executionMode: "queue",
+        queueJobId,
+        ...(evaluationRetention ? { evaluationRetention: true } : {})
+      },
+      { status: 201 }
+    );
+  }
+
+  const job = await createJob(authContext.store, uploadId, { executionMode: "inline" });
 
   console.info(`[pipeline] background scheduled upload_id=${uploadId}`);
-  after(() => {
+  after(async () => {
     const startedAt = Date.now();
     console.info(`[pipeline] background started upload_id=${uploadId}`);
-    void processUpload({ uploadId, store: authContext.store, userId: authContext.user.id })
-      .then(() => {
-        console.info(`[pipeline] background completed upload_id=${uploadId} elapsed_ms=${Date.now() - startedAt}`);
-      })
-      .catch((error) => {
-        if (isUploadProcessingCancelled(error)) {
-          return;
-        }
-        console.info(
-          `[pipeline] background failed upload_id=${uploadId} elapsed_ms=${Date.now() - startedAt} error_name=${error instanceof Error ? error.name : "unknown"}`
-        );
-        console.error("process upload failed", error);
-      });
+    try {
+      await processUpload({ uploadId, store: authContext.store, userId: authContext.user.id });
+      console.info(`[pipeline] background completed upload_id=${uploadId} elapsed_ms=${Date.now() - startedAt}`);
+    } catch (error) {
+      if (isUploadProcessingCancelled(error)) {
+        return;
+      }
+      console.info(
+        `[pipeline] background failed upload_id=${uploadId} elapsed_ms=${Date.now() - startedAt} error_name=${error instanceof Error ? error.name : "unknown"}`
+      );
+      console.error("process upload failed", error);
+    }
   });
 
-  return NextResponse.json({ uploadId, jobId: job.id, status: "uploaded" }, { status: 201 });
+  return NextResponse.json(
+    { uploadId, jobId: job.id, status: "uploaded", ...(evaluationRetention ? { evaluationRetention: true } : {}) },
+    { status: 201 }
+  );
 }

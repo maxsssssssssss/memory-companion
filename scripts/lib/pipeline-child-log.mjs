@@ -3,14 +3,22 @@ import { redactSensitiveUrl } from "./pipeline-validation.mjs";
 const allowedPrefixes = [
   "[pipeline]",
   "[transcription]",
+  "[asr-chunks]",
+  "[transcript-merge]",
+  "[analysis-chunks]",
+  "[analysis-parallel]",
   "[audio-insights]",
   "[audio-insight]",
+  "[audio insight provider fallback]",
   "[ffmpeg-features]",
   "[emotion-signals]",
   "[semantic-segments]",
   "[extraction]",
   "[relationship-signals]",
+  "[relationship signal provider fallback]",
+  "[extraction provider fallback]",
   "[memory-index]",
+  "[memory-relevance]",
   "[proactive-insights]"
 ];
 

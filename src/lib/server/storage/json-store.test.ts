@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from "fs/promises";
+import { mkdtemp, readdir, rm } from "fs/promises";
 import { tmpdir } from "os";
 import { join } from "path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -47,6 +47,19 @@ describe("JsonStore", () => {
       { id: "upload_1", value: { title: "First" } },
       { id: "upload_2", value: { title: "Second" } }
     ]);
+  });
+
+  it("serializes concurrent atomic writes to the same record", async () => {
+    const store = await createTempStore();
+
+    await Promise.all(Array.from({ length: 20 }, (_, value) =>
+      store.write("jobs", "job_1", { value })
+    ));
+
+    const record = await store.read<{ value: number }>("jobs", "job_1");
+    expect(record?.value).toBeGreaterThanOrEqual(0);
+    expect(record?.value).toBeLessThan(20);
+    expect(await readdir(join(tempDir!, "store", "jobs"))).toEqual(["job_1.json"]);
   });
 
   it("rejects unsafe collection keys for all operations", async () => {

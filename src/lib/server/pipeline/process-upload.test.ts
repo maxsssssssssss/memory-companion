@@ -3,10 +3,14 @@ import { tmpdir } from "os";
 import { join } from "path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AudioInsight, AudioUpload, ProcessingJob, TranscriptSegment } from "@/lib/domain/types";
+import { buildAudioInsights } from "@/lib/processing/audio-insights";
 import { extractBriefItems } from "@/lib/processing/extract-rule-based";
 import { deepseekAudioInsightProvider } from "@/lib/server/audio-insights/deepseek-provider";
 import { openaiAudioInsightProvider } from "@/lib/server/audio-insights/openai-provider";
+import type { EvaluationAuditReport } from "@/lib/server/evaluation/audit-report";
 import * as extractionProviderModule from "@/lib/server/extraction/provider";
+import { openMemoryDatabase } from "@/lib/server/memory/db";
+import { createMemoryRepository } from "@/lib/server/memory/repository";
 import { JsonStore } from "@/lib/server/storage/json-store";
 import { UploadProcessingCancelledError, processUpload } from "./process-upload";
 
@@ -51,16 +55,23 @@ vi.mock("@/lib/server/memory/relevance", () => ({
 }));
 
 let tempDir: string | undefined;
+const originalEvaluationMode = process.env.EVALUATION_MODE;
 
 type StoredUpload = AudioUpload & {
+  filePath?: string;
   errorCode?: string;
   errorMessage?: string;
+  evaluationRetention?: boolean;
 };
 
 type DeleteTrigger = (collection: string, id: string, value: unknown) => boolean;
 
 function isProcessingJob(value: unknown): value is ProcessingJob {
   return value !== null && typeof value === "object" && "status" in value && "uploadId" in value;
+}
+
+function hasReadyStatus(value: unknown) {
+  return value !== null && typeof value === "object" && "status" in value && value.status === "ready";
 }
 
 class DeleteDuringWriteStore extends JsonStore {
@@ -133,6 +144,23 @@ class RecordingJobStore extends JsonStore {
   }
 }
 
+class EvaluationAuditOrderStore extends JsonStore {
+  readonly terminalWrites: string[] = [];
+
+  override async write<T>(collection: string, id: string, value: T): Promise<void> {
+    if (collection === "evaluation-reports") {
+      this.terminalWrites.push("audit-report");
+    }
+    if (collection === "uploads" && hasReadyStatus(value)) {
+      this.terminalWrites.push("upload-ready");
+    }
+    if (collection === "jobs-by-upload" && isProcessingJob(value) && value.status === "ready") {
+      this.terminalWrites.push("job-ready");
+    }
+    await super.write(collection, id, value);
+  }
+}
+
 class FailingProactiveInsightCacheStore extends JsonStore {
   override async write<T>(collection: string, id: string, value: T): Promise<void> {
     if (collection === "proactive-insights") {
@@ -154,6 +182,7 @@ function restoreProviderEnv(
 }
 
 beforeEach(() => {
+  delete process.env.EVALUATION_MODE;
   extractFfmpegAcousticFeaturesMock.mockResolvedValue([]);
   emotionSignalAnalyzeMock.mockResolvedValue([]);
   getEmotionSignalProviderMock.mockReturnValue({ analyze: emotionSignalAnalyzeMock });
@@ -178,6 +207,11 @@ beforeEach(() => {
 });
 
 afterEach(async () => {
+  if (originalEvaluationMode === undefined) {
+    delete process.env.EVALUATION_MODE;
+  } else {
+    process.env.EVALUATION_MODE = originalEvaluationMode;
+  }
   if (tempDir) {
     await rm(tempDir, { recursive: true, force: true });
     tempDir = undefined;
@@ -222,6 +256,7 @@ describe("processUpload", () => {
       expect(logs).toEqual(
         expect.arrayContaining([
           expect.stringMatching(/^\[audio-insights\] start segments=\d+$/),
+          expect.stringMatching(/^\[audio-insights\] chunks=\d+ .*parallel_elapsed_ms=\d+ merge_elapsed_ms=\d+$/),
           expect.stringMatching(/^\[audio-insights\] completed count=\d+ elapsed_ms=\d+$/),
           expect.stringMatching(/^\[ffmpeg-features\] start segments=\d+$/),
           expect.stringMatching(/^\[ffmpeg-features\] completed count=\d+ elapsed_ms=\d+$/),
@@ -229,12 +264,255 @@ describe("processUpload", () => {
           expect.stringMatching(/^\[semantic-segments\] completed count=\d+ elapsed_ms=\d+$/),
           expect.stringMatching(/^\[extraction\] start segments=\d+ semantic_segments=\d+$/),
           expect.stringMatching(/^\[extraction\] completed count=\d+ elapsed_ms=\d+$/),
+          expect.stringMatching(/^\[relationship-signals\] chunks=\d+ .*candidates=\d+ .*reducer_elapsed_ms=\d+$/),
           expect.stringMatching(/^\[pipeline\] ready .*elapsed_ms=\d+$/)
         ])
       );
       expect(logs.join("\n")).not.toContain(result.segments[0]?.text ?? "never-present");
     } finally {
       consoleInfo.mockRestore();
+      restoreProviderEnv("TRANSCRIPTION_PROVIDER", originalTranscriptionProvider);
+      restoreProviderEnv("EXTRACTION_PROVIDER", originalExtractionProvider);
+    }
+  });
+
+  it("starts independent post-ASR analysis stages concurrently before semantic extraction", async () => {
+    tempDir = await mkdtemp(join(tmpdir(), "brief-pipeline-parallel-"));
+    const store = new JsonStore(tempDir);
+    const filePath = join(tempDir, "demo.m4a");
+    await writeFile(filePath, "fake audio");
+    const originalTranscriptionProvider = process.env.TRANSCRIPTION_PROVIDER;
+    const originalExtractionProvider = process.env.EXTRACTION_PROVIDER;
+    const originalAudioInsightProvider = process.env.AUDIO_INSIGHT_PROVIDER;
+    const startedStages: string[] = [];
+    let releaseStages: (() => void) | undefined;
+    const stageGate = new Promise<void>((resolve) => {
+      releaseStages = resolve;
+    });
+    let processing: ReturnType<typeof processUpload> | undefined;
+    const extractionProvider = {
+      extract: vi.fn(
+        async (
+          uploadId: string,
+          segments: TranscriptSegment[],
+          options?: extractionProviderModule.ExtractionOptions
+        ) => {
+          startedStages.push("extraction");
+          expect(options?.semanticSegments?.length).toBeGreaterThan(0);
+          return extractBriefItems(uploadId, segments);
+        }
+      )
+    };
+    const consoleInfo = vi.spyOn(console, "info").mockImplementation(() => undefined);
+    const upload: AudioUpload = {
+      id: "upload_parallel_analysis",
+      originalName: "demo.m4a",
+      mimeType: "audio/mp4",
+      sizeBytes: 10,
+      recordingDate: "2026-07-14",
+      status: "uploaded"
+    };
+
+    try {
+      process.env.TRANSCRIPTION_PROVIDER = "fixture";
+      process.env.EXTRACTION_PROVIDER = "rule";
+      process.env.AUDIO_INSIGHT_PROVIDER = "rule";
+      await store.write("uploads", upload.id, { ...upload, filePath });
+
+      processing = processUpload({
+        uploadId: upload.id,
+        store,
+        dependencies: {
+          audioInsightProvider: {
+            async analyze(uploadId, segments) {
+              startedStages.push("audio-insight");
+              await stageGate;
+              return buildAudioInsights(uploadId, segments);
+            }
+          },
+          acousticFeatureExtractor: async () => {
+            startedStages.push("acoustic-features");
+            await stageGate;
+            return [];
+          },
+          emotionSignalProvider: {
+            async analyze() {
+              startedStages.push("emotion-signals");
+              await stageGate;
+              return [];
+            }
+          },
+          extractionProvider
+        }
+      });
+
+      await vi.waitFor(() => {
+        expect(startedStages).toEqual(
+          expect.arrayContaining(["audio-insight", "acoustic-features", "emotion-signals"])
+        );
+      });
+      expect(startedStages).not.toContain("extraction");
+
+      releaseStages?.();
+      const result = await processing;
+      const logs = consoleInfo.mock.calls.map(([message]) => String(message));
+      const parallelCompletedIndex = logs.findIndex((line) =>
+        line.startsWith("[analysis-parallel] completed")
+      );
+      const semanticStartedIndex = logs.findIndex((line) =>
+        line.startsWith("[semantic-segments] start")
+      );
+      const extractionStartedIndex = logs.findIndex((line) => line.startsWith("[extraction] start"));
+
+      expect(result.job.status).toBe("ready");
+      expect(startedStages.indexOf("extraction")).toBeGreaterThan(
+        startedStages.indexOf("emotion-signals")
+      );
+      expect(parallelCompletedIndex).toBeGreaterThanOrEqual(0);
+      expect(semanticStartedIndex).toBeGreaterThan(parallelCompletedIndex);
+      expect(extractionStartedIndex).toBeGreaterThan(semanticStartedIndex);
+      expect(logs).toEqual(
+        expect.arrayContaining([
+          expect.stringMatching(/^\[analysis-parallel\] started segments=\d+$/),
+          expect.stringMatching(
+            /^\[analysis-parallel\] completed audio_insight_duration_ms=\d+ acoustic_duration_ms=\d+ emotion_duration_ms=\d+ elapsed_ms=\d+ audio_insight_fallback=false acoustic_fallback=false emotion_fallback=false$/
+          )
+        ])
+      );
+    } finally {
+      releaseStages?.();
+      await processing?.catch(() => undefined);
+      consoleInfo.mockRestore();
+      restoreProviderEnv("TRANSCRIPTION_PROVIDER", originalTranscriptionProvider);
+      restoreProviderEnv("EXTRACTION_PROVIDER", originalExtractionProvider);
+      restoreProviderEnv("AUDIO_INSIGHT_PROVIDER", originalAudioInsightProvider);
+    }
+  });
+
+  it("isolates an Audio Insight failure while acoustic and emotion stages still complete", async () => {
+    tempDir = await mkdtemp(join(tmpdir(), "brief-pipeline-parallel-fallback-"));
+    const store = new JsonStore(tempDir);
+    const filePath = join(tempDir, "demo.m4a");
+    await writeFile(filePath, "fake audio");
+    const originalTranscriptionProvider = process.env.TRANSCRIPTION_PROVIDER;
+    const originalExtractionProvider = process.env.EXTRACTION_PROVIDER;
+    const acousticFeatureExtractor = vi.fn(async ({ segments }: { segments: TranscriptSegment[] }) => [
+      {
+        segmentId: segments[0].id,
+        volume: "high" as const,
+        pause: "normal" as const,
+        overlap: false,
+        confidence: 0.72
+      }
+    ]);
+    const emotionSignalProvider = { analyze: vi.fn(async () => []) };
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const upload: AudioUpload = {
+      id: "upload_parallel_audio_fallback",
+      originalName: "demo.m4a",
+      mimeType: "audio/mp4",
+      sizeBytes: 10,
+      recordingDate: "2026-07-14",
+      status: "uploaded"
+    };
+
+    try {
+      process.env.TRANSCRIPTION_PROVIDER = "fixture";
+      process.env.EXTRACTION_PROVIDER = "rule";
+      await store.write("uploads", upload.id, { ...upload, filePath });
+
+      const result = await processUpload({
+        uploadId: upload.id,
+        store,
+        dependencies: {
+          audioInsightProvider: {
+            async analyze() {
+              throw new Error("audio insight unavailable");
+            }
+          },
+          acousticFeatureExtractor,
+          emotionSignalProvider
+        }
+      });
+
+      expect(result.job.status).toBe("ready");
+      expect(acousticFeatureExtractor).toHaveBeenCalledOnce();
+      expect(emotionSignalProvider.analyze).toHaveBeenCalledOnce();
+      expect(result.audioInsights.length).toBeGreaterThan(0);
+      expect(result.audioInsights[0].voice.volume).toBe("high");
+      expect(warnSpy).not.toHaveBeenCalledWith(
+        "[analysis-parallel] stage=audio_insight failed; rule fallback will be used.",
+        "Error"
+      );
+    } finally {
+      warnSpy.mockRestore();
+      restoreProviderEnv("TRANSCRIPTION_PROVIDER", originalTranscriptionProvider);
+      restoreProviderEnv("EXTRACTION_PROVIDER", originalExtractionProvider);
+    }
+  });
+
+  it("isolates acoustic and emotion failures while preserving text Audio Insights", async () => {
+    tempDir = await mkdtemp(join(tmpdir(), "brief-pipeline-optional-fallbacks-"));
+    const store = new JsonStore(tempDir);
+    const filePath = join(tempDir, "demo.m4a");
+    await writeFile(filePath, "fake audio");
+    const originalTranscriptionProvider = process.env.TRANSCRIPTION_PROVIDER;
+    const originalExtractionProvider = process.env.EXTRACTION_PROVIDER;
+    const audioInsightProvider = {
+      analyze: vi.fn(async (uploadId: string, segments: TranscriptSegment[]) =>
+        buildAudioInsights(uploadId, segments)
+      )
+    };
+    const acousticFeatureExtractor = vi.fn(async () => {
+      throw Object.assign(new Error("ffmpeg unavailable"), { code: "ENOENT" });
+    });
+    const emotionSignalProvider = {
+      analyze: vi.fn(async () => {
+        throw new Error("emotion provider unavailable");
+      })
+    };
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const upload: AudioUpload = {
+      id: "upload_parallel_optional_fallbacks",
+      originalName: "demo.m4a",
+      mimeType: "audio/mp4",
+      sizeBytes: 10,
+      recordingDate: "2026-07-14",
+      status: "uploaded"
+    };
+
+    try {
+      process.env.TRANSCRIPTION_PROVIDER = "fixture";
+      process.env.EXTRACTION_PROVIDER = "rule";
+      await store.write("uploads", upload.id, { ...upload, filePath });
+
+      const result = await processUpload({
+        uploadId: upload.id,
+        store,
+        dependencies: {
+          audioInsightProvider,
+          acousticFeatureExtractor,
+          emotionSignalProvider
+        }
+      });
+
+      expect(result.job.status).toBe("ready");
+      expect(audioInsightProvider.analyze).toHaveBeenCalledTimes(4);
+      expect(audioInsightProvider.analyze.mock.calls.every(([, chunkSegments]) => chunkSegments.length === 1)).toBe(true);
+      expect(acousticFeatureExtractor).toHaveBeenCalledOnce();
+      expect(emotionSignalProvider.analyze).toHaveBeenCalledOnce();
+      expect(result.audioInsights.length).toBeGreaterThan(0);
+      expect(result.audioInsights.every((insight) => insight.uploadId === upload.id)).toBe(true);
+      expect(warnSpy).toHaveBeenCalledWith(
+        "[audio feature fallback] ffmpeg acoustic feature extraction failed; text-based audio insights will be used.",
+        "Error"
+      );
+      expect(warnSpy).toHaveBeenCalledWith(
+        "[emotion signal fallback] emotion signal analysis failed; existing audio insight evidence will be used.",
+        "Error"
+      );
+    } finally {
+      warnSpy.mockRestore();
       restoreProviderEnv("TRANSCRIPTION_PROVIDER", originalTranscriptionProvider);
       restoreProviderEnv("EXTRACTION_PROVIDER", originalExtractionProvider);
     }
@@ -312,7 +590,7 @@ describe("processUpload", () => {
       expect(result.job.status).toBe("ready");
       expect(extractionProvider.extract).toHaveBeenCalledTimes(1);
       expect(store.progressWrites).toEqual([0, 25, 70, 80, 90, 92, 96, 100]);
-      expect(relationshipSignalAnalyzeMock).toHaveBeenCalledTimes(1);
+      expect(relationshipSignalAnalyzeMock).toHaveBeenCalledTimes(2);
     } finally {
       providerSpy.mockRestore();
       consoleInfo.mockRestore();
@@ -506,6 +784,64 @@ describe("processUpload", () => {
     }
   });
 
+  it("accepts the chunked transcription processor while preserving downstream segment contracts", async () => {
+    tempDir = await mkdtemp(join(tmpdir(), "brief-pipeline-"));
+    const store = new JsonStore(tempDir);
+    const filePath = join(tempDir, "demo.wav");
+    await writeFile(filePath, "fake audio");
+    const originalExtractionProvider = process.env.EXTRACTION_PROVIDER;
+    const originalAudioInsightProvider = process.env.AUDIO_INSIGHT_PROVIDER;
+    const transcriptionProcessor = vi.fn(async ({ uploadId }: { uploadId: string }) => [
+      {
+        id: `${uploadId}_chunk_00000_seg_00001`,
+        uploadId,
+        startSeconds: 1,
+        endSeconds: 3,
+        speaker: "speaker_1",
+        text: "我们周五前再确认一次。",
+        confidence: 0.9,
+        sceneLabels: ["self_reflection" as const],
+        valueLabels: ["commitment" as const]
+      }
+    ]);
+    const upload: AudioUpload = {
+      id: "upload_chunk_processor",
+      originalName: "demo.wav",
+      mimeType: "audio/wav",
+      sizeBytes: 10,
+      recordingDate: "2026-07-14",
+      status: "uploaded"
+    };
+
+    try {
+      process.env.EXTRACTION_PROVIDER = "rule";
+      process.env.AUDIO_INSIGHT_PROVIDER = "rule";
+      await store.write("uploads", upload.id, { ...upload, filePath });
+
+      const result = await processUpload({
+        uploadId: upload.id,
+        store,
+        dependencies: { transcriptionProcessor }
+      });
+
+      expect(transcriptionProcessor).toHaveBeenCalledWith(
+        expect.objectContaining({ uploadId: upload.id, store, filePath })
+      );
+      expect(result.job.status).toBe("ready");
+      expect(result.segments).toEqual([
+        expect.objectContaining({
+          id: `${upload.id}_chunk_00000_seg_00001`,
+          uploadId: upload.id,
+          startSeconds: 1,
+          endSeconds: 3
+        })
+      ]);
+    } finally {
+      restoreProviderEnv("EXTRACTION_PROVIDER", originalExtractionProvider);
+      restoreProviderEnv("AUDIO_INSIGHT_PROVIDER", originalAudioInsightProvider);
+    }
+  });
+
   it("falls back to rule audio insights when the AI audio insight provider fails", async () => {
     tempDir = await mkdtemp(join(tmpdir(), "brief-pipeline-"));
     const store = new JsonStore(tempDir);
@@ -536,7 +872,7 @@ describe("processUpload", () => {
       const result = await processUpload({ uploadId: upload.id, store });
       const storedAudioInsights = await store.read<AudioInsight[]>("audio-insights", upload.id);
 
-      expect(openaiAudioInsightProvider.analyze).toHaveBeenCalledTimes(1);
+      expect(openaiAudioInsightProvider.analyze).toHaveBeenCalledTimes(4);
       expect(result.job.status).toBe("ready");
       expect(result.audioInsights.length).toBeGreaterThan(0);
       expect(storedAudioInsights?.length).toBe(result.audioInsights.length);
@@ -595,10 +931,10 @@ describe("processUpload", () => {
       });
 
       expect(result.job.status).toBe("ready");
-      expect(deepseekAudioInsightProvider.analyze).toHaveBeenCalledTimes(1);
+      expect(deepseekAudioInsightProvider.analyze).toHaveBeenCalledTimes(4);
       expect(result.audioInsights.length).toBeGreaterThan(0);
       expect(result.briefItems.length).toBeGreaterThan(0);
-      expect(relationshipSignalAnalyzeMock).toHaveBeenCalledTimes(1);
+      expect(relationshipSignalAnalyzeMock).toHaveBeenCalledTimes(2);
       expect(memoryRepository.replaceUploadMemories).toHaveBeenCalledTimes(1);
       expect(proactiveInsightGenerateMock).toHaveBeenCalledTimes(1);
     } finally {
@@ -636,7 +972,7 @@ describe("processUpload", () => {
       const result = await processUpload({ uploadId: upload.id, store });
       const storedRelationshipSignals = await store.read("relationship-signals", upload.id);
 
-      expect(relationshipSignalAnalyzeMock).toHaveBeenCalledOnce();
+      expect(relationshipSignalAnalyzeMock).toHaveBeenCalledTimes(2);
       expect(result.job.status).toBe("ready");
       expect(storedRelationshipSignals).toEqual([]);
     } finally {
@@ -867,7 +1203,121 @@ describe("processUpload", () => {
       const storedUpload = await store.read<StoredUpload>("uploads", upload.id);
       expect(storedUpload?.status).toBe("ready");
       expect("filePath" in (storedUpload ?? {})).toBe(false);
+      expect(await store.read("evaluation-reports", upload.id)).toBeNull();
     } finally {
+      restoreProviderEnv("TRANSCRIPTION_PROVIDER", originalTranscriptionProvider);
+      restoreProviderEnv("EXTRACTION_PROVIDER", originalExtractionProvider);
+    }
+  });
+
+  it("uses production cleanup for an unmarked upload even when evaluation mode is enabled", async () => {
+    tempDir = await mkdtemp(join(tmpdir(), "brief-pipeline-unmarked-evaluation-"));
+    const store = new JsonStore(tempDir);
+    const filePath = join(tempDir, "ordinary.m4a");
+    await writeFile(filePath, "fake audio");
+    const originalTranscriptionProvider = process.env.TRANSCRIPTION_PROVIDER;
+    const originalExtractionProvider = process.env.EXTRACTION_PROVIDER;
+    const upload: AudioUpload = {
+      id: "upload_unmarked_evaluation_mode",
+      originalName: "ordinary.m4a",
+      mimeType: "audio/mp4",
+      sizeBytes: 10,
+      recordingDate: "2026-07-16",
+      status: "uploaded"
+    };
+
+    try {
+      process.env.EVALUATION_MODE = "true";
+      process.env.TRANSCRIPTION_PROVIDER = "fixture";
+      process.env.EXTRACTION_PROVIDER = "rule";
+      await store.write("uploads", upload.id, { ...upload, filePath });
+
+      const result = await processUpload({ uploadId: upload.id, store });
+
+      expect(result.job.status).toBe("ready");
+      await expect(access(filePath)).rejects.toThrow();
+      const storedUpload = await store.read<StoredUpload & { filePath?: string }>("uploads", upload.id);
+      expect(storedUpload?.status).toBe("ready");
+      expect("filePath" in (storedUpload ?? {})).toBe(false);
+      expect(await store.read("evaluation-reports", upload.id)).toBeNull();
+    } finally {
+      restoreProviderEnv("TRANSCRIPTION_PROVIDER", originalTranscriptionProvider);
+      restoreProviderEnv("EXTRACTION_PROVIDER", originalExtractionProvider);
+    }
+  });
+
+  it("retains the uploaded audio and ready artifacts in evaluation mode", async () => {
+    tempDir = await mkdtemp(join(tmpdir(), "brief-pipeline-evaluation-"));
+    const store = new EvaluationAuditOrderStore(tempDir);
+    const filePath = join(tempDir, "evaluation.m4a");
+    await writeFile(filePath, "fake audio");
+    const originalTranscriptionProvider = process.env.TRANSCRIPTION_PROVIDER;
+    const originalExtractionProvider = process.env.EXTRACTION_PROVIDER;
+    const memoryDatabase = openMemoryDatabase({ filePath: join(tempDir, "evaluation-memory.sqlite") });
+    const memoryRepository = createMemoryRepository(memoryDatabase);
+    const upload: AudioUpload = {
+      id: "upload_retain_audio_success",
+      originalName: "evaluation.m4a",
+      mimeType: "audio/mp4",
+      sizeBytes: 10,
+      recordingDate: "2026-07-16",
+      status: "uploaded"
+    };
+
+    try {
+      process.env.EVALUATION_MODE = "true";
+      process.env.TRANSCRIPTION_PROVIDER = "fixture";
+      process.env.EXTRACTION_PROVIDER = "rule";
+      await store.write("uploads", upload.id, { ...upload, filePath, evaluationRetention: true });
+
+      const result = await processUpload({
+        uploadId: upload.id,
+        store,
+        userId: "evaluation-user",
+        memoryRepository
+      });
+
+      expect(result.job.status).toBe("ready");
+      await expect(access(filePath)).resolves.toBeUndefined();
+      const storedUpload = await store.read<StoredUpload & { filePath?: string }>("uploads", upload.id);
+      expect(storedUpload).toMatchObject({ status: "ready", filePath });
+      expect(await store.read("segments", upload.id)).not.toBeNull();
+      expect((await store.listIds("analysis-chunks")).length).toBeGreaterThan(0);
+      const report = await store.read<EvaluationAuditReport>("evaluation-reports", upload.id);
+      expect(report).toMatchObject({
+        mode: "evaluation_retention",
+        uploadId: upload.id,
+        status: "ready",
+        retention: {
+          uploadRecordRetained: true,
+          uploadFilePathRetained: true,
+          uploadFileExists: true,
+          automaticDeleteBlocked: true,
+          explicitConfirmedDeleteAllowed: true
+        },
+        memory: {
+          auditStatus: "completed",
+          audited: true
+        }
+      });
+      expect(report?.artifacts.transcriptSegments).toBe(result.segments.length);
+      expect(report?.artifacts.analysisCheckpoints).toBeGreaterThan(0);
+      expect(report?.relationship.reducerAuditAvailable).toBe(true);
+      expect(store.terminalWrites).toEqual(["audit-report", "upload-ready", "job-ready"]);
+      expect(report?.evidenceFirst).toMatchObject({
+        audited: true,
+        invalidSourceIds: 0,
+        nonVerbatimQuotes: 0,
+        memoriesWithoutEvidence: 0
+      });
+      expect(report?.evidenceFirst.duplicateEvidence).toEqual(expect.any(Number));
+      expect(memoryRepository.getRelevantMemories({
+        userId: "evaluation-user",
+        uploadId: upload.id,
+        limit: 100
+      }).length).toBeGreaterThan(0);
+    } finally {
+      memoryDatabase.close();
       restoreProviderEnv("TRANSCRIPTION_PROVIDER", originalTranscriptionProvider);
       restoreProviderEnv("EXTRACTION_PROVIDER", originalExtractionProvider);
     }
@@ -956,7 +1406,7 @@ describe("processUpload", () => {
     }
   });
 
-  it("deletes the uploaded audio file after processing fails", async () => {
+  it("retains the uploaded audio file after processing fails so an outer retry can resume", async () => {
     tempDir = await mkdtemp(join(tmpdir(), "brief-pipeline-"));
     const store = new JsonStore(tempDir);
     const filePath = join(tempDir, "demo.m4a");
@@ -981,10 +1431,10 @@ describe("processUpload", () => {
       const result = await processUpload({ uploadId: upload.id, store });
 
       expect(result.job.status).toBe("failed");
-      await expect(access(filePath)).rejects.toThrow();
+      await expect(access(filePath)).resolves.toBeUndefined();
       const storedUpload = await store.read<StoredUpload>("uploads", upload.id);
       expect(storedUpload?.status).toBe("failed");
-      expect("filePath" in (storedUpload ?? {})).toBe(false);
+      expect(storedUpload?.filePath).toBe(filePath);
     } finally {
       restoreProviderEnv("TRANSCRIPTION_PROVIDER", originalTranscriptionProvider);
       restoreProviderEnv("EXTRACTION_PROVIDER", originalExtractionProvider);
@@ -1066,6 +1516,57 @@ describe("processUpload", () => {
       expect(await store.read("deleted-uploads", upload.id)).not.toBeNull();
       expect(await store.read("uploads", upload.id)).toBeNull();
       expect(await store.read("proactive-insights", `current_${upload.id}`)).toBeNull();
+    } finally {
+      restoreProviderEnv("TRANSCRIPTION_PROVIDER", originalTranscriptionProvider);
+      restoreProviderEnv("EXTRACTION_PROVIDER", originalExtractionProvider);
+    }
+  });
+
+  it("removes memories that race with a mid-processing delete", async () => {
+    tempDir = await mkdtemp(join(tmpdir(), "brief-pipeline-"));
+    const store = new DeleteDuringWriteStore(
+      tempDir,
+      (collection) => collection === "proactive-insights"
+    );
+    const filePath = join(tempDir, "demo.m4a");
+    await writeFile(filePath, "fake audio");
+    const originalTranscriptionProvider = process.env.TRANSCRIPTION_PROVIDER;
+    const originalExtractionProvider = process.env.EXTRACTION_PROVIDER;
+    const memoryRepository = {
+      replaceUploadMemories: vi.fn(() => ({
+        inputCount: 0,
+        memoryCount: 0,
+        mergedCount: 0,
+        relationCount: 0
+      })),
+      getRelevantMemories: vi.fn(() => []),
+      deleteByUpload: vi.fn()
+    };
+    const upload: AudioUpload = {
+      id: "upload_mid_delete_memory",
+      originalName: "demo.m4a",
+      mimeType: "audio/mp4",
+      sizeBytes: 10,
+      recordingDate: "2026-06-03",
+      status: "uploaded"
+    };
+
+    try {
+      process.env.TRANSCRIPTION_PROVIDER = "fixture";
+      process.env.EXTRACTION_PROVIDER = "rule";
+      await store.write("uploads", upload.id, { ...upload, filePath });
+
+      await expect(
+        processUpload({
+          uploadId: upload.id,
+          store,
+          userId: "user_1",
+          memoryRepository
+        })
+      ).rejects.toBeInstanceOf(UploadProcessingCancelledError);
+
+      expect(memoryRepository.replaceUploadMemories).toHaveBeenCalledOnce();
+      expect(memoryRepository.deleteByUpload).toHaveBeenCalledWith("user_1", upload.id);
     } finally {
       restoreProviderEnv("TRANSCRIPTION_PROVIDER", originalTranscriptionProvider);
       restoreProviderEnv("EXTRACTION_PROVIDER", originalExtractionProvider);

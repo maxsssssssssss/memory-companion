@@ -1,0 +1,48 @@
+{
+  "datasetVersion": "long-recording-45m-v1",
+  "description": "Privacy-safe synthetic Chinese two-speaker long recording for end-to-end chunk pipeline evaluation.",
+  "recordingDate": "2026-07-15",
+  "targetDurationSeconds": {
+    "min": 2670,
+    "max": 2695,
+    "planned": 2682
+  },
+  "expectedChunkDurationSeconds": 300,
+  "expectedChunkCount": 9,
+  "audioFile": "audio/long-recording-45m-v1.wav",
+  "dialogueFile": "dialogue.json",
+  "transcriptFile": "dialogue.txt",
+  "speakers": [
+    {
+      "id": "A",
+      "preferredVoice": "Microsoft Yaoyao",
+      "description": "Chinese female voice"
+    },
+    {
+      "id": "B",
+      "preferredVoice": "Microsoft Kangkang",
+      "description": "Chinese male voice"
+    }
+  ],
+  "sections": [
+    { "id": "daily_chat", "startSeconds": 0, "endSeconds": 300, "targetDurationSeconds": 300 },
+    { "id": "work_stress", "startSeconds": 300, "endSeconds": 600, "targetDurationSeconds": 300 },
+    { "id": "resume_commitment_coffee", "startSeconds": 600, "endSeconds": 900, "targetDurationSeconds": 300 },
+    { "id": "museum_plan", "startSeconds": 900, "endSeconds": 1200, "targetDurationSeconds": 300 },
+    { "id": "everyday_transition_evasive", "startSeconds": 1200, "endSeconds": 1500, "targetDurationSeconds": 300 },
+    { "id": "online_conflict_concern", "startSeconds": 1500, "endSeconds": 1800, "targetDurationSeconds": 300 },
+    { "id": "repair_boundary", "startSeconds": 1800, "endSeconds": 2100, "targetDurationSeconds": 300 },
+    { "id": "topic_revisit", "startSeconds": 2100, "endSeconds": 2400, "targetDurationSeconds": 300 },
+    { "id": "commitment_close", "startSeconds": 2400, "endSeconds": 2682, "targetDurationSeconds": 282 }
+  ],
+  "generationConfig": {
+    "sampleRate": 16000,
+    "channels": 1,
+    "codec": "pcm_s16le",
+    "loudnessTargetLufs": -20,
+    "truePeakDb": -3,
+    "normalPauseSeconds": [0.8, 1.0, 1.2, 1.4, 1.1, 1.5, 0.9, 1.3],
+    "sectionTransitionPauseSeconds": 5,
+    "tempoRange": [0.72, 1.35]
+  }
+}

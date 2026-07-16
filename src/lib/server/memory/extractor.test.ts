@@ -103,6 +103,169 @@ const relationshipSignals: RelationshipSignalCard[] = [
 ];
 
 describe("memory extraction", () => {
+  it("extracts stable preferences directly from verbatim transcript evidence", () => {
+    const preferenceSegments: TranscriptSegment[] = [
+      { ...segments[0], id: "pref_coffee_positive", text: "我更喜欢无糖拿铁。", valueLabels: [] },
+      { ...segments[1], id: "pref_coffee_negative", text: "我不喜欢太甜的咖啡。", valueLabels: [] },
+      { ...segments[0], id: "pref_drink_condition", text: "点饮料的话我一般选低糖。", valueLabels: [] }
+    ];
+
+    const memories = extractUploadMemories({
+      userId: "user_1",
+      uploadId: "upload_1",
+      recordingDate: "2026-07-08",
+      segments: preferenceSegments,
+      briefItems: [],
+      semanticSegments: [],
+      relationshipSignals: [],
+      now: "2026-07-10T10:00:00.000Z"
+    });
+
+    expect(memories.some((memory) => memory.type === "preference")).toBe(true);
+    expect(memories.flatMap((memory) => memory.evidence).filter((item) => item.sourceType === "transcript")).toEqual(
+      expect.arrayContaining(preferenceSegments.map((item) => expect.objectContaining({ sourceId: item.id, quote: item.text })))
+    );
+  });
+
+  it("recognizes preference language across domains without promoting one-time choices", () => {
+    const stable: TranscriptSegment[] = [
+      { ...segments[0], id: "pref_food", text: "吃饭时我通常更喜欢清淡一点。", valueLabels: [] },
+      { ...segments[1], id: "pref_temperature", text: "我不太能接受空调温度太低。", valueLabels: [] },
+      { ...segments[0], id: "pref_volume", text: "听音乐的话我一般会把音量调低。", valueLabels: [] },
+      { ...segments[1], id: "pref_activity", text: "周末活动我更倾向慢慢逛，不想排太满。", valueLabels: [] }
+    ];
+    const oneTime: TranscriptSegment = {
+      ...segments[0], id: "one_time_choice", text: "今天先喝拿铁吧。", valueLabels: []
+    };
+
+    const memories = extractUploadMemories({
+      userId: "user_1",
+      uploadId: "upload_1",
+      recordingDate: "2026-07-08",
+      segments: [...stable, oneTime],
+      briefItems: [],
+      semanticSegments: [],
+      relationshipSignals: [],
+      now: "2026-07-10T10:00:00.000Z"
+    });
+    const transcriptSourceIds = memories.flatMap((memory) => memory.evidence)
+      .filter((item) => item.sourceType === "transcript")
+      .map((item) => item.sourceId);
+
+    expect(stable.every((item) => transcriptSourceIds.includes(item.id))).toBe(true);
+    expect(transcriptSourceIds).not.toContain(oneTime.id);
+  });
+
+  it("keeps daily relationship observations separate from long-term memory admission", () => {
+    const listening: RelationshipSignalCard = {
+      ...relationshipSignals[0],
+      id: "signal_listening",
+      signalType: "active_listening",
+      summary: "这一次回应中有复述和确认。"
+    };
+    const support: RelationshipSignalCard = {
+      ...relationshipSignals[0],
+      id: "signal_support",
+      signalType: "emotional_support",
+      summary: "这一次回应中有安慰和支持。"
+    };
+    const actionableCommitment: RelationshipSignalCard = {
+      ...relationshipSignals[0],
+      id: "signal_actionable_commitment",
+      signalType: "clear_commitment",
+      summary: "明确答应周五前确认餐厅。"
+    };
+
+    const memories = extractUploadMemories({
+      userId: "user_1",
+      uploadId: "upload_1",
+      recordingDate: "2026-07-08",
+      segments,
+      briefItems: [],
+      semanticSegments: [],
+      relationshipSignals: [listening, support, actionableCommitment],
+      now: "2026-07-10T10:00:00.000Z"
+    });
+
+    expect(memories.filter((memory) => memory.type === "relationship_signal").map((memory) => memory.title)).toEqual([
+      actionableCommitment.summary
+    ]);
+  });
+
+  it("stores one verbatim transcript quote per source segment instead of an aggregate quote", () => {
+    const rewrittenSemantic: SemanticSegment = {
+      ...semanticSegments[0],
+      id: "semantic_aggregate",
+      title: "见面时间仍待确认",
+      summary: "围绕见面安排展开。模型对两处原文做了概括。",
+      transcriptExcerpt: "我会确认餐厅……周六时间还需要再确认。"
+    };
+
+    const memories = extractUploadMemories({
+      userId: "user_1",
+      uploadId: "upload_1",
+      recordingDate: "2026-07-08",
+      segments,
+      briefItems: [],
+      semanticSegments: [rewrittenSemantic],
+      relationshipSignals: [],
+      now: "2026-07-10T10:00:00.000Z"
+    });
+
+    expect(memories).toHaveLength(1);
+    expect(memories[0]?.evidence.filter((item) => item.sourceType === "transcript")).toEqual([
+      expect.objectContaining({ sourceId: "segment_1", quote: segments[0].text }),
+      expect.objectContaining({ sourceId: "segment_2", quote: segments[1].text })
+    ]);
+    expect(memories[0]?.evidence.every((item) => segments.some((segment) => segment.text === item.quote))).toBe(true);
+    expect(memories[0]?.evidence.some((item) => item.quote.includes("……"))).toBe(false);
+  });
+
+  it("keeps formatting differences out of persisted evidence by copying the real source text", () => {
+    const formatted = {
+      ...briefItems[0],
+      id: "brief_formatted",
+      transcriptExcerpt: "我会在周五前确认餐厅!"
+    };
+
+    const memories = extractUploadMemories({
+      userId: "user_1",
+      uploadId: "upload_1",
+      recordingDate: "2026-07-08",
+      segments,
+      briefItems: [formatted],
+      semanticSegments: [],
+      relationshipSignals: [],
+      now: "2026-07-10T10:00:00.000Z"
+    });
+
+    expect(memories[0]?.evidence.every((item) => item.quote === segments[0].text)).toBe(true);
+  });
+
+  it("does not carry unrelated chatter from a broad semantic excerpt into the memory summary", () => {
+    const broadSemantic: SemanticSegment = {
+      ...semanticSegments[0],
+      id: "semantic_broad",
+      title: "工作风险待确认",
+      summary: "围绕工作风险、项目规划展开。今天天气有点冷，地铁换乘很顺。项目验收标准仍需确认。",
+      transcriptExcerpt: "今天天气有点冷。项目验收标准仍需确认。"
+    };
+
+    const memories = extractUploadMemories({
+      userId: "user_1",
+      uploadId: "upload_1",
+      recordingDate: "2026-07-08",
+      segments,
+      briefItems: [],
+      semanticSegments: [broadSemantic],
+      relationshipSignals: [],
+      now: "2026-07-10T10:00:00.000Z"
+    });
+
+    expect(memories).toHaveLength(1);
+    expect(memories[0]?.summary).toBe("围绕工作风险、项目规划展开。");
+  });
+
   it("extracts v1 event, commitment, question and relationship signal memories", () => {
     const memories = extractUploadMemories({
       userId: "user_1",

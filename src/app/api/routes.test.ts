@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const storeMock = vi.hoisted(() => ({
   list: vi.fn(),
+  listIds: vi.fn(),
   read: vi.fn(),
   write: vi.fn(),
   delete: vi.fn()
@@ -27,6 +28,9 @@ const memoryRepositoryMock = vi.hoisted(() => ({
 const answerQuestionWithAIMock = vi.hoisted(() => vi.fn());
 const normalizeQaConversationMock = vi.hoisted(() => vi.fn());
 const afterMock = vi.hoisted(() => vi.fn());
+const enqueuePipelineJobMock = vi.hoisted(() => vi.fn());
+const originalEvaluationMode = process.env.EVALUATION_MODE;
+const originalPipelineExecutionMode = process.env.PIPELINE_EXECUTION_MODE;
 const authContextMock = vi.hoisted(() => ({
   isUnauthenticatedError: vi.fn((error: unknown) => error instanceof Error && error.message === "unauthenticated"),
   requireAuthContext: vi.fn(),
@@ -78,6 +82,10 @@ vi.mock("@/lib/server/pipeline/process-upload", () => ({
   processUpload: processUploadMock
 }));
 
+vi.mock("@/lib/server/queue/producer", () => ({
+  enqueuePipelineJob: enqueuePipelineJobMock
+}));
+
 vi.mock("@/lib/server/memory", () => ({
   getMemoryRepository: vi.fn(() => memoryRepositoryMock)
 }));
@@ -120,6 +128,7 @@ import { GET as getUploadByDate } from "./uploads/by-date/route";
 import { GET as getUploadDates } from "./uploads/dates/route";
 import { GET as getLatestUpload } from "./uploads/latest/route";
 import { POST as postUpload } from "./uploads/route";
+import { buildPipelineJobId } from "@/lib/server/queue/types";
 
 function relationshipSignalFixture(input: {
   uploadId: string;
@@ -160,8 +169,15 @@ function relationshipSignalFixture(input: {
 
 describe("API routes", () => {
   beforeEach(() => {
+    delete process.env.EVALUATION_MODE;
+    delete process.env.PIPELINE_EXECUTION_MODE;
     vi.clearAllMocks();
+    storeMock.listIds.mockResolvedValue([]);
     processUploadMock.mockResolvedValue(undefined);
+    enqueuePipelineJobMock.mockImplementation(async (payload) => ({
+      jobId: buildPipelineJobId(payload),
+      enqueued: true
+    }));
     retrieveQaEvidenceMock.mockReturnValue([
       {
         id: "brief_shadow_1",
@@ -223,6 +239,16 @@ describe("API routes", () => {
   });
 
   afterEach(() => {
+    if (originalEvaluationMode === undefined) {
+      delete process.env.EVALUATION_MODE;
+    } else {
+      process.env.EVALUATION_MODE = originalEvaluationMode;
+    }
+    if (originalPipelineExecutionMode === undefined) {
+      delete process.env.PIPELINE_EXECUTION_MODE;
+    } else {
+      process.env.PIPELINE_EXECUTION_MODE = originalPipelineExecutionMode;
+    }
     vi.useRealTimers();
     vi.restoreAllMocks();
   });
@@ -270,17 +296,134 @@ describe("API routes", () => {
       id: jobId,
       uploadId,
       status: "waiting",
-      progress: 0
+      progress: 0,
+      updatedAt: expect.any(String),
+      executionMode: "inline"
     });
     expect(storeMock.write).toHaveBeenCalledWith("jobs-by-upload", uploadId, {
       id: jobId,
       uploadId,
       status: "waiting",
-      progress: 0
+      progress: 0,
+      updatedAt: expect.any(String),
+      executionMode: "inline"
     });
     expect(afterMock).toHaveBeenCalledOnce();
+    expect(enqueuePipelineJobMock).not.toHaveBeenCalled();
     expect(authContextMock.requireAuthContext).toHaveBeenCalledWith(request);
     expect(processUploadMock).toHaveBeenCalledWith({ uploadId, store: storeMock, userId: "user_default" });
+  });
+
+  it("enqueues a minimal stable BullMQ job without invoking after in queue mode", async () => {
+    process.env.PIPELINE_EXECUTION_MODE = "queue";
+    const formData = new FormData();
+    const file = new File(["audio-data"], "queue.m4a", { type: "audio/mp4" });
+    Object.defineProperty(file, "arrayBuffer", {
+      value: vi.fn().mockResolvedValue(new TextEncoder().encode("audio-data").buffer)
+    });
+    formData.set("file", file);
+    const request = { formData: vi.fn().mockResolvedValue(formData) } as unknown as Request;
+
+    const response = await postUpload(request);
+    const body = await response.json();
+    const expectedQueueJobId = buildPipelineJobId({
+      version: 1,
+      uploadId: body.uploadId,
+      userRef: "user_default"
+    });
+
+    expect(response.status).toBe(201);
+    expect(body).toEqual({
+      uploadId: expect.any(String),
+      jobId: expect.any(String),
+      status: "waiting",
+      executionMode: "queue",
+      queueJobId: expectedQueueJobId
+    });
+    expect(enqueuePipelineJobMock).toHaveBeenCalledWith({
+      version: 1,
+      uploadId: body.uploadId,
+      userRef: "user_default"
+    });
+    expect(afterMock).not.toHaveBeenCalled();
+    expect(processUploadMock).not.toHaveBeenCalled();
+    expect(storeMock.write).toHaveBeenCalledWith(
+      "jobs-by-upload",
+      body.uploadId,
+      expect.objectContaining({
+        executionMode: "queue",
+        queueJobId: expectedQueueJobId,
+        queuedAt: expect.any(String),
+        status: "waiting"
+      })
+    );
+  });
+
+  it("fails closed and retains the upload when Redis enqueue is unavailable", async () => {
+    process.env.PIPELINE_EXECUTION_MODE = "queue";
+    enqueuePipelineJobMock.mockRejectedValueOnce(new Error("redis unavailable"));
+    const formData = new FormData();
+    const file = new File(["audio-data"], "queue.m4a", { type: "audio/mp4" });
+    Object.defineProperty(file, "arrayBuffer", {
+      value: vi.fn().mockResolvedValue(new TextEncoder().encode("audio-data").buffer)
+    });
+    formData.set("file", file);
+
+    const response = await postUpload({
+      formData: vi.fn().mockResolvedValue(formData)
+    } as unknown as Request);
+
+    expect(response.status).toBe(503);
+    const body = await response.json();
+    expect(body).toEqual({
+      error: "pipeline_queue_unavailable",
+      uploadId: expect.any(String),
+      jobId: expect.any(String),
+      status: "failed"
+    });
+    expect(afterMock).not.toHaveBeenCalled();
+    expect(processUploadMock).not.toHaveBeenCalled();
+    expect(rmMock).not.toHaveBeenCalled();
+    expect(storeMock.write).toHaveBeenCalledWith(
+      "uploads",
+      body.uploadId,
+      expect.objectContaining({
+        status: "failed",
+        filePath: expect.stringContaining(`${body.uploadId}.m4a`),
+        errorCode: "queue_unavailable"
+      })
+    );
+    expect(storeMock.write).toHaveBeenCalledWith(
+      "jobs-by-upload",
+      body.uploadId,
+      expect.objectContaining({ status: "failed", errorCode: "queue_unavailable" })
+    );
+  });
+
+  it("marks only an explicitly opted-in upload for evaluation retention", async () => {
+    process.env.EVALUATION_MODE = "true";
+    const formData = new FormData();
+    const file = new File(["audio-data"], "evaluation.m4a", { type: "audio/mp4" });
+    Object.defineProperty(file, "arrayBuffer", {
+      value: vi.fn().mockResolvedValue(new TextEncoder().encode("audio-data").buffer)
+    });
+    formData.set("file", file);
+    const request = {
+      headers: new Headers({ "x-evaluation-retention": "true" }),
+      formData: vi.fn().mockResolvedValue(formData)
+    } as unknown as Request;
+
+    const response = await postUpload(request);
+    const [[, uploadId, payload]] = storeMock.write.mock.calls;
+
+    expect(response.status).toBe(201);
+    expect(payload).toMatchObject({ evaluationRetention: true });
+    await expect(response.json()).resolves.toEqual({
+      uploadId,
+      jobId: expect.any(String),
+      status: "uploaded",
+      evaluationRetention: true
+    });
   });
 
   it("logs the background processing lifecycle without request content", async () => {
@@ -2325,15 +2468,163 @@ describe("API routes", () => {
     expect(storeMock.delete).toHaveBeenCalledWith("jobs-by-upload", "upload_1");
     expect(storeMock.delete).toHaveBeenCalledWith("segments", "upload_1");
     expect(storeMock.delete).toHaveBeenCalledWith("audio-insights", "upload_1");
+    expect(storeMock.delete).toHaveBeenCalledWith("audio-insight-corrections", "upload_1");
+    expect(storeMock.delete).toHaveBeenCalledWith("speaker-aliases", "upload_1");
     expect(storeMock.delete).toHaveBeenCalledWith("semantic-segments", "upload_1");
     expect(storeMock.delete).toHaveBeenCalledWith("brief-items", "upload_1");
     expect(storeMock.delete).toHaveBeenCalledWith("relationship-signals", "upload_1");
     expect(storeMock.delete).toHaveBeenCalledWith("proactive-insights", "current_upload_1");
+    expect(storeMock.delete).toHaveBeenCalledWith("evaluation-reports", "upload_1");
     expect(storeMock.delete).toHaveBeenCalledWith("answers", "answer_1");
     expect(storeMock.delete).toHaveBeenCalledWith("answers", "answer_2");
     expect(storeMock.delete).toHaveBeenCalledWith("answers-by-upload", "upload_1");
+    expect(storeMock.listIds).toHaveBeenCalledWith("analysis-chunks");
     expect(memoryRepositoryMock.deleteByUpload).toHaveBeenCalledWith("user_default", "upload_1");
     await expect(response.json()).resolves.toEqual({ deleted: true });
+  });
+
+  it("retains upload, checkpoints and memory when evaluation cleanup is unconfirmed", async () => {
+    process.env.EVALUATION_MODE = "true";
+    storeMock.read.mockImplementation(async (collection: string) => {
+      if (collection === "uploads") {
+        return {
+          id: "upload_1",
+          originalName: "evaluation.m4a",
+          mimeType: "audio/mp4",
+          sizeBytes: 12,
+          recordingDate: "2026-07-16",
+          status: "ready",
+          evaluationRetention: true,
+          filePath: "/tmp/daily-brief-test/user_default/uploads/upload_1.m4a"
+        };
+      }
+      return null;
+    });
+
+    const response = await deleteUpload(new Request("http://localhost/api/uploads/upload_1", {
+      method: "DELETE"
+    }), {
+      params: Promise.resolve({ uploadId: "upload_1" })
+    });
+
+    expect(response.status).toBe(409);
+    await expect(response.json()).resolves.toEqual({
+      error: "evaluation_retention_active",
+      retained: true,
+      confirmationHeader: "x-evaluation-delete-confirmed"
+    });
+    expect(storeMock.write).not.toHaveBeenCalledWith("deleted-uploads", expect.anything(), expect.anything());
+    expect(storeMock.delete).not.toHaveBeenCalled();
+    expect(storeMock.listIds).not.toHaveBeenCalledWith("analysis-chunks");
+    expect(memoryRepositoryMock.deleteByUpload).not.toHaveBeenCalled();
+    expect(rmMock).not.toHaveBeenCalled();
+  });
+
+  it("does not change cleanup for an unmarked upload when evaluation mode is enabled", async () => {
+    process.env.EVALUATION_MODE = "true";
+    storeMock.read.mockImplementation(async (collection: string) => {
+      if (collection === "uploads") {
+        return {
+          id: "upload_1",
+          originalName: "ordinary.m4a",
+          mimeType: "audio/mp4",
+          sizeBytes: 12,
+          recordingDate: "2026-07-16",
+          status: "ready"
+        };
+      }
+      return null;
+    });
+
+    const response = await deleteUpload(new Request("http://localhost/api/uploads/upload_1", {
+      method: "DELETE"
+    }), {
+      params: Promise.resolve({ uploadId: "upload_1" })
+    });
+
+    expect(response.status).toBe(200);
+    expect(storeMock.delete).toHaveBeenCalledWith("uploads", "upload_1");
+    expect(memoryRepositoryMock.deleteByUpload).toHaveBeenCalledWith("user_default", "upload_1");
+  });
+
+  it("allows an explicitly confirmed user delete during evaluation", async () => {
+    process.env.EVALUATION_MODE = "true";
+    storeMock.read.mockImplementation(async (collection: string) => {
+      if (collection === "uploads") {
+        return {
+          id: "upload_1",
+          originalName: "evaluation.m4a",
+          mimeType: "audio/mp4",
+          sizeBytes: 12,
+          recordingDate: "2026-07-16",
+          status: "ready",
+          evaluationRetention: true
+        };
+      }
+      return null;
+    });
+
+    const response = await deleteUpload(new Request("http://localhost/api/uploads/upload_1", {
+      method: "DELETE",
+      headers: { "x-evaluation-delete-confirmed": "true" }
+    }), {
+      params: Promise.resolve({ uploadId: "upload_1" })
+    });
+
+    expect(response.status).toBe(200);
+    expect(storeMock.write).toHaveBeenCalledWith("deleted-uploads", "upload_1", {
+      uploadId: "upload_1",
+      deletedAt: expect.any(String)
+    });
+    expect(storeMock.delete).toHaveBeenCalledWith("uploads", "upload_1");
+    expect(storeMock.delete).toHaveBeenCalledWith("evaluation-reports", "upload_1");
+    expect(memoryRepositoryMock.deleteByUpload).toHaveBeenCalledWith("user_default", "upload_1");
+  });
+
+  it("keeps the parent upload retryable when child cleanup fails", async () => {
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    storeMock.read.mockImplementation(async (collection: string) => {
+      if (collection === "uploads") {
+        return {
+          id: "upload_1",
+          originalName: "retryable.m4a",
+          mimeType: "audio/mp4",
+          sizeBytes: 12,
+          recordingDate: "2026-07-16",
+          status: "ready"
+        };
+      }
+      return null;
+    });
+    memoryRepositoryMock.deleteByUpload
+      .mockImplementationOnce(() => {
+        throw new Error("sqlite busy");
+      })
+      .mockReturnValue(undefined);
+
+    const first = await deleteUpload(new Request("http://localhost/api/uploads/upload_1", {
+      method: "DELETE"
+    }), {
+      params: Promise.resolve({ uploadId: "upload_1" })
+    });
+
+    expect(first.status).toBe(500);
+    await expect(first.json()).resolves.toEqual({
+      error: "upload_cleanup_failed",
+      deleted: false,
+      retryable: true
+    });
+    expect(storeMock.delete).not.toHaveBeenCalledWith("uploads", "upload_1");
+
+    const second = await deleteUpload(new Request("http://localhost/api/uploads/upload_1", {
+      method: "DELETE"
+    }), {
+      params: Promise.resolve({ uploadId: "upload_1" })
+    });
+
+    expect(second.status).toBe(200);
+    expect(storeMock.delete).toHaveBeenCalledWith("uploads", "upload_1");
+    consoleError.mockRestore();
   });
 
   it("skips invalid child ids during delete and continues parent cleanup", async () => {
