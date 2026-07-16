@@ -37,3 +37,8 @@ sample*.mp3
 .redis-data/
 redis-data/
 docker-data/
+
+# Local collaboration and handoff documents
+AGENTS.md
+UPDATE_HISTORY.md
+daily-brief  memory-companion 项目交接文档 v1.0.md
