@@ -10,6 +10,7 @@ export * from "./deduplication";
 export * from "./admission";
 export * from "./extractor";
 export * from "./importance";
+export * from "./owner-attribution";
 export * from "./relations";
 export * from "./repository";
 export * from "./retrieval-comparison";

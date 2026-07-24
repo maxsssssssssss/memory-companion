@@ -178,6 +178,35 @@ describe("memory deduplication", () => {
     expect(consolidated.find((item) => item.id === "memory_1")?.occurrenceCount).toBe(2);
   });
 
+  it("honors an internal merge policy without changing similarity detection", () => {
+    const first = memory({
+      id: "preference_owner_a",
+      uploadId: "upload_1",
+      date: "2026-07-07",
+      type: "preference",
+      title: "饮食偏好",
+      summary: "我不喜欢太辣的食物。"
+    });
+    const second = memory({
+      id: "preference_owner_b",
+      uploadId: "upload_2",
+      date: "2026-07-08",
+      type: "preference",
+      title: "饮食偏好",
+      summary: "我不爱太辣的食物。"
+    });
+    const mergedPairs: string[] = [];
+
+    const consolidated = consolidateMemories([first, second], undefined, {
+      canMerge: (primary, incoming) => primary.id === incoming.id,
+      onMerged: (primary, incoming) => mergedPairs.push(`${primary.id}:${incoming.id}`)
+    });
+
+    expect(findSimilarMemories(second, [first])).toHaveLength(1);
+    expect(consolidated).toHaveLength(2);
+    expect(mergedPairs).toEqual([]);
+  });
+
   it("merges repeated stable preferences by their subject without relying on a specific domain", () => {
     const first = memory({
       id: "preference_1",
@@ -193,7 +222,7 @@ describe("memory deduplication", () => {
       date: "2026-07-08",
       type: "preference",
       title: "明确偏好表达",
-      summary: "音乐的音量我通常会调低。"
+      summary: "我不爱音乐音量太高。"
     });
     const unrelated = memory({
       id: "preference_3",
@@ -218,7 +247,7 @@ describe("memory deduplication", () => {
       title: "Stable drink choice",
       summary: "A low-sugar drink is the usual choice."
     });
-    first.evidence[0].quote = "I usually choose a low-sugar oat drink without syrup.";
+    first.evidence[0].quote = "I usually prefer low-sugar oat drinks.";
     const repeated = memory({
       id: "preference_evidence_2",
       uploadId: "upload_2",
@@ -227,10 +256,42 @@ describe("memory deduplication", () => {
       title: "Sweetness preference",
       summary: "The sweetness preference remains unchanged."
     });
-    repeated.evidence[0].quote = "I do not like very sweet drinks; choose low-sugar without syrup.";
+    repeated.evidence[0].quote = "I prefer low-sugar oat drinks.";
 
     expect(findSimilarMemories(repeated, [first])).toEqual([
       expect.objectContaining({ memory: first })
     ]);
+  });
+
+  it("matches exact normalized preference identities without merging different values", () => {
+    const first = memory({
+      id: "preference_cilantro_first",
+      uploadId: "upload_1",
+      date: "2026-07-01",
+      type: "preference",
+      title: "饮食偏好",
+      summary: "我不喜欢香菜。"
+    });
+    const repeated = memory({
+      id: "preference_cilantro_repeat",
+      uploadId: "upload_2",
+      date: "2026-07-08",
+      type: "preference",
+      title: "点餐习惯",
+      summary: "我不爱香菜。"
+    });
+    const distinct = memory({
+      id: "preference_quiet",
+      uploadId: "upload_3",
+      date: "2026-07-08",
+      type: "preference",
+      title: "环境偏好",
+      summary: "我更喜欢安静的位置。"
+    });
+
+    expect(findSimilarMemories(repeated, [first, distinct])).toEqual([
+      expect.objectContaining({ memory: first })
+    ]);
+    expect(findSimilarMemories(distinct, [first])).toEqual([]);
   });
 });

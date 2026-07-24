@@ -1,6 +1,15 @@
 import type { TranscriptSegment } from "@/lib/domain/types";
 import type { JsonStore } from "@/lib/server/storage/json-store";
 import {
+  JsonSpeakerIdentityRepository,
+  type SpeakerIdentityRepository
+} from "@/lib/server/speaker-identity/repository";
+import { resolveSpeakerIdentities } from "@/lib/server/speaker-identity/resolver";
+import type {
+  SpeakerIdentityMatcher,
+  VoiceprintIdentityHint
+} from "@/lib/server/speaker-identity/types";
+import {
   getTranscriptionProvider,
   getTranscriptionProviderRuntime,
   type TranscriptionInput
@@ -30,6 +39,12 @@ type ChunkedTranscriptionDependencies = {
   checkpoints?: ChunkCheckpointStore;
   cleanupChunks?: typeof cleanupGeneratedAudioChunks;
   schedulerOptions?: ChunkSchedulerOptions;
+  speakerIdentityRepository?:
+    Pick<SpeakerIdentityRepository, "loadDirectMappings"> &
+    Partial<Pick<SpeakerIdentityRepository, "loadVoiceprintHints">>;
+  speakerIdentityMatcher?: SpeakerIdentityMatcher;
+  speakerIdentityMatcherFeatures?: Record<string, unknown>;
+  voiceprintIdentityHints?: VoiceprintIdentityHint[];
 };
 
 export class IncompleteChunkTranscriptionError extends Error {
@@ -72,7 +87,42 @@ export async function transcribeSpeakerAsrAudioInChunks(
     if (result.failed.length > 0) {
       throw new IncompleteChunkTranscriptionError(result.failed.map((chunk) => chunk.id));
     }
-    const merged = mergeTranscriptChunks(result.completed);
+    let transcriptChunks = result.completed;
+    try {
+      const identityRepository = dependencies.speakerIdentityRepository ??
+        new JsonSpeakerIdentityRepository(input.store);
+      const [manualMappings, storedVoiceprintHints] = await Promise.all([
+        identityRepository.loadDirectMappings(input.uploadId),
+        dependencies.voiceprintIdentityHints === undefined &&
+        identityRepository.loadVoiceprintHints
+          ? identityRepository.loadVoiceprintHints(result.completed)
+          : Promise.resolve([])
+      ]);
+      const identityResolution = await resolveSpeakerIdentities({
+        uploadId: input.uploadId,
+        chunks: result.completed,
+        manualMappings,
+        voiceprintHints: dependencies.voiceprintIdentityHints ?? storedVoiceprintHints,
+        matcher: dependencies.speakerIdentityMatcher,
+        matcherFeatures: dependencies.speakerIdentityMatcherFeatures
+      });
+      transcriptChunks = identityResolution.chunks;
+      try {
+        await input.store.write("speaker-identities", input.uploadId, identityResolution.audit);
+      } catch (error) {
+        console.warn(
+          `[speaker-identity] audit_write_failed upload_id=${input.uploadId} error_name=${error instanceof Error ? error.name : "unknown"}`
+        );
+      }
+      console.info(
+        `[speaker-identity] upload_id=${input.uploadId} chunks=${identityResolution.audit.chunksProcessed} local_speaker_groups=${identityResolution.audit.localSpeakerGroups} global_speakers=${identityResolution.audit.globalSpeakers} matched=${identityResolution.audit.matched} unknown=${identityResolution.audit.unknown} conflicts=${identityResolution.audit.conflicts} average_confidence=${identityResolution.audit.averageConfidence.toFixed(4)}`
+      );
+    } catch (error) {
+      console.warn(
+        `[speaker-identity] resolution_failed upload_id=${input.uploadId} error_name=${error instanceof Error ? error.name : "unknown"}`
+      );
+    }
+    const merged = mergeTranscriptChunks(transcriptChunks);
     console.info(
       `[transcript-merge] upload_id=${input.uploadId} chunks=${merged.stats.chunkCount} input_segments=${merged.stats.inputSegmentCount} segments=${merged.stats.segmentCount} duplicates_removed=${merged.stats.duplicateRemoved} warnings=${merged.warnings.length}`
     );

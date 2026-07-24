@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { z } from "zod";
 import type { TranscriptChunk } from "@/lib/domain/chunks";
+import { transcriptSpeakerLabel } from "@/lib/domain/speaker-identity";
 import type { AudioInsight, RelationshipSignalCard, SemanticSegment, TranscriptSegment } from "@/lib/domain/types";
 import {
   RawRelationshipSignalItemSchema,
@@ -81,7 +82,10 @@ function normalizeRawCandidate(input: {
   const insightIds = new Set(input.audioInsights.map((insight) => insight.id));
   return RawRelationshipSignalItemSchema.parse({
     ...input.item,
-    involvedSpeakers: unique(input.evidence.flatMap((segment) => segment.speaker ? [segment.speaker] : [])),
+    involvedSpeakers: unique(input.evidence.flatMap((segment) => {
+      const speaker = transcriptSpeakerLabel(segment);
+      return speaker ? [speaker] : [];
+    })),
     evidenceSegmentIds: input.evidence.map((segment) => segment.id),
     evidenceSegments: [],
     textEvidence: input.evidence.map((segment) => segment.text),

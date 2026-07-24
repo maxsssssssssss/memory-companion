@@ -1,3 +1,4 @@
+import { resolve } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { JsonStore } from "../storage/json-store";
 import {
@@ -93,14 +94,15 @@ describe("provider config", () => {
     storeMock.read.mockResolvedValue({ apiKeyMode: "default" });
     process.env.APP_DATA_DIR = "/var/data/daily-brief";
     process.env.APP_STORAGE_MODE = "server";
+    const dataDirectory = resolve(process.env.APP_DATA_DIR);
 
     await expect(getProviderSettingsView(storeMock as unknown as JsonStore)).resolves.toEqual(
       expect.objectContaining({
         storageMode: "server",
         canOpenDataFolder: false,
-        dataDirectory: "/var/data/daily-brief",
-        uploadsDirectory: "/var/data/daily-brief/uploads",
-        apiKeyStoragePath: "/var/data/daily-brief/settings/provider-config.json"
+        dataDirectory,
+        uploadsDirectory: resolve(dataDirectory, "uploads"),
+        apiKeyStoragePath: resolve(dataDirectory, "settings", "provider-config.json")
       })
     );
   });

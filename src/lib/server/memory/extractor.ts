@@ -1,17 +1,30 @@
 import { createHash } from "node:crypto";
 import type { BriefItem, RelationshipSignalCard, SemanticSegment, TranscriptSegment } from "@/lib/domain/types";
+import type { RelationshipLifecycleEdge } from "@/lib/server/relationship-signals/lifecycle/types";
 import type {
   MemoryEvidenceSourceType,
   MemoryEvidenceWrite,
   MemoryItemType,
   MemoryWriteInput
 } from "./types";
-import { meaningfulTextTokens, sharedTokenCount, tokenSetSimilarity } from "@/lib/server/text-features";
 import {
   evaluateMemoryAdmission,
   isStablePreferenceText,
   type MemoryAdmissionDecision
 } from "./admission";
+import {
+  extractPreferenceIdentities,
+  preferenceIdentitiesFromMemory,
+  preferenceIdentityHash,
+  preferenceIdentityLabel,
+  type PreferenceIdentity
+} from "./preference-identity";
+import {
+  resolveMemoryOwnerAttribution,
+  resolveMemoryOwnerAttributions,
+  type MemoryOwnerAudit,
+  type MemoryOwnerResolution
+} from "./owner-attribution";
 
 export type ExtractUploadMemoriesInput = {
   userId: string;
@@ -21,6 +34,10 @@ export type ExtractUploadMemoriesInput = {
   briefItems: BriefItem[];
   semanticSegments: SemanticSegment[];
   relationshipSignals: RelationshipSignalCard[];
+  relationshipLifecycle?: {
+    edges: RelationshipLifecycleEdge[];
+    candidateIdsByCardId?: Record<string, string[]>;
+  };
   now?: string;
 };
 
@@ -147,9 +164,11 @@ function createMemory(input: {
   extractionReason: string;
   structuredSourceType?: Exclude<MemoryEvidenceSourceType, "transcript" | "audio_insight">;
   structuredSourceId?: string;
+  identityKey?: string;
   sourceSegmentIds: string[];
   segmentById: Map<string, TranscriptSegment>;
   now: string;
+  status?: MemoryWriteInput["status"];
 }): MemoryWriteInput | null {
   const sourceSegments = Array.from(new Set(input.sourceSegmentIds))
     .map((segmentId) => input.segmentById.get(segmentId))
@@ -167,7 +186,8 @@ function createMemory(input: {
     input.uploadId,
     input.type,
     input.structuredSourceType ?? "transcript",
-    input.structuredSourceId ?? sourceSegments[0].id
+    input.structuredSourceId ?? sourceSegments[0].id,
+    input.identityKey ?? ""
   ]);
   const canonicalQuote = verbatimQuote(sourceSegments[0].text);
   const evidence: MemoryEvidenceWrite[] = [
@@ -198,6 +218,7 @@ function createMemory(input: {
     summary: cleanText(input.summary),
     importance: clamp(input.importance),
     importanceReasons: [input.extractionReason],
+    ...(input.status ? { status: input.status } : {}),
     date: input.recordingDate,
     createdAt: input.now,
     updatedAt: input.now,
@@ -207,17 +228,33 @@ function createMemory(input: {
 
 function transcriptPreferenceGroups(segments: TranscriptSegment[]) {
   const candidates = segments.filter((segment) => isStablePreferenceText(segment.text));
-  const groups: TranscriptSegment[][] = [];
+  const groups = new Map<string, {
+    identity: PreferenceIdentity;
+    ownerKey: string;
+    segments: TranscriptSegment[];
+  }>();
   for (const candidate of candidates) {
-    const candidateTokens = meaningfulTextTokens(candidate.text);
-    const group = groups.find((items) => {
-      const groupTokens = meaningfulTextTokens(items.map((item) => item.text).join(" "));
-      return sharedTokenCount(candidateTokens, groupTokens) >= 2 && tokenSetSimilarity(candidateTokens, groupTokens) >= 0.08;
+    const attribution = resolveMemoryOwnerAttribution({
+      memoryId: `preference_observation_${candidate.id}`,
+      memoryType: "preference",
+      evidenceSegments: [candidate]
     });
-    if (group) group.push(candidate);
-    else groups.push([candidate]);
+    const ownerKey = attribution.scope === "individual" && attribution.owner.type !== "unknown"
+      ? `${attribution.owner.type}\u001f${attribution.owner.identityId}`
+      : `unresolved\u001f${candidate.id}`;
+    for (const identity of extractPreferenceIdentities(candidate.text)) {
+      const groupKey = `${ownerKey}\u001f${identity.fingerprint}`;
+      const group = groups.get(groupKey) ?? { identity, ownerKey, segments: [] };
+      if (!group.segments.some((segment) => segment.id === candidate.id)) {
+        group.segments.push(candidate);
+      }
+      groups.set(groupKey, group);
+    }
   }
-  return groups;
+  return [...groups.values()].sort((left, right) =>
+    left.ownerKey.localeCompare(right.ownerKey) ||
+    left.identity.fingerprint.localeCompare(right.identity.fingerprint)
+  );
 }
 
 export type MemoryExtractionAudit = {
@@ -228,6 +265,9 @@ export type MemoryExtractionAudit = {
   preferenceCandidates: Array<{
     memoryId: string;
     sourceSegmentIds: string[];
+    identityHash: string;
+    normalizedValue: PreferenceIdentity["value"];
+    observationCount: number;
     persisted: boolean;
   }>;
   relationshipSignals: Array<{
@@ -236,35 +276,95 @@ export type MemoryExtractionAudit = {
     memoryTier: MemoryAdmissionDecision["memoryTier"];
     score: number;
     reasons: string[];
+    lifecycleResolved?: boolean;
+    lifecycleRelationTypes?: RelationshipLifecycleEdge["relationType"][];
   }>;
+  ownerAttribution: MemoryOwnerAudit;
 };
 
 type MemoryCandidate = {
   memory: MemoryWriteInput;
+  ownerAttribution?: MemoryOwnerResolution;
   relationshipSignal?: RelationshipSignalCard;
   sourceSegmentCount: number;
   preferenceSourceSegmentIds?: string[];
+  preferenceIdentity?: PreferenceIdentity;
+  lifecycleResolved?: boolean;
+  lifecycleRelationTypes?: RelationshipLifecycleEdge["relationType"][];
 };
+
+function relationshipLifecycleForCard(input: {
+  cardId: string;
+  lifecycle?: ExtractUploadMemoriesInput["relationshipLifecycle"];
+}) {
+  if (!input.lifecycle) {
+    return { targetSegmentIds: [] as string[], relationTypes: [] as RelationshipLifecycleEdge["relationType"][], resolved: false };
+  }
+  const sourceIds = new Set([
+    input.cardId,
+    ...(input.lifecycle.candidateIdsByCardId?.[input.cardId] ?? [])
+  ]);
+  const edgesBySource = new Map<string, RelationshipLifecycleEdge[]>();
+  for (const edge of input.lifecycle.edges) {
+    const outgoing = edgesBySource.get(edge.fromSignalId) ?? [];
+    outgoing.push(edge);
+    edgesBySource.set(edge.fromSignalId, outgoing);
+  }
+  const queue = [...sourceIds];
+  const visited = new Set<string>();
+  const edges: RelationshipLifecycleEdge[] = [];
+  while (queue.length > 0) {
+    const signalId = queue.shift()!;
+    if (visited.has(signalId)) continue;
+    visited.add(signalId);
+    for (const edge of edgesBySource.get(signalId) ?? []) {
+      edges.push(edge);
+      if (!visited.has(edge.toSignalId)) queue.push(edge.toSignalId);
+    }
+  }
+  const relationTypes = [...new Set(edges.map((edge) => edge.relationType))];
+  return {
+    targetSegmentIds: [...new Set(edges.flatMap((edge) => edge.evidence.toSegments))],
+    relationTypes,
+    resolved: relationTypes.some((relationType) => relationType !== "updated_by")
+  };
+}
 
 function transcriptEvidenceIds(memory: MemoryWriteInput) {
   return new Set(memory.evidence.filter((item) => item.sourceType === "transcript").map((item) => item.sourceId));
 }
 
+function sourceSegmentsForMemory(
+  memory: MemoryWriteInput,
+  segmentById: Map<string, TranscriptSegment>
+) {
+  return [...transcriptEvidenceIds(memory)]
+    .map((segmentId) => segmentById.get(segmentId))
+    .filter((segment): segment is TranscriptSegment => segment !== undefined);
+}
+
+function ownerDedupKey(candidate: MemoryCandidate) {
+  const attribution = candidate.ownerAttribution;
+  return attribution?.scope === "individual" && attribution.owner.type !== "unknown"
+    ? `${attribution.owner.type}\u001f${attribution.owner.identityId}`
+    : `unresolved\u001f${candidate.memory.id}`;
+}
+
+function preferenceCandidateKey(candidate: MemoryCandidate, identity: PreferenceIdentity) {
+  return `${ownerDedupKey(candidate)}\u001f${identity.fingerprint}`;
+}
+
 function deduplicateExtractionCandidates(candidates: MemoryCandidate[]) {
-  const deduplicated: MemoryCandidate[] = [];
-  for (const candidate of candidates) {
-    if (candidate.memory.type !== "preference") {
-      deduplicated.push(candidate);
-      continue;
-    }
-    const ids = transcriptEvidenceIds(candidate.memory);
-    const existing = deduplicated.find((item) => {
-      if (item.memory.type !== "preference") return false;
-      return sharedTokenCount(ids, transcriptEvidenceIds(item.memory)) > 0;
-    });
+  const deduplicated = candidates.filter((candidate) => candidate.memory.type !== "preference");
+  const preferenceByIdentity = new Map<string, MemoryCandidate>();
+  const mergePreferenceCandidate = (candidate: MemoryCandidate) => {
+    const identity = candidate.preferenceIdentity;
+    if (!identity) return;
+    const key = preferenceCandidateKey(candidate, identity);
+    const existing = preferenceByIdentity.get(key);
     if (!existing) {
-      deduplicated.push(candidate);
-      continue;
+      preferenceByIdentity.set(key, candidate);
+      return;
     }
     const evidenceByKey = new Map(
       [...existing.memory.evidence, ...candidate.memory.evidence]
@@ -282,12 +382,59 @@ function deduplicateExtractionCandidates(candidates: MemoryCandidate[]) {
     existing.preferenceSourceSegmentIds = [
       ...new Set([...(existing.preferenceSourceSegmentIds ?? []), ...(candidate.preferenceSourceSegmentIds ?? [])])
     ];
+  };
+
+  for (const candidate of candidates.filter((item) => item.memory.type === "preference" && item.preferenceIdentity)) {
+    mergePreferenceCandidate(candidate);
   }
-  return deduplicated;
+
+  for (const candidate of candidates.filter((item) => item.memory.type === "preference" && !item.preferenceIdentity)) {
+    const identities = preferenceIdentitiesFromMemory(candidate.memory);
+    const existingMatches = identities.flatMap((identity) => {
+      const existing = preferenceByIdentity.get(preferenceCandidateKey(candidate, identity));
+      return existing ? [existing] : [];
+    });
+    if (existingMatches.length > 0) {
+      for (const existing of existingMatches) {
+        existing.memory = {
+          ...existing.memory,
+          importanceReasons: [
+            ...new Set([...(existing.memory.importanceReasons ?? []), ...(candidate.memory.importanceReasons ?? [])])
+          ]
+        };
+      }
+      continue;
+    }
+    if (identities.length !== 1) {
+      continue;
+    }
+    const transcriptEvidence = candidate.memory.evidence.filter((evidence) =>
+      evidence.sourceType === "transcript" &&
+      extractPreferenceIdentities(evidence.quote).some((identity) => identity.fingerprint === identities[0].fingerprint)
+    );
+    if (transcriptEvidence.length === 0) {
+      continue;
+    }
+    mergePreferenceCandidate({
+      ...candidate,
+      memory: { ...candidate.memory, evidence: transcriptEvidence },
+      sourceSegmentCount: transcriptEvidence.length,
+      preferenceSourceSegmentIds: transcriptEvidence.map((evidence) => evidence.sourceId),
+      preferenceIdentity: identities[0]
+    });
+  }
+  return [
+    ...deduplicated,
+    ...[...preferenceByIdentity.values()].sort((left, right) =>
+      ownerDedupKey(left).localeCompare(ownerDedupKey(right)) ||
+      left.preferenceIdentity!.fingerprint.localeCompare(right.preferenceIdentity!.fingerprint)
+    )
+  ];
 }
 
 export function extractUploadMemoriesWithAudit(input: ExtractUploadMemoriesInput): {
   memories: MemoryWriteInput[];
+  ownerAttributions: MemoryOwnerResolution[];
   audit: MemoryExtractionAudit;
 } {
   const now = input.now ?? new Date().toISOString();
@@ -341,28 +488,38 @@ export function extractUploadMemoriesWithAudit(input: ExtractUploadMemoriesInput
     }), { sourceSegmentCount: briefItem.sourceSegmentIds.length });
   }
 
-  for (const preferenceSegments of transcriptPreferenceGroups(input.segments)) {
+  for (const preferenceGroup of transcriptPreferenceGroups(input.segments)) {
+    const preferenceSegments = preferenceGroup.segments;
     const representative = [...preferenceSegments].sort(
-      (left, right) => right.text.length - left.text.length || left.startSeconds - right.startSeconds
+      (left, right) =>
+        extractPreferenceIdentities(left.text).length - extractPreferenceIdentities(right.text).length ||
+        right.text.length - left.text.length ||
+        left.startSeconds - right.startSeconds
     )[0];
     const memory = createMemory({
       ...input,
       type: "preference",
-      title: `明确偏好表达：${cleanText(representative.text, 120)}`,
+      title: `明确偏好表达：${preferenceIdentityLabel(preferenceGroup.identity)}`,
       summary: representative.text,
       importance: 0.7,
       extractionReason: "extraction: explicit stable preference from transcript",
       sourceSegmentIds: preferenceSegments.map((segment) => segment.id),
+      identityKey: `${preferenceGroup.ownerKey}\u001f${preferenceGroup.identity.fingerprint}`,
       segmentById,
       now
     });
     addCandidate(memory, {
       sourceSegmentCount: preferenceSegments.length,
-      preferenceSourceSegmentIds: preferenceSegments.map((segment) => segment.id)
+      preferenceSourceSegmentIds: preferenceSegments.map((segment) => segment.id),
+      preferenceIdentity: preferenceGroup.identity
     });
   }
 
   for (const relationshipSignal of input.relationshipSignals) {
+    const lifecycle = relationshipLifecycleForCard({
+      cardId: relationshipSignal.id,
+      lifecycle: input.relationshipLifecycle
+    });
     addCandidate(createMemory({
       ...input,
       type: "relationship_signal",
@@ -372,25 +529,64 @@ export function extractUploadMemoriesWithAudit(input: ExtractUploadMemoriesInput
       extractionReason: `extraction: relationship signal ${relationshipSignal.signalType}`,
       structuredSourceType: "relationship_signal",
       structuredSourceId: relationshipSignal.id,
-      sourceSegmentIds: relationshipSignal.evidenceSegments.map((evidence) => evidence.segmentId),
+      sourceSegmentIds: [
+        ...relationshipSignal.evidenceSegments.map((evidence) => evidence.segmentId),
+        ...lifecycle.targetSegmentIds
+      ],
       segmentById,
-      now
+      now,
+      ...(lifecycle.resolved ? { status: "resolved" as const } : {})
     }), {
       relationshipSignal,
-      sourceSegmentCount: relationshipSignal.evidenceSegments.length
+      sourceSegmentCount: relationshipSignal.evidenceSegments.length + lifecycle.targetSegmentIds.length,
+      ...(lifecycle.relationTypes.length > 0 ? {
+        lifecycleResolved: lifecycle.resolved,
+        lifecycleRelationTypes: lifecycle.relationTypes
+      } : {})
     });
   }
 
-  const normalizedCandidates = deduplicateExtractionCandidates(candidates);
+  const initiallyAttributed = candidates.map((candidate) => ({
+    ...candidate,
+    ownerAttribution: resolveMemoryOwnerAttribution({
+      memoryId: candidate.memory.id,
+      memoryType: candidate.memory.type,
+      evidenceSegments: sourceSegmentsForMemory(candidate.memory, segmentById)
+    })
+  }));
+  const normalizedCandidates = deduplicateExtractionCandidates(initiallyAttributed);
+  const ownerResolution = resolveMemoryOwnerAttributions({
+    memories: normalizedCandidates.map((candidate) => ({
+      memoryId: candidate.memory.id,
+      memoryType: candidate.memory.type,
+      evidenceSegments: sourceSegmentsForMemory(candidate.memory, segmentById)
+    })),
+    now: () => now
+  });
+  const ownerAttributionByMemoryId = new Map(
+    ownerResolution.attributions.map((attribution) => [attribution.memoryId, attribution])
+  );
   const evaluated = normalizedCandidates.map((candidate) => ({
     ...candidate,
-    decision: evaluateMemoryAdmission(candidate)
+    ownerAttribution: ownerAttributionByMemoryId.get(candidate.memory.id),
+    decision: evaluateMemoryAdmission({
+      ...candidate,
+      ownerAttribution: ownerAttributionByMemoryId.get(candidate.memory.id)
+    })
   }));
-  const memories = evaluated
-    .filter((candidate) => candidate.decision.shouldPersist)
-    .map((candidate) => candidate.memory);
+  const persisted = evaluated.filter((candidate) => candidate.decision.shouldPersist);
+  const memories = persisted.map((candidate) => candidate.memory);
+  const persistedOwnerResolution = resolveMemoryOwnerAttributions({
+    memories: persisted.map((candidate) => ({
+      memoryId: candidate.memory.id,
+      memoryType: candidate.memory.type,
+      evidenceSegments: sourceSegmentsForMemory(candidate.memory, segmentById)
+    })),
+    now: () => now
+  });
   return {
     memories,
+    ownerAttributions: persistedOwnerResolution.attributions,
     audit: {
       candidateCount: normalizedCandidates.length,
       persistedCount: memories.length,
@@ -399,6 +595,9 @@ export function extractUploadMemoriesWithAudit(input: ExtractUploadMemoriesInput
       preferenceCandidates: evaluated.flatMap((candidate) => candidate.preferenceSourceSegmentIds ? [{
         memoryId: candidate.memory.id,
         sourceSegmentIds: candidate.preferenceSourceSegmentIds,
+        identityHash: preferenceIdentityHash(candidate.preferenceIdentity!),
+        normalizedValue: candidate.preferenceIdentity!.value,
+        observationCount: candidate.preferenceSourceSegmentIds.length,
         persisted: candidate.decision.shouldPersist
       }] : []),
       relationshipSignals: evaluated.flatMap((candidate) => candidate.relationshipSignal ? [{
@@ -406,8 +605,13 @@ export function extractUploadMemoriesWithAudit(input: ExtractUploadMemoriesInput
         signalType: candidate.relationshipSignal.signalType,
         memoryTier: candidate.decision.memoryTier,
         score: candidate.decision.score,
-        reasons: candidate.decision.reasons
-      }] : [])
+        reasons: candidate.decision.reasons,
+        ...(candidate.lifecycleRelationTypes ? {
+          lifecycleResolved: candidate.lifecycleResolved === true,
+          lifecycleRelationTypes: candidate.lifecycleRelationTypes
+        } : {})
+      }] : []),
+      ownerAttribution: persistedOwnerResolution.audit
     }
   };
 }

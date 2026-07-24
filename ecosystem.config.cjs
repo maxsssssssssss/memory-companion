@@ -8,7 +8,7 @@ module.exports = {
       name: "daily-brief",
       cwd: __dirname,
       script: "npm",
-      args: "start",
+      args: "start -- -p 3200",
       instances: 1,
       exec_mode: "fork",
       watch: false,

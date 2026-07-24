@@ -18,6 +18,75 @@ describe("domain schemas", () => {
     expect(segment.endSeconds).toBeGreaterThan(segment.startSeconds);
   });
 
+  it("preserves optional global speaker identity without changing the local label", () => {
+    const segment = TranscriptSegmentSchema.parse({
+      id: "seg_identity_1",
+      uploadId: "upload_1",
+      startSeconds: 0,
+      endSeconds: 4,
+      speaker: "speaker_0",
+      identity: {
+        globalSpeakerId: "person_1",
+        displayName: "Contact A",
+        identityType: "known_contact",
+        confidence: 0.92,
+        source: "voiceprint"
+      },
+      text: "A short utterance.",
+      confidence: 0.9,
+      sceneLabels: [],
+      valueLabels: []
+    });
+
+    expect(segment.speaker).toBe("speaker_0");
+    expect(segment.identity?.globalSpeakerId).toBe("person_1");
+  });
+
+  it("accepts a known-user voiceprint identity without changing the local label", () => {
+    const segment = TranscriptSegmentSchema.parse({
+      id: "seg_identity_user",
+      uploadId: "upload_1",
+      startSeconds: 0,
+      endSeconds: 4,
+      speaker: "speaker_0",
+      identity: {
+        globalSpeakerId: "user_user_1",
+        identityType: "known_user",
+        confidence: 0.95,
+        source: "voiceprint"
+      },
+      text: "A short utterance.",
+      confidence: 0.9,
+      sceneLabels: [],
+      valueLabels: []
+    });
+
+    expect(segment.speaker).toBe("speaker_0");
+    expect(segment.identity?.identityType).toBe("known_user");
+  });
+
+  it("rejects invalid speaker identity confidence", () => {
+    expect(() =>
+      TranscriptSegmentSchema.parse({
+        id: "seg_identity_invalid",
+        uploadId: "upload_1",
+        startSeconds: 0,
+        endSeconds: 4,
+        speaker: "speaker_0",
+        identity: {
+          globalSpeakerId: "person_1",
+          identityType: "known_contact",
+          confidence: 1.1,
+          source: "voiceprint"
+        },
+        text: "A short utterance.",
+        confidence: 0.9,
+        sceneLabels: [],
+        valueLabels: []
+      })
+    ).toThrow();
+  });
+
   it("rejects a brief item without source evidence", () => {
     expect(() =>
       BriefItemSchema.parse({

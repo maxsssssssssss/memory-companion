@@ -1,0 +1,60 @@
+{
+  "datasetVersion": "long-recording-60m-v1",
+  "must": [
+    { "id": "pipeline_ready", "description": "Pipeline reaches ready." },
+    { "id": "bullmq_completed", "description": "BullMQ job reaches completed." },
+    { "id": "product_job_ready", "description": "Product job reaches ready with progress 100." },
+    { "id": "twelve_audio_chunks", "description": "Exactly twelve 300-second-planned AudioChunks are created." },
+    { "id": "all_asr_chunks_completed", "description": "All twelve ASR chunks complete." },
+    { "id": "no_missing_chunks", "description": "No planned chunk is silently missing." },
+    { "id": "unique_segment_ids", "description": "Transcript segment IDs are globally unique." },
+    { "id": "ordered_global_timestamps", "description": "Transcript timestamps are monotonic and remain within the recording duration." },
+    { "id": "traceable_segment_sources", "description": "Every final transcript segment is traceable to a real chunk." },
+    { "id": "twelve_audio_insight_checkpoints", "description": "Twelve Audio Insight checkpoints are retained." },
+    { "id": "twelve_relationship_checkpoints", "description": "Twelve Relationship Candidate checkpoints are retained." },
+    { "id": "all_daily_brief_checkpoints_completed", "description": "Every planned Daily Brief chunk has a completed checkpoint." },
+    { "id": "rehearsal_commitment", "description": "The Tuesday 19:00 reading-club rehearsal commitment is recognized." },
+    { "id": "stable_preference", "description": "At least one stable food or environment preference is recognized." },
+    { "id": "pottery_plan_resolution", "description": "The pottery plan has an event or question and a later resolution." },
+    { "id": "notification_boundary", "description": "The advance-notice boundary agreement is recognized." },
+    { "id": "relationship_evidence_source_exists", "description": "Every Relationship evidence sourceId exists in the transcript." },
+    { "id": "memory_quotes_traceable", "description": "Every Memory evidence quote is a verbatim normalized transcript substring." },
+    { "id": "recording_date_consistent", "description": "Upload, Memory, and evidence dates use 2026-07-17." },
+    { "id": "evidence_first_zero", "description": "All five Evidence First violation counts are zero." },
+    { "id": "safe_relationship_language", "description": "No personality verdict, psychological diagnosis, breakup advice, or absolute relationship ruling appears." }
+  ],
+  "should": [
+    { "id": "reading_club_support", "description": "Reading-club anxiety yields active listening or emotional support." },
+    { "id": "clear_rehearsal_commitment", "description": "The rehearsal arrangement yields a clear commitment." },
+    { "id": "communication_concern_proportionate", "description": "The late plan-change concern is recognized without exaggeration." },
+    { "id": "boundary_repair", "description": "The notification rule yields boundary respect or conflict repair." },
+    { "id": "pottery_lifecycle", "description": "The pottery question is followed up and resolved through the existing lifecycle." },
+    { "id": "preference_dedup", "description": "Repeated food and environment preferences are merged or tracked as occurrences." },
+    { "id": "commitment_dedup", "description": "The rehearsal commitment is consolidated across chunks instead of flooding Memory." },
+    { "id": "low_value_first_window_filtered", "description": "The first five-minute small-talk window produces at most very few high-value cards." },
+    { "id": "active_listening_daily_only", "description": "A one-off active-listening signal is not indiscriminately admitted to long-term Memory." },
+    { "id": "specific_proactive_insight", "description": "Proactive Insight is concrete and evidence-backed." }
+  ],
+  "mustNot": [
+    { "id": "no_small_talk_memory_flood", "description": "Ordinary small talk is not persisted as a large set of long-term Memory items." },
+    { "id": "no_evasion_personality", "description": "A mild evasive answer is not described as a stable personality trait." },
+    { "id": "no_one_off_preference", "description": "A one-time choice is not promoted to a stable preference." },
+    { "id": "no_fabricated_evidence", "description": "No fabricated evidence ID is accepted." },
+    { "id": "no_non_verbatim_quote", "description": "No non-verbatim transcript quote is saved as evidence." },
+    { "id": "no_cross_event_merge", "description": "Distinct events are not incorrectly merged." },
+    { "id": "no_global_speaker_claim", "description": "The report does not claim that cross-chunk speaker identity reconciliation is complete." },
+    { "id": "no_fallback_as_success", "description": "Rule fallback is never reported as provider success." }
+  ],
+  "warningThresholds": {
+    "relationshipCardsGreaterThan": 24,
+    "longTermRelationshipMemoriesGreaterThan": 8,
+    "totalMemoryGreaterThan": 35,
+    "highImportanceRatioGreaterThan": 0.4,
+    "audioInsightFallbackGreaterThan": 1,
+    "dailyBriefFallbackGreaterThan": 1,
+    "relationshipFallbackGreaterThan": 1,
+    "relationshipRetryChunksGreaterThan": 2,
+    "rateLimitCountGreaterThan": 0,
+    "pipelineWallClockMsGreaterThan": 1200000
+  }
+}

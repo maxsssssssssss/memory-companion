@@ -1,4 +1,5 @@
 import { AnalysisChunkSchema, type AnalysisChunk, type TranscriptChunk } from "@/lib/domain/chunks";
+import { transcriptSpeakerIdentityFingerprint } from "@/lib/domain/speaker-identity";
 import type { AudioInsight, SemanticSegment, TranscriptSegment } from "@/lib/domain/types";
 import { z } from "zod";
 import {
@@ -17,7 +18,13 @@ import {
   type StructuredJsonDiagnostics
 } from "@/lib/server/openai/structured-json";
 import { ZodError } from "zod";
-import type { RelationshipSignalProvider, RelationshipSignalRequestMetrics } from "./provider";
+import type {
+  RelationshipSignalCandidateAudit,
+  RelationshipSignalProvider,
+  RelationshipSignalRecoveryMode,
+  RelationshipSignalRequestMetrics
+} from "./provider";
+import { selectRelationshipContext } from "./context-selector";
 import {
   createRelationshipSignalCandidates,
   reduceRelationshipSignalCandidates,
@@ -44,6 +51,7 @@ export type RelationshipSignalChunkProcessingOptions = {
   random?: () => number;
   sleep?: (delayMs: number) => Promise<void>;
   now?: () => string;
+  evaluationRawResponseCapture?: boolean;
   analysisCheckpoint?: {
     store: JsonAnalysisChunkCheckpointStore;
     userId: string;
@@ -138,6 +146,10 @@ function relationshipInputFingerprint(input: {
   audioInsights: AudioInsight[];
   shouldProcess: boolean;
 }) {
+  const selectedContext = selectRelationshipContext({
+    segments: input.transcriptChunk.segments,
+    audioInsights: input.audioInsights
+  });
   return fingerprintAnalysisInput({
     uploadId: input.uploadId,
     recordingDate: input.recordingDate,
@@ -149,9 +161,10 @@ function relationshipInputFingerprint(input: {
       startSeconds: segment.startSeconds,
       endSeconds: segment.endSeconds,
       speaker: segment.speaker ?? null,
+      identity: transcriptSpeakerIdentityFingerprint(segment),
       text: segment.text
     })),
-    audioInsights: input.audioInsights.slice(0, 12).map((insight) => ({
+    audioInsights: selectedContext.audioInsights.map((insight) => ({
       id: insight.id,
       sourceSegmentIds: insight.sourceSegmentIds,
       sourceTimeRange: insight.sourceTimeRange,
@@ -171,10 +184,10 @@ function relationshipProcessorFingerprint(override?: string) {
     kind: "relationship_candidate",
     provider: configuredProvider,
     model: process.env.OPENAI_RELATIONSHIP_SIGNAL_MODEL ?? process.env.OPENAI_TEXT_MODEL ?? null,
-    promptVersion: "relationship_candidate_chunk_v3_compact",
-    schemaVersion: "relationship_candidate_v2_validation_audit",
-    normalizationVersion: "relationship_evidence_quality_v4",
-    maxOutputTokens: process.env.RELATIONSHIP_SIGNAL_CHUNK_MAX_OUTPUT_TOKENS ?? "2000",
+    promptVersion: "relationship_candidate_chunk_v5_speaker_identity",
+    schemaVersion: "relationship_provider_compact_candidate_v1",
+    normalizationVersion: "relationship_compact_backfill_v2_confidence_labels_evidence_quality_v4",
+    maxOutputTokens: process.env.RELATIONSHIP_SIGNAL_CHUNK_MAX_OUTPUT_TOKENS ?? "2800",
     override: override ?? null
   });
 }
@@ -212,6 +225,42 @@ function relationshipFailurePhase(error: unknown) {
   }
   if (error instanceof ZodError) return "validation";
   return "provider";
+}
+
+function relationshipValidationIssueLogFields(diagnostics: StructuredJsonDiagnostics | undefined) {
+  if (
+    diagnostics?.parseResult !== "success" ||
+    diagnostics.validationResult !== "failed"
+  ) {
+    return null;
+  }
+
+  const codes = (diagnostics.validationIssueSummary ?? [])
+    .slice(0, 10)
+    .map((issue) => issue.code)
+    .join(",") || "none";
+  const paths = (diagnostics.validationIssues ?? [])
+    .slice(0, 10)
+    .map((issue) => issue.path)
+    .join(",") || "none";
+
+  return [
+    `validation_issue_count=${diagnostics.validationIssueCount ?? 0}`,
+    `validation_issue_codes=${codes}`,
+    `validation_issue_paths=${paths}`,
+    `truncated=${diagnostics.validationIssuesTruncated === true}`
+  ].join(" ");
+}
+
+function checkpointResponseDiagnostics(diagnostics: StructuredJsonDiagnostics) {
+  const safeDiagnostics = { ...diagnostics };
+  delete safeDiagnostics.validationIssues;
+  delete safeDiagnostics.validationIssueSummary;
+  return safeDiagnostics;
+}
+
+function checkpointValidationIssueSummary(diagnostics: StructuredJsonDiagnostics | undefined) {
+  return diagnostics?.validationIssueSummary?.slice(0, 10).map(({ code, count }) => ({ code, count })) ?? [];
 }
 
 function isRetryableRelationshipError(error: unknown) {
@@ -276,8 +325,15 @@ async function extractChunkCandidates(input: {
   semanticSegments: SemanticSegment[];
   audioInsights: AudioInsight[];
   signal: AbortSignal;
+  recoveryMode: RelationshipSignalRecoveryMode;
+  evaluationRawResponseCapture?: {
+    evaluationRetention: boolean;
+    chunkIndex: number;
+    attempt: number;
+  };
   onDiagnostics?: (diagnostics: StructuredJsonDiagnostics) => void;
   onRequestMetrics?: (metrics: RelationshipSignalRequestMetrics) => void;
+  onCandidateAudit?: (audit: RelationshipSignalCandidateAudit) => void;
 }) {
   if (input.provider.extractCandidates) {
     const rawItems = await input.provider.extractCandidates({
@@ -287,8 +343,13 @@ async function extractChunkCandidates(input: {
       semanticSegments: input.semanticSegments,
       audioInsights: input.audioInsights,
       signal: input.signal,
+      recoveryMode: input.recoveryMode,
+      ...(input.evaluationRawResponseCapture ? {
+        evaluationRawResponseCapture: input.evaluationRawResponseCapture
+      } : {}),
       ...(input.onDiagnostics ? { onDiagnostics: input.onDiagnostics } : {}),
-      ...(input.onRequestMetrics ? { onRequestMetrics: input.onRequestMetrics } : {})
+      ...(input.onRequestMetrics ? { onRequestMetrics: input.onRequestMetrics } : {}),
+      ...(input.onCandidateAudit ? { onCandidateAudit: input.onCandidateAudit } : {})
     });
     return createRelationshipSignalCandidates({
       uploadId: input.uploadId,
@@ -306,8 +367,13 @@ async function extractChunkCandidates(input: {
     semanticSegments: input.semanticSegments,
     audioInsights: input.audioInsights,
     signal: input.signal,
+    recoveryMode: input.recoveryMode,
+    ...(input.evaluationRawResponseCapture ? {
+      evaluationRawResponseCapture: input.evaluationRawResponseCapture
+    } : {}),
     ...(input.onDiagnostics ? { onDiagnostics: input.onDiagnostics } : {}),
-    ...(input.onRequestMetrics ? { onRequestMetrics: input.onRequestMetrics } : {})
+    ...(input.onRequestMetrics ? { onRequestMetrics: input.onRequestMetrics } : {}),
+    ...(input.onCandidateAudit ? { onCandidateAudit: input.onCandidateAudit } : {})
   });
   return relationshipCardsToCandidates({
     uploadId: input.uploadId,
@@ -386,10 +452,13 @@ async function processRelationshipSignalChunksOwned(input: RelationshipSignalChu
   type AttemptRecord = {
     context: Context;
     attempt: number;
+    recoveryMode: RelationshipSignalRecoveryMode;
+    durationMs: number;
     value?: CandidateResult;
     error?: unknown;
     diagnostics?: StructuredJsonDiagnostics;
     requestMetrics?: RelationshipSignalRequestMetrics;
+    candidateAudit?: RelationshipSignalCandidateAudit;
     checkpointHit?: boolean;
     checkpointResultSource?: "provider_success" | "provider_retry_success" | "rule_fallback" | "deterministic_skip";
   };
@@ -402,7 +471,12 @@ async function processRelationshipSignalChunksOwned(input: RelationshipSignalChu
     return record;
   };
 
-  const runAttempt = async (context: Context, attempt: number, concurrency: number): Promise<AttemptRecord> => {
+  const runAttempt = async (
+    context: Context,
+    attempt: number,
+    concurrency: number,
+    recoveryMode: RelationshipSignalRecoveryMode
+  ): Promise<AttemptRecord> => {
     const attemptStartedAt = Date.now();
     if (context.startedAt === 0) context.startedAt = attemptStartedAt;
     const remainingBudgetMs = options.totalBudgetMs - context.spentMs;
@@ -410,12 +484,15 @@ async function processRelationshipSignalChunksOwned(input: RelationshipSignalChu
       return recordAttempt({
         context,
         attempt,
+        recoveryMode,
+        durationMs: 0,
         error: new ChunkAttemptTimeoutError(options.totalBudgetMs)
       });
     }
     const attemptTimeoutMs = Math.min(options.attemptTimeoutMs, remainingBudgetMs);
     let diagnostics: StructuredJsonDiagnostics | undefined;
     let requestMetrics: RelationshipSignalRequestMetrics | undefined;
+    let candidateAudit: RelationshipSignalCandidateAudit | undefined;
     try {
       const result = await runChunkAttempt({
         execute: async (signal) => {
@@ -428,11 +505,27 @@ async function processRelationshipSignalChunksOwned(input: RelationshipSignalChu
               semanticSegments: context.semanticSegments,
               audioInsights: context.audioInsights,
               signal,
+              recoveryMode,
+              ...(input.options?.evaluationRawResponseCapture ? {
+                evaluationRawResponseCapture: {
+                  evaluationRetention: true,
+                  chunkIndex: context.transcriptChunk.index,
+                  attempt
+                }
+              } : {}),
               onDiagnostics: (value) => { diagnostics = value; },
+              onCandidateAudit: (value) => { candidateAudit = value; },
               onRequestMetrics: (value) => {
                 requestMetrics = value;
+                const removedReasons = Object.entries(value.removedReasonCounts ?? {})
+                  .sort(([left], [right]) => left.localeCompare(right))
+                  .map(([reason, count]) => `${reason}:${count}`)
+                  .join(",") || "none";
                 console.info(
-                  `[relationship-provider] request_start upload_id=${input.uploadId} chunk_index=${context.transcriptChunk.index} attempt=${attempt} concurrency=${concurrency} started_at=${new Date(attemptStartedAt).toISOString()} segment_count=${context.transcriptChunk.segments.length} insight_count=${context.audioInsights.length} semantic_count=${value.semanticSegmentCount} input_chars_before=${context.inputCharacters} context_chars_before=${value.unoptimizedContextCharacterCount} context_chars_after=${value.optimizedContextCharacterCount} prompt_chars=${value.promptCharacterCount} transcript_chars=${value.transcriptCharacterCount} insight_chars=${value.insightCharacterCount} semantic_chars=${value.semanticCharacterCount} max_output_tokens=${value.maxOutputTokens} response_mode=${value.responseMode}`
+                  `[relationship_context_selection] upload_id=${input.uploadId} chunk_index=${context.transcriptChunk.index} attempt=${attempt} insights_before=${value.insightsBefore ?? context.audioInsights.length} insights_after=${value.insightsAfter ?? context.audioInsights.length} insight_chars_before=${value.insightCharsBefore ?? value.insightCharacterCount} insight_chars_after=${value.insightCharsAfter ?? value.insightCharacterCount} removed_reason_counts=${removedReasons}`
+                );
+                console.info(
+                  `[relationship-provider] request_start upload_id=${input.uploadId} chunk_index=${context.transcriptChunk.index} attempt=${attempt} concurrency=${concurrency} recovery_mode=${value.recoveryMode} candidate_limit=${value.candidateLimit} started_at=${new Date(attemptStartedAt).toISOString()} segment_count=${context.transcriptChunk.segments.length} insight_count=${context.audioInsights.length} semantic_count=${value.semanticSegmentCount} input_chars_before=${context.inputCharacters} context_chars_before=${value.unoptimizedContextCharacterCount} context_chars_after=${value.optimizedContextCharacterCount} prompt_chars=${value.promptCharacterCount} transcript_chars=${value.transcriptCharacterCount} insight_chars=${value.insightCharacterCount} semantic_chars=${value.semanticCharacterCount} max_output_tokens=${value.maxOutputTokens} output_tokens_budget=${value.maxOutputTokens} response_mode=${value.responseMode}`
                 );
               }
             });
@@ -445,22 +538,49 @@ async function processRelationshipSignalChunksOwned(input: RelationshipSignalChu
         maxRetries: 0
       });
       const providerStatus = result.value.candidates.length > 0 ? "provider_success" : "empty_safe_result";
+      const durationMs = Date.now() - attemptStartedAt;
       console.info(
-        `[relationship-signals] upload_id=${input.uploadId} chunk_index=${context.transcriptChunk.index} segment_count=${context.transcriptChunk.segments.length} insight_count=${context.audioInsights.length} semantic_count=${requestMetrics?.semanticSegmentCount ?? -1} input_chars=${context.inputCharacters} prompt_chars=${requestMetrics?.promptCharacterCount ?? -1} output_token_limit=${requestMetrics?.maxOutputTokens ?? -1} attempt=${attempt} concurrency=${concurrency} attempt_timeout_ms=${attemptTimeoutMs} elapsed_ms=${Date.now() - attemptStartedAt} first_response_ms=-1 response_complete_ms=${diagnostics?.responseCompleteDurationMs ?? -1} parse_ms=${diagnostics?.parseDurationMs ?? -1} validation_ms=${diagnostics?.validationDurationMs ?? -1} total_ms=${diagnostics?.totalDurationMs ?? -1} provider_status=${providerStatus} failure_phase=none response_text_length=${diagnostics?.responseTextLength ?? -1} response_status=${diagnostics?.responseStatus ?? "unknown"} incomplete_reason=${diagnostics?.incompleteReason ?? "none"} finish_reason=unavailable parse_result=${diagnostics?.parseResult ?? "unknown"} validation_result=${diagnostics?.validationResult ?? "unknown"} retry_reason=none fallback_reason=none`
+        `[relationship-signals] upload_id=${input.uploadId} chunk_index=${context.transcriptChunk.index} segment_count=${context.transcriptChunk.segments.length} insight_count=${context.audioInsights.length} semantic_count=${requestMetrics?.semanticSegmentCount ?? -1} input_chars=${context.inputCharacters} prompt_chars=${requestMetrics?.promptCharacterCount ?? -1} output_token_limit=${requestMetrics?.maxOutputTokens ?? -1} output_tokens_budget=${requestMetrics?.maxOutputTokens ?? -1} compact_candidate_count=${candidateAudit?.compactCandidateCount ?? result.value.candidates.length} recovery_mode=${recoveryMode} attempt=${attempt} concurrency=${concurrency} attempt_timeout_ms=${attemptTimeoutMs} elapsed_ms=${durationMs} first_response_ms=-1 response_complete_ms=${diagnostics?.responseCompleteDurationMs ?? -1} parse_ms=${diagnostics?.parseDurationMs ?? -1} validation_ms=${diagnostics?.validationDurationMs ?? -1} total_ms=${diagnostics?.totalDurationMs ?? -1} provider_status=${providerStatus} failure_phase=none response_text_length=${diagnostics?.responseTextLength ?? -1} response_status=${diagnostics?.responseStatus ?? "unknown"} incomplete_reason=${diagnostics?.incompleteReason ?? "none"} finish_reason=unavailable parse_result=${diagnostics?.parseResult ?? "unknown"} validation_result=${diagnostics?.validationResult ?? "unknown"} retry_reason=none fallback_reason=none`
       );
-      context.spentMs += Date.now() - attemptStartedAt;
-      return recordAttempt({ context, attempt, value: result.value, diagnostics, requestMetrics });
+      context.spentMs += durationMs;
+      return recordAttempt({
+        context,
+        attempt,
+        recoveryMode,
+        durationMs,
+        value: result.value,
+        diagnostics,
+        requestMetrics,
+        candidateAudit
+      });
     } catch (error) {
       const code = relationshipFailureCode(error);
       const willRetry = attempt === 1 && options.maxRetries > 0 && isRetryableRelationshipError(error);
+      const validationIssueFields = relationshipValidationIssueLogFields(diagnostics);
+      if (validationIssueFields) {
+        console.info(
+          `[relationship-provider] validation_failed upload_id=${input.uploadId} chunk_index=${context.transcriptChunk.index} attempt=${attempt} parse_result=success validation_result=failed ${validationIssueFields}`
+        );
+      }
       console.info(
-        `[relationship-signals] upload_id=${input.uploadId} chunk_index=${context.transcriptChunk.index} segment_count=${context.transcriptChunk.segments.length} insight_count=${context.audioInsights.length} semantic_count=${requestMetrics?.semanticSegmentCount ?? -1} input_chars=${context.inputCharacters} prompt_chars=${requestMetrics?.promptCharacterCount ?? -1} output_token_limit=${requestMetrics?.maxOutputTokens ?? -1} attempt=${attempt} concurrency=${concurrency} attempt_timeout_ms=${attemptTimeoutMs} elapsed_ms=${Date.now() - attemptStartedAt} first_response_ms=-1 response_complete_ms=${diagnostics?.responseCompleteDurationMs ?? -1} parse_ms=${diagnostics?.parseDurationMs ?? -1} validation_ms=${diagnostics?.validationDurationMs ?? -1} total_ms=${diagnostics?.totalDurationMs ?? -1} provider_status=failed failure_phase=${relationshipFailurePhase(error)} response_text_length=${diagnostics?.responseTextLength ?? -1} response_status=${diagnostics?.responseStatus ?? "unknown"} incomplete_reason=${diagnostics?.incompleteReason ?? "none"} finish_reason=unavailable parse_result=${diagnostics?.parseResult ?? "unknown"} validation_result=${diagnostics?.validationResult ?? "unknown"} failure_reason=${code} will_retry=${willRetry} retry_reason=${willRetry ? code : "none"} fallback_reason=none`
+        `[relationship-signals] upload_id=${input.uploadId} chunk_index=${context.transcriptChunk.index} segment_count=${context.transcriptChunk.segments.length} insight_count=${context.audioInsights.length} semantic_count=${requestMetrics?.semanticSegmentCount ?? -1} input_chars=${context.inputCharacters} prompt_chars=${requestMetrics?.promptCharacterCount ?? -1} output_token_limit=${requestMetrics?.maxOutputTokens ?? -1} output_tokens_budget=${requestMetrics?.maxOutputTokens ?? -1} compact_candidate_count=${candidateAudit?.compactCandidateCount ?? 0} recovery_mode=${recoveryMode} attempt=${attempt} concurrency=${concurrency} attempt_timeout_ms=${attemptTimeoutMs} elapsed_ms=${Date.now() - attemptStartedAt} first_response_ms=-1 response_complete_ms=${diagnostics?.responseCompleteDurationMs ?? -1} parse_ms=${diagnostics?.parseDurationMs ?? -1} validation_ms=${diagnostics?.validationDurationMs ?? -1} total_ms=${diagnostics?.totalDurationMs ?? -1} provider_status=failed failure_phase=${relationshipFailurePhase(error)} response_text_length=${diagnostics?.responseTextLength ?? -1} response_status=${diagnostics?.responseStatus ?? "unknown"} incomplete_reason=${diagnostics?.incompleteReason ?? "none"} finish_reason=unavailable parse_result=${diagnostics?.parseResult ?? "unknown"} validation_result=${diagnostics?.validationResult ?? "unknown"} failure_reason=${code} will_retry=${willRetry} retry_reason=${willRetry ? code : "none"} fallback_reason=none`
       );
-      context.spentMs += Date.now() - attemptStartedAt;
-      return recordAttempt({ context, attempt, error, diagnostics, requestMetrics });
+      const durationMs = Date.now() - attemptStartedAt;
+      context.spentMs += durationMs;
+      return recordAttempt({
+        context,
+        attempt,
+        recoveryMode,
+        durationMs,
+        error,
+        diagnostics,
+        requestMetrics,
+        candidateAudit
+      });
     }
   };
 
+  const firstPassStartedAt = Date.now();
   const initial = await mapWithConcurrency({
     items: contexts,
     options: { concurrency: options.concurrency },
@@ -473,6 +593,8 @@ async function processRelationshipSignalChunksOwned(input: RelationshipSignalChu
         return recordAttempt({
           context,
           attempt: 0,
+          recoveryMode: "standard",
+          durationMs: 0,
           value: {
             candidates: context.checkpointLookup.output,
             rejectedCount: validationRejections.length,
@@ -491,16 +613,20 @@ async function processRelationshipSignalChunksOwned(input: RelationshipSignalChu
         return recordAttempt({
           context,
           attempt: 0,
+          recoveryMode: "standard",
+          durationMs: 0,
           value: { candidates: [], rejectedCount: 0, rejectionReasons: {}, validationRejections: [] }
         });
       }
-      return runAttempt(context, 1, options.concurrency);
+      return runAttempt(context, 1, options.concurrency, "standard");
     }
   });
+  const firstPassWallMs = Date.now() - firstPassStartedAt;
 
   const retryable = initial.filter(
     (record) => record.error && options.maxRetries > 0 && isRetryableRelationshipError(record.error)
   );
+  const recoveryStartedAt = Date.now();
   const recovered = await mapWithConcurrency({
     items: retryable,
     options: { concurrency: options.recoveryConcurrency },
@@ -510,9 +636,15 @@ async function processRelationshipSignalChunksOwned(input: RelationshipSignalChu
         await options.sleep(delay);
         record.context.spentMs += delay;
       }
-      return runAttempt(record.context, 2, options.recoveryConcurrency);
+      const recoveryMode: RelationshipSignalRecoveryMode =
+        relationshipFailureCode(record.error) === "incomplete_response"
+          && record.diagnostics?.incompleteReason === "max_output_tokens"
+          ? "compact"
+          : "standard";
+      return runAttempt(record.context, 2, options.recoveryConcurrency, recoveryMode);
     }
   });
+  const recoveryWallMs = retryable.length > 0 ? Date.now() - recoveryStartedAt : 0;
   const recoveredByIndex = new Map(
     recovered.map((record) => [record.context.transcriptChunk.index, record])
   );
@@ -619,11 +751,18 @@ async function processRelationshipSignalChunksOwned(input: RelationshipSignalChu
             inputCharacterCount: context.inputCharacters,
             providerRetryCount: output.retryCount,
             validationRejections: output.validationRejections,
+            ...(providerAttempt ? { recoveryMode: providerAttempt.recoveryMode } : {}),
             ...(providerAttempt?.requestMetrics ? {
               requestMetrics: providerAttempt.requestMetrics
             } : {}),
+            ...(providerAttempt?.candidateAudit ? {
+              candidateContractAudit: providerAttempt.candidateAudit
+            } : {}),
             ...(providerAttempt?.diagnostics ? {
-              responseDiagnostics: providerAttempt.diagnostics
+              responseDiagnostics: checkpointResponseDiagnostics(providerAttempt.diagnostics)
+            } : {}),
+            ...(checkpointValidationIssueSummary(providerAttempt?.diagnostics).length > 0 ? {
+              validationIssueSummary: checkpointValidationIssueSummary(providerAttempt?.diagnostics)
             } : {}),
             ...(providerAttempt?.error ? {
               failureCode: relationshipFailureCode(providerAttempt.error),
@@ -674,6 +813,54 @@ async function processRelationshipSignalChunksOwned(input: RelationshipSignalChu
     error: output.error,
     now
   }));
+  const sumProviderMs = [...attemptHistory.values()]
+    .flat()
+    .filter((attempt) => attempt.attempt > 0)
+    .reduce((total, attempt) => total + attempt.durationMs, 0);
+  const criticalPathMs = firstPassWallMs + recoveryWallMs;
+  const chunkAudits = outputs.map((output) => {
+    const context = contexts.find((item) => item.transcriptChunk.index === output.transcriptChunk.index)!;
+    const history = attemptHistory.get(output.transcriptChunk.index) ?? [];
+    const firstAttempt = history.find((attempt) => attempt.attempt === 1);
+    const retryAttempt = history.find((attempt) => attempt.attempt === 2);
+    const finalAttempt = history.at(-1);
+    const requestMetrics = finalAttempt?.requestMetrics ?? firstAttempt?.requestMetrics;
+    return {
+      chunkIndex: output.transcriptChunk.index,
+      segmentCount: output.transcriptChunk.segments.length,
+      transcriptChars: requestMetrics?.transcriptCharacterCount ?? null,
+      insightsBefore: requestMetrics?.insightsBefore ?? context.audioInsights.length,
+      insightsAfter: requestMetrics?.insightsAfter ?? null,
+      insightCharsBefore: requestMetrics?.insightCharsBefore ?? null,
+      insightCharsAfter: requestMetrics?.insightCharsAfter ?? requestMetrics?.insightCharacterCount ?? null,
+      contextCharsBefore: requestMetrics?.unoptimizedContextCharacterCount ?? null,
+      contextCharsAfter: requestMetrics?.optimizedContextCharacterCount ?? null,
+      promptChars: requestMetrics?.promptCharacterCount ?? null,
+      outputTokensBudget: requestMetrics?.maxOutputTokens ?? null,
+      firstAttemptDurationMs: firstAttempt?.durationMs ?? null,
+      retryDurationMs: retryAttempt?.durationMs ?? null,
+      responseTextChars: finalAttempt?.diagnostics?.responseTextLength ?? null,
+      responseStatus: finalAttempt?.diagnostics?.responseStatus ?? null,
+      failurePhase: finalAttempt?.error ? relationshipFailurePhase(finalAttempt.error) : "none",
+      candidateCount: output.candidates.length,
+      finalResultSource: output.providerStatus,
+      attempts: history.map((attempt) => ({
+        attempt: attempt.attempt,
+        recoveryMode: attempt.recoveryMode,
+        durationMs: attempt.durationMs,
+        status: attempt.error ? "failed" as const : "completed" as const,
+        failureCode: attempt.error ? relationshipFailureCode(attempt.error) : null,
+        failurePhase: attempt.error ? relationshipFailurePhase(attempt.error) : "none",
+        responseTextChars: attempt.diagnostics?.responseTextLength ?? null,
+        responseStatus: attempt.diagnostics?.responseStatus ?? null,
+        incompleteReason: attempt.diagnostics?.incompleteReason ?? null,
+        rawCandidateCount: attempt.candidateAudit?.rawCandidateCount ?? attempt.value?.candidates.length ?? 0,
+        validCandidateCount: attempt.value?.candidates.length ?? 0,
+        compactCandidateCount: attempt.candidateAudit?.compactCandidateCount ?? attempt.value?.candidates.length ?? 0,
+        requestMetrics: attempt.requestMetrics ?? null
+      }))
+    };
+  });
   const stats = {
     chunkCount: chunks.length,
     completedChunks: outputs.filter((output) => !output.failed).length,
@@ -697,15 +884,27 @@ async function processRelationshipSignalChunksOwned(input: RelationshipSignalChu
     normalizationRejected: reduced.audit.normalizationRejectedCount,
     selectionRejected: reduced.audit.clusterRejectedCount + reduced.audit.normalizationRejectedCount,
     cardCount: reduced.cards.length,
+    firstPassWallMs,
+    recoveryWallMs,
+    sumProviderMs,
+    criticalPathMs,
     parallelDurationMs,
     reducerDurationMs,
     checkpointHits: outputs.filter((output) => output.checkpointHit).length,
     checkpointMisses: outputs.filter((output) => !output.checkpointHit).length
   };
   console.info(
-    `[relationship-signals] chunks=${stats.chunkCount} success_chunks=${stats.successChunks} retry_success_chunks=${stats.retrySuccessChunks} fallback_chunks=${stats.fallbackChunks} skipped_chunks=${stats.skippedChunks} failed_chunks=${stats.failedChunks} timeout_chunks=${stats.timeoutChunks} invalid_json_chunks=${stats.invalidJsonChunks} parse_failure_chunks=${stats.parseFailureChunks} validation_failure_chunks=${stats.validationFailureChunks} provider_failure_chunks=${stats.providerFailureChunks} checkpoint_hits=${stats.checkpointHits} checkpoint_misses=${stats.checkpointMisses} candidates=${stats.candidateCount} validation_rejected=${stats.candidateValidationRejected} quality_rejected=${stats.qualityRejectedCandidates} rejected=${stats.rejectedCandidates} clusters=${stats.clusterCount} merged_candidates=${stats.mergedCandidateCount} cluster_rejected=${stats.clusterRejected} normalization_rejected=${stats.normalizationRejected} selection_rejected=${stats.selectionRejected} cards=${stats.cardCount} wall_clock_ms=${parallelDurationMs} reducer_elapsed_ms=${reducerDurationMs}`
+    `[relationship-signals] chunks=${stats.chunkCount} success_chunks=${stats.successChunks} retry_success_chunks=${stats.retrySuccessChunks} fallback_chunks=${stats.fallbackChunks} skipped_chunks=${stats.skippedChunks} failed_chunks=${stats.failedChunks} timeout_chunks=${stats.timeoutChunks} invalid_json_chunks=${stats.invalidJsonChunks} parse_failure_chunks=${stats.parseFailureChunks} validation_failure_chunks=${stats.validationFailureChunks} provider_failure_chunks=${stats.providerFailureChunks} checkpoint_hits=${stats.checkpointHits} checkpoint_misses=${stats.checkpointMisses} candidates=${stats.candidateCount} validation_rejected=${stats.candidateValidationRejected} quality_rejected=${stats.qualityRejectedCandidates} rejected=${stats.rejectedCandidates} clusters=${stats.clusterCount} merged_candidates=${stats.mergedCandidateCount} cluster_rejected=${stats.clusterRejected} normalization_rejected=${stats.normalizationRejected} selection_rejected=${stats.selectionRejected} cards=${stats.cardCount} first_pass_wall_ms=${firstPassWallMs} recovery_wall_ms=${recoveryWallMs} critical_path_ms=${criticalPathMs} sum_provider_ms=${sumProviderMs} wall_clock_ms=${parallelDurationMs} reducer_elapsed_ms=${reducerDurationMs}`
   );
-  return { cards: reduced.cards, analysisChunks, stats, reducerAudit: reduced.audit };
+  return {
+    cards: reduced.cards,
+    candidates,
+    candidateIdsByCardId: reduced.candidateIdsByCardId,
+    analysisChunks,
+    stats,
+    reducerAudit: reduced.audit,
+    chunkAudits
+  };
 }
 
 const relationshipStageFlights = new Map<
@@ -729,6 +928,7 @@ function relationshipStageFlightKey(input: RelationshipSignalChunkProcessingInpu
         startSeconds: segment.startSeconds,
         endSeconds: segment.endSeconds,
         speaker: segment.speaker ?? null,
+        identity: transcriptSpeakerIdentityFingerprint(segment),
         text: segment.text,
         sceneLabels: segment.sceneLabels,
         valueLabels: segment.valueLabels

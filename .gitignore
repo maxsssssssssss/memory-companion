@@ -1,23 +1,54 @@
-node_modules
-.venv
-.next
-out
-dist
-coverage
-.env
-.env.local
-.env.*
-!.env.example
-.data
-*.log
-.DS_Store
+# Dependencies and build output
+node_modules/
+.venv/
+.next/
+out/
+dist/
+coverage/
 *.tsbuildinfo
 
-# Sensitive local files
-Tokenhub info.txt
-ASR、区分说话人相关接口文档.pdf
+# Environment and local credentials
+.env
+.env.*
+!.env.example
+.envrc
+*.pem
+*.key
+*.p12
+*.pfx
+
+# Local application and database state
+.data/
+*.log
 *.sqlite
 *.sqlite-*
+*.sqlite3
+*.sqlite3-*
+*.db
+*.db-*
+
+# Generated evaluation and browser artifacts
+output/
+reports/
+playwright-report/
+test-results/
+**/provider-raw-responses/
+
+# Local Redis / Docker runtime data
+.redis-data/
+redis-data/
+docker-data/
+
+# Local test and sample audio
+fixtures/audio/
+sample*.mp3
+*.wav
+*.mp3
+*.m4a
+*.webm
+*.ogg
+*.flac
+*.aac
 
 # Local development tool state
 .codex/
@@ -26,19 +57,12 @@ ASR、区分说话人相关接口文档.pdf
 config.yml
 daybrief.html
 
-# Local test and sample audio
-fixtures/audio/
-sample*.mp3
-*.wav
-*.mp3
-*.m4a
+# OS metadata
+.DS_Store
 
-# Local Redis / Docker runtime data
-.redis-data/
-redis-data/
-docker-data/
-
-# Local collaboration and handoff documents
+# Sensitive local files and collaboration history
+Tokenhub info.txt
+ASR、区分说话人相关接口文档.pdf
 AGENTS.md
 UPDATE_HISTORY.md
 daily-brief  memory-companion 项目交接文档 v1.0.md

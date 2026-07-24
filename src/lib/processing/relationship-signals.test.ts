@@ -194,6 +194,31 @@ describe("relationship signal processing", () => {
     ]);
   });
 
+  it("backfills trusted speaker identities while keeping local transcript labels intact", () => {
+    const identified = relationshipSegments.map((segment, index) => ({
+      ...segment,
+      identity: {
+        globalSpeakerId: `person_${index + 1}`,
+        displayName: index === 0 ? "Contact A" : "Contact B",
+        identityType: "known_contact" as const,
+        confidence: 0.94,
+        source: "voiceprint" as const
+      }
+    }));
+    const cards = normalizeRelationshipSignalItems({
+      uploadId: "upload_1",
+      recordingDate: "2026-07-09",
+      segments: identified,
+      semanticSegments,
+      audioInsights,
+      items: [validModelItem({ involvedSpeakers: [] })]
+    });
+
+    expect(cards[0].involvedSpeakers).toEqual(["Contact A", "Contact B"]);
+    expect(cards[0].evidenceSegments.map((item) => item.speaker)).toEqual(["Contact A", "Contact B"]);
+    expect(identified.map((segment) => segment.speaker)).toEqual(["speaker_1", "speaker_2"]);
+  });
+
   it("drops cards that use forbidden relationship judgments", () => {
     const cards = normalizeRelationshipSignalItems({
       uploadId: "upload_1",

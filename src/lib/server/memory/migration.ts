@@ -11,7 +11,7 @@ import {
 import { JsonStore } from "@/lib/server/storage/json-store";
 import { getDataRootDir } from "@/lib/server/storage/paths";
 import { getMemoryDatabasePath, openMemoryDatabase } from "./db";
-import { extractUploadMemories } from "./extractor";
+import { extractUploadMemoriesWithAudit } from "./extractor";
 import { createMemoryRepository } from "./repository";
 import type { MemoryRepository } from "./types";
 
@@ -97,7 +97,7 @@ export async function migrateLegacyMemoryIndex(input: {
             readArray(store, "semantic-segments", upload.id, SemanticSegmentSchema),
             readArray(store, "relationship-signals", upload.id, RelationshipSignalCardSchema)
           ]);
-          const memories = extractUploadMemories({
+          const extraction = extractUploadMemoriesWithAudit({
             userId,
             uploadId: upload.id,
             recordingDate: upload.recordingDate,
@@ -111,10 +111,11 @@ export async function migrateLegacyMemoryIndex(input: {
             userId,
             uploadId: upload.id,
             sourceSegments: segments,
-            memories
+            memories: extraction.memories,
+            ownerAttributions: extraction.ownerAttributions
           });
           result.uploadsIndexed += 1;
-          result.memoriesIndexed += memories.length;
+          result.memoriesIndexed += extraction.memories.length;
         } catch (error) {
           result.uploadsFailed += 1;
           logger.warn("[memory:migrate] upload skipped after validation/index failure", {

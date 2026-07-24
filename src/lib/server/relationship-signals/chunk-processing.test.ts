@@ -7,7 +7,10 @@ import { AudioInsightSchema, type AudioInsight, type TranscriptSegment } from "@
 import { resolveAnalysisTranscriptChunks } from "@/lib/server/analysis-chunks/transcript-chunks";
 import { JsonAnalysisChunkCheckpointStore } from "@/lib/server/analysis-chunks/checkpoint";
 import { JsonStore } from "@/lib/server/storage/json-store";
-import { StructuredJsonResponseError } from "@/lib/server/openai/structured-json";
+import {
+  StructuredJsonResponseError,
+  type StructuredJsonDiagnostics
+} from "@/lib/server/openai/structured-json";
 import type { RawRelationshipSignalItem } from "@/lib/processing/relationship-signals";
 import type { RelationshipSignalProvider } from "./provider";
 import { processRelationshipSignalChunks } from "./chunk-processing";
@@ -69,6 +72,29 @@ function audioInsight(segment: TranscriptSegment, summary: string) {
     summary,
     evidence: segment.text,
     confidence: 0.8
+  });
+}
+
+function emitRelationshipRequestMetrics(
+  input: Parameters<NonNullable<RelationshipSignalProvider["extractCandidates"]>>[0],
+  recoveryMode: "standard" | "compact",
+  candidateLimit: 5 | 3
+) {
+  input.onRequestMetrics?.({
+    responseMode: "json",
+    model: "mock-relationship-model",
+    promptCharacterCount: 1_200,
+    unoptimizedContextCharacterCount: 1_100,
+    optimizedContextCharacterCount: 900,
+    transcriptCharacterCount: 700,
+    semanticCharacterCount: 0,
+    semanticSegmentCount: 0,
+    insightCharacterCount: 200,
+    systemPromptCharacterCount: 200,
+    jsonInstructionCharacterCount: 100,
+    maxOutputTokens: 2_800,
+    recoveryMode,
+    candidateLimit
   });
 }
 
@@ -362,6 +388,183 @@ describe("chunked relationship signal processing", () => {
     expect(extractCandidates).toHaveBeenCalledTimes(1);
   });
 
+  it("uses compact recovery after an incomplete max-output response and keeps at most three candidates", async () => {
+    const segments = [relationshipSegment(0)];
+    const chunks = resolveAnalysisTranscriptChunks({ uploadId: "upload_1", segments, now: () => timestamp });
+    const recoveryModes: string[] = [];
+    const consoleInfo = vi.spyOn(console, "info").mockImplementation(() => undefined);
+    const provider: RelationshipSignalProvider = {
+      async analyze() { return []; },
+      async extractCandidates(input) {
+        const recoveryMode = input.recoveryMode ?? "standard";
+        recoveryModes.push(recoveryMode);
+        emitRelationshipRequestMetrics(input, recoveryMode, recoveryMode === "compact" ? 3 : 5);
+        if (recoveryMode === "standard") {
+          input.onDiagnostics?.({
+            responseStatus: "incomplete",
+            incompleteReason: "max_output_tokens",
+            responseTextLength: 1_900,
+            parseResult: "not_started",
+            validationResult: "not_started"
+          });
+          throw new StructuredJsonResponseError(
+            "incomplete_response",
+            "Structured response was incomplete: max_output_tokens"
+          );
+        }
+        const candidates = Array.from({ length: 3 }, (_, index) => ({
+          ...candidate(input.segments[0]),
+          confidence: 0.9 - index * 0.05,
+          summary: `compact-recovery-candidate-${index + 1}`
+        }));
+        input.onCandidateAudit?.({
+          contract: "compact",
+          recoveryMode,
+          candidateLimit: 3,
+          rawCandidateCount: 4,
+          compactCandidateCount: 3,
+          overLimitCount: 1
+        });
+        return candidates;
+      }
+    };
+
+    try {
+      const result = await processRelationshipSignalChunks({
+        uploadId: "upload_1",
+        recordingDate: "2026-07-15",
+        transcriptChunks: chunks,
+        segments,
+        semanticSegments: [],
+        audioInsights: [],
+        provider,
+        options: {
+          concurrency: 1,
+          recoveryConcurrency: 1,
+          maxRetries: 1,
+          retryDelayMs: 0,
+          attemptTimeoutMs: 1_000,
+          totalBudgetMs: 3_000,
+          now: () => timestamp
+        }
+      });
+
+      expect(recoveryModes).toEqual(["standard", "compact"]);
+      expect(result.stats.retrySuccessChunks).toBe(1);
+      expect(result.stats.fallbackChunks).toBe(0);
+      expect(result.stats.candidateCount).toBe(3);
+      const logs = consoleInfo.mock.calls.map(([message]) => String(message)).join("\n");
+      expect(logs).toContain("failure_reason=incomplete_response");
+      expect(logs).toContain("recovery_mode=compact");
+      expect(logs).toContain("compact_candidate_count=3");
+      expect(logs).toContain("output_tokens_budget=2800");
+    } finally {
+      consoleInfo.mockRestore();
+    }
+  });
+
+  it("does not use compact recovery for non-token incomplete responses", async () => {
+    const segments = [relationshipSegment(0)];
+    const chunks = resolveAnalysisTranscriptChunks({ uploadId: "upload_1", segments, now: () => timestamp });
+    const recoveryModes: string[] = [];
+    const provider: RelationshipSignalProvider = {
+      async analyze() { return []; },
+      async extractCandidates(input) {
+        const mode = input.recoveryMode ?? "standard";
+        recoveryModes.push(mode);
+        emitRelationshipRequestMetrics(input, mode, 5);
+        if (recoveryModes.length === 1) {
+          input.onDiagnostics?.({
+            responseStatus: "incomplete",
+            incompleteReason: "content_filter",
+            responseTextLength: 0,
+            parseResult: "not_started",
+            validationResult: "not_started"
+          });
+          throw new StructuredJsonResponseError(
+            "incomplete_response",
+            "Structured response was incomplete: content_filter"
+          );
+        }
+        return [candidate(input.segments[0])];
+      }
+    };
+
+    const result = await processRelationshipSignalChunks({
+      uploadId: "upload_1",
+      recordingDate: "2026-07-15",
+      transcriptChunks: chunks,
+      segments,
+      semanticSegments: [],
+      audioInsights: [],
+      provider,
+      options: {
+        concurrency: 1,
+        recoveryConcurrency: 1,
+        maxRetries: 1,
+        retryDelayMs: 0,
+        attemptTimeoutMs: 1_000,
+        totalBudgetMs: 3_000,
+        now: () => timestamp
+      }
+    });
+
+    expect(recoveryModes).toEqual(["standard", "standard"]);
+    expect(result.stats.retrySuccessChunks).toBe(1);
+  });
+
+  it("keeps timeout recovery in standard mode", async () => {
+    const segments = [relationshipSegment(0)];
+    const chunks = resolveAnalysisTranscriptChunks({ uploadId: "upload_1", segments, now: () => timestamp });
+    const recoveryModes: string[] = [];
+    const consoleInfo = vi.spyOn(console, "info").mockImplementation(() => undefined);
+    const provider: RelationshipSignalProvider = {
+      async analyze() { return []; },
+      async extractCandidates(input) {
+        const recoveryMode = input.recoveryMode ?? "standard";
+        recoveryModes.push(recoveryMode);
+        emitRelationshipRequestMetrics(input, recoveryMode, 5);
+        if (recoveryModes.length === 1) {
+          return await new Promise<RawRelationshipSignalItem[]>((_resolve, reject) => {
+            input.signal?.addEventListener("abort", () => reject(new Error("aborted")), { once: true });
+          });
+        }
+        return [candidate(input.segments[0])];
+      }
+    };
+
+    try {
+      const result = await processRelationshipSignalChunks({
+        uploadId: "upload_1",
+        recordingDate: "2026-07-15",
+        transcriptChunks: chunks,
+        segments,
+        semanticSegments: [],
+        audioInsights: [],
+        provider,
+        options: {
+          concurrency: 1,
+          recoveryConcurrency: 1,
+          maxRetries: 1,
+          retryDelayMs: 0,
+          attemptTimeoutMs: 10,
+          totalBudgetMs: 1_000,
+          now: () => timestamp
+        }
+      });
+
+      expect(recoveryModes).toEqual(["standard", "standard"]);
+      expect(result.stats.timeoutChunks).toBe(1);
+      expect(result.stats.retrySuccessChunks).toBe(1);
+      const logs = consoleInfo.mock.calls.map(([message]) => String(message)).join("\n");
+      expect(logs).toContain("failure_reason=timeout");
+      expect(logs).toContain("recovery_mode=standard");
+      expect(logs).not.toContain("recovery_mode=compact");
+    } finally {
+      consoleInfo.mockRestore();
+    }
+  });
+
   it("moves retryable timeouts to a single-concurrency recovery queue", async () => {
     const segments = [relationshipSegment(0), relationshipSegment(1)];
     const chunks = resolveAnalysisTranscriptChunks({
@@ -523,6 +726,112 @@ describe("chunked relationship signal processing", () => {
       expect(logs).toContain("failure_reason=invalid_json will_retry=true retry_reason=invalid_json");
       expect(logs).toContain("failure_phase=validation");
       expect(logs).toContain("failure_reason=validation_failure will_retry=false retry_reason=none");
+    } finally {
+      consoleInfo.mockRestore();
+    }
+  });
+
+  it("logs bounded validation issues and checkpoints only their code summary", async () => {
+    tempDir = await mkdtemp(join(tmpdir(), "relationship-validation-diagnostics-"));
+    const segments = [relationshipSegment(0)];
+    const chunks = resolveAnalysisTranscriptChunks({
+      uploadId: "upload_1",
+      segments,
+      maxDurationSeconds: 300,
+      now: () => timestamp
+    });
+    const checkpointStore = new JsonAnalysisChunkCheckpointStore(new JsonStore(tempDir));
+    const sensitiveTranscript = segments[0].text;
+    const sensitiveQuote = "PRIVATE_QUOTE_SHOULD_NOT_APPEAR";
+    const sensitiveToken = "PRIVATE_TOKEN_SHOULD_NOT_APPEAR";
+    const validationIssues = Array.from({ length: 10 }, (_, index) => ({
+      path: `items[${index}].signalType`,
+      code: "invalid_enum_value",
+      message: index === 0 ? sensitiveQuote : "Invalid enum value"
+    }));
+    const provider: RelationshipSignalProvider = {
+      async analyze() { return []; },
+      async extractCandidates(input) {
+        const diagnostics: StructuredJsonDiagnostics = {
+          responseTextLength: 500,
+          parseResult: "success",
+          validationResult: "failed",
+          validationIssueCount: 12,
+          validationIssues,
+          validationIssueSummary: [{ code: "invalid_enum_value", count: 12 }],
+          validationIssuesTruncated: true
+        };
+        input.onDiagnostics?.(diagnostics);
+        throw new z.ZodError([
+          {
+            code: "custom",
+            path: ["items", 0, "signalType"],
+            message: `${sensitiveTranscript} ${sensitiveQuote} ${sensitiveToken}`
+          }
+        ]);
+      }
+    };
+    const consoleInfo = vi.spyOn(console, "info").mockImplementation(() => undefined);
+
+    try {
+      const result = await processRelationshipSignalChunks({
+        uploadId: "upload_1",
+        recordingDate: "2026-07-15",
+        transcriptChunks: chunks,
+        segments,
+        semanticSegments: [],
+        audioInsights: [],
+        provider,
+        options: {
+          concurrency: 1,
+          recoveryConcurrency: 1,
+          maxRetries: 0,
+          retryDelayMs: 0,
+          attemptTimeoutMs: 1_000,
+          totalBudgetMs: 3_000,
+          now: () => timestamp,
+          analysisCheckpoint: {
+            store: checkpointStore,
+            userId: "user_1",
+            processorFingerprint: "relationship-validation-diagnostics-v1"
+          }
+        }
+      });
+
+      expect(result.stats.validationFailureChunks).toBe(1);
+      const logs = consoleInfo.mock.calls.map(([message]) => String(message)).join("\n");
+      expect(logs).toContain("[relationship-provider] validation_failed");
+      expect(logs).toContain("validation_issue_count=12");
+      expect(logs).toContain("validation_issue_codes=invalid_enum_value");
+      expect(logs).toContain("validation_issue_paths=items[0].signalType");
+      expect(logs).toContain("items[9].signalType");
+      expect(logs).not.toContain("items[10].signalType");
+      expect(logs).toContain("truncated=true");
+      expect(logs).not.toContain(sensitiveTranscript);
+      expect(logs).not.toContain(sensitiveQuote);
+      expect(logs).not.toContain(sensitiveToken);
+
+      const checkpoints = await checkpointStore.list({
+        userId: "user_1",
+        uploadId: "upload_1",
+        kind: "relationship_candidate"
+      });
+      expect(checkpoints).toHaveLength(1);
+      expect(checkpoints[0].metadata.validationIssueSummary).toEqual([
+        { code: "invalid_enum_value", count: 12 }
+      ]);
+      const responseDiagnostics = checkpoints[0].metadata.responseDiagnostics as Record<string, unknown>;
+      expect(responseDiagnostics).toMatchObject({
+        parseResult: "success",
+        validationResult: "failed",
+        validationIssueCount: 12,
+        validationIssuesTruncated: true
+      });
+      expect(responseDiagnostics.validationIssues).toBeUndefined();
+      expect(responseDiagnostics.validationIssueSummary).toBeUndefined();
+      expect(JSON.stringify(checkpoints[0].metadata)).not.toContain(sensitiveTranscript);
+      expect(JSON.stringify(checkpoints[0].metadata)).not.toContain(sensitiveQuote);
+      expect(JSON.stringify(checkpoints[0].metadata)).not.toContain(sensitiveToken);
     } finally {
       consoleInfo.mockRestore();
     }

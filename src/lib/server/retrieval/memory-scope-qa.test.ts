@@ -141,7 +141,7 @@ describe("memory scope QA shadow isolation", () => {
     }
   });
 
-  it("returns the unchanged QA answer when the JSON shadow snapshot fails", async () => {
+  it("reuses the ranked evidence from the actual QA call for shadow observation", async () => {
     tempDir = await mkdtemp(join(tmpdir(), "memory-scope-shadow-"));
     const store = new JsonStore(tempDir);
     await store.write("uploads", "upload_1", {
@@ -163,11 +163,20 @@ describe("memory scope QA shadow isolation", () => {
       citedSegmentIds: ["segment_1"],
       createdAt: "2026-07-10T10:00:00.000Z"
     };
-    answerQuestionWithAIMock.mockResolvedValue(expectedAnswer);
-    retrieveQaEvidenceMock.mockImplementation(() => {
-      throw new Error("shadow snapshot failed");
+    const rankedEvidence = [{
+      id: "segment_1",
+      kind: "raw",
+      title: "evidence",
+      text: "bounded evidence",
+      startSeconds: 0,
+      endSeconds: 1,
+      sourceSegmentIds: ["segment_1"],
+      priority: 1
+    }];
+    answerQuestionWithAIMock.mockImplementation(async (input) => {
+      input.onRetrievedEvidence?.(rankedEvidence, 7);
+      return expectedAnswer;
     });
-    const warning = vi.spyOn(console, "warn").mockImplementation(() => undefined);
 
     const answer = await answerMemoryScopeQuestion({
       scopeId: "all_memory",
@@ -179,7 +188,10 @@ describe("memory scope QA shadow isolation", () => {
 
     expect(answer).toEqual(expectedAnswer);
     expect(answerQuestionWithAIMock).toHaveBeenCalledOnce();
-    expect(observeMemoryShadowRetrievalMock).not.toHaveBeenCalled();
-    expect(warning).toHaveBeenCalledWith(expect.stringContaining("json_observer_failure=shadow snapshot failed"));
+    expect(retrieveQaEvidenceMock).not.toHaveBeenCalled();
+    expect(observeMemoryShadowRetrievalMock).toHaveBeenCalledWith(expect.objectContaining({
+      jsonEvidence: rankedEvidence,
+      jsonRetrievalTimeMs: 7
+    }));
   });
 });

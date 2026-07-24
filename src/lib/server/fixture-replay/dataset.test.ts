@@ -31,6 +31,19 @@ describe("memory fixture dataset", () => {
     expect(first.every((segment) => segment.uploadId === fixtureUploadId(session.sessionId))).toBe(true);
     expect(first.every((segment, index) => index === 0 || segment.startSeconds > first[index - 1].endSeconds)).toBe(true);
     expect(first.map((segment) => segment.speaker)).toEqual(["A", "B", "A", "B", "A", "B", "A", "B", "A", "B"]);
+    expect(first.map((segment) => segment.identity?.globalSpeakerId)).toEqual([
+      "fixture_person_a",
+      "fixture_person_b",
+      "fixture_person_a",
+      "fixture_person_b",
+      "fixture_person_a",
+      "fixture_person_b",
+      "fixture_person_a",
+      "fixture_person_b",
+      "fixture_person_a",
+      "fixture_person_b"
+    ]);
+    expect(first.every((segment) => segment.identity?.source === "manual_mapping")).toBe(true);
   });
 
   it("rejects paths outside the dataset", () => {

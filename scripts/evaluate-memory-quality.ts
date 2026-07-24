@@ -12,6 +12,7 @@ import { RawRelationshipSignalItemSchema } from "@/lib/processing/relationship-s
 import { openMemoryDatabase } from "@/lib/server/memory/db";
 import { extractUploadMemoriesWithAudit } from "@/lib/server/memory/extractor";
 import { calculateImportance } from "@/lib/server/memory/importance";
+import { normalizeEvidenceQuoteForDedup } from "@/lib/server/memory/evidence-deduplication";
 import { detectMemoryRelationsWithAudit } from "@/lib/server/memory/relations";
 import { createMemoryRepository } from "@/lib/server/memory/repository";
 import {
@@ -164,7 +165,7 @@ async function main() {
     const duplicateEvidence = memories.flatMap((memory) => {
       const seen = new Set<string>();
       return memory.evidence.filter((evidence) => {
-        const key = `${evidence.sourceType}\u001f${evidence.sourceId}`;
+        const key = `${evidence.uploadId}\u001f${evidence.sourceId}\u001f${normalizeEvidenceQuoteForDedup(evidence.quote)}`;
         if (seen.has(key)) return true;
         seen.add(key);
         return false;

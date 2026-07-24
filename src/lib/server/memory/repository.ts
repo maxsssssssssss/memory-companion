@@ -2,6 +2,16 @@ import type Database from "better-sqlite3";
 import { consolidateMemories } from "./deduplication";
 import { calculateImportance, combineImportanceReasons } from "./importance";
 import { detectMemoryRelations } from "./relations";
+import { deduplicateMemoryEvidence } from "./evidence-deduplication";
+import {
+  PersistedMemoryOwnerObservationSchema,
+  aggregateMemoryOwnerObservations,
+  createPersistedMemoryOwnerObservation,
+  memoryOwnerMergeCompatible,
+  rekeyMemoryOwnerObservations,
+  type PersistedMemoryOwnerObservation
+} from "./owner-attribution/storage";
+import type { MemoryOwnerMetadata } from "./owner-attribution/types";
 import {
   MemoryEvidenceSchema,
   MemoryItemSchema,
@@ -59,6 +69,22 @@ type MemoryRelationRow = {
   created_at: string;
 };
 
+type MemoryOwnerObservationRow = {
+  id: string;
+  memory_id: string;
+  upload_id: string;
+  memory_type: string;
+  owner_scope: string;
+  owner_type: string;
+  identity_id: string | null;
+  confidence: number;
+  source: string;
+  participants_json: string;
+  evidence_segment_ids_json: string;
+  reasons_json: string;
+  created_at: string;
+};
+
 function assertIdentifier(value: string, name: string) {
   const normalized = value.trim();
   if (!normalized || normalized.length > 512) {
@@ -80,19 +106,14 @@ function sanitizeIncomingMemories(input: ReplaceUploadMemoriesInput) {
     ? new Map(input.sourceSegments.map((segment) => [segment.id, segment]))
     : undefined;
 
-  return input.memories.flatMap((rawMemory) => {
+  let duplicateEvidenceRemoved = 0;
+  const memories = input.memories.flatMap((rawMemory) => {
     const parsed = MemoryWriteInputSchema.parse(rawMemory);
-    const seen = new Set<string>();
     const transcriptEvidence = parsed.evidence.flatMap((evidence) => {
       if (evidence.sourceType !== "transcript" || evidence.uploadId !== input.uploadId) {
         return [];
       }
-      const key = `${evidence.sourceType}\u001f${evidence.sourceId}`;
-      if (seen.has(key)) {
-        return [];
-      }
       if (!segmentById) {
-        seen.add(key);
         return [evidence];
       }
       const segment = segmentById.get(evidence.sourceId);
@@ -104,7 +125,6 @@ function sanitizeIncomingMemories(input: ReplaceUploadMemoriesInput) {
       if (!actual || !expected.includes(actual)) {
         return [];
       }
-      seen.add(key);
       return [{ ...evidence, quote: segment.text.slice(0, 4_000) }];
     });
 
@@ -119,10 +139,6 @@ function sanitizeIncomingMemories(input: ReplaceUploadMemoriesInput) {
       if (evidence.sourceType === "transcript" || evidence.uploadId !== input.uploadId) {
         return [];
       }
-      const key = `${evidence.sourceType}\u001f${evidence.sourceId}`;
-      if (seen.has(key)) {
-        return [];
-      }
       const actual = normalizedQuote(evidence.quote);
       const groundedTranscript = transcriptEvidence.find((item) => {
         const source = normalizedQuote(item.quote);
@@ -134,15 +150,17 @@ function sanitizeIncomingMemories(input: ReplaceUploadMemoriesInput) {
         );
         return [];
       }
-      seen.add(key);
       return [{ ...evidence, quote: groundedTranscript.quote }];
     });
 
+    const deduplicated = deduplicateMemoryEvidence(parsed.id, [...transcriptEvidence, ...derivedEvidence]);
+    duplicateEvidenceRemoved += deduplicated.removed;
     return [MemoryWriteInputSchema.parse({
       ...parsed,
-      evidence: [...transcriptEvidence, ...derivedEvidence]
+      evidence: deduplicated.evidence
     })];
   });
+  return { memories, duplicateEvidenceRemoved };
 }
 
 function boundedLimit(value: number | undefined, fallback = 50) {
@@ -205,17 +223,62 @@ function relationFromRow(row: MemoryRelationRow): MemoryRelation {
   });
 }
 
+function parsedJsonArray(value: string) {
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+function ownerObservationFromRow(row: MemoryOwnerObservationRow) {
+  return PersistedMemoryOwnerObservationSchema.parse({
+    id: row.id,
+    memoryId: row.memory_id,
+    uploadId: row.upload_id,
+    memoryType: row.memory_type,
+    scope: row.owner_scope,
+    owner: {
+      type: row.owner_type,
+      ...(row.identity_id ? { identityId: row.identity_id } : {}),
+      confidence: row.confidence,
+      source: row.source
+    },
+    participants: parsedJsonArray(row.participants_json),
+    evidenceSegmentIds: parsedJsonArray(row.evidence_segment_ids_json),
+    reasons: parsedJsonArray(row.reasons_json),
+    createdAt: row.created_at
+  });
+}
+
+function observationsByMemoryId(observations: PersistedMemoryOwnerObservation[]) {
+  const byMemoryId = new Map<string, PersistedMemoryOwnerObservation[]>();
+  for (const observation of observations) {
+    const current = byMemoryId.get(observation.memoryId) ?? [];
+    current.push(observation);
+    byMemoryId.set(observation.memoryId, current);
+  }
+  return byMemoryId;
+}
+
 function evidenceDates(evidence: MemoryEvidence[]) {
   return [...new Set(evidence.map((item) => item.date))].sort();
 }
 
-function recalculateMemory(memory: MemoryItem, input: { resetResolved?: boolean } = {}) {
-  if (memory.evidence.length === 0) {
+function recalculateMemory(
+  memory: MemoryItem,
+  input: { resetResolved?: boolean; onEvidenceDedup?: (removed: number) => void } = {}
+) {
+  const deduplicated = deduplicateMemoryEvidence(memory.id, memory.evidence);
+  input.onEvidenceDedup?.(deduplicated.removed);
+  const evidence = deduplicated.evidence;
+  if (evidence.length === 0) {
     throw new Error(`Memory ${memory.id} has no evidence`);
   }
-  const dates = evidenceDates(memory.evidence);
+  const dates = evidenceDates(evidence);
   const status = input.resetResolved && memory.status === "resolved" ? "active" : memory.status;
-  const occurrenceCount = new Set(memory.evidence.map((item) => item.uploadId)).size;
+  const occurrenceCount = new Set(evidence.map((item) => item.uploadId)).size;
   const importance = calculateImportance({
     type: memory.type,
     title: memory.title,
@@ -223,8 +286,8 @@ function recalculateMemory(memory: MemoryItem, input: { resetResolved?: boolean 
     status,
     occurrenceCount,
     evidenceDates: dates,
-    evidenceSourceTypes: memory.evidence.map((item) => item.sourceType),
-    evidenceCount: memory.evidence.length
+    evidenceSourceTypes: evidence.map((item) => item.sourceType),
+    evidenceCount: evidence.length
   });
   return MemoryItemSchema.parse({
     ...memory,
@@ -235,12 +298,14 @@ function recalculateMemory(memory: MemoryItem, input: { resetResolved?: boolean 
     occurrenceCount,
     firstSeenDate: dates[0],
     lastSeenDate: dates.at(-1),
-    date: dates.at(-1)
+    date: dates.at(-1),
+    evidence
   });
 }
 
 function incomingMemory(userId: string, input: NormalizedMemoryWriteInput): MemoryItem {
-  const evidence = input.evidence.map((item) => MemoryEvidenceSchema.parse({ ...item, memoryId: input.id }));
+  const parsedEvidence = input.evidence.map((item) => MemoryEvidenceSchema.parse({ ...item, memoryId: input.id }));
+  const evidence = deduplicateMemoryEvidence(input.id, parsedEvidence).evidence;
   if (!evidence.some((item) => item.sourceType === "transcript")) {
     throw new Error(`Memory ${input.id} has no transcript evidence`);
   }
@@ -274,9 +339,41 @@ function incomingMemory(userId: string, input: NormalizedMemoryWriteInput): Memo
   });
 }
 
-function buildManagedIndex(memories: MemoryItem[]) {
-  const reset = memories.map((memory) => recalculateMemory(memory, { resetResolved: true }));
-  const consolidated = consolidateMemories(reset);
+function buildManagedIndex(
+  memories: MemoryItem[],
+  ownerObservations: PersistedMemoryOwnerObservation[] = []
+) {
+  let duplicateEvidenceRemoved = 0;
+  const onEvidenceDedup = (removed: number) => {
+    duplicateEvidenceRemoved += removed;
+  };
+  const reset = memories.map((memory) => recalculateMemory(memory, { resetResolved: true, onEvidenceDedup }));
+  const ownerObservationsByMemoryId = observationsByMemoryId(ownerObservations);
+  const ownerMetadata = (memory: MemoryItem): MemoryOwnerMetadata | undefined =>
+    aggregateMemoryOwnerObservations({
+      memoryId: memory.id,
+      memoryType: memory.type,
+      observations: ownerObservationsByMemoryId.get(memory.id) ?? []
+    });
+  const consolidated = consolidateMemories(reset, onEvidenceDedup, {
+    canMerge: (primary, incoming) =>
+      memoryOwnerMergeCompatible(
+        primary.type,
+        ownerMetadata(primary),
+        ownerMetadata(incoming)
+      ),
+    onMerged: (primary, incoming, merged) => {
+      const combined = [
+        ...(ownerObservationsByMemoryId.get(primary.id) ?? []),
+        ...(ownerObservationsByMemoryId.get(incoming.id) ?? [])
+      ];
+      const rekeyed = rekeyMemoryOwnerObservations(combined, merged.id);
+      const unique = new Map(rekeyed.map((observation) => [observation.id, observation]));
+      ownerObservationsByMemoryId.set(merged.id, [...unique.values()]);
+      if (incoming.id !== merged.id) ownerObservationsByMemoryId.delete(incoming.id);
+      if (primary.id !== merged.id) ownerObservationsByMemoryId.delete(primary.id);
+    }
+  });
   const relations = detectMemoryRelations(consolidated);
   const resolvedIds = new Set(
     relations
@@ -301,9 +398,17 @@ function buildManagedIndex(memories: MemoryItem[]) {
     recalculateMemory({
       ...memory,
       status: resolvedIds.has(memory.id) ? "resolved" : memory.status
-    })
+    }, { onEvidenceDedup })
   );
-  return { memories: managed, relations };
+  const managedIds = new Set(managed.map((memory) => memory.id));
+  return {
+    memories: managed,
+    relations,
+    duplicateEvidenceRemoved,
+    ownerObservations: [...ownerObservationsByMemoryId.entries()]
+      .filter(([memoryId]) => managedIds.has(memoryId))
+      .flatMap(([, observations]) => observations)
+  };
 }
 
 export function createMemoryRepository(database: Database.Database): MemoryRepository {
@@ -320,6 +425,13 @@ export function createMemoryRepository(database: Database.Database): MemoryRepos
   const selectItemById = database.prepare(`
     SELECT * FROM memory_items
     WHERE user_id = ? AND id = ?
+  `);
+  const selectUserOwnerObservations = database.prepare(`
+    SELECT memory_owner_observations.*, memory_items.type AS memory_type
+    FROM memory_owner_observations
+    INNER JOIN memory_items ON memory_items.id = memory_owner_observations.memory_id
+    WHERE memory_items.user_id = ?
+    ORDER BY memory_owner_observations.created_at, memory_owner_observations.id
   `);
   const deleteUserItems = database.prepare("DELETE FROM memory_items WHERE user_id = ?");
   const insertItem = database.prepare(`
@@ -341,6 +453,15 @@ export function createMemoryRepository(database: Database.Database): MemoryRepos
     INSERT INTO memory_relations (id, source_memory_id, target_memory_id, relation_type, confidence, created_at)
     VALUES (@id, @sourceMemoryId, @targetMemoryId, @relationType, @confidence, @createdAt)
   `);
+  const insertOwnerObservation = database.prepare(`
+    INSERT INTO memory_owner_observations (
+      id, memory_id, upload_id, owner_scope, owner_type, identity_id, confidence,
+      source, participants_json, evidence_segment_ids_json, reasons_json, created_at
+    ) VALUES (
+      @id, @memoryId, @uploadId, @scope, @ownerType, @identityId, @confidence,
+      @source, @participantsJson, @evidenceSegmentIdsJson, @reasonsJson, @createdAt
+    )
+  `);
 
   function memoriesFromRows(rows: MemoryItemRow[], evidenceFilter?: (evidence: MemoryEvidence) => boolean) {
     return rows.map((row) => {
@@ -355,7 +476,17 @@ export function createMemoryRepository(database: Database.Database): MemoryRepos
     return memoriesFromRows(selectUserItems.all(userId) as MemoryItemRow[]);
   }
 
-  function writeUserIndex(userId: string, memories: MemoryItem[], relations: MemoryRelation[]) {
+  function loadUserOwnerObservations(userId: string) {
+    return (selectUserOwnerObservations.all(userId) as MemoryOwnerObservationRow[])
+      .map(ownerObservationFromRow);
+  }
+
+  function writeUserIndex(
+    userId: string,
+    memories: MemoryItem[],
+    relations: MemoryRelation[],
+    ownerObservations: PersistedMemoryOwnerObservation[] = []
+  ) {
     deleteUserItems.run(userId);
     for (const memory of memories) {
       insertItem.run({
@@ -377,9 +508,31 @@ export function createMemoryRepository(database: Database.Database): MemoryRepos
         createdAt: memory.createdAt,
         updatedAt: memory.updatedAt
       });
-      for (const evidence of memory.evidence) {
+      const deduplicated = deduplicateMemoryEvidence(memory.id, memory.evidence);
+      if (deduplicated.removed > 0) {
+        console.warn(`[memory-evidence-dedup] removed=${deduplicated.removed} memory_id=${memory.id} operation=write`);
+      }
+      for (const evidence of deduplicated.evidence) {
         insertEvidence.run({ ...evidence, memoryId: memory.id });
       }
+    }
+    const validMemoryIds = new Set(memories.map((memory) => memory.id));
+    for (const observation of ownerObservations) {
+      if (!validMemoryIds.has(observation.memoryId)) continue;
+      insertOwnerObservation.run({
+        id: observation.id,
+        memoryId: observation.memoryId,
+        uploadId: observation.uploadId,
+        scope: observation.scope,
+        ownerType: observation.owner.type,
+        identityId: observation.owner.identityId ?? null,
+        confidence: observation.owner.confidence,
+        source: observation.owner.source,
+        participantsJson: JSON.stringify(observation.participants),
+        evidenceSegmentIdsJson: JSON.stringify(observation.evidenceSegmentIds),
+        reasonsJson: JSON.stringify(observation.reasons),
+        createdAt: observation.createdAt
+      });
     }
     for (const relation of relations) {
       insertRelation.run(relation);
@@ -389,9 +542,10 @@ export function createMemoryRepository(database: Database.Database): MemoryRepos
   const replaceUploadMemories = database.transaction((input: ReplaceUploadMemoriesInput): MemoryIndexUpdateResult => {
     const userId = assertIdentifier(input.userId, "user id");
     const uploadId = assertIdentifier(input.uploadId, "upload id");
-    const parsedInputs = sanitizeIncomingMemories({ ...input, uploadId });
+    const sanitized = sanitizeIncomingMemories({ ...input, uploadId });
 
     const existing = loadUserMemories(userId);
+    const existingOwnerObservations = loadUserOwnerObservations(userId);
     const remaining = existing
       .map((memory) => ({
         ...memory,
@@ -399,10 +553,40 @@ export function createMemoryRepository(database: Database.Database): MemoryRepos
       }))
       .filter((memory) => memory.evidence.length > 0)
       .map((memory) => recalculateMemory(memory));
-    const incoming = parsedInputs.map((memory) => incomingMemory(userId, memory));
+    const incoming = sanitized.memories.map((memory) => incomingMemory(userId, memory));
+    const sanitizedById = new Map(sanitized.memories.map((memory) => [memory.id, memory]));
+    const incomingOwnerObservations = (input.ownerAttributions ?? []).flatMap((resolution) => {
+      const memory = sanitizedById.get(resolution.memoryId);
+      if (!memory || memory.type !== resolution.memoryType) return [];
+      const allowedEvidenceSegmentIds = new Set(
+        memory.evidence
+          .filter((evidence) => evidence.sourceType === "transcript")
+          .map((evidence) => evidence.sourceId)
+      );
+      const observation = createPersistedMemoryOwnerObservation({
+        uploadId,
+        resolution,
+        allowedEvidenceSegmentIds,
+        createdAt: memory.createdAt
+      });
+      return observation ? [observation] : [];
+    });
+    const remainingIds = new Set(remaining.map((memory) => memory.id));
+    const remainingOwnerObservations = existingOwnerObservations.filter(
+      (observation) => observation.uploadId !== uploadId && remainingIds.has(observation.memoryId)
+    );
     const beforeConsolidation = remaining.length + incoming.length;
-    const managed = buildManagedIndex([...remaining, ...incoming]);
-    writeUserIndex(userId, managed.memories, managed.relations);
+    const managed = buildManagedIndex(
+      [...remaining, ...incoming],
+      [...remainingOwnerObservations, ...incomingOwnerObservations]
+    );
+    writeUserIndex(userId, managed.memories, managed.relations, managed.ownerObservations);
+    const duplicateEvidenceRemoved = sanitized.duplicateEvidenceRemoved + managed.duplicateEvidenceRemoved;
+    if (duplicateEvidenceRemoved > 0) {
+      console.warn(
+        `[memory-evidence-dedup] removed=${duplicateEvidenceRemoved} user_id=${userId} upload_id=${uploadId}`
+      );
+    }
 
     return {
       inputCount: incoming.length,
@@ -466,15 +650,25 @@ export function createMemoryRepository(database: Database.Database): MemoryRepos
     const userId = assertIdentifier(userIdInput, "user id");
     const uploadId = assertIdentifier(uploadIdInput, "upload id");
     database.transaction(() => {
-      const remaining = loadUserMemories(userId)
+      const existing = loadUserMemories(userId);
+      const remaining = existing
         .map((memory) => ({
           ...memory,
           evidence: memory.evidence.filter((item) => item.uploadId !== uploadId)
         }))
         .filter((memory) => memory.evidence.length > 0)
         .map((memory) => recalculateMemory(memory));
-      const managed = buildManagedIndex(remaining);
-      writeUserIndex(userId, managed.memories, managed.relations);
+      const remainingIds = new Set(remaining.map((memory) => memory.id));
+      const ownerObservations = loadUserOwnerObservations(userId).filter(
+        (observation) => observation.uploadId !== uploadId && remainingIds.has(observation.memoryId)
+      );
+      const managed = buildManagedIndex(remaining, ownerObservations);
+      writeUserIndex(userId, managed.memories, managed.relations, managed.ownerObservations);
+      if (managed.duplicateEvidenceRemoved > 0) {
+        console.warn(
+          `[memory-evidence-dedup] removed=${managed.duplicateEvidenceRemoved} user_id=${userId} operation=delete_upload`
+        );
+      }
     })();
   }
 
@@ -525,6 +719,26 @@ export function createMemoryRepository(database: Database.Database): MemoryRepos
       });
   }
 
+  function getMemoryOwnerAttributions(userIdInput: string, memoryIds?: string[]) {
+    const userId = assertIdentifier(userIdInput, "user id");
+    const requestedIds = memoryIds
+      ? new Set(memoryIds.map((memoryId) => assertIdentifier(memoryId, "memory id")))
+      : undefined;
+    const grouped = observationsByMemoryId(
+      loadUserOwnerObservations(userId).filter(
+        (observation) => !requestedIds || requestedIds.has(observation.memoryId)
+      )
+    );
+    return [...grouped.entries()].flatMap(([memoryId, observations]) => {
+      const metadata = aggregateMemoryOwnerObservations({
+        memoryId,
+        memoryType: observations[0].memoryType,
+        observations
+      });
+      return metadata ? [metadata] : [];
+    }).sort((left, right) => left.memoryId.localeCompare(right.memoryId));
+  }
+
   function getUserIds() {
     return (database.prepare("SELECT DISTINCT user_id FROM memory_items ORDER BY user_id").all() as Array<{ user_id: string }>)
       .map((row) => row.user_id);
@@ -533,8 +747,13 @@ export function createMemoryRepository(database: Database.Database): MemoryRepos
   const rebuildUserMemories = database.transaction((userIdInput: string): MemoryIndexUpdateResult => {
     const userId = assertIdentifier(userIdInput, "user id");
     const existing = loadUserMemories(userId);
-    const managed = buildManagedIndex(existing);
-    writeUserIndex(userId, managed.memories, managed.relations);
+    const managed = buildManagedIndex(existing, loadUserOwnerObservations(userId));
+    writeUserIndex(userId, managed.memories, managed.relations, managed.ownerObservations);
+    if (managed.duplicateEvidenceRemoved > 0) {
+      console.warn(
+        `[memory-evidence-dedup] removed=${managed.duplicateEvidenceRemoved} user_id=${userId} operation=rebuild`
+      );
+    }
     return {
       inputCount: existing.length,
       memoryCount: managed.memories.length,
@@ -553,6 +772,7 @@ export function createMemoryRepository(database: Database.Database): MemoryRepos
     getRepeatedMemories,
     getRelatedMemories,
     getMemoryRelations,
+    getMemoryOwnerAttributions,
     getUserIds,
     rebuildUserMemories
   };

@@ -118,6 +118,7 @@ export async function buildFixtureTranscriptSegments(input: {
     const startSeconds = roundMillis(cursor);
     const endSeconds = roundMillis(startSeconds + duration);
     cursor = endSeconds + INTER_UTTERANCE_GAPS[index % INTER_UTTERANCE_GAPS.length];
+    const globalSpeakerId = input.dataset.manifest.manualSpeakerIdentities?.[utterance.speaker];
 
     return TranscriptSegmentSchema.parse({
       id: fixtureSegmentId(input.session.sessionId, index),
@@ -125,6 +126,14 @@ export async function buildFixtureTranscriptSegments(input: {
       startSeconds,
       endSeconds,
       speaker: utterance.speaker,
+      ...(globalSpeakerId ? {
+        identity: {
+          globalSpeakerId,
+          identityType: "known_contact" as const,
+          confidence: 1,
+          source: "manual_mapping" as const
+        }
+      } : {}),
       text: utterance.text,
       confidence: 1,
       sceneLabels: ["self_reflection"],

@@ -5,12 +5,18 @@ import { ruleExtractionProvider } from "./rule-provider";
 
 export type ExtractionFallbackReason =
   | "deadline"
-  | "timeout"
+  | "network_error"
+  | "fetch_timeout"
+  | "provider_5xx"
   | "rate_limit"
+  | "empty_response"
+  | "incomplete_response"
+  | "max_output_tokens"
   | "invalid_json"
-  | "invalid_schema"
-  | "network"
-  | "provider_error";
+  | "validation_failure"
+  | "evidence_validation_failure"
+  | "content_filter"
+  | "unknown_provider_error";
 
 export type ExtractionProgressEvent =
   | {
@@ -41,6 +47,7 @@ export type ExtractionProgressEvent =
       itemCount: number;
       elapsedMs: number;
       provider: "openai" | "checkpoint" | "fixture";
+      resultSource?: "provider_success" | "provider_retry_success";
     }
   | {
       phase: "chunk_fallback";
@@ -50,6 +57,7 @@ export type ExtractionProgressEvent =
       itemCount: number;
       elapsedMs: number;
       reason: ExtractionFallbackReason;
+      resultSource?: "rule_fallback";
     }
   | {
       phase: "merged";
@@ -64,6 +72,7 @@ export type ExtractionProgressEvent =
 export type ExtractionOptions = {
   semanticSegments?: SemanticSegment[];
   onProgress?: (event: ExtractionProgressEvent) => void | Promise<void>;
+  evaluationRawResponseCapture?: boolean;
   analysisCheckpoint?: {
     store: JsonAnalysisChunkCheckpointStore;
     userId: string;
@@ -129,9 +138,11 @@ function wrapWithFallback(providerName: ProviderName, fallbackName: ProviderName
       try {
         return await primaryProvider.extract(uploadId, segments, options);
       } catch (error) {
+        const failureName = error instanceof Error
+          ? error.name.replace(/[^A-Za-z0-9_-]/gu, "").slice(0, 80) || "Error"
+          : "UnknownError";
         console.error(
-          `[extraction provider fallback] ${providerName} failed, fallback provider ${fallbackName} will be used.`,
-          error instanceof Error ? `${error.name}: ${error.message}` : "unknown error"
+          `[extraction provider fallback] primary=${providerName} fallback=${fallbackName} error_name=${failureName}`
         );
         return await fallbackProvider.extract(uploadId, segments, options);
       }

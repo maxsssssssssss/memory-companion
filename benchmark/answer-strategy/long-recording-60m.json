@@ -1,0 +1,240 @@
+[
+  {
+    "id": "q001",
+    "category": "fact",
+    "question": "准备带领读书会的人最担心哪两个现场场景？",
+    "expected_scope": "current",
+    "difficulty": "medium"
+  },
+  {
+    "id": "q002",
+    "category": "fact",
+    "question": "正式排练约在什么时间、地点，预计持续多久？",
+    "expected_scope": "current",
+    "difficulty": "easy"
+  },
+  {
+    "id": "q003",
+    "category": "fact",
+    "question": "陪练者在正式排练中答应负责哪些具体任务？",
+    "expected_scope": "current",
+    "difficulty": "medium"
+  },
+  {
+    "id": "q004",
+    "category": "fact",
+    "question": "读书会提纲计划什么时候发送，里面会包含什么？",
+    "expected_scope": "current",
+    "difficulty": "easy"
+  },
+  {
+    "id": "q005",
+    "category": "fact",
+    "question": "陶艺体验最终预约在什么时候，共有几个位置、哪些人参加？",
+    "expected_scope": "current",
+    "difficulty": "easy"
+  },
+  {
+    "id": "q007",
+    "category": "relationship",
+    "question": "面对读书会分享焦虑，对方是怎样先理解和回应，而不是马上给一堆建议的？",
+    "expected_scope": "current",
+    "difficulty": "medium"
+  },
+  {
+    "id": "q008",
+    "category": "relationship",
+    "question": "双方对排练后的反馈顺序做了什么约定？",
+    "expected_scope": "current",
+    "difficulty": "medium"
+  },
+  {
+    "id": "q009",
+    "category": "relationship",
+    "question": "讨论陶艺安排时，对方是怎样保留共同决定和修改选择的空间的？",
+    "expected_scope": "current",
+    "difficulty": "hard"
+  },
+  {
+    "id": "q010",
+    "category": "relationship",
+    "question": "为什么“应该没问题”这个回答会让另一方感到不舒服？",
+    "expected_scope": "current",
+    "difficulty": "medium"
+  },
+  {
+    "id": "q011",
+    "category": "relationship",
+    "question": "在陶艺场次沟通出现落差后，对方如何承认并修正自己的沟通方式？",
+    "expected_scope": "current",
+    "difficulty": "medium"
+  },
+  {
+    "id": "q012",
+    "category": "relationship",
+    "question": "双方最后形成的计划变化通知规则包括哪些要点？",
+    "expected_scope": "current",
+    "difficulty": "hard"
+  },
+  {
+    "id": "q013",
+    "category": "relationship",
+    "question": "变化通知规则只约束负责预约的人，还是对双方都适用？",
+    "expected_scope": "current",
+    "difficulty": "easy"
+  },
+  {
+    "id": "q014",
+    "category": "relationship",
+    "question": "后来哪些行为表明对方不仅记住了饮食偏好，还保留了当事人的选择权？",
+    "expected_scope": "current",
+    "difficulty": "medium"
+  },
+  {
+    "id": "q016",
+    "category": "lifecycle",
+    "question": "刚开始讨论陶艺体验时，哪些信息已经确认，哪些仍然未知？",
+    "expected_scope": "current",
+    "difficulty": "medium"
+  },
+  {
+    "id": "q017",
+    "category": "lifecycle",
+    "question": "陶艺预约后来从未确认状态变成了什么状态？",
+    "expected_scope": "current",
+    "difficulty": "easy"
+  },
+  {
+    "id": "q018",
+    "category": "lifecycle",
+    "question": "是否邀请朋友参加陶艺课这个问题后来是怎样解决的？",
+    "expected_scope": "current",
+    "difficulty": "medium"
+  },
+  {
+    "id": "q019",
+    "category": "lifecycle",
+    "question": "陶艺预约完成后，成品领取还是寄送是否已经最终决定？",
+    "expected_scope": "current",
+    "difficulty": "medium"
+  },
+  {
+    "id": "q020",
+    "category": "lifecycle",
+    "question": "读书会排练相关的承诺中，哪些仍是未来安排，哪些已经实际执行？",
+    "expected_scope": "current",
+    "difficulty": "hard"
+  },
+  {
+    "id": "q021",
+    "category": "lifecycle",
+    "question": "当晚十分钟的小排练和周二正式排练分别是什么状态？",
+    "expected_scope": "current",
+    "difficulty": "hard"
+  },
+  {
+    "id": "q022",
+    "category": "lifecycle",
+    "question": "录音中是否有证据表明三个讨论问题和提纲已经发送？",
+    "expected_scope": "current",
+    "difficulty": "medium"
+  },
+  {
+    "id": "q023",
+    "category": "lifecycle",
+    "question": "周二排练房间是否已经确认，还是仍属于之后要完成的事项？",
+    "expected_scope": "current",
+    "difficulty": "medium"
+  },
+  {
+    "id": "q025",
+    "category": "preference",
+    "question": "录音里明确提到的四项稳定饮食和用餐环境偏好是什么？",
+    "expected_scope": "current",
+    "difficulty": "easy"
+  },
+  {
+    "id": "q026",
+    "category": "preference",
+    "question": "选择座位时应该避开什么环境，优先考虑什么位置？",
+    "expected_scope": "current",
+    "difficulty": "easy"
+  },
+  {
+    "id": "q027",
+    "category": "preference",
+    "question": "参加陶艺体验时，对课程形式、衣物和活动后安排有哪些偏好？",
+    "expected_scope": "current",
+    "difficulty": "medium"
+  },
+  {
+    "id": "q028",
+    "category": "preference",
+    "question": "接受排练反馈时，当事人更喜欢怎样的顺序和信息量？",
+    "expected_scope": "current",
+    "difficulty": "medium"
+  },
+  {
+    "id": "q029",
+    "category": "preference",
+    "question": "下次为这位当事人选择餐厅时，应当先用哪些条件筛选？",
+    "expected_scope": "current",
+    "difficulty": "medium"
+  },
+  {
+    "id": "q031",
+    "category": "ambiguous",
+    "question": "那个安排后来怎么样了？",
+    "expected_scope": "current",
+    "difficulty": "hard"
+  },
+  {
+    "id": "q032",
+    "category": "ambiguous",
+    "question": "之前说的那个预约最后有结果吗？",
+    "expected_scope": "current",
+    "difficulty": "medium"
+  },
+  {
+    "id": "q033",
+    "category": "ambiguous",
+    "question": "排练后来做了吗？",
+    "expected_scope": "current",
+    "difficulty": "hard"
+  },
+  {
+    "id": "q034",
+    "category": "ambiguous",
+    "question": "她答应的事情都做完了吗？",
+    "expected_scope": "current",
+    "difficulty": "hard"
+  },
+  {
+    "id": "q036",
+    "category": "companion",
+    "question": "我一想到读书会冷场就紧张，你会怎么回应我？",
+    "expected_scope": "current",
+    "difficulty": "medium"
+  },
+  {
+    "id": "q037",
+    "category": "companion",
+    "question": "沉默几秒是不是就说明我把讨论带得很差？",
+    "expected_scope": "current",
+    "difficulty": "medium"
+  },
+  {
+    "id": "q038",
+    "category": "companion",
+    "question": "我最容易慌的地方，需要什么样的支持会更合适？",
+    "expected_scope": "current",
+    "difficulty": "medium"
+  },
+  {
+    "id": "q039",
+    "category": "companion",
+    "question": "计划临时变化让我不舒服，是不是我太敏感了？",
+    "expected_scope": "current",
+    "difficulty": "medium"
+  }
+]

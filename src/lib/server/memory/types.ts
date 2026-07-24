@@ -1,5 +1,9 @@
 import { z } from "zod";
 import type { TranscriptSegment } from "@/lib/domain/types";
+import type {
+  MemoryOwnerMetadata,
+  MemoryOwnerResolution
+} from "./owner-attribution/types";
 
 const DateKeySchema = z.string().regex(/^\d{4}-\d{2}-\d{2}$/);
 const RecordIdSchema = z.string().trim().min(1).max(512);
@@ -121,6 +125,7 @@ export type ReplaceUploadMemoriesInput = {
   uploadId: string;
   memories: MemoryWriteInput[];
   sourceSegments?: TranscriptSegment[];
+  ownerAttributions?: MemoryOwnerResolution[];
 };
 
 export type MemoryIndexUpdateResult = {
@@ -145,6 +150,7 @@ export type MemoryRepository = {
   getRepeatedMemories(userId: string, limit?: number): MemoryItem[];
   getRelatedMemories(userId: string, memoryId: string): RelatedMemory[];
   getMemoryRelations(userId: string): MemoryRelation[];
+  getMemoryOwnerAttributions(userId: string, memoryIds?: string[]): MemoryOwnerMetadata[];
   getUserIds(): string[];
   rebuildUserMemories(userId: string): MemoryIndexUpdateResult;
 };

@@ -65,6 +65,10 @@ describe("fixture replay reset", () => {
       memories: [memoryInput("other_memory", "other_upload", "2026-06-29")]
     });
     await selectedStore.write("uploads", fixtureUploadId, { id: fixtureUploadId });
+    await selectedStore.write("memory-owner-audits", fixtureUploadId, {
+      version: 1,
+      memoriesProcessed: 1
+    });
     await selectedStore.write("uploads", "real_upload", { id: "real_upload" });
     await otherStore.write("uploads", "other_upload", { id: "other_upload" });
 
@@ -80,6 +84,7 @@ describe("fixture replay reset", () => {
     expect(repository.getRelevantMemories({ userId: "memory-eval-user" })).toEqual([]);
     expect(repository.getRelevantMemories({ userId: "other-user" })).toHaveLength(1);
     expect(await selectedStore.read("uploads", fixtureUploadId)).toBeNull();
+    expect(await selectedStore.read("memory-owner-audits", fixtureUploadId)).toBeNull();
     expect(await selectedStore.read("uploads", "real_upload")).toEqual({ id: "real_upload" });
     expect(await otherStore.read("uploads", "other_upload")).toEqual({ id: "other_upload" });
     database.close();

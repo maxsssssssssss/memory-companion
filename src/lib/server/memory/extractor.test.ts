@@ -2,7 +2,7 @@
 
 import { describe, expect, it } from "vitest";
 import type { BriefItem, RelationshipSignalCard, SemanticSegment, TranscriptSegment } from "@/lib/domain/types";
-import { extractUploadMemories } from "./extractor";
+import { extractUploadMemories, extractUploadMemoriesWithAudit } from "./extractor";
 
 const segments: TranscriptSegment[] = [
   {
@@ -11,6 +11,12 @@ const segments: TranscriptSegment[] = [
     startSeconds: 0,
     endSeconds: 8,
     speaker: "speaker_1",
+    identity: {
+      globalSpeakerId: "person_user",
+      identityType: "known_contact",
+      confidence: 0.96,
+      source: "manual_mapping"
+    },
     text: "我会在周五前确认餐厅。",
     confidence: 0.96,
     sceneLabels: ["unknown"],
@@ -22,6 +28,12 @@ const segments: TranscriptSegment[] = [
     startSeconds: 9,
     endSeconds: 18,
     speaker: "speaker_2",
+    identity: {
+      globalSpeakerId: "person_partner",
+      identityType: "known_contact",
+      confidence: 0.95,
+      source: "manual_mapping"
+    },
     text: "那周六具体几点还需要再确认。",
     confidence: 0.94,
     sceneLabels: ["unknown"],
@@ -103,6 +115,59 @@ const relationshipSignals: RelationshipSignalCard[] = [
 ];
 
 describe("memory extraction", () => {
+  it("consumes lifecycle metadata to resolve a relationship memory with target evidence", () => {
+    const extraction = extractUploadMemoriesWithAudit({
+      userId: "user_1",
+      uploadId: "upload_1",
+      recordingDate: "2026-07-08",
+      segments,
+      briefItems: [],
+      semanticSegments: [],
+      relationshipSignals,
+      relationshipLifecycle: {
+        candidateIdsByCardId: { signal_1: ["candidate_plan"] },
+        edges: [
+          {
+            fromSignalId: "candidate_plan",
+            toSignalId: "candidate_update",
+            relationType: "updated_by",
+            confidence: 0.86,
+            evidence: {
+              fromSegments: ["segment_1"],
+              toSegments: ["segment_2"]
+            },
+            reason: "commitment_to_update:shared_topic:shared_speaker_context:forward_time"
+          },
+          {
+            fromSignalId: "candidate_update",
+            toSignalId: "candidate_completion",
+            relationType: "fulfilled_by",
+            confidence: 0.9,
+            evidence: {
+              fromSegments: ["segment_2"],
+              toSegments: ["segment_2"]
+            },
+            reason: "commitment_to_fulfillment:shared_topic:shared_speaker_context:forward_time"
+          }
+        ]
+      },
+      now: "2026-07-10T10:00:00.000Z"
+    });
+    const memory = extraction.memories.find((item) => item.type === "relationship_signal");
+
+    expect(memory).toEqual(expect.objectContaining({ status: "resolved" }));
+    expect(memory?.evidence).toEqual(expect.arrayContaining([
+      expect.objectContaining({ sourceType: "transcript", sourceId: "segment_2", quote: segments[1].text })
+    ]));
+    expect(extraction.audit.relationshipSignals).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        signalId: "signal_1",
+        lifecycleResolved: true,
+        lifecycleRelationTypes: ["updated_by", "fulfilled_by"]
+      })
+    ]));
+  });
+
   it("extracts stable preferences directly from verbatim transcript evidence", () => {
     const preferenceSegments: TranscriptSegment[] = [
       { ...segments[0], id: "pref_coffee_positive", text: "我更喜欢无糖拿铁。", valueLabels: [] },
@@ -154,6 +219,109 @@ describe("memory extraction", () => {
 
     expect(stable.every((item) => transcriptSourceIds.includes(item.id))).toBe(true);
     expect(transcriptSourceIds).not.toContain(oneTime.id);
+  });
+
+  it("does not persist a preference preface without a concrete preference identity", () => {
+    const preface: TranscriptSegment = {
+      ...segments[0],
+      id: "preference_preface",
+      text: "我先把几个一直没变的饮食习惯说清楚。",
+      valueLabels: []
+    };
+
+    expect(extractUploadMemories({
+      userId: "user_1",
+      uploadId: "upload_1",
+      recordingDate: "2026-07-08",
+      segments: [preface],
+      briefItems: [],
+      semanticSegments: [],
+      relationshipSignals: [],
+      now: "2026-07-10T10:00:00.000Z"
+    })).toEqual([]);
+  });
+
+  it("merges repeated observations of the same preference and audits the observation count", () => {
+    const repeatedPreferenceSegments: TranscriptSegment[] = [
+      { ...segments[0], id: "preference_first", text: "我不喜欢香菜。", valueLabels: [] },
+      { ...segments[0], id: "preference_repeated", startSeconds: 9, endSeconds: 18, text: "我不吃香菜。", valueLabels: [] }
+    ];
+
+    const result = extractUploadMemoriesWithAudit({
+      userId: "user_1",
+      uploadId: "upload_1",
+      recordingDate: "2026-07-08",
+      segments: repeatedPreferenceSegments,
+      briefItems: [],
+      semanticSegments: [],
+      relationshipSignals: [],
+      now: "2026-07-10T10:00:00.000Z"
+    });
+
+    expect(result.memories).toHaveLength(1);
+    expect(result.memories[0]?.evidence).toHaveLength(2);
+    expect(result.audit.preferenceCandidates).toEqual([
+      expect.objectContaining({ observationCount: 2, normalizedValue: "avoid", persisted: true })
+    ]);
+    expect(result.ownerAttributions).toEqual([
+      expect.objectContaining({
+        owner: expect.objectContaining({ type: "known_identity", identityId: "person_user" })
+      })
+    ]);
+  });
+
+  it("does not merge the same preference across different resolved owners", () => {
+    const result = extractUploadMemoriesWithAudit({
+      userId: "user_1",
+      uploadId: "upload_1",
+      recordingDate: "2026-07-08",
+      segments: [
+        { ...segments[0], id: "preference_owner_a", text: "我不太能吃辣。", valueLabels: [] },
+        { ...segments[1], id: "preference_owner_b", text: "我不喜欢吃辣。", valueLabels: [] }
+      ],
+      briefItems: [],
+      semanticSegments: [],
+      relationshipSignals: [],
+      now: "2026-07-10T10:00:00.000Z"
+    });
+
+    expect(result.memories).toHaveLength(2);
+    expect(result.ownerAttributions.map((item) => item.owner.identityId).sort())
+      .toEqual(["person_partner", "person_user"]);
+    expect(new Set(result.memories.map((memory) => memory.id)).size).toBe(2);
+  });
+
+  it("keeps an explicit preference daily-only when identity is unavailable", () => {
+    const result = extractUploadMemoriesWithAudit({
+      userId: "user_1",
+      uploadId: "upload_1",
+      recordingDate: "2026-07-08",
+      segments: [{
+        ...segments[0],
+        id: "preference_unknown_owner",
+        identity: undefined,
+        text: "我不太能吃辣。",
+        valueLabels: []
+      }],
+      briefItems: [],
+      semanticSegments: [],
+      relationshipSignals: [],
+      now: "2026-07-10T10:00:00.000Z"
+    });
+
+    expect(result.memories).toEqual([]);
+    expect(result.audit.decisions).toEqual([
+      expect.objectContaining({
+        shouldPersist: false,
+        memoryTier: "daily_only",
+        reasons: expect.arrayContaining(["preference_owner_not_reliably_identified"])
+      })
+    ]);
+    expect(result.audit.ownerAttribution).toMatchObject({
+      memoriesProcessed: 0,
+      unknownOwners: 0,
+      records: []
+    });
   });
 
   it("keeps daily relationship observations separate from long-term memory admission", () => {
@@ -385,7 +553,7 @@ describe("memory extraction", () => {
       now: "2026-07-10T10:00:00.000Z"
     });
 
-    expect(memories.map((memory) => memory.type).sort()).toEqual(["preference", "question"]);
+    expect(memories.map((memory) => memory.type).sort()).toEqual(["preference", "preference", "question"]);
     expect(memories.find((memory) => memory.type === "preference")?.importanceReasons).toContain(
       "extraction: contains explicit stable preference or habit"
     );
@@ -425,7 +593,7 @@ describe("memory extraction", () => {
     ).toEqual([]);
   });
 
-  it("keeps explicit recent activities and second-person preferences without treating chatter as event", () => {
+  it("keeps explicit recent activities but does not assign second-person preferences to the reporter", () => {
     const activitySegment: TranscriptSegment = {
       ...segments[0],
       id: "segment_activity",
@@ -470,7 +638,7 @@ describe("memory extraction", () => {
       now: "2026-07-10T10:00:00.000Z"
     });
 
-    expect(memories.map((memory) => memory.type).sort()).toEqual(["event", "preference"]);
+    expect(memories.map((memory) => memory.type)).toEqual(["event"]);
     expect(memories.find((memory) => memory.type === "event")?.importanceReasons).toContain(
       "extraction: contains a dated or completed activity"
     );

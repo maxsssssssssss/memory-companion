@@ -20,6 +20,24 @@ export type RelationshipSignalRequestMetrics = {
   systemPromptCharacterCount: number;
   jsonInstructionCharacterCount: number;
   maxOutputTokens: number;
+  recoveryMode: RelationshipSignalRecoveryMode;
+  candidateLimit: 3 | 5;
+  insightsBefore?: number;
+  insightsAfter?: number;
+  insightCharsBefore?: number;
+  insightCharsAfter?: number;
+  removedReasonCounts?: Record<string, number>;
+};
+
+export type RelationshipSignalRecoveryMode = "standard" | "compact";
+
+export type RelationshipSignalCandidateAudit = {
+  contract: "compact";
+  recoveryMode: RelationshipSignalRecoveryMode;
+  candidateLimit: 3 | 5;
+  rawCandidateCount: number;
+  compactCandidateCount: number;
+  overLimitCount: number;
 };
 
 export type RelationshipSignalProviderInput = {
@@ -28,9 +46,16 @@ export type RelationshipSignalProviderInput = {
   segments: TranscriptSegment[];
   semanticSegments: SemanticSegment[];
   audioInsights: AudioInsight[];
+  recoveryMode?: RelationshipSignalRecoveryMode;
   signal?: AbortSignal;
   onDiagnostics?: (diagnostics: StructuredJsonDiagnostics) => void;
   onRequestMetrics?: (metrics: RelationshipSignalRequestMetrics) => void;
+  onCandidateAudit?: (audit: RelationshipSignalCandidateAudit) => void;
+  evaluationRawResponseCapture?: {
+    evaluationRetention: boolean;
+    chunkIndex: number;
+    attempt: number;
+  };
 };
 
 export type RelationshipSignalProvider = {

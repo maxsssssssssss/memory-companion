@@ -69,7 +69,17 @@ describe("evaluation audit report", () => {
           sourceId: segment.id,
           uploadId: "upload_1",
           date: "2026-07-16",
-          quote: segment.text,
+          quote: "  我会在周六晚上帮你检查简历。  ",
+          createdAt: generatedAt
+        },
+        {
+          id: "evidence_distinct_quote",
+          memoryId: "memory_1",
+          sourceType: "transcript",
+          sourceId: segment.id,
+          uploadId: "upload_1",
+          date: "2026-07-16",
+          quote: "周六晚上",
           createdAt: generatedAt
         },
         {
@@ -108,7 +118,7 @@ describe("evaluation audit report", () => {
 
     expect(report.evidenceFirst).toMatchObject({
       audited: true,
-      evidenceCount: 3,
+      evidenceCount: 4,
       invalidSourceIds: 1,
       nonVerbatimQuotes: 0,
       duplicateEvidence: 1,
@@ -141,5 +151,29 @@ describe("evaluation audit report", () => {
       memoriesWithoutEvidence: null,
       orphanEvidence: null
     });
+  });
+
+  it("records only provider capture counts and hashes in the retained report", () => {
+    const report = buildEvaluationAuditReport({
+      ...baseInput(),
+      memoryStage: { status: "skipped", reason: "missing_user_id" },
+      memoryAuditStatus: "skipped",
+      memories: [],
+      providerRawResponses: {
+        version: 1,
+        enabled: true,
+        fileCount: 1,
+        aggregateSha256: "a".repeat(64),
+        files: [{ relativePath: "upload-ref/relationship/chunk.json", bytes: 123, sha256: "b".repeat(64) }]
+      }
+    });
+
+    expect(report.artifacts.providerRawResponses).toMatchObject({
+      enabled: true,
+      fileCount: 1,
+      aggregateSha256: "a".repeat(64)
+    });
+    expect(JSON.stringify(report)).not.toContain("rawResponse");
+    expect(JSON.stringify(report)).not.toContain("private marker");
   });
 });

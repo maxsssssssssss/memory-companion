@@ -152,6 +152,32 @@ describe("transcript chunk merge", () => {
     expect(reconcileSpeakers).toHaveBeenCalledTimes(1);
   });
 
+  it("preserves global identity metadata without replacing the chunk-local speaker", () => {
+    const chunk = createTranscriptChunkFromLocalSegments({
+      chunk: audioChunk(0),
+      localSegments: [localSegment(1, 1, 5)],
+      now: () => timestamp
+    });
+    const identified = {
+      ...chunk,
+      speakerMap: { speaker_1: "person_a" },
+      segments: chunk.segments.map((segment) => ({
+        ...segment,
+        identity: {
+          globalSpeakerId: "person_a",
+          identityType: "unknown_person" as const,
+          confidence: 0.91,
+          source: "cross_chunk_matching" as const
+        }
+      }))
+    };
+
+    const segment = mergeTranscriptChunks([identified]).segments[0];
+
+    expect(segment.speaker).toBe("speaker_1");
+    expect(segment.identity?.globalSpeakerId).toBe("person_a");
+  });
+
   it("removes a highly similar same-speaker duplicate at an overlapping chunk boundary", () => {
     const first = createTranscriptChunkFromLocalSegments({
       chunk: audioChunk(0),

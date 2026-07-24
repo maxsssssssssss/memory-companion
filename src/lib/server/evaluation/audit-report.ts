@@ -9,7 +9,10 @@ import type {
 } from "@/lib/domain/types";
 import type { ProactiveInsight } from "@/lib/domain/proactive-insights";
 import type { MemoryIndexUpdateResult, MemoryItem, MemoryRelation } from "@/lib/server/memory";
+import { normalizeEvidenceQuoteForDedup } from "@/lib/server/memory/evidence-deduplication";
 import type { RelationshipReducerAudit } from "@/lib/server/relationship-signals/candidates";
+import type { RelationshipLifecycleAudit } from "@/lib/server/relationship-signals/lifecycle/types";
+import type { ProviderRawResponseCaptureReport } from "./provider-response-capture";
 
 export const EVALUATION_AUDIT_REPORT_VERSION = 1 as const;
 
@@ -67,11 +70,14 @@ export type EvaluationAuditReport = {
     analysisCheckpoints: number;
     analysisCheckpointsByKind: Record<AnalysisChunkCheckpoint["kind"], number>;
     analysisCheckpointsByStatus: Record<AnalysisChunkCheckpoint["status"], number>;
+    providerRawResponses: ProviderRawResponseCaptureReport;
   };
   relationship: {
     stats: Record<string, number>;
     reducerAudit: RelationshipReducerAudit | null;
     reducerAuditAvailable: boolean;
+    lifecycleAudit: RelationshipLifecycleAudit | null;
+    lifecycleAuditAvailable: boolean;
   };
   memory: {
     stage: EvaluationMemoryIndexStageAudit;
@@ -174,7 +180,7 @@ function buildEvidenceFirstAudit(input: {
   const duplicateEvidence = currentUploadMemories.reduce((total, memory) => {
     const seen = new Set<string>();
     return total + memory.evidence.filter((item) => item.uploadId === input.uploadId).reduce((duplicates, item) => {
-      const key = `${item.sourceType}\u001f${item.sourceId}`;
+      const key = `${item.uploadId}\u001f${item.sourceId}\u001f${normalizeEvidenceQuoteForDedup(item.quote)}`;
       if (seen.has(key)) return duplicates + 1;
       seen.add(key);
       return duplicates;
@@ -212,6 +218,7 @@ export function buildEvaluationAuditReport(input: {
   analysisCheckpoints: AnalysisChunkCheckpoint[];
   relationshipStats: Record<string, number>;
   relationshipReducerAudit: RelationshipReducerAudit | null;
+  relationshipLifecycleAudit?: RelationshipLifecycleAudit | null;
   memoryStage: EvaluationMemoryIndexStageAudit;
   memoryAuditStatus: "completed" | "skipped" | "failed";
   memoryAuditError?: string;
@@ -219,6 +226,7 @@ export function buildEvaluationAuditReport(input: {
   memoryRelations: MemoryRelation[] | null;
   orphanEvidenceCount: number | null;
   memoriesWithoutEvidenceCount: number | null;
+  providerRawResponses?: ProviderRawResponseCaptureReport;
 }): EvaluationAuditReport {
   const currentUploadEvidence = input.memories.flatMap((memory) =>
     memory.evidence.filter((evidence) => evidence.uploadId === input.uploadId)
@@ -250,12 +258,21 @@ export function buildEvaluationAuditReport(input: {
       transcriptChunkCheckpoints: input.transcriptChunks.length,
       analysisCheckpoints: input.analysisCheckpoints.length,
       analysisCheckpointsByKind: countByAnalysisKind(input.analysisCheckpoints),
-      analysisCheckpointsByStatus: countByAnalysisStatus(input.analysisCheckpoints)
+      analysisCheckpointsByStatus: countByAnalysisStatus(input.analysisCheckpoints),
+      providerRawResponses: input.providerRawResponses ?? {
+        version: 1,
+        enabled: false,
+        fileCount: 0,
+        aggregateSha256: null,
+        files: []
+      }
     },
     relationship: {
       stats: input.relationshipStats,
       reducerAudit: input.relationshipReducerAudit,
-      reducerAuditAvailable: input.relationshipReducerAudit !== null
+      reducerAuditAvailable: input.relationshipReducerAudit !== null,
+      lifecycleAudit: input.relationshipLifecycleAudit ?? null,
+      lifecycleAuditAvailable: input.relationshipLifecycleAudit !== null && input.relationshipLifecycleAudit !== undefined
     },
     memory: {
       stage: input.memoryStage,

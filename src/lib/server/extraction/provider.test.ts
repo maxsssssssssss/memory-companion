@@ -62,9 +62,11 @@ describe("extraction providers", () => {
   it("falls back to rule extraction when OpenAI extraction fails", async () => {
     const originalProvider = process.env.EXTRACTION_PROVIDER;
     const originalFallbackProvider = process.env.EXTRACTION_FALLBACK_PROVIDER;
+    const sensitiveError = "PRIVATE_TRANSCRIPT token=PRIVATE_TOKEN Authorization=PRIVATE_HEADER";
     const openaiExtract = vi
       .spyOn(openaiExtractionProvider, "extract")
-      .mockRejectedValue(new Error("OpenAI extraction error"));
+      .mockRejectedValue(new Error(sensitiveError));
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
 
     try {
       process.env.EXTRACTION_PROVIDER = "openai";
@@ -79,7 +81,14 @@ describe("extraction providers", () => {
       expect(openaiExtractionProvider.extract).toHaveBeenCalledWith("upload_test", classifiedSegments, options);
       expect(items.length).toBeGreaterThan(0);
       expect(items.every((item) => item.sourceSegmentIds.length > 0)).toBe(true);
+      const logs = consoleError.mock.calls.map((call) => call.map(String).join(" ")).join("\n");
+      expect(logs).toContain("error_name=Error");
+      expect(logs).not.toContain(sensitiveError);
+      expect(logs).not.toContain("PRIVATE_TRANSCRIPT");
+      expect(logs).not.toContain("PRIVATE_TOKEN");
+      expect(logs).not.toContain("PRIVATE_HEADER");
     } finally {
+      consoleError.mockRestore();
       openaiExtract.mockRestore();
       if (originalProvider === undefined) {
         delete process.env.EXTRACTION_PROVIDER;

@@ -130,6 +130,26 @@ export const EmotionEvidenceSchema = z.object({
   correctedByUser: z.boolean().optional()
 });
 
+export const SpeakerIdentityTypeSchema = z.enum([
+  "known_user",
+  "known_contact",
+  "unknown_person"
+]);
+export const SpeakerIdentitySourceSchema = z.enum([
+  "voiceprint",
+  "cross_chunk_matching",
+  "manual_mapping"
+]);
+export const TranscriptSpeakerIdentitySchema = z
+  .object({
+    globalSpeakerId: z.string().min(1),
+    displayName: z.string().min(1).optional(),
+    identityType: SpeakerIdentityTypeSchema,
+    confidence: z.number().min(0).max(1),
+    source: SpeakerIdentitySourceSchema
+  })
+  .strict();
+
 export const TranscriptSegmentSchema = z
   .object({
     id: z.string().min(1),
@@ -137,6 +157,7 @@ export const TranscriptSegmentSchema = z
     startSeconds: z.number().nonnegative(),
     endSeconds: z.number().positive(),
     speaker: z.string().optional(),
+    identity: TranscriptSpeakerIdentitySchema.optional(),
     text: z.string().min(1),
     confidence: z.number().min(0).max(1),
     sceneLabels: z.array(SceneLabelSchema),
@@ -352,6 +373,9 @@ export type RelationshipSignalSeverity = z.infer<typeof RelationshipSignalSeveri
 export type RelationshipSignalEvidenceSegment = z.infer<typeof RelationshipSignalEvidenceSegmentSchema>;
 export type RelationshipSignalCard = z.infer<typeof RelationshipSignalCardSchema>;
 export type TranscriptSegment = z.infer<typeof TranscriptSegmentSchema>;
+export type SpeakerIdentityType = z.infer<typeof SpeakerIdentityTypeSchema>;
+export type SpeakerIdentitySource = z.infer<typeof SpeakerIdentitySourceSchema>;
+export type TranscriptSpeakerIdentity = z.infer<typeof TranscriptSpeakerIdentitySchema>;
 export type SemanticSegment = z.infer<typeof SemanticSegmentSchema>;
 export type SpeakerRole = z.infer<typeof SpeakerRoleSchema>;
 export type VoicePace = z.infer<typeof VoicePaceSchema>;

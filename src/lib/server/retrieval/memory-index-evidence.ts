@@ -5,6 +5,8 @@ import type {
   MemoryItemType,
   MemoryRepository
 } from "@/lib/server/memory/types";
+import type { MemoryOwnerMetadata } from "@/lib/server/memory/owner-attribution/types";
+import { filterMemoryOwnerMetadataByEvidence } from "@/lib/server/memory/owner-attribution/storage";
 
 export type MemoryIndexQaScope = "current" | "week" | "all";
 
@@ -16,6 +18,7 @@ export type MemoryIndexQaDateRange = {
 export type MemoryIndexQaContext = {
   scope: MemoryIndexQaScope;
   memories: MemoryItem[];
+  ownerAttributions?: MemoryOwnerMetadata[];
   evidence: MemoryEvidence[];
   sourceIds: string[];
   distinctDates: string[];
@@ -116,6 +119,7 @@ function emptyContext(scope: MemoryIndexQaScope, startedAt: number): MemoryIndex
   return {
     scope,
     memories: [],
+    ownerAttributions: [],
     evidence: [],
     sourceIds: [],
     distinctDates: [],
@@ -129,7 +133,8 @@ export function retrieveMemoryIndexEvidence(input: {
   scope: MemoryIndexQaScope;
   query: string;
   dateRange?: MemoryIndexQaDateRange;
-  repository?: Pick<MemoryRepository, "getRelevantMemories">;
+  repository?: Pick<MemoryRepository, "getRelevantMemories"> &
+    Partial<Pick<MemoryRepository, "getMemoryOwnerAttributions">>;
 }): MemoryIndexQaContext {
   const startedAt = performance.now();
   if (input.scope === "current") {
@@ -156,10 +161,31 @@ export function retrieveMemoryIndexEvidence(input: {
     memories.flatMap((memory) => memory.evidence).map((evidence) => [evidence.id, evidence])
   );
   const evidence = [...evidenceById.values()];
+  let ownerAttributions: MemoryOwnerMetadata[] = [];
+  try {
+    const retrieved = repository.getMemoryOwnerAttributions?.(
+      input.userId,
+      memories.map((memory) => memory.id)
+    ) ?? [];
+    const selectedTranscriptIds = new Set(
+      evidence
+        .filter((item) => item.sourceType === "transcript")
+        .map((item) => item.sourceId)
+    );
+    ownerAttributions = retrieved.flatMap((metadata) => {
+      const scoped = filterMemoryOwnerMetadataByEvidence(metadata, selectedTranscriptIds);
+      return scoped ? [scoped] : [];
+    });
+  } catch (error) {
+    console.warn(
+      `[memory-owner] retrieval_failed user_id=${input.userId} error_name=${error instanceof Error ? error.name : "unknown"}`
+    );
+  }
 
   return {
     scope: input.scope,
     memories,
+    ownerAttributions,
     evidence,
     sourceIds: [...new Set(evidence.map((item) => item.sourceId))],
     distinctDates: [...new Set(evidence.map((item) => item.date))].sort(),

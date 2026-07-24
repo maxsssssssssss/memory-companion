@@ -10,8 +10,17 @@ import type {
 } from "@/lib/domain/types";
 import { applySpeakerAliasesToPayload, sanitizeSpeakerAliases, type StoredSpeakerAliases } from "@/lib/domain/speaker-aliases";
 import { isUnauthenticatedError, requireAuthContext, unauthorizedResponse } from "@/lib/server/auth/request-context";
-import { answerQuestionWithAI, normalizeQaConversation } from "@/lib/server/retrieval/ai-qa";
+import {
+  answerQuestionWithAI,
+  normalizeQaConversation,
+  type AnswerQuestionWithAIInput
+} from "@/lib/server/retrieval/ai-qa";
 import { qaPromptInstructionFromBody } from "@/lib/server/retrieval/qa-prompt-override";
+import {
+  acceptsQaBrowserStream,
+  createTextQaBrowserStream,
+  textQaNdjsonResponse
+} from "@/lib/server/retrieval/text-qa-stream";
 
 const STORE_KEY_PATTERN = /^[A-Za-z0-9_-]+$/;
 
@@ -92,7 +101,7 @@ export async function POST(request: Request, { params }: { params: Promise<{ upl
   );
   const conversation = normalizeQaConversation(body.conversation);
   const qaPromptInstruction = qaPromptInstructionFromBody(body);
-  const answer = await answerQuestionWithAI({
+  const qaInput: AnswerQuestionWithAIInput = {
     uploadId,
     question: body.question.trim(),
     scope: "current",
@@ -104,16 +113,33 @@ export async function POST(request: Request, { params }: { params: Promise<{ upl
     settingsStore: authContext.store,
     ...(qaPromptInstruction ? { qaPromptInstruction } : {}),
     ...(conversation.length > 0 ? { conversation } : {})
-  });
-  const answers = (await authContext.store.read<QuestionAnswer[]>("answers-by-upload", uploadId)) ?? [];
+  };
+  const persistAnswer = async (answer: QuestionAnswer) => {
+    const answers =
+      (await authContext.store.read<QuestionAnswer[]>("answers-by-upload", uploadId)) ?? [];
 
-  await authContext.store.write("answers", answer.id, answer);
-  try {
-    await authContext.store.write("answers-by-upload", uploadId, [...answers, answer]);
-  } catch (error) {
-    await authContext.store.delete("answers", answer.id).catch(() => undefined);
-    throw error;
+    await authContext.store.write("answers", answer.id, answer);
+    try {
+      await authContext.store.write("answers-by-upload", uploadId, [...answers, answer]);
+    } catch (error) {
+      await authContext.store.delete("answers", answer.id).catch(() => undefined);
+      throw error;
+    }
+  };
+
+  if (acceptsQaBrowserStream(request)) {
+    return textQaNdjsonResponse(
+      createTextQaBrowserStream({
+        input: qaInput,
+        onFinal: async (event) => {
+          await persistAnswer(event.answer);
+        }
+      })
+    );
   }
+
+  const answer = await answerQuestionWithAI(qaInput);
+  await persistAnswer(answer);
 
   return NextResponse.json(answer);
 }
