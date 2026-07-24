@@ -3,6 +3,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+const testDataRootDir = join(tmpdir(), "daily-brief-test", "user_default");
+const testUploadsRootDir = join(testDataRootDir, "uploads");
+const testProviderConfigPath = join(testDataRootDir, "settings", "provider-config.json");
+
 const storeMock = vi.hoisted(() => ({
   list: vi.fn(),
   listIds: vi.fn(),
@@ -17,6 +21,7 @@ const rmMock = vi.hoisted(() => vi.fn());
 const statMock = vi.hoisted(() => vi.fn());
 const execFileMock = vi.hoisted(() => vi.fn());
 const processUploadMock = vi.hoisted(() => vi.fn());
+const deleteProviderRawResponseCapturesMock = vi.hoisted(() => vi.fn());
 const retrieveQaEvidenceMock = vi.hoisted(() => vi.fn());
 const observeMemoryShadowRetrievalMock = vi.hoisted(() => vi.fn());
 const retrieveMemoryIndexEvidenceMock = vi.hoisted(() => vi.fn());
@@ -80,6 +85,10 @@ vi.mock("@/lib/server/auth/request-context", () => authContextMock);
 vi.mock("@/lib/server/pipeline/process-upload", () => ({
   isUploadProcessingCancelled: vi.fn(() => false),
   processUpload: processUploadMock
+}));
+
+vi.mock("@/lib/server/evaluation/provider-response-capture", () => ({
+  deleteProviderRawResponseCaptures: deleteProviderRawResponseCapturesMock
 }));
 
 vi.mock("@/lib/server/queue/producer", () => ({
@@ -172,8 +181,10 @@ describe("API routes", () => {
     delete process.env.EVALUATION_MODE;
     delete process.env.PIPELINE_EXECUTION_MODE;
     vi.clearAllMocks();
+    storeMock.list.mockResolvedValue([]);
     storeMock.listIds.mockResolvedValue([]);
     processUploadMock.mockResolvedValue(undefined);
+    deleteProviderRawResponseCapturesMock.mockResolvedValue(undefined);
     enqueuePipelineJobMock.mockImplementation(async (payload) => ({
       jobId: buildPipelineJobId(payload),
       enqueued: true
@@ -204,8 +215,8 @@ describe("API routes", () => {
     authContextMock.requireAuthContext.mockResolvedValue({
       user: { id: "user_default", email: "default@example.com" },
       store: storeMock,
-      dataRootDir: "/tmp/daily-brief-test/user_default",
-      uploadsRootDir: "/tmp/daily-brief-test/user_default/uploads"
+      dataRootDir: testDataRootDir,
+      uploadsRootDir: testUploadsRootDir
     });
     answerQuestionWithAIMock.mockResolvedValue({
       id: "answer_1",
@@ -288,9 +299,9 @@ describe("API routes", () => {
     expect(jobId).toMatch(/^[A-Za-z0-9_-]+$/);
     expect(uploadCollection).toBe("uploads");
     expect(payload.originalName).toBe("../../../demo.m4a");
-    expect(payload.filePath).toBe(`/tmp/daily-brief-test/user_default/uploads/${uploadId}.m4a`);
+    expect(payload.filePath).toBe(join(testUploadsRootDir, `${uploadId}.m4a`));
     expect(payload.filePath.includes("..")).toBe(false);
-    expect(mkdirMock).toHaveBeenCalledWith("/tmp/daily-brief-test/user_default/uploads", { recursive: true });
+    expect(mkdirMock).toHaveBeenCalledWith(testUploadsRootDir, { recursive: true });
     expect(writeFileMock).toHaveBeenCalledOnce();
     expect(storeMock.write).toHaveBeenCalledWith("jobs", jobId, {
       id: jobId,
@@ -473,7 +484,7 @@ describe("API routes", () => {
     expect(response.status).toBe(201);
     expect(payload.originalName).toBe("Note-20000105224639.pcm");
     expect(payload.mimeType).toBe("audio/wav");
-    expect(payload.filePath).toBe(`/tmp/daily-brief-test/user_default/uploads/${uploadId}.wav`);
+    expect(payload.filePath).toBe(join(testUploadsRootDir, `${uploadId}.wav`));
     expect(new TextDecoder().decode(writtenBytes.subarray(0, 4))).toBe("RIFF");
     expect(new TextDecoder().decode(writtenBytes.subarray(8, 12))).toBe("WAVE");
   });
@@ -496,8 +507,8 @@ describe("API routes", () => {
       const [[, uploadId, payload]] = storeMock.write.mock.calls;
 
       expect(response.status).toBe(201);
-      expect(payload.filePath).toBe(`/tmp/daily-brief-test/user_default/uploads/${uploadId}.mp3`);
-      expect(mkdirMock).toHaveBeenCalledWith("/tmp/daily-brief-test/user_default/uploads", { recursive: true });
+      expect(payload.filePath).toBe(join(testUploadsRootDir, `${uploadId}.mp3`));
+      expect(mkdirMock).toHaveBeenCalledWith(testUploadsRootDir, { recursive: true });
     } finally {
       delete process.env.APP_DATA_DIR;
     }
@@ -876,9 +887,9 @@ describe("API routes", () => {
         customQaPrompt: "",
         storageMode: "local",
         canOpenDataFolder: true,
-        dataDirectory: "/tmp/daily-brief-test/user_default",
-        uploadsDirectory: "/tmp/daily-brief-test/user_default/uploads",
-        apiKeyStoragePath: "/tmp/daily-brief-test/user_default/settings/provider-config.json"
+        dataDirectory: testDataRootDir,
+        uploadsDirectory: testUploadsRootDir,
+        apiKeyStoragePath: testProviderConfigPath
       })
     );
     expect(JSON.stringify(body)).not.toContain("sk-or-secret");
@@ -997,10 +1008,10 @@ describe("API routes", () => {
     const response = await postOpenDataFolder(new Request("http://localhost/api/settings/open-data-folder", { method: "POST" }));
 
     expect(response.status).toBe(200);
-    expect(execFileMock).toHaveBeenCalledWith("open", ["/tmp/daily-brief-test/user_default"], expect.any(Function));
+    expect(execFileMock).toHaveBeenCalledWith("open", [testDataRootDir], expect.any(Function));
     await expect(response.json()).resolves.toEqual({
       opened: true,
-      dataDirectory: "/tmp/daily-brief-test/user_default"
+      dataDirectory: testDataRootDir
     });
   });
 
@@ -2441,7 +2452,7 @@ describe("API routes", () => {
           sizeBytes: 12,
           recordingDate: "2026-06-03",
           status: "ready",
-          filePath: "/tmp/daily-brief-test/user_default/uploads/upload_1.m4a"
+          filePath: join(testUploadsRootDir, "upload_1.m4a")
         };
       }
       if (collection === "jobs-by-upload") {
@@ -2462,7 +2473,7 @@ describe("API routes", () => {
       uploadId: "upload_1",
       deletedAt: expect.any(String)
     });
-    expect(rmMock).toHaveBeenCalledWith("/tmp/daily-brief-test/user_default/uploads/upload_1.m4a", { force: true });
+    expect(rmMock).toHaveBeenCalledWith(join(testUploadsRootDir, "upload_1.m4a"), { force: true });
     expect(storeMock.delete).toHaveBeenCalledWith("jobs", "job_1");
     expect(storeMock.delete).toHaveBeenCalledWith("uploads", "upload_1");
     expect(storeMock.delete).toHaveBeenCalledWith("jobs-by-upload", "upload_1");
@@ -2473,6 +2484,9 @@ describe("API routes", () => {
     expect(storeMock.delete).toHaveBeenCalledWith("semantic-segments", "upload_1");
     expect(storeMock.delete).toHaveBeenCalledWith("brief-items", "upload_1");
     expect(storeMock.delete).toHaveBeenCalledWith("relationship-signals", "upload_1");
+    expect(storeMock.delete).toHaveBeenCalledWith("relationship-lifecycle", "upload_1");
+    expect(storeMock.delete).toHaveBeenCalledWith("speaker-identities", "upload_1");
+    expect(storeMock.delete).toHaveBeenCalledWith("memory-owner-audits", "upload_1");
     expect(storeMock.delete).toHaveBeenCalledWith("proactive-insights", "current_upload_1");
     expect(storeMock.delete).toHaveBeenCalledWith("evaluation-reports", "upload_1");
     expect(storeMock.delete).toHaveBeenCalledWith("answers", "answer_1");
@@ -2495,7 +2509,7 @@ describe("API routes", () => {
           recordingDate: "2026-07-16",
           status: "ready",
           evaluationRetention: true,
-          filePath: "/tmp/daily-brief-test/user_default/uploads/upload_1.m4a"
+          filePath: join(testUploadsRootDir, "upload_1.m4a")
         };
       }
       return null;
@@ -2579,6 +2593,7 @@ describe("API routes", () => {
     expect(storeMock.delete).toHaveBeenCalledWith("uploads", "upload_1");
     expect(storeMock.delete).toHaveBeenCalledWith("evaluation-reports", "upload_1");
     expect(memoryRepositoryMock.deleteByUpload).toHaveBeenCalledWith("user_default", "upload_1");
+    expect(deleteProviderRawResponseCapturesMock).toHaveBeenCalledWith("upload_1");
   });
 
   it("keeps the parent upload retryable when child cleanup fails", async () => {

@@ -16,6 +16,7 @@ import { fixtureReplayProviders, createFixtureTranscriptionProvider } from "@/li
 import { replayMemoryFixtures } from "@/lib/server/fixture-replay/replay";
 import { resetFixtureReplayUser } from "@/lib/server/fixture-replay/reset";
 import { openMemoryDatabase } from "@/lib/server/memory/db";
+import { normalizeEvidenceQuoteForDedup } from "@/lib/server/memory/evidence-deduplication";
 import { createMemoryRepository } from "@/lib/server/memory/repository";
 import { processUpload } from "@/lib/server/pipeline/process-upload";
 import { JsonStore } from "@/lib/server/storage/json-store";
@@ -173,7 +174,12 @@ async function evidenceMetrics(report: Awaited<ReturnType<typeof replayMemoryFix
   const duplicateKeys = new Set<string>();
   let duplicateEvidence = 0;
   for (const item of report.memoryEvidence) {
-    const key = `${item.memoryId}:${item.sourceType}:${item.sourceId}`;
+    const key = JSON.stringify([
+      item.memoryId,
+      item.uploadId,
+      item.sourceId,
+      normalizeEvidenceQuoteForDedup(item.quote)
+    ]);
     if (duplicateKeys.has(key)) duplicateEvidence += 1;
     duplicateKeys.add(key);
   }

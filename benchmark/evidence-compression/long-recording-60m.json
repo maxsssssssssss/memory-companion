@@ -1,0 +1,175 @@
+{
+  "version": 1,
+  "datasetVersion": "long-recording-60m-v1",
+  "questions": [
+    {
+      "id": "q017",
+      "category": "lifecycle",
+      "question": "陶艺预约后来从未确认状态变成了什么状态？",
+      "expectedScope": "current",
+      "evaluation": {
+        "kind": "lifecycle",
+        "expectedState": "resolved",
+        "concepts": [
+          {
+            "id": "reservation_completed",
+            "anyOf": ["预约完成", "预约成功", "已经确认", "已确认"]
+          },
+          {
+            "id": "payment_or_notice",
+            "anyOf": ["付款", "支付", "确认通知"]
+          }
+        ],
+        "minimumConcepts": 2,
+        "requiredConceptIds": ["reservation_completed", "payment_or_notice"]
+      }
+    },
+    {
+      "id": "q018",
+      "category": "lifecycle",
+      "question": "是否邀请朋友参加陶艺课这个问题后来是怎样解决的？",
+      "expectedScope": "current",
+      "evaluation": {
+        "kind": "lifecycle",
+        "expectedState": "resolved",
+        "concepts": [
+          {
+            "id": "no_friends",
+            "anyOf": ["不邀请朋友", "没有邀请朋友", "不请朋友"]
+          },
+          {
+            "id": "two_people",
+            "anyOf": ["两个人", "两人参加", "只有他们两人", "两个位置"]
+          }
+        ],
+        "minimumConcepts": 2,
+        "requiredConceptIds": ["no_friends", "two_people"]
+      }
+    },
+    {
+      "id": "q034",
+      "category": "lifecycle",
+      "question": "她答应的事情都做完了吗？",
+      "expectedScope": "current",
+      "evaluation": {
+        "kind": "aggregate_lifecycle",
+        "expectedState": "partial_or_unknown",
+        "concepts": [],
+        "minimumConcepts": 0,
+        "requiredConceptIds": []
+      }
+    },
+    {
+      "id": "q025",
+      "category": "preference",
+      "question": "录音里明确提到的四项稳定饮食和用餐环境偏好是什么？",
+      "expectedScope": "current",
+      "evaluation": {
+        "kind": "preference",
+        "expectedState": "not_applicable",
+        "concepts": [
+          {
+            "id": "cilantro_avoid",
+            "anyOf": ["不喜欢香菜", "不吃香菜", "不放香菜", "不要香菜"]
+          },
+          {
+            "id": "spicy_avoid",
+            "anyOf": ["不太能吃辣", "不能吃辣", "完全不辣", "不放辣"]
+          },
+          {
+            "id": "light_food",
+            "anyOf": ["清淡"]
+          },
+          {
+            "id": "quiet_seating",
+            "anyOf": ["安静", "不拥挤", "人少"]
+          }
+        ],
+        "minimumConcepts": 4,
+        "requiredConceptIds": [
+          "cilantro_avoid",
+          "spicy_avoid",
+          "light_food",
+          "quiet_seating"
+        ]
+      }
+    },
+    {
+      "id": "q026",
+      "category": "preference",
+      "question": "选择座位时应该避开什么环境，优先考虑什么位置？",
+      "expectedScope": "current",
+      "evaluation": {
+        "kind": "preference",
+        "expectedState": "not_applicable",
+        "concepts": [
+          {
+            "id": "avoid_busy_path",
+            "anyOf": ["取餐口", "通道", "排队", "拥挤"]
+          },
+          {
+            "id": "prefer_quiet",
+            "anyOf": ["安静", "不拥挤", "人少"]
+          },
+          {
+            "id": "prefer_protected_seat",
+            "anyOf": ["靠墙", "角落", "桌距宽"]
+          }
+        ],
+        "minimumConcepts": 3,
+        "requiredConceptIds": [
+          "avoid_busy_path",
+          "prefer_quiet",
+          "prefer_protected_seat"
+        ]
+      }
+    },
+    {
+      "id": "q022",
+      "category": "unsupported",
+      "question": "录音中是否有证据表明三个讨论问题和提纲已经发送？",
+      "expectedScope": "current",
+      "evaluation": {
+        "kind": "unsupported",
+        "expectedState": "pending",
+        "concepts": [],
+        "minimumConcepts": 0,
+        "requiredConceptIds": []
+      }
+    },
+    {
+      "id": "q012",
+      "category": "relationship",
+      "question": "双方最后形成的计划变化通知规则包括哪些要点？",
+      "expectedScope": "current",
+      "evaluation": {
+        "kind": "relationship",
+        "expectedState": "not_applicable",
+        "concepts": [
+          {
+            "id": "state_distinction",
+            "allOf": ["已确认", "暂定", "未知"]
+          },
+          {
+            "id": "prompt_notice",
+            "anyOf": ["尽快告诉", "及时通知", "先通知", "变化先通知"]
+          },
+          {
+            "id": "night_boundary",
+            "anyOf": ["十点半", "22:30", "非紧急不打扰", "第二天再说"]
+          },
+          {
+            "id": "bounded_options",
+            "allOf": ["两个", "取消"]
+          },
+          {
+            "id": "shared_rule",
+            "anyOf": ["双方", "彼此", "两个人都", "我们都"]
+          }
+        ],
+        "minimumConcepts": 4,
+        "requiredConceptIds": ["state_distinction", "shared_rule"]
+      }
+    }
+  ]
+}

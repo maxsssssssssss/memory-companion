@@ -56,6 +56,7 @@ vi.mock("@/lib/server/memory/relevance", () => ({
 
 let tempDir: string | undefined;
 const originalEvaluationMode = process.env.EVALUATION_MODE;
+const originalDebugSaveProviderResponse = process.env.DEBUG_SAVE_PROVIDER_RESPONSE;
 
 type StoredUpload = AudioUpload & {
   filePath?: string;
@@ -183,6 +184,7 @@ function restoreProviderEnv(
 
 beforeEach(() => {
   delete process.env.EVALUATION_MODE;
+  delete process.env.DEBUG_SAVE_PROVIDER_RESPONSE;
   extractFfmpegAcousticFeaturesMock.mockResolvedValue([]);
   emotionSignalAnalyzeMock.mockResolvedValue([]);
   getEmotionSignalProviderMock.mockReturnValue({ analyze: emotionSignalAnalyzeMock });
@@ -211,6 +213,11 @@ afterEach(async () => {
     delete process.env.EVALUATION_MODE;
   } else {
     process.env.EVALUATION_MODE = originalEvaluationMode;
+  }
+  if (originalDebugSaveProviderResponse === undefined) {
+    delete process.env.DEBUG_SAVE_PROVIDER_RESPONSE;
+  } else {
+    process.env.DEBUG_SAVE_PROVIDER_RESPONSE = originalDebugSaveProviderResponse;
   }
   if (tempDir) {
     await rm(tempDir, { recursive: true, force: true });
@@ -251,8 +258,16 @@ describe("processUpload", () => {
 
       const result = await processUpload({ uploadId: upload.id, store });
       const logs = consoleInfo.mock.calls.map(([message]) => String(message));
+      const lifecycle = await store.read<Record<string, unknown>>("relationship-lifecycle", upload.id);
 
       expect(result.job.status).toBe("ready");
+      expect(lifecycle).toEqual(expect.objectContaining({
+        version: 1,
+        uploadId: upload.id,
+        signalCount: expect.any(Number),
+        edges: expect.any(Array),
+        audit: expect.objectContaining({ candidatePairsChecked: expect.any(Number) })
+      }));
       expect(logs).toEqual(
         expect.arrayContaining([
           expect.stringMatching(/^\[audio-insights\] start segments=\d+$/),
@@ -265,6 +280,7 @@ describe("processUpload", () => {
           expect.stringMatching(/^\[extraction\] start segments=\d+ semantic_segments=\d+$/),
           expect.stringMatching(/^\[extraction\] completed count=\d+ elapsed_ms=\d+$/),
           expect.stringMatching(/^\[relationship-signals\] chunks=\d+ .*candidates=\d+ .*reducer_elapsed_ms=\d+$/),
+          expect.stringMatching(/^\[relationship-lifecycle\] pairs_checked=\d+ edges_created=\d+ rejected_matches=\d+$/),
           expect.stringMatching(/^\[pipeline\] ready .*elapsed_ms=\d+$/)
         ])
       );
@@ -553,7 +569,7 @@ describe("processUpload", () => {
           chunkCount: 2,
           itemCount: 1,
           elapsedMs: 50,
-          reason: "timeout"
+          reason: "fetch_timeout"
         });
         const items = extractBriefItems(uploadId, segments);
         await options?.onProgress?.({
@@ -936,6 +952,9 @@ describe("processUpload", () => {
       expect(result.briefItems.length).toBeGreaterThan(0);
       expect(relationshipSignalAnalyzeMock).toHaveBeenCalledTimes(2);
       expect(memoryRepository.replaceUploadMemories).toHaveBeenCalledTimes(1);
+      expect(await store.read("memory-owner-audits", upload.id)).toEqual(
+        expect.objectContaining({ version: 1, memoriesProcessed: expect.any(Number) })
+      );
       expect(proactiveInsightGenerateMock).toHaveBeenCalledTimes(1);
     } finally {
       deepseekAnalyze.mockRestore();
@@ -1302,7 +1321,20 @@ describe("processUpload", () => {
       });
       expect(report?.artifacts.transcriptSegments).toBe(result.segments.length);
       expect(report?.artifacts.analysisCheckpoints).toBeGreaterThan(0);
+      expect(report?.artifacts.providerRawResponses).toEqual({
+        version: 1,
+        enabled: false,
+        fileCount: 0,
+        aggregateSha256: null,
+        files: []
+      });
       expect(report?.relationship.reducerAuditAvailable).toBe(true);
+      expect(report?.relationship.lifecycleAuditAvailable).toBe(true);
+      expect(report?.relationship.lifecycleAudit).toEqual(expect.objectContaining({
+        candidatePairsChecked: expect.any(Number),
+        lifecycleEdgesCreated: expect.any(Number),
+        edges: expect.any(Array)
+      }));
       expect(store.terminalWrites).toEqual(["audit-report", "upload-ready", "job-ready"]);
       expect(report?.evidenceFirst).toMatchObject({
         audited: true,

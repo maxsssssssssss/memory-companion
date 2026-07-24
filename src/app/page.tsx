@@ -4,6 +4,7 @@ import { Fragment, type FormEvent, useCallback, useEffect, useMemo, useRef, useS
 
 import { DailyBrief } from "@/components/daily-brief";
 import { QaPanel } from "@/components/qa-panel";
+import { QaVoiceWorkspace } from "@/components/qa-voice-workspace";
 import { Timeline } from "@/components/timeline";
 import { formatLocalDateInputValue, UploadPanel } from "@/components/upload-panel";
 import { combineDayPayloads, type DayRecording } from "@/lib/client/day-aggregation";
@@ -32,6 +33,7 @@ import {
 import { applySpeakerAliasesToPayload, collectSpeakerAliasTargets, sanitizeSpeakerAliases, sanitizeSpeakerAliasesByUploadId } from "@/lib/domain/speaker-aliases";
 import type { ProactiveInsight } from "@/lib/domain/proactive-insights";
 import type { AudioInsight, AudioUpload, BriefItem, ProcessingJob, QuestionAnswer, RelationshipSignalCard, SemanticSegment, TranscriptSegment } from "@/lib/domain/types";
+import type { VoiceQaContext } from "@/lib/domain/voice-qa-context";
 
 type DayPayload = {
   upload: AudioUpload;
@@ -66,6 +68,24 @@ type ProviderSettingsPayload = {
   apiKeyStoragePath: string;
 };
 
+function voiceQaContext(input: {
+  contextId: string;
+  segments: TranscriptSegment[];
+  audioInsights?: AudioInsight[];
+  semanticSegments?: SemanticSegment[];
+  briefItems: BriefItem[];
+  relationshipSignals?: RelationshipSignalCard[];
+}): VoiceQaContext {
+  return {
+    contextId: input.contextId,
+    segments: input.segments,
+    audioInsights: input.audioInsights ?? [],
+    semanticSegments: input.semanticSegments ?? [],
+    briefItems: input.briefItems,
+    relationshipSignals: input.relationshipSignals ?? []
+  };
+}
+
 type DayRequestResult =
   | {
       kind: "success";
@@ -96,6 +116,9 @@ type QaQuestionInput = {
   model: string;
   promptPresetId: string;
   customPrompt: string;
+};
+type QaStreamQuestionInput = QaQuestionInput & {
+  signal: AbortSignal;
 };
 type QaAnswerPayload = {
   answer: string;
@@ -1992,6 +2015,22 @@ function DailyBriefApp({ user, onLogout }: { user: AuthUser; onLogout: () => Pro
   const hasAllScopeData = Boolean(allMemoryContext) || (!isLocalFirstMode && recordingDates.length > 0);
   const activeScopeHasData =
     memoryScope === "current" ? hasCurrentScopeData : memoryScope === "week" ? hasWeekScopeData : hasAllScopeData;
+  const voiceQaModeUnavailableReason = isLocalFirstMode
+    ? "语音问答暂不支持浏览器本地优先数据。切回服务端保存的记忆后即可使用。"
+    : undefined;
+  const voiceQaUnavailableReason = ({
+    hasData,
+    isDayAggregate = false
+  }: {
+    hasData: boolean;
+    isDayAggregate?: boolean;
+  }) =>
+    voiceQaModeUnavailableReason ??
+    (!hasData
+      ? "当前范围还没有可用于语音问答的记忆。"
+      : isDayAggregate
+        ? "当前日期包含多条录音，暂不支持按聚合结果进行语音问答。请切换到本周或全部记忆。"
+        : undefined);
   const activeQaEmptyState = !activeScopeHasData
     ? {
         current: {
@@ -2219,6 +2258,33 @@ function DailyBriefApp({ user, onLogout }: { user: AuthUser; onLogout: () => Pro
     return answer;
   }, [displayPayload]);
 
+  const handleServerContextQuestionStream = useCallback(async (input: QaStreamQuestionInput) => {
+    if (!displayPayload) {
+      throw new Error("当前没有可用于问答的录音。");
+    }
+
+    return fetch("/api/days/context/qa", {
+      method: "POST",
+      headers: {
+        Accept: "application/x-ndjson",
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        uploadId: displayPayload.upload.id,
+        question: input.question,
+        ...(input.conversation.length > 0 ? { conversation: input.conversation } : {}),
+        promptPresetId: input.promptPresetId,
+        customPrompt: input.customPrompt,
+        segments: displayPayload.segments,
+        audioInsights: displayPayload.audioInsights ?? [],
+        semanticSegments: displayPayload.semanticSegments ?? [],
+        briefItems: displayPayload.briefItems,
+        relationshipSignals: displayPayload.relationshipSignals ?? []
+      }),
+      signal: input.signal
+    });
+  }, [displayPayload]);
+
   const handleMemoryContextQuestion = useCallback(
     async (input: QaQuestionInput) => {
       if (!activeLocalMemoryContext) {
@@ -2272,6 +2338,37 @@ function DailyBriefApp({ user, onLogout }: { user: AuthUser; onLogout: () => Pro
       return answer;
     },
     [activeLocalMemoryContext, isLocalFirstMode, selectedDate]
+  );
+
+  const handleMemoryContextQuestionStream = useCallback(
+    async (input: QaStreamQuestionInput) => {
+      if (!activeLocalMemoryContext || isLocalFirstMode) {
+        throw new Error("当前范围没有可用于服务端流式问答的记忆。");
+      }
+
+      return fetch("/api/days/context/qa", {
+        method: "POST",
+        headers: {
+          Accept: "application/x-ndjson",
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          uploadId: activeLocalMemoryContext.uploadId,
+          scope: activeLocalMemoryContext.scope,
+          question: input.question,
+          ...(input.conversation.length > 0 ? { conversation: input.conversation } : {}),
+          promptPresetId: input.promptPresetId,
+          customPrompt: input.customPrompt,
+          segments: activeLocalMemoryContext.segments,
+          audioInsights: activeLocalMemoryContext.audioInsights,
+          semanticSegments: activeLocalMemoryContext.semanticSegments,
+          briefItems: activeLocalMemoryContext.briefItems,
+          relationshipSignals: activeLocalMemoryContext.relationshipSignals
+        }),
+        signal: input.signal
+      });
+    },
+    [activeLocalMemoryContext, isLocalFirstMode]
   );
 
   const loadCurrentQuestionHistory = useCallback(() => {
@@ -2500,21 +2597,41 @@ function DailyBriefApp({ user, onLogout }: { user: AuthUser; onLogout: () => Pro
   const renderWorkspaceState = () => {
     if (activeView === "qa" && memoryScope !== "current") {
       return (
-        <section className="workspace-view workspace-view-active">
-          <QaPanel
-            uploadId={activeLocalMemoryContext?.uploadId}
+        <section className="workspace-view workspace-view-active qa-workspace-view">
+          <QaVoiceWorkspace
+            active
             scope={memoryScope}
-            referenceDate={selectedDate}
-            isActive
-            emptyState={activeQaEmptyState}
-            proactiveObservations={memoryProactiveQaPresentation.observations}
-            suggestedQuestions={memoryProactiveQaPresentation.suggestedQuestions}
-            scopeMeta={memoryQaScopeMeta}
-            onLocalQuestion={activeLocalMemoryContext ? handleMemoryContextQuestion : undefined}
-            loadQuestionHistory={activeLocalMemoryContext ? loadMemoryQuestionHistory : undefined}
-            saveQuestionHistory={activeLocalMemoryContext ? saveMemoryQuestionHistory : undefined}
-            includeLoadedHistoryInConversation={Boolean(activeLocalMemoryContext)}
-          />
+            referenceDate={memoryScope === "week" ? selectedDate : undefined}
+            context={activeLocalMemoryContext ? voiceQaContext({
+              contextId: activeLocalMemoryContext.uploadId,
+              segments: activeLocalMemoryContext.segments,
+              audioInsights: activeLocalMemoryContext.audioInsights,
+              semanticSegments: activeLocalMemoryContext.semanticSegments,
+              briefItems: activeLocalMemoryContext.briefItems,
+              relationshipSignals: activeLocalMemoryContext.relationshipSignals
+            }) : undefined}
+            unavailableReason={voiceQaUnavailableReason({ hasData: activeScopeHasData })}
+          >
+            <QaPanel
+              uploadId={activeLocalMemoryContext?.uploadId}
+              scope={memoryScope}
+              referenceDate={selectedDate}
+              isActive
+              emptyState={activeQaEmptyState}
+              proactiveObservations={memoryProactiveQaPresentation.observations}
+              suggestedQuestions={memoryProactiveQaPresentation.suggestedQuestions}
+              scopeMeta={memoryQaScopeMeta}
+              onLocalQuestion={activeLocalMemoryContext ? handleMemoryContextQuestion : undefined}
+              onStreamQuestion={
+                activeLocalMemoryContext && !isLocalFirstMode
+                  ? handleMemoryContextQuestionStream
+                  : undefined
+              }
+              loadQuestionHistory={activeLocalMemoryContext ? loadMemoryQuestionHistory : undefined}
+              saveQuestionHistory={activeLocalMemoryContext ? saveMemoryQuestionHistory : undefined}
+              includeLoadedHistoryInConversation={Boolean(activeLocalMemoryContext)}
+            />
+          </QaVoiceWorkspace>
         </section>
       );
     }
@@ -2546,20 +2663,42 @@ function DailyBriefApp({ user, onLogout }: { user: AuthUser; onLogout: () => Pro
               onSaveAudioInsightCorrection={handleSaveAudioInsightCorrection}
             />
           </section>
-          <section className={`workspace-view ${activeView === "qa" ? "workspace-view-active" : ""}`} aria-hidden={activeView !== "qa"}>
-            <QaPanel
-              uploadId={payload.upload.id}
+          <section
+            className={`workspace-view qa-workspace-view ${activeView === "qa" ? "workspace-view-active" : ""}`}
+            aria-hidden={activeView !== "qa"}
+          >
+            <QaVoiceWorkspace
+              active={activeView === "qa"}
               scope="current"
-              isActive={activeView === "qa"}
-              emptyState={activeQaEmptyState}
-              proactiveObservations={currentProactiveQaPresentation.observations}
-              suggestedQuestions={currentProactiveQaPresentation.suggestedQuestions}
-              scopeMeta={currentQaScopeMeta}
-              onLocalQuestion={isLocalFirstMode ? handleLocalQuestion : handleServerContextQuestion}
-              loadQuestionHistory={loadCurrentQuestionHistory}
-              saveQuestionHistory={saveCurrentQuestionHistory}
-              includeLoadedHistoryInConversation={isLocalFirstMode}
-            />
+              uploadId={payload.isDayAggregate ? undefined : payload.upload.id}
+              context={!payload.isDayAggregate && displayPayload ? voiceQaContext({
+                contextId: displayPayload.upload.id,
+                segments: displayPayload.segments,
+                audioInsights: displayPayload.audioInsights,
+                semanticSegments: displayPayload.semanticSegments,
+                briefItems: displayPayload.briefItems,
+                relationshipSignals: displayPayload.relationshipSignals
+              }) : undefined}
+              unavailableReason={voiceQaUnavailableReason({
+                hasData: hasCurrentScopeData,
+                isDayAggregate: Boolean(payload.isDayAggregate)
+              })}
+            >
+              <QaPanel
+                uploadId={payload.upload.id}
+                scope="current"
+                isActive={activeView === "qa"}
+                emptyState={activeQaEmptyState}
+                proactiveObservations={currentProactiveQaPresentation.observations}
+                suggestedQuestions={currentProactiveQaPresentation.suggestedQuestions}
+                scopeMeta={currentQaScopeMeta}
+                onLocalQuestion={isLocalFirstMode ? handleLocalQuestion : handleServerContextQuestion}
+                onStreamQuestion={!isLocalFirstMode ? handleServerContextQuestionStream : undefined}
+                loadQuestionHistory={loadCurrentQuestionHistory}
+                saveQuestionHistory={saveCurrentQuestionHistory}
+                includeLoadedHistoryInConversation={isLocalFirstMode}
+              />
+            </QaVoiceWorkspace>
           </section>
         </>
       );
@@ -2600,8 +2739,14 @@ function DailyBriefApp({ user, onLogout }: { user: AuthUser; onLogout: () => Pro
 
     if (activeView === "qa" && memoryScope === "current" && activeQaEmptyState) {
       return (
-        <section className="workspace-view workspace-view-active">
-          <QaPanel scope="current" referenceDate={selectedDate} isActive emptyState={activeQaEmptyState} scopeMeta={currentQaScopeMeta} />
+        <section className="workspace-view workspace-view-active qa-workspace-view">
+          <QaVoiceWorkspace
+            active
+            scope="current"
+            unavailableReason={voiceQaUnavailableReason({ hasData: false })}
+          >
+            <QaPanel scope="current" referenceDate={selectedDate} isActive emptyState={activeQaEmptyState} scopeMeta={currentQaScopeMeta} />
+          </QaVoiceWorkspace>
         </section>
       );
     }

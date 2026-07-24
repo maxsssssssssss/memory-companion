@@ -1,11 +1,22 @@
 import type OpenAI from "openai";
 import { zodTextFormat } from "openai/helpers/zod";
-import type { z } from "zod";
+import { ZodError, type z } from "zod";
 
 type ResponseInput = Parameters<OpenAI["responses"]["parse"]>[0]["input"];
 type ResponseRequestOptions = Exclude<Parameters<OpenAI["responses"]["create"]>[1], undefined>;
 
 export type StructuredJsonResponseMode = "auto" | "structured" | "json";
+
+export type StructuredJsonValidationIssue = {
+  path: string;
+  code: string;
+  message: string;
+};
+
+export type StructuredJsonValidationIssueSummary = {
+  code: string;
+  count: number;
+};
 
 type ResponseTextCandidate = {
   output_text?: unknown;
@@ -41,7 +52,106 @@ export type StructuredJsonDiagnostics = {
   parseDurationMs?: number;
   validationDurationMs?: number;
   totalDurationMs?: number;
+  validationIssueCount?: number;
+  validationIssues?: StructuredJsonValidationIssue[];
+  validationIssueSummary?: StructuredJsonValidationIssueSummary[];
+  validationIssuesTruncated?: boolean;
 };
+
+export type StructuredJsonValidationFailureRawResponse = {
+  rawResponse: string;
+  model: string;
+  schemaName: string;
+  capturedAt: string;
+  validationIssueCount: number;
+  validationIssues: StructuredJsonValidationIssue[];
+  validationIssueSummary: StructuredJsonValidationIssueSummary[];
+  validationIssuesTruncated: boolean;
+};
+
+const MAX_VALIDATION_ISSUES = 10;
+
+type ZodValidationIssue = ZodError["issues"][number];
+
+function validationIssueCode(issue: ZodValidationIssue) {
+  if (issue.code === "invalid_type" && issue.received === "undefined") {
+    return "missing_field";
+  }
+  return issue.code;
+}
+
+function validationIssueMessage(code: string) {
+  switch (code) {
+    case "missing_field":
+      return "Required field is missing";
+    case "invalid_enum_value":
+      return "Invalid enum value";
+    case "invalid_type":
+      return "Invalid value type";
+    case "too_small":
+      return "Value is below the minimum size";
+    case "too_big":
+      return "Value exceeds the maximum size";
+    case "invalid_string":
+      return "Invalid string value";
+    case "unrecognized_keys":
+      return "Object contains unrecognized fields";
+    case "invalid_union":
+    case "invalid_union_discriminator":
+      return "Value does not match an allowed variant";
+    case "invalid_literal":
+      return "Invalid literal value";
+    case "not_multiple_of":
+      return "Number is not an allowed multiple";
+    case "not_finite":
+      return "Number must be finite";
+    case "custom":
+      return "Custom validation failed";
+    default:
+      return "Schema validation failed";
+  }
+}
+
+function validationIssuePath(path: ZodValidationIssue["path"]) {
+  if (path.length === 0) {
+    return "$";
+  }
+
+  let result = "";
+  for (const part of path) {
+    if (typeof part === "number") {
+      result += `[${Math.max(0, Math.trunc(part))}]`;
+      continue;
+    }
+    const safePart = part.replace(/[^A-Za-z0-9_-]/gu, "_").slice(0, 64) || "unknown";
+    result += result ? `.${safePart}` : safePart;
+  }
+  return result.slice(0, 240);
+}
+
+function validationIssueDiagnostics(error: ZodError) {
+  const codeCounts = new Map<string, number>();
+  for (const issue of error.issues) {
+    const code = validationIssueCode(issue);
+    codeCounts.set(code, (codeCounts.get(code) ?? 0) + 1);
+  }
+
+  return {
+    validationIssueCount: error.issues.length,
+    validationIssues: error.issues.slice(0, MAX_VALIDATION_ISSUES).map((issue) => {
+      const code = validationIssueCode(issue);
+      return {
+        path: validationIssuePath(issue.path),
+        code,
+        message: validationIssueMessage(code)
+      };
+    }),
+    validationIssueSummary: [...codeCounts.entries()]
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([code, count]) => ({ code, count })),
+    validationIssuesTruncated: error.issues.length > MAX_VALIDATION_ISSUES
+  };
+}
 
 function isAbortError(error: unknown) {
   if (!error || typeof error !== "object" || !("name" in error)) {
@@ -236,6 +346,9 @@ export async function parseStructuredJsonResponse<TSchema extends z.ZodTypeAny>(
   requestOptions?: ResponseRequestOptions;
   normalize?: (value: unknown) => unknown;
   onDiagnostics?: (diagnostics: StructuredJsonDiagnostics) => void;
+  onValidationFailureRawResponse?: (
+    capture: StructuredJsonValidationFailureRawResponse
+  ) => void | Promise<void>;
 }): Promise<z.infer<TSchema>> {
   const outputLimit =
     input.maxOutputTokens === undefined ? {} : { max_output_tokens: input.maxOutputTokens };
@@ -309,6 +422,23 @@ export async function parseStructuredJsonResponse<TSchema extends z.ZodTypeAny>(
       diagnostics.validationResult = "failed";
       diagnostics.validationDurationMs = Date.now() - validationStartedAt;
       diagnostics.totalDurationMs = Date.now() - requestStartedAt;
+      if (error instanceof ZodError) {
+        const issues = validationIssueDiagnostics(error);
+        Object.assign(diagnostics, issues);
+        if (input.onValidationFailureRawResponse) {
+          try {
+            await input.onValidationFailureRawResponse({
+              rawResponse: rawText,
+              model: input.model,
+              schemaName: input.name,
+              capturedAt: new Date().toISOString(),
+              ...issues
+            });
+          } catch {
+            console.warn("[provider-raw-response-capture] write_failed");
+          }
+        }
+      }
       input.onDiagnostics?.(diagnostics);
       throw error;
     }

@@ -34,12 +34,14 @@ import {
   type EvaluationMemoryIndexStageAudit
 } from "@/lib/server/evaluation/audit-report";
 import { isEvaluationRetentionUpload } from "@/lib/server/evaluation/retention";
+import { collectProviderRawResponseCaptureReport } from "@/lib/server/evaluation/provider-response-capture";
 import { getExtractionProvider, type ExtractionProgressEvent, type ExtractionProvider } from "@/lib/server/extraction/provider";
 import { createJob, updateJob } from "@/lib/server/jobs/job-store";
 import {
   extractUploadMemoriesWithAudit,
   getMemoryDatabase,
   getMemoryRepository,
+  type MemoryExtractionAudit,
   type MemoryItem,
   type MemoryRelation,
   type MemoryRepository
@@ -55,10 +57,16 @@ import {
 import { getProactiveInsightProvider, type ProactiveInsightProvider } from "@/lib/server/proactive-insights/provider";
 import { getRelationshipSignalProvider, type RelationshipSignalProvider } from "@/lib/server/relationship-signals/provider";
 import { processRelationshipSignalChunks } from "@/lib/server/relationship-signals/chunk-processing";
+import {
+  relationshipLifecycleSignalsFromCandidates,
+  relationshipLifecycleSignalsFromCards,
+  resolveRelationshipLifecycles
+} from "@/lib/server/relationship-signals/lifecycle/resolver";
 import type { JsonStore } from "@/lib/server/storage/json-store";
 import { appStore } from "@/lib/server/storage/json-store";
 import { type TranscriptionProvider } from "@/lib/server/transcription/provider";
 import { JsonChunkCheckpointStore } from "@/lib/server/transcription/chunks/checkpoint-store";
+import { JsonSpeakerIdentityRepository } from "@/lib/server/speaker-identity/repository";
 import {
   transcribeConfiguredAudio,
   type UploadTranscriptionProcessor
@@ -100,6 +108,7 @@ export type ProcessUploadDependencies = {
   memoryRelevanceJudge?: MemoryRelevanceJudge;
   proactiveInsightProvider?: ProactiveInsightProvider;
   now?: () => string;
+  evaluationRawResponseCapture?: boolean;
 };
 
 export type ProcessUploadResult = {
@@ -177,11 +186,15 @@ async function cleanupProcessingArtifacts(
     cleanupJobArtifacts(store, uploadId, job),
     new JsonChunkCheckpointStore(store).deleteUpload(uploadId),
     new JsonAnalysisChunkCheckpointStore(store).deleteUpload(userId, uploadId),
+    new JsonSpeakerIdentityRepository(store).deleteUploadMappings(uploadId),
     store.delete("segments", uploadId),
     store.delete("audio-insights", uploadId),
     store.delete("semantic-segments", uploadId),
     store.delete("brief-items", uploadId),
     store.delete("relationship-signals", uploadId),
+    store.delete("relationship-lifecycle", uploadId),
+    store.delete("memory-owner-audits", uploadId),
+    store.delete("speaker-identities", uploadId),
     store.delete("proactive-insights", proactiveInsightCacheIdForUpload(uploadId))
   ]);
   deleteMemories?.();
@@ -385,6 +398,7 @@ async function generateRelationshipSignals(input: {
     store: JsonAnalysisChunkCheckpointStore;
     userId: string;
   };
+  evaluationRawResponseCapture?: boolean;
   now?: () => string;
 }) {
   try {
@@ -397,6 +411,7 @@ async function generateRelationshipSignals(input: {
       semanticSegments: input.semanticSegments,
       provider: input.provider ?? getRelationshipSignalProvider(),
       options: {
+        evaluationRawResponseCapture: input.evaluationRawResponseCapture === true,
         ...(input.analysisCheckpoint ? { analysisCheckpoint: input.analysisCheckpoint } : {}),
         ...(input.now ? { now: input.now } : {})
       }
@@ -408,6 +423,8 @@ async function generateRelationshipSignals(input: {
     );
     return {
       cards: [],
+      candidates: [],
+      candidateIdsByCardId: {},
       analysisChunks: [],
       stats: {
         chunkCount: input.transcriptChunks.length,
@@ -442,6 +459,10 @@ function updateMemoryIndex(input: {
   briefItems: BriefItem[];
   semanticSegments: SemanticSegment[];
   relationshipSignals: RelationshipSignalCard[];
+  relationshipLifecycle?: {
+    edges: import("@/lib/server/relationship-signals/lifecycle/types").RelationshipLifecycleEdge[];
+    candidateIdsByCardId?: Record<string, string[]>;
+  };
   repository?: Pick<MemoryRepository, "replaceUploadMemories">;
   now?: string;
 }): EvaluationMemoryIndexStageAudit {
@@ -458,14 +479,19 @@ function updateMemoryIndex(input: {
       briefItems: input.briefItems,
       semanticSegments: input.semanticSegments,
       relationshipSignals: input.relationshipSignals,
+      ...(input.relationshipLifecycle ? { relationshipLifecycle: input.relationshipLifecycle } : {}),
       ...(input.now ? { now: input.now } : {})
     });
     const repository = input.repository ?? getMemoryRepository();
+    console.info(
+      `[memory-owner] upload_id=${input.upload.id} known=${extraction.audit.ownerAttribution.knownOwners} local=${extraction.audit.ownerAttribution.localSpeakerOwners} unknown=${extraction.audit.ownerAttribution.unknownOwners} shared=${extraction.audit.ownerAttribution.sharedMemories}`
+    );
     const result = repository.replaceUploadMemories({
       userId: input.userId,
       uploadId: input.upload.id,
       sourceSegments: input.segments,
-      memories: extraction.memories
+      memories: extraction.memories,
+      ownerAttributions: extraction.ownerAttributions
     });
     console.info(
       `[memory-index] updated user_id=${input.userId} upload_id=${input.upload.id} input=${result.inputCount} memories=${result.memoryCount} merged=${result.mergedCount} relations=${result.relationCount}`
@@ -951,6 +977,7 @@ export async function processUpload(input: ProcessUploadInput): Promise<ProcessU
       input.dependencies?.extractionProvider ?? getExtractionProvider()
     ).extract(upload.id, segments, {
       semanticSegments,
+      evaluationRawResponseCapture: evaluationRetention,
       analysisCheckpoint: {
         store: analysisCheckpointStore,
         userId: checkpointUserId,
@@ -987,12 +1014,36 @@ export async function processUpload(input: ProcessUploadInput): Promise<ProcessU
         store: analysisCheckpointStore,
         userId: checkpointUserId
       },
+      evaluationRawResponseCapture: evaluationRetention,
       now
     });
     const relationshipSignals = relationshipSignalResult.cards;
     await writeUploadScopedValue(store, "relationship-signals", upload.id, relationshipSignals);
     console.info(
       `[relationship-signals] completed count=${relationshipSignals.length} elapsed_ms=${Date.now() - relationshipSignalsStartedAt}`
+    );
+
+    const lifecycleSignals = relationshipSignalResult.candidates.length > 0
+      ? relationshipLifecycleSignalsFromCandidates({
+          candidates: relationshipSignalResult.candidates,
+          segments,
+          recordingDate: upload.recordingDate
+        })
+      : relationshipLifecycleSignalsFromCards(relationshipSignals);
+    const relationshipLifecycle = resolveRelationshipLifecycles(lifecycleSignals);
+    const relationshipLifecycleArtifact = {
+      version: 1 as const,
+      uploadId: upload.id,
+      generatedAt: now(),
+      inputSource: relationshipSignalResult.candidates.length > 0 ? "candidates" as const : "cards" as const,
+      signalCount: lifecycleSignals.length,
+      candidateIdsByCardId: relationshipSignalResult.candidateIdsByCardId,
+      edges: relationshipLifecycle.edges,
+      audit: relationshipLifecycle.audit
+    };
+    await writeUploadScopedValue(store, "relationship-lifecycle", upload.id, relationshipLifecycleArtifact);
+    console.info(
+      `[relationship-lifecycle] pairs_checked=${relationshipLifecycle.audit.candidatePairsChecked} edges_created=${relationshipLifecycle.edges.length} rejected_matches=${relationshipLifecycle.audit.matches.filter((match) => !match.accepted).length}`
     );
 
     activeStage = "memory-index";
@@ -1005,9 +1056,22 @@ export async function processUpload(input: ProcessUploadInput): Promise<ProcessU
       briefItems,
       semanticSegments,
       relationshipSignals,
+      relationshipLifecycle: {
+        edges: relationshipLifecycle.edges,
+        candidateIdsByCardId: relationshipSignalResult.candidateIdsByCardId
+      },
       repository: input.memoryRepository,
       now: now()
     });
+    if (memoryIndexStage.status === "completed") {
+      const admissionAudit = memoryIndexStage.admission as MemoryExtractionAudit;
+      await writeUploadScopedValue(
+        store,
+        "memory-owner-audits",
+        upload.id,
+        admissionAudit.ownerAttribution
+      );
+    }
     console.info(`[memory-index] completed elapsed_ms=${Date.now() - memoryIndexStartedAt}`);
 
     activeStage = "proactive-insights";
@@ -1097,6 +1161,10 @@ export async function processUpload(input: ProcessUploadInput): Promise<ProcessU
       const reducerAudit = "reducerAudit" in relationshipSignalResult
         ? relationshipSignalResult.reducerAudit
         : null;
+      const providerRawResponses = await collectProviderRawResponseCaptureReport({
+        uploadId: upload.id,
+        evaluationRetention
+      });
       const auditReport = buildEvaluationAuditReport({
         generatedAt: now(),
         uploadId: upload.id,
@@ -1115,13 +1183,15 @@ export async function processUpload(input: ProcessUploadInput): Promise<ProcessU
         analysisCheckpoints,
         relationshipStats: relationshipSignalResult.stats,
         relationshipReducerAudit: reducerAudit,
+        relationshipLifecycleAudit: relationshipLifecycle.audit,
         memoryStage: memoryIndexStage,
         memoryAuditStatus: memoryAudit.status,
         ...(memoryAudit.error ? { memoryAuditError: memoryAudit.error } : {}),
         memories: memoryAudit.memories,
         memoryRelations: memoryAudit.relations,
         orphanEvidenceCount: memoryAudit.orphanEvidenceCount,
-        memoriesWithoutEvidenceCount: memoryAudit.memoriesWithoutEvidenceCount
+        memoriesWithoutEvidenceCount: memoryAudit.memoriesWithoutEvidenceCount,
+        providerRawResponses
       });
       await writeUploadScopedValue(store, "evaluation-reports", upload.id, auditReport);
       await writeUploadScopedValue(store, "uploads", upload.id, { ...currentUpload, status: "ready" });

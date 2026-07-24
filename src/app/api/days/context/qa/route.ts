@@ -24,6 +24,11 @@ import {
   type MemoryIndexQaContext
 } from "@/lib/server/retrieval/memory-index-evidence";
 import { qaPromptInstructionFromBody } from "@/lib/server/retrieval/qa-prompt-override";
+import {
+  acceptsQaBrowserStream,
+  createTextQaBrowserStream,
+  textQaNdjsonResponse
+} from "@/lib/server/retrieval/text-qa-stream";
 
 const STORE_KEY_PATTERN = /^[A-Za-z0-9_-]+$/;
 
@@ -143,9 +148,8 @@ export async function POST(request: Request) {
     }
   }
 
-  const answer = await answerQuestionWithAI(qaInput);
-
-  if (shadowSnapshot && (scope === "week" || scope === "all")) {
+  const observeShadowSnapshot = () => {
+    if (!shadowSnapshot || (scope !== "week" && scope !== "all")) return;
     try {
       const dateRange = scope === "week" ? dateRangeFromScopeId(uploadId) : undefined;
       observeMemoryShadowRetrieval({
@@ -161,7 +165,19 @@ export async function POST(request: Request) {
         `[memory-shadow] scope=${scope} observer_failure=${error instanceof Error ? error.message : "unknown_error"}`
       );
     }
+  };
+
+  if (acceptsQaBrowserStream(request)) {
+    return textQaNdjsonResponse(
+      createTextQaBrowserStream({
+        input: qaInput,
+        onFinal: observeShadowSnapshot
+      })
+    );
   }
+
+  const answer = await answerQuestionWithAI(qaInput);
+  observeShadowSnapshot();
 
   return NextResponse.json(answer);
 }

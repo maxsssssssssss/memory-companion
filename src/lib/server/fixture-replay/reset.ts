@@ -11,6 +11,8 @@ const uploadOwnedCollections = [
   "semantic-segments",
   "brief-items",
   "relationship-signals",
+  "relationship-lifecycle",
+  "memory-owner-audits",
   "deleted-uploads"
 ] as const;
 

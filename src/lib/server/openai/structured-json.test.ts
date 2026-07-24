@@ -164,8 +164,141 @@ describe("parseStructuredJsonResponse", () => {
       parseResult: "success",
       validationResult: "failed",
       validationDurationMs: expect.any(Number),
-      totalDurationMs: expect.any(Number)
+      totalDurationMs: expect.any(Number),
+      validationIssueCount: 1,
+      validationIssues: [
+        {
+          path: "items[0].value",
+          code: "invalid_type",
+          message: "Invalid value type"
+        }
+      ],
+      validationIssueSummary: [{ code: "invalid_type", count: 1 }],
+      validationIssuesTruncated: false
     }));
+  });
+
+  it("exposes exact raw JSON only through the validation-failure capture hook", async () => {
+    const rawResponse = '{"items":[{"value":123,"private":"raw-marker"}]}';
+    const onValidationFailureRawResponse = vi.fn();
+    const client = {
+      responses: {
+        parse: vi.fn(),
+        create: vi.fn().mockResolvedValue({ output_text: rawResponse })
+      }
+    } as unknown as OpenAI;
+
+    await expect(parseStructuredJsonResponse({
+      client,
+      model: "capture-model",
+      name: "capture_schema",
+      schema: Schema,
+      requestInput: "input",
+      jsonInstruction: "Return JSON.",
+      mode: "json",
+      onValidationFailureRawResponse
+    })).rejects.toBeInstanceOf(z.ZodError);
+
+    expect(onValidationFailureRawResponse).toHaveBeenCalledOnce();
+    expect(onValidationFailureRawResponse).toHaveBeenCalledWith(expect.objectContaining({
+      rawResponse,
+      model: "capture-model",
+      schemaName: "capture_schema",
+      validationIssueCount: 1,
+      validationIssues: [
+        { path: "items[0].value", code: "invalid_type", message: "Invalid value type" }
+      ]
+    }));
+  });
+
+  it("does not invoke the raw hook for success or JSON parse failure", async () => {
+    const onValidationFailureRawResponse = vi.fn();
+    const successClient = {
+      responses: {
+        parse: vi.fn(),
+        create: vi.fn().mockResolvedValue({ output_text: '{"items":[{"value":"ok"}]}' })
+      }
+    } as unknown as OpenAI;
+    const parseFailureClient = {
+      responses: { parse: vi.fn(), create: vi.fn().mockResolvedValue({ output_text: "not json" }) }
+    } as unknown as OpenAI;
+
+    await parseStructuredJsonResponse({
+      client: successClient,
+      model: "test-model",
+      name: "test_schema",
+      schema: Schema,
+      requestInput: "input",
+      jsonInstruction: "Return JSON.",
+      mode: "json",
+      onValidationFailureRawResponse
+    });
+    await expect(parseStructuredJsonResponse({
+      client: parseFailureClient,
+      model: "test-model",
+      name: "test_schema",
+      schema: Schema,
+      requestInput: "input",
+      jsonInstruction: "Return JSON.",
+      mode: "json",
+      onValidationFailureRawResponse
+    })).rejects.toMatchObject({ code: "no_json" });
+
+    expect(onValidationFailureRawResponse).not.toHaveBeenCalled();
+  });
+
+  it("keeps the original Zod failure when the capture hook fails", async () => {
+    const client = {
+      responses: {
+        parse: vi.fn(),
+        create: vi.fn().mockResolvedValue({ output_text: '{"items":[{"value":123}]}' })
+      }
+    } as unknown as OpenAI;
+    const onValidationFailureRawResponse = vi.fn().mockRejectedValue(new Error("capture storage unavailable"));
+
+    await expect(parseStructuredJsonResponse({
+      client,
+      model: "test-model",
+      name: "test_schema",
+      schema: Schema,
+      requestInput: "input",
+      jsonInstruction: "Return JSON.",
+      mode: "json",
+      onValidationFailureRawResponse
+    })).rejects.toBeInstanceOf(z.ZodError);
+    expect(onValidationFailureRawResponse).toHaveBeenCalledOnce();
+  });
+
+  it("limits validation issue detail to ten entries and reports truncation", async () => {
+    const onDiagnostics = vi.fn();
+    const client = {
+      responses: {
+        parse: vi.fn(),
+        create: vi.fn().mockResolvedValue({
+          output_text: JSON.stringify({
+            items: Array.from({ length: 12 }, (_, value) => ({ value }))
+          })
+        })
+      }
+    } as unknown as OpenAI;
+
+    await expect(parseStructuredJsonResponse({
+      client,
+      model: "test-model",
+      name: "test_schema",
+      schema: Schema,
+      requestInput: "input",
+      jsonInstruction: "Return JSON.",
+      mode: "json",
+      onDiagnostics
+    })).rejects.toBeInstanceOf(z.ZodError);
+
+    const diagnostics = onDiagnostics.mock.calls.at(-1)?.[0];
+    expect(diagnostics.validationIssueCount).toBe(12);
+    expect(diagnostics.validationIssues).toHaveLength(10);
+    expect(diagnostics.validationIssues.at(-1)?.path).toBe("items[9].value");
+    expect(diagnostics.validationIssueSummary).toEqual([{ code: "invalid_type", count: 12 }]);
+    expect(diagnostics.validationIssuesTruncated).toBe(true);
   });
 
   it("does not retry with a JSON request after structured mode is aborted", async () => {

@@ -1,3 +1,4 @@
+import { transcriptSpeakerLabel } from "@/lib/domain/speaker-identity";
 import { RelationshipSignalCardSchema, type RelationshipSignalCard, type TranscriptSegment } from "@/lib/domain/types";
 import { containsForbiddenRelationshipJudgment } from "@/lib/processing/relationship-signals";
 
@@ -107,7 +108,7 @@ function evidenceText(card: RelationshipSignalCard, sourceSegments: TranscriptSe
   const transcriptEvidence = sourceSegments
     .map(
       (segment) =>
-        `- [${segment.id}] ${segment.startSeconds}-${segment.endSeconds}s ${segment.speaker ?? "speaker_unknown"}: ${compactText(segment.text)}`
+        `- [${segment.id}] ${segment.startSeconds}-${segment.endSeconds}s ${transcriptSpeakerLabel(segment) ?? "speaker_unknown"}: ${compactText(segment.text)}`
     )
     .join("\n");
 

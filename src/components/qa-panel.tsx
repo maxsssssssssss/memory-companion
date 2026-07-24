@@ -1,9 +1,24 @@
 "use client";
 
-import { Fragment, type FormEvent, type KeyboardEvent, useEffect, useRef, useState } from "react";
+import {
+  Fragment,
+  type FormEvent,
+  type KeyboardEvent,
+  useCallback,
+  useEffect,
+  useRef,
+  useState
+} from "react";
+import { parseQaBrowserNdjsonStream } from "@/lib/client/qa-ndjson-stream";
 import type { ProactiveObservation, SuggestedQuestion } from "@/lib/client/proactive-qa-presentation";
 import type { QaScopeMeta } from "@/lib/client/qa-scope-metadata";
 import { formatTime } from "@/lib/domain/time";
+import { useQaVoiceWorkspace } from "./qa-voice-workspace";
+import {
+  BrowserVoiceQa,
+  type BrowserVoiceQaCompletedTurn
+} from "./voice/browser-voice-qa";
+import type { BrowserVoiceQaState } from "./voice/voice-session-status";
 
 type QaPanelProps = {
   uploadId?: string;
@@ -20,6 +35,14 @@ type QaPanelProps = {
     promptPresetId: QaPromptPresetId;
     customPrompt: string;
   }) => Promise<AnswerPayload>;
+  onStreamQuestion?: (input: {
+    question: string;
+    conversation: ConversationMessage[];
+    model: string;
+    promptPresetId: QaPromptPresetId;
+    customPrompt: string;
+    signal: AbortSignal;
+  }) => Promise<Response>;
   loadQuestionHistory?: () => Promise<StoredAnswerPayload[]> | StoredAnswerPayload[];
   saveQuestionHistory?: (turn: ConversationTurn) => Promise<void> | void;
   includeLoadedHistoryInConversation?: boolean;
@@ -101,6 +124,12 @@ const MAX_CONTEXT_MESSAGES = 8;
 const MAX_CONTEXT_MESSAGE_LENGTH = 1200;
 const MAX_DISPLAYED_SUGGESTIONS = 3;
 const DEFAULT_QA_MODEL = "openai/gpt-5-mini";
+const voiceStateCopy: Record<BrowserVoiceQaState, string> = {
+  idle: "",
+  listening: "正在听你说话，再点一次麦克风结束录音",
+  thinking: "正在查找相关记忆",
+  speaking: "正在播放语音回答"
+};
 
 const scopeCopy: Record<
   QaScope,
@@ -245,11 +274,13 @@ export function QaPanel({
   suggestedQuestions = [],
   scopeMeta,
   onLocalQuestion,
+  onStreamQuestion,
   loadQuestionHistory,
   saveQuestionHistory,
   includeLoadedHistoryInConversation,
   emptyState
 }: QaPanelProps) {
+  const voiceWorkspace = useQaVoiceWorkspace();
   const copy = scopeCopy[scope];
   const effectiveScopeMeta: QaScopeMeta = scopeMeta ?? {
     scope,
@@ -268,6 +299,7 @@ export function QaPanel({
   const [turns, setTurns] = useState<ConversationTurn[]>([]);
   const [errorMessage, setErrorMessage] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [voiceState, setVoiceState] = useState<BrowserVoiceQaState>("idle");
   const [qaModel, setQaModel] = useState(DEFAULT_QA_MODEL);
   const [qaModelPresets, setQaModelPresets] = useState<QaModelPreset[]>([]);
   const [isSavingModel, setIsSavingModel] = useState(false);
@@ -278,16 +310,35 @@ export function QaPanel({
   const [isSavingPrompt, setIsSavingPrompt] = useState(false);
   const [promptMessage, setPromptMessage] = useState("");
   const requestIdRef = useRef(0);
+  const activeStreamControllerRef = useRef<AbortController | null>(null);
+  const firstTextRenderTraceRef = useRef<{
+    requestId: number;
+    pendingTurnId: string;
+    startedAt: number;
+    logged: boolean;
+  } | null>(null);
   const threadRef = useRef<HTMLDivElement>(null);
   const questionInputRef = useRef<HTMLTextAreaElement>(null);
 
   useEffect(() => {
+    activeStreamControllerRef.current?.abort();
+    activeStreamControllerRef.current = null;
+    firstTextRenderTraceRef.current = null;
     requestIdRef.current += 1;
     setQuestion("");
     setTurns([]);
     setErrorMessage("");
     setIsSubmitting(false);
+    setVoiceState("idle");
   }, [uploadId, scope, referenceDate, isDataEmpty]);
+
+  useEffect(
+    () => () => {
+      activeStreamControllerRef.current?.abort();
+      activeStreamControllerRef.current = null;
+    },
+    []
+  );
 
   useEffect(() => {
     const thread = threadRef.current;
@@ -295,6 +346,28 @@ export function QaPanel({
       return;
     }
     thread.scrollTop = thread.scrollHeight;
+  }, [turns]);
+
+  useEffect(() => {
+    const trace = firstTextRenderTraceRef.current;
+    if (!trace || trace.logged || trace.requestId !== requestIdRef.current) {
+      return;
+    }
+
+    const streamedTurn = turns.find((turn) => turn.id === trace.pendingTurnId);
+    if (!streamedTurn?.answer || streamedTurn.isPending) {
+      return;
+    }
+
+    trace.logged = true;
+    console.info(
+      "QA_STREAM_TRACE:",
+      JSON.stringify({
+        event: "first_text_render",
+        request_id: trace.requestId,
+        elapsed_ms: Math.max(0, Math.round(performance.now() - trace.startedAt))
+      })
+    );
   }, [turns]);
 
   useEffect(() => {
@@ -341,7 +414,7 @@ export function QaPanel({
     }
 
     const endpoint = endpointForScope(scope, uploadId, referenceDate);
-    if (onLocalQuestion) {
+    if (onLocalQuestion || onStreamQuestion) {
       setTurns([]);
       return;
     }
@@ -383,7 +456,7 @@ export function QaPanel({
     return () => {
       controller.abort();
     };
-  }, [isActive, isDataEmpty, loadQuestionHistory, onLocalQuestion, scope, uploadId, referenceDate]);
+  }, [isActive, isDataEmpty, loadQuestionHistory, onLocalQuestion, onStreamQuestion, scope, uploadId, referenceDate]);
 
   useEffect(() => {
     if (!isActive) {
@@ -434,7 +507,7 @@ export function QaPanel({
   async function submitQuestion(nextQuestion: string) {
     const normalizedQuestion = nextQuestion.trim();
 
-    if (!normalizedQuestion) {
+    if (!normalizedQuestion || isSubmitting || voiceState !== "idle") {
       return;
     }
 
@@ -451,13 +524,17 @@ export function QaPanel({
       return;
     }
 
-    const useLocalQuestionHandler = Boolean(onLocalQuestion);
+    const useStreamQuestionHandler = Boolean(onStreamQuestion);
+    const useLocalQuestionHandler = !useStreamQuestionHandler && Boolean(onLocalQuestion);
     const endpoint = endpointForScope(scope, uploadId, referenceDate);
-    if (!useLocalQuestionHandler && !endpoint) {
+    if (!useStreamQuestionHandler && !useLocalQuestionHandler && !endpoint) {
       setErrorMessage(copy.unavailableMessage);
       return;
     }
 
+    activeStreamControllerRef.current?.abort();
+    activeStreamControllerRef.current = null;
+    firstTextRenderTraceRef.current = null;
     const pendingTurnId = `pending_${requestId}`;
     const conversation = conversationFromTurns(turns, shouldIncludeLoadedHistoryInConversation);
     setErrorMessage("");
@@ -475,47 +552,100 @@ export function QaPanel({
     ]);
 
     try {
-      const payload = useLocalQuestionHandler
-        ? await onLocalQuestion!({
+      let payload: StoredAnswerPayload;
+
+      if (useStreamQuestionHandler) {
+        const controller = new AbortController();
+        activeStreamControllerRef.current = controller;
+        firstTextRenderTraceRef.current = {
+          requestId,
+          pendingTurnId,
+          startedAt: performance.now(),
+          logged: false
+        };
+
+        const response = await onStreamQuestion!({
+          question: normalizedQuestion,
+          conversation,
+          model: qaModel,
+          promptPresetId: qaPromptPresetId,
+          customPrompt: customQaPrompt,
+          signal: controller.signal
+        });
+        if (!response.ok || !response.body) {
+          throw new Error("qa_stream_unavailable");
+        }
+
+        let finalPayload: StoredAnswerPayload | null = null;
+        let streamFailed = false;
+        for await (const event of parseQaBrowserNdjsonStream(response.body)) {
+          if (controller.signal.aborted || requestId !== requestIdRef.current) {
+            return;
+          }
+
+          if (event.type === "sentence") {
+            setTurns((currentTurns) =>
+              currentTurns.map((turn) =>
+                turn.id === pendingTurnId
+                  ? {
+                      ...turn,
+                      answer: `${turn.answer}${event.text}`,
+                      citedSegmentIds: [...new Set([...turn.citedSegmentIds, ...event.citedSegmentIds])],
+                      isPending: false
+                    }
+                  : turn
+              )
+            );
+            continue;
+          }
+
+          if (event.type === "final") {
+            finalPayload = event.answer;
+            continue;
+          }
+
+          if (event.type === "error" || (event.type === "complete" && event.status === "failed")) {
+            streamFailed = true;
+          }
+        }
+
+        if (streamFailed || !finalPayload) {
+          throw new Error("qa_stream_failed");
+        }
+        payload = finalPayload;
+      } else if (useLocalQuestionHandler) {
+        payload = await onLocalQuestion!({
             question: normalizedQuestion,
             conversation,
             model: qaModel,
             promptPresetId: qaPromptPresetId,
             customPrompt: customQaPrompt
+          });
+      } else {
+        const response = await fetch(endpoint!, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json"
+          },
+          body: JSON.stringify({
+            question: normalizedQuestion,
+            promptPresetId: qaPromptPresetId,
+            customPrompt: customQaPrompt,
+            ...(conversation.length > 0 ? { conversation } : {})
           })
-        : await (async () => {
-            const response = await fetch(endpoint!, {
-              method: "POST",
-              headers: {
-                "Content-Type": "application/json"
-              },
-              body: JSON.stringify({
-                question: normalizedQuestion,
-                promptPresetId: qaPromptPresetId,
-                customPrompt: customQaPrompt,
-                ...(conversation.length > 0 ? { conversation } : {})
-              })
-            });
-            const responsePayload = (await response.json()) as {
-              answer?: string;
-              citedSegmentIds?: string[];
-              citations?: AnswerPayload["citations"];
-              id?: string;
-              question?: string;
-              createdAt?: string;
-              error?: string;
+        });
+        const responsePayload = (await response.json()) as StoredAnswerPayload & {
+          error?: string;
+        };
+
+        payload = response.ok
+          ? responsePayload
+          : {
+              ...responsePayload,
+              answer: "",
+              citedSegmentIds: undefined
             };
-
-            if (!response.ok) {
-              return {
-                ...responsePayload,
-                answer: "",
-                citedSegmentIds: undefined
-              };
-            }
-
-            return responsePayload;
-          })();
+      }
 
       if (requestId !== requestIdRef.current) {
         return;
@@ -538,16 +668,34 @@ export function QaPanel({
       if (saveQuestionHistory) {
         void Promise.resolve(saveQuestionHistory(answeredTurn)).catch(() => undefined);
       }
-    } catch {
+    } catch (error) {
       if (requestId !== requestIdRef.current) {
+        return;
+      }
+      if (error instanceof Error && error.name === "AbortError") {
         return;
       }
 
       setErrorMessage(copy.submitErrorMessage);
-      setTurns((currentTurns) => currentTurns.map((turn) => (turn.id === pendingTurnId ? { ...turn, isPending: false } : turn)));
+      setTurns((currentTurns) =>
+        currentTurns.map((turn) =>
+          turn.id === pendingTurnId
+            ? {
+                ...turn,
+                answer: "",
+                citedSegmentIds: [],
+                citations: undefined,
+                isPending: false
+              }
+            : turn
+        )
+      );
     } finally {
       if (requestId === requestIdRef.current) {
         setIsSubmitting(false);
+      }
+      if (activeStreamControllerRef.current?.signal.aborted || requestId === requestIdRef.current) {
+        activeStreamControllerRef.current = null;
       }
     }
   }
@@ -569,7 +717,7 @@ export function QaPanel({
     }
 
     event.preventDefault();
-    if (isSubmitting) {
+    if (isSubmitting || voiceState !== "idle") {
       return;
     }
 
@@ -581,6 +729,26 @@ export function QaPanel({
     setErrorMessage("");
     questionInputRef.current?.focus();
   }
+
+  const handleVoiceTurnCompleted = useCallback((voiceTurn: BrowserVoiceQaCompletedTurn) => {
+    const answeredTurn: ConversationTurn = {
+      id: voiceTurn.id,
+      question: voiceTurn.question,
+      answer: voiceTurn.answer,
+      citedSegmentIds: voiceTurn.citedSegmentIds,
+      citations: voiceTurn.citations,
+      createdAt: new Date().toISOString()
+    };
+    setTurns((currentTurns) => (
+      currentTurns.some((turn) => turn.id === answeredTurn.id)
+        ? currentTurns
+        : [...currentTurns, answeredTurn]
+    ));
+    setErrorMessage("");
+    if (saveQuestionHistory) {
+      void Promise.resolve(saveQuestionHistory(answeredTurn)).catch(() => undefined);
+    }
+  }, [saveQuestionHistory]);
 
   async function saveQaModel(nextModel: string) {
     if (!nextModel) {
@@ -887,7 +1055,7 @@ export function QaPanel({
             rows={1}
             placeholder={emptyState?.placeholder ?? copy.placeholder}
             value={question}
-            disabled={isDataEmpty}
+            disabled={isDataEmpty || voiceState !== "idle"}
             onChange={(event) => setQuestion(event.target.value)}
             onKeyDown={handleQuestionKeyDown}
           />
@@ -918,9 +1086,41 @@ export function QaPanel({
               {promptMessage ? <span className="model-state">{promptMessage}</span> : null}
               {modelMessage ? <span className="model-state">{modelMessage}</span> : null}
             </div>
-            <button className="send" type="submit" disabled={isDataEmpty || (scope === "current" && !uploadId) || isSubmitting} aria-label="提问">
-              <SendIcon />
-            </button>
+            <div className="composer-actions">
+              {voiceWorkspace?.active ? (
+                <BrowserVoiceQa
+                  key={`composer:${voiceWorkspace.sessionKey}`}
+                  variant="composer"
+                  answerMode={voiceWorkspace.answerMode}
+                  scope={voiceWorkspace.scope}
+                  uploadId={voiceWorkspace.uploadId}
+                  referenceDate={voiceWorkspace.referenceDate}
+                  context={voiceWorkspace.context}
+                  conversation={conversationFromTurns(
+                    turns,
+                    shouldIncludeLoadedHistoryInConversation
+                  )}
+                  disabled={isDataEmpty || isSubmitting}
+                  disabledReason={voiceWorkspace.unavailableReason}
+                  onStateChange={setVoiceState}
+                  onErrorMessage={setErrorMessage}
+                  onTurnCompleted={handleVoiceTurnCompleted}
+                />
+              ) : null}
+              <button
+                className="send"
+                type="submit"
+                disabled={
+                  isDataEmpty ||
+                  (scope === "current" && !uploadId) ||
+                  isSubmitting ||
+                  voiceState !== "idle"
+                }
+                aria-label="提问"
+              >
+                <SendIcon />
+              </button>
+            </div>
           </div>
           {qaPromptPresetId === "custom" ? (
             <div className="custom-role-inline">
@@ -950,7 +1150,9 @@ export function QaPanel({
           ) : null}
         </div>
         {errorMessage ? <p className="form-error">{errorMessage}</p> : null}
-        <div className="hint">{copy.hint}</div>
+        <div className="hint" aria-live="polite">
+          {voiceState === "idle" ? copy.hint : voiceStateCopy[voiceState]}
+        </div>
       </form>
     </div>
   );

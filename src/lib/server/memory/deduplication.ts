@@ -1,6 +1,8 @@
 import { calculateImportance, combineImportanceReasons } from "./importance";
 import { meaningfulTextTokens, sharedTokenCount } from "../text-features";
 import { MemoryItemSchema, type MemoryEvidence, type MemoryItem } from "./types";
+import { deduplicateMemoryEvidence } from "./evidence-deduplication";
+import { preferenceIdentitiesFromMemory } from "./preference-identity";
 
 export type MemorySimilarityMatch = {
   memory: MemoryItem;
@@ -97,8 +99,28 @@ export function findSimilarMemories(candidate: MemoryItem, existing: MemoryItem[
       const preferenceShared = candidate.type === "preference"
         ? sharedTokenCount(preferenceSubject(candidate), preferenceSubject(memory))
         : 0;
+      const candidatePreferenceIdentities = candidate.type === "preference"
+        ? preferenceIdentitiesFromMemory(candidate)
+        : [];
+      const memoryPreferenceIdentities = candidate.type === "preference"
+        ? preferenceIdentitiesFromMemory(memory)
+        : [];
+      const exactPreferenceIdentity = candidatePreferenceIdentities.some((candidateIdentity) =>
+        memoryPreferenceIdentities.some((memoryIdentity) =>
+          candidateIdentity.fingerprint === memoryIdentity.fingerprint
+        )
+      );
+      const conflictingPreferenceIdentity = candidatePreferenceIdentities.some((candidateIdentity) =>
+        memoryPreferenceIdentities.some((memoryIdentity) =>
+          candidateIdentity.key === memoryIdentity.key && candidateIdentity.value !== memoryIdentity.value
+        )
+      );
+      const identitySafeLegacyFallback = !conflictingPreferenceIdentity &&
+        (candidatePreferenceIdentities.length === 0 || memoryPreferenceIdentities.length === 0) &&
+        preferenceShared >= 2;
       const similar = candidate.type === "preference"
-        ? preferenceShared >= 2 && daysApart <= MAX_EXACT_MATCH_DAYS * 2
+        ? (exactPreferenceIdentity || identitySafeLegacyFallback) &&
+          daysApart <= MAX_EXACT_MATCH_DAYS * 2
         : (exactSummary || exactTitle && summaryScore >= 0.2) && daysApart <= MAX_EXACT_MATCH_DAYS ||
           score >= MIN_SIMILARITY && titleScore >= 0.35 && summaryScore >= 0.2 && daysApart <= MAX_SIMILAR_MATCH_DAYS;
       return similar ? { memory, score, daysApart } : null;
@@ -123,19 +145,21 @@ function representative(primary: MemoryItem, incoming: MemoryItem) {
   return incoming.createdAt < primary.createdAt ? incoming : primary;
 }
 
-export function mergeMemories(primary: MemoryItem, incoming: MemoryItem): MemoryItem {
+export function mergeMemories(
+  primary: MemoryItem,
+  incoming: MemoryItem,
+  onEvidenceDedup?: (removed: number) => void
+): MemoryItem {
   if (primary.userId !== incoming.userId || primary.type !== incoming.type) {
     throw new Error("Only same-user, same-type memories can be merged");
   }
 
   const selected = representative(primary, incoming);
-  const evidenceById = new Map<string, MemoryEvidence>();
-  for (const evidence of [...primary.evidence, ...incoming.evidence]) {
-    evidenceById.set(evidence.id, { ...evidence, memoryId: primary.id });
-  }
-  const evidence = [...evidenceById.values()].sort(
-    (left, right) => left.date.localeCompare(right.date) || left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id)
-  );
+  const combinedEvidence: MemoryEvidence[] = [...primary.evidence, ...incoming.evidence]
+    .map((evidence) => ({ ...evidence, memoryId: primary.id }));
+  const deduplicated = deduplicateMemoryEvidence(primary.id, combinedEvidence);
+  onEvidenceDedup?.(deduplicated.removed);
+  const evidence = deduplicated.evidence;
   const evidenceDates = [...new Set(evidence.map((item) => item.date))].sort();
   const occurrenceCount = new Set(evidence.map((item) => item.uploadId)).size;
   const importance = calculateImportance({
@@ -173,20 +197,33 @@ export function mergeMemories(primary: MemoryItem, incoming: MemoryItem): Memory
   });
 }
 
-export function consolidateMemories(memories: MemoryItem[]) {
+export type MemoryConsolidationPolicy = {
+  canMerge?: (primary: MemoryItem, incoming: MemoryItem) => boolean;
+  onMerged?: (primary: MemoryItem, incoming: MemoryItem, merged: MemoryItem) => void;
+};
+
+export function consolidateMemories(
+  memories: MemoryItem[],
+  onEvidenceDedup?: (removed: number) => void,
+  policy: MemoryConsolidationPolicy = {}
+) {
   const consolidated: MemoryItem[] = [];
   const ordered = [...memories].sort(
     (left, right) => left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id)
   );
 
   for (const memory of ordered) {
-    const match = findSimilarMemories(memory, consolidated)[0];
+    const match = findSimilarMemories(memory, consolidated)
+      .find((candidate) => policy.canMerge?.(candidate.memory, memory) ?? true);
     if (!match) {
       consolidated.push(memory);
       continue;
     }
     const index = consolidated.findIndex((item) => item.id === match.memory.id);
-    consolidated[index] = mergeMemories(consolidated[index], memory);
+    const primary = consolidated[index];
+    const merged = mergeMemories(primary, memory, onEvidenceDedup);
+    consolidated[index] = merged;
+    policy.onMerged?.(primary, memory, merged);
   }
 
   return consolidated;

@@ -1,0 +1,67 @@
+{
+  "version": 1,
+  "datasetVersion": "long-recording-60m-v1",
+  "questions": [
+    {
+      "id": "q017",
+      "category": "lifecycle",
+      "question": "陶艺预约后来从未确认状态变成了什么状态？",
+      "expectedScope": "current",
+      "evaluation": {
+        "kind": "lifecycle",
+        "expectedState": "resolved",
+        "requiredAnswerAnyOf": [
+          ["预约完成", "预约成功", "已经确认", "已确认"],
+          ["付款", "支付", "确认通知", "确认"]
+        ]
+      }
+    },
+    {
+      "id": "q018",
+      "category": "lifecycle",
+      "question": "是否邀请朋友参加陶艺课这个问题后来是怎样解决的？",
+      "expectedScope": "current",
+      "evaluation": {
+        "kind": "lifecycle",
+        "expectedState": "resolved",
+        "requiredAnswerAnyOf": [
+          ["不邀请朋友", "没有邀请朋友", "不请朋友"],
+          ["两个人", "两人参加", "只有他们两人", "两个位置"]
+        ]
+      }
+    },
+    {
+      "id": "q022",
+      "category": "unsupported",
+      "question": "录音中是否有证据表明三个讨论问题和提纲已经发送？",
+      "expectedScope": "current",
+      "evaluation": {
+        "kind": "unsupported",
+        "expectedState": "pending",
+        "requiredAnswerAnyOf": []
+      }
+    },
+    {
+      "id": "q034",
+      "category": "lifecycle",
+      "question": "她答应的事情都做完了吗？",
+      "expectedScope": "current",
+      "evaluation": {
+        "kind": "aggregate_lifecycle",
+        "expectedState": "partial_or_unknown",
+        "requiredAnswerAnyOf": []
+      }
+    },
+    {
+      "id": "q040",
+      "category": "summary",
+      "question": "总结一下今天的事情。",
+      "expectedScope": "current",
+      "evaluation": {
+        "kind": "summary",
+        "expectedState": "not_applicable",
+        "requiredAnswerAnyOf": []
+      }
+    }
+  ]
+}

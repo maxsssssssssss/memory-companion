@@ -1,6 +1,8 @@
 import type { RelationshipSignalCard } from "@/lib/domain/types";
 import { meaningfulTextTokens, roundedScore } from "@/lib/server/text-features";
 import type { MemoryWriteInput } from "./types";
+import type { MemoryOwnerResolution } from "./owner-attribution/types";
+import { hasConcretePreferenceIdentity } from "./preference-identity";
 
 export type MemoryAdmissionDecision = {
   memoryId: string;
@@ -12,7 +14,7 @@ export type MemoryAdmissionDecision = {
 };
 
 const STABLE_PREFERENCE_PATTERN =
-  /不喜欢|更喜欢|最喜欢|特别喜欢|更倾向|(?:我的|我对.{1,20}的)偏好(?:是|为|：|:)|平时.{0,8}(?:喜欢|选择|会)|通常.{0,8}(?:喜欢|选择|会)|一般(?:会|选|喜欢|倾向)|习惯|不太能接受|一直习惯|prefer|usually|habit/iu;
+  /不喜欢|不爱|不吃|不太能吃|不能吃|更喜欢|最喜欢|特别喜欢|更倾向|(?:我的|我对.{1,20}的)偏好(?:是|为|：|:)|平时.{0,8}(?:喜欢|选择|会)|通常.{0,8}(?:喜欢|选择|会)|一般(?:会|选|喜欢|倾向)|习惯|不太能接受|一直习惯|prefer|usually|habit/iu;
 const ONE_TIME_CHOICE_PATTERN =
   /(?:今天|这次|这回|当前|现在|暂时).{0,10}(?:先|就|选|点|喝|吃|用|想|不想)|(?:for now|today|this time)/iu;
 const FUTURE_ACTION_PATTERN =
@@ -38,7 +40,7 @@ const GENERIC_RELATIONSHIP_SUMMARY_PATTERN =
   /^(?:对方|双方|互动|回应).{0,24}(?:出现|给出|体现|展现|涉及).{0,24}(?:线索|回应方式|答复时间|后续行动|承诺|支持|边界)[。！! ]*$/u;
 
 export function isStablePreferenceText(value: string) {
-  return STABLE_PREFERENCE_PATTERN.test(value) && !(
+  return STABLE_PREFERENCE_PATTERN.test(value) && hasConcretePreferenceIdentity(value) && !(
     ONE_TIME_CHOICE_PATTERN.test(value) && !/平时|通常|一般|习惯|更喜欢|更倾向|不喜欢|偏好/u.test(value)
   );
 }
@@ -67,6 +69,7 @@ function isBroadAggregate(memory: MemoryWriteInput, sourceSegmentCount: number) 
 
 export function evaluateMemoryAdmission(input: {
   memory: MemoryWriteInput;
+  ownerAttribution?: MemoryOwnerResolution;
   relationshipSignal?: RelationshipSignalCard;
   sourceSegmentCount?: number;
   occurrenceCount?: number;
@@ -115,6 +118,14 @@ export function evaluateMemoryAdmission(input: {
     shouldPersist = isStablePreferenceText(text) && !isOneTimeChoiceText(text) && !broadAggregate;
     score = shouldPersist ? 0.75 : 0.28;
     reasons.push(shouldPersist ? "explicit_stable_preference" : "one_time_or_ambiguous_choice");
+    if (shouldPersist && input.ownerAttribution && (
+      input.ownerAttribution.scope !== "individual" ||
+      input.ownerAttribution.owner.type !== "known_identity"
+    )) {
+      shouldPersist = false;
+      score = 0.34;
+      reasons.push("preference_owner_not_reliably_identified");
+    }
   } else if (memory.type === "commitment") {
     shouldPersist = FUTURE_ACTION_PATTERN.test(text) && hasSpecificContent(text) && !broadAggregate;
     score = shouldPersist ? 0.78 + (DEADLINE_PATTERN.test(text) ? 0.08 : 0) : 0.36;

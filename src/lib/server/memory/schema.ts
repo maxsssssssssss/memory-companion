@@ -1,6 +1,6 @@
 import type Database from "better-sqlite3";
 
-export const MEMORY_SCHEMA_VERSION = 2;
+export const MEMORY_SCHEMA_VERSION = 3;
 
 const MEMORY_SCHEMA_V1 = `
   CREATE TABLE memory_items (
@@ -72,9 +72,33 @@ const MEMORY_SCHEMA_V2 = `
     ON memory_items(user_id, status, importance_score DESC);
 `;
 
+const MEMORY_SCHEMA_V3 = `
+  CREATE TABLE memory_owner_observations (
+    id TEXT PRIMARY KEY,
+    memory_id TEXT NOT NULL,
+    upload_id TEXT NOT NULL,
+    owner_scope TEXT NOT NULL CHECK (owner_scope IN ('individual', 'shared', 'unknown')),
+    owner_type TEXT NOT NULL CHECK (owner_type IN ('known_identity', 'local_speaker', 'unknown')),
+    identity_id TEXT,
+    confidence REAL NOT NULL CHECK (confidence >= 0 AND confidence <= 1),
+    source TEXT NOT NULL CHECK (source IN ('speaker_identity', 'manual_mapping', 'explicit_statement', 'unknown')),
+    participants_json TEXT NOT NULL DEFAULT '[]',
+    evidence_segment_ids_json TEXT NOT NULL DEFAULT '[]',
+    reasons_json TEXT NOT NULL DEFAULT '[]',
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (memory_id) REFERENCES memory_items(id) ON DELETE CASCADE
+  );
+
+  CREATE INDEX idx_memory_owner_observations_memory
+    ON memory_owner_observations(memory_id);
+  CREATE INDEX idx_memory_owner_observations_upload
+    ON memory_owner_observations(upload_id);
+`;
+
 const MIGRATIONS = [
   { version: 1, sql: MEMORY_SCHEMA_V1 },
-  { version: 2, sql: MEMORY_SCHEMA_V2 }
+  { version: 2, sql: MEMORY_SCHEMA_V2 },
+  { version: 3, sql: MEMORY_SCHEMA_V3 }
 ] as const;
 
 export function migrateMemorySchema(database: Database.Database) {

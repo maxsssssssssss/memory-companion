@@ -3,6 +3,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { retrieveMemoryIndexEvidence } from "./memory-index-evidence";
 import type { MemoryItem, MemoryRepository } from "@/lib/server/memory/types";
+import type { MemoryOwnerMetadata } from "@/lib/server/memory/owner-attribution/types";
 
 function memory(input: {
   id: string;
@@ -62,9 +63,10 @@ function memory(input: {
   };
 }
 
-function repository(memories: MemoryItem[]) {
+function repository(memories: MemoryItem[], ownerAttributions: MemoryOwnerMetadata[] = []) {
   return {
-    getRelevantMemories: vi.fn(() => memories)
+    getRelevantMemories: vi.fn(() => memories),
+    getMemoryOwnerAttributions: vi.fn(() => ownerAttributions)
   } as unknown as MemoryRepository;
 }
 
@@ -102,6 +104,124 @@ describe("memory index QA evidence adapter", () => {
       expect.arrayContaining(["commitment_high_brief", "commitment_high_segment"])
     );
     expect(result.evidence.every((item) => item.memoryId === "commitment_high")).toBe(true);
+  });
+
+  it("joins internal owner metadata only for selected memories", () => {
+    const selected = memory({ id: "preference_selected", type: "preference", importanceScore: 0.8 });
+    const owner: MemoryOwnerMetadata = {
+      version: 1,
+      memoryId: selected.id,
+      memoryType: "preference",
+      scope: "individual",
+      owner: {
+        type: "known_identity",
+        identityId: "person_partner",
+        confidence: 0.95,
+        source: "manual_mapping"
+      },
+      participants: [{
+        role: "owner",
+        attribution: {
+          type: "known_identity",
+          identityId: "person_partner",
+          confidence: 0.95,
+          source: "manual_mapping"
+        },
+        evidenceSegmentIds: ["preference_selected_segment"]
+      }],
+      evidenceSegmentIds: ["preference_selected_segment"],
+      reasons: ["explicit_owner"]
+    };
+    const memoryRepository = repository([selected], [owner]);
+
+    const result = retrieveMemoryIndexEvidence({
+      userId: "user_1",
+      scope: "all",
+      query: "过去记录过什么偏好？",
+      repository: memoryRepository
+    });
+
+    expect(result.ownerAttributions).toEqual([owner]);
+    expect(memoryRepository.getMemoryOwnerAttributions).toHaveBeenCalledWith(
+      "user_1",
+      [selected.id]
+    );
+  });
+
+  it("removes owner participants whose evidence is outside the retrieved scope", () => {
+    const selected = memory({ id: "event_scoped", type: "event", importanceScore: 0.8 });
+    const owner: MemoryOwnerMetadata = {
+      version: 1,
+      memoryId: selected.id,
+      memoryType: "event",
+      scope: "shared",
+      owner: { type: "unknown", confidence: 0, source: "unknown" },
+      participants: [
+        {
+          role: "participant",
+          attribution: {
+            type: "known_identity",
+            identityId: "person_current",
+            confidence: 0.95,
+            source: "speaker_identity"
+          },
+          evidenceSegmentIds: ["event_scoped_segment"]
+        },
+        {
+          role: "participant",
+          attribution: {
+            type: "known_identity",
+            identityId: "person_outside_scope",
+            confidence: 0.95,
+            source: "speaker_identity"
+          },
+          evidenceSegmentIds: ["historical_segment"]
+        }
+      ],
+      evidenceSegmentIds: ["event_scoped_segment", "historical_segment"],
+      reasons: ["shared_context"]
+    };
+
+    const result = retrieveMemoryIndexEvidence({
+      userId: "user_1",
+      scope: "all",
+      query: "过去发生过哪些事件？",
+      repository: repository([selected], [owner])
+    });
+
+    expect(result.ownerAttributions).toEqual([
+      expect.objectContaining({
+        evidenceSegmentIds: ["event_scoped_segment"],
+        participants: [
+          expect.objectContaining({
+            attribution: expect.objectContaining({ identityId: "person_current" })
+          })
+        ]
+      })
+    ]);
+    expect(JSON.stringify(result.ownerAttributions)).not.toContain("person_outside_scope");
+  });
+
+  it("keeps QA retrieval available when owner metadata cannot be read", () => {
+    const selected = memory({ id: "commitment_without_owner", type: "commitment", importanceScore: 0.85 });
+    const memoryRepository = repository([selected]);
+    vi.mocked(memoryRepository.getMemoryOwnerAttributions).mockImplementation(() => {
+      throw new Error("owner sidecar unavailable");
+    });
+    const warning = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+
+    const result = retrieveMemoryIndexEvidence({
+      userId: "user_1",
+      scope: "all",
+      query: "之前答应过什么？",
+      repository: memoryRepository
+    });
+
+    expect(result.memories).toEqual([selected]);
+    expect(result.ownerAttributions).toEqual([]);
+    expect(warning).toHaveBeenCalledWith(
+      "[memory-owner] retrieval_failed user_id=user_1 error_name=Error"
+    );
   });
 
   it("filters memory types for unresolved and relationship questions", () => {

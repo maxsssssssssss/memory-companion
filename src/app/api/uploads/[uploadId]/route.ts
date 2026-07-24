@@ -5,10 +5,12 @@ import type { AudioUpload, ProcessingJob, QuestionAnswer } from "@/lib/domain/ty
 import { proactiveInsightCacheIdForUpload } from "@/lib/domain/proactive-insights";
 import { isUnauthenticatedError, requireAuthContext, unauthorizedResponse } from "@/lib/server/auth/request-context";
 import { isConfirmedEvaluationDelete, isEvaluationRetentionUpload } from "@/lib/server/evaluation/retention";
+import { deleteProviderRawResponseCaptures } from "@/lib/server/evaluation/provider-response-capture";
 import { getMemoryRepository } from "@/lib/server/memory";
 import { cleanupGeneratedAudioChunks } from "@/lib/server/transcription/chunks/audio-planner";
 import { JsonChunkCheckpointStore } from "@/lib/server/transcription/chunks/checkpoint-store";
 import { JsonAnalysisChunkCheckpointStore } from "@/lib/server/analysis-chunks/checkpoint";
+import { JsonSpeakerIdentityRepository } from "@/lib/server/speaker-identity/repository";
 
 type StoredUpload = AudioUpload & {
   filePath?: string;
@@ -79,6 +81,7 @@ export async function DELETE(_request: Request, { params }: { params: Promise<{ 
     await cleanupGeneratedAudioChunks(chunks);
     await chunkCheckpoints.deleteUpload(uploadId);
     await new JsonAnalysisChunkCheckpointStore(authContext.store).deleteUpload(authContext.user.id, uploadId);
+    await new JsonSpeakerIdentityRepository(authContext.store).deleteUploadMappings(uploadId);
 
     const job = await authContext.store.read<ProcessingJob>("jobs-by-upload", uploadId);
     if (job) {
@@ -110,11 +113,15 @@ export async function DELETE(_request: Request, { params }: { params: Promise<{ 
       authContext.store.delete("semantic-segments", uploadId),
       authContext.store.delete("brief-items", uploadId),
       authContext.store.delete("relationship-signals", uploadId),
+      authContext.store.delete("relationship-lifecycle", uploadId),
+      authContext.store.delete("speaker-identities", uploadId),
+      authContext.store.delete("memory-owner-audits", uploadId),
       authContext.store.delete("proactive-insights", proactiveInsightCacheIdForUpload(uploadId)),
       authContext.store.delete("answers-by-upload", uploadId)
     ]);
 
     getMemoryRepository().deleteByUpload(authContext.user.id, uploadId);
+    await deleteProviderRawResponseCaptures(uploadId);
 
     // Keep the parent record addressable until every retryable child cleanup has completed.
     await authContext.store.delete("evaluation-reports", uploadId);

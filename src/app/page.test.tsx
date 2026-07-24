@@ -2,7 +2,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testi
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { ProactiveInsight } from "@/lib/domain/proactive-insights";
-import type { AudioInsight, AudioUpload, BriefItem, ProcessingJob, RelationshipSignalCard, SemanticSegment, TranscriptSegment } from "@/lib/domain/types";
+import type { AudioInsight, AudioUpload, BriefItem, ProcessingJob, QuestionAnswer, RelationshipSignalCard, SemanticSegment, TranscriptSegment } from "@/lib/domain/types";
 
 type LocalDayIndexItem = {
   uploadId: string;
@@ -130,6 +130,44 @@ function jsonResponse(body: unknown, init?: { ok?: boolean; status?: number }): 
     status: init?.status ?? 200,
     json: async () => body
   };
+}
+
+function qaStreamResponse(answer: QuestionAnswer) {
+  const events = [
+    {
+      type: "meta",
+      version: 1,
+      streamId: "00000000-0000-4000-8000-000000000001"
+    },
+    ...(answer.citedSegmentIds.length > 0
+      ? [
+          {
+            type: "sentence",
+            sequence: 1,
+            text: answer.answer,
+            supportIds: answer.citedSegmentIds,
+            citedSegmentIds: answer.citedSegmentIds,
+            groundingValidated: true
+          }
+        ]
+      : []),
+    {
+      type: "final",
+      answer,
+      source: "provider_stream"
+    },
+    {
+      type: "complete",
+      status: "completed"
+    }
+  ];
+
+  return new Response(`${events.map((event) => JSON.stringify(event)).join("\n")}\n`, {
+    status: 200,
+    headers: {
+      "Content-Type": "application/x-ndjson; charset=utf-8"
+    }
+  });
 }
 
 function authMeResponse() {
@@ -532,6 +570,63 @@ describe("HomePage", () => {
     expect(within(statusRegion).queryByText(uploadId)).not.toBeInTheDocument();
   });
 
+  it("mounts Voice QA in the QA workspace and unmounts it when leaving that view", async () => {
+    const uploadId = "upload_voice_sidebar";
+    window.localStorage.setItem(LAST_UPLOAD_ID_STORAGE_KEY, uploadId);
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      const url = String(input);
+
+      if (url === "/api/settings") {
+        return Promise.resolve(settingsResponse());
+      }
+
+      if (url === `/api/days/${uploadId}`) {
+        return Promise.resolve(
+          jsonResponse(
+            buildPayload(uploadId, "ready", {
+              segments: [
+                {
+                  id: "seg_voice_sidebar",
+                  uploadId,
+                  startSeconds: 0,
+                  endSeconds: 8,
+                  text: "今天确认了一项安排。",
+                  confidence: 0.95,
+                  sceneLabels: ["self_reflection"],
+                  valueLabels: ["decision"]
+                }
+              ]
+            })
+          )
+        );
+      }
+
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    vi.stubGlobal("fetch", withAuthenticatedFetch(fetchMock));
+    render(<HomePage />);
+
+    await screen.findByText("录音复盘已完成");
+    expect(screen.queryByRole("button", { name: "开始语音提问" })).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "问答 AI" }));
+    const voiceButton = await screen.findByRole("button", { name: "开始语音提问" });
+    const composer = screen.getByRole("form", { name: "QA composer" });
+    expect(within(composer).getByRole("button", { name: "开始语音提问" }))
+      .toBe(voiceButton);
+    expect(voiceButton).toHaveAttribute("data-answer-mode", "agent");
+    expect(voiceButton).toBeEnabled();
+    expect(screen.queryByRole("complementary", { name: "语音问答" }))
+      .not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "时间轴" }));
+    await waitFor(() => {
+      expect(screen.queryByRole("button", { name: "开始语音提问" }))
+        .not.toBeInTheDocument();
+    });
+  });
+
   it("filters the current recording from the top search and shows result counts", async () => {
     window.localStorage.setItem(LAST_UPLOAD_ID_STORAGE_KEY, "upload_search");
     const fetchMock = vi.fn((input: RequestInfo | URL) => {
@@ -792,19 +887,21 @@ describe("HomePage", () => {
     fireEvent.click(screen.getByRole("button", { name: "保存" }));
 
     expect(await screen.findByText("已保存")).toBeInTheDocument();
-    expect(localAnalysisMocks.saveLocalDayPayload).toHaveBeenCalledWith(
-      expect.objectContaining({
-        upload: expect.objectContaining({ id: "upload_alias_cleaned" }),
-        speakerAliases: {
-          speaker_1: "大叔"
-        },
-        speakerAliasesByUploadId: {
-          upload_alias_cleaned: {
+    await waitFor(() => {
+      expect(localAnalysisMocks.saveLocalDayPayload).toHaveBeenCalledWith(
+        expect.objectContaining({
+          upload: expect.objectContaining({ id: "upload_alias_cleaned" }),
+          speakerAliases: {
             speaker_1: "大叔"
+          },
+          speakerAliasesByUploadId: {
+            upload_alias_cleaned: {
+              speaker_1: "大叔"
+            }
           }
-        }
-      })
-    );
+        })
+      );
+    });
   });
 
   it("uses speaker aliases in current recording QA context while preserving raw segment speaker ids", async () => {
@@ -890,7 +987,7 @@ describe("HomePage", () => {
         expect(body.briefItems?.[0]?.title).toBe("张三 确认方案");
 
         return Promise.resolve(
-          jsonResponse({
+          qaStreamResponse({
             id: "answer_qa_alias",
             uploadId: "upload_qa_alias",
             question: "谁要确认方案？",
@@ -1049,7 +1146,7 @@ describe("HomePage", () => {
         expect(body.relationshipSignals?.map((card) => card.id)).toEqual(["signal_relationship_1"]);
 
         return Promise.resolve(
-          jsonResponse({
+          qaStreamResponse({
             id: "answer_relationship_signal",
             uploadId: "upload_relationship",
             question: "这次回应中，哪句话最值得继续确认？",
@@ -1651,7 +1748,7 @@ describe("HomePage", () => {
           ]);
 
           return Promise.resolve(
-            jsonResponse({
+            qaStreamResponse({
               id: "answer_day_context_followup",
               uploadId: "day_2026-06-03",
               question: "继续",
@@ -1663,7 +1760,7 @@ describe("HomePage", () => {
         }
 
         return Promise.resolve(
-          jsonResponse({
+          qaStreamResponse({
             id: "answer_day_context",
             uploadId: "day_2026-06-03",
             question: "这一天有什么重点？",
@@ -1706,6 +1803,7 @@ describe("HomePage", () => {
       expect(fetchMock.mock.calls.some(([url, init]) => String(url) === "/api/days/context/qa" && init?.method === "POST")).toBe(true);
     });
     const contextQaCall = fetchMock.mock.calls.find(([url, init]) => String(url) === "/api/days/context/qa" && init?.method === "POST");
+    const contextQaHeaders = new Headers(contextQaCall?.[1]?.headers);
     const contextQaBody = JSON.parse(String(contextQaCall?.[1]?.body)) as {
       uploadId?: string;
       question?: string;
@@ -1714,6 +1812,8 @@ describe("HomePage", () => {
       promptPresetId?: string;
       customPrompt?: string;
     };
+    expect(contextQaHeaders.get("Accept")).toBe("application/x-ndjson");
+    expect(contextQaCall?.[1]?.signal).toBeDefined();
     expect(contextQaBody.uploadId).toBe("day_2026-06-03");
     expect(contextQaBody.question).toBe("这一天有什么重点？");
     expect(contextQaBody.promptPresetId).toBe("date");
@@ -2782,7 +2882,7 @@ describe("HomePage", () => {
         expect(body.relationshipSignals?.map((card) => card.id)).toEqual(["relationship_signal_local_week_1"]);
 
         return Promise.resolve(
-          jsonResponse({
+          qaStreamResponse({
             id: "answer_week_context",
             uploadId: "week_2026-06-08_2026-06-14",
             question: "这周互动氛围怎么样？",
@@ -2866,7 +2966,9 @@ describe("HomePage", () => {
 
     expect(settingsToggle).toHaveAttribute("aria-expanded", "true");
     expect(screen.getByText("数据只保存在本机")).toBeInTheDocument();
-    expect(screen.getByText("/Users/wangsong/Documents/Long-time Record Analyze/.data")).toBeInTheDocument();
+    expect(
+      await screen.findByText("/Users/wangsong/Documents/Long-time Record Analyze/.data")
+    ).toBeInTheDocument();
     expect(screen.getByText("不会上传到我们的云")).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "使用我的 OpenRouter Key" }));

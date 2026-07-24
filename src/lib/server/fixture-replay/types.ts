@@ -22,6 +22,7 @@ export const FixtureManifestSchema = z.object({
   description: z.string().min(1),
   timezone: z.string().min(1),
   productionDateField: z.literal("recordingDate"),
+  manualSpeakerIdentities: z.record(SafeIdSchema, SafeIdSchema).optional(),
   sessions: z.array(FixtureSessionSchema).min(1)
 });
 

@@ -16,7 +16,7 @@ afterEach(async () => {
 });
 
 describe("memory database", () => {
-  it("creates the v1.5 schema with management columns and relations", async () => {
+  it("creates the managed memory schema with an internal owner-attribution sidecar", async () => {
     tempDir = await mkdtemp(join(tmpdir(), "memory-db-"));
     const database = openMemoryDatabase({ filePath: join(tempDir, "memory.sqlite") });
 
@@ -33,7 +33,13 @@ describe("memory database", () => {
     }>;
 
     expect(tables.map((table) => table.name)).toEqual(
-      expect.arrayContaining(["memory_evidence", "memory_items", "memory_relations", "schema_migrations"])
+      expect.arrayContaining([
+        "memory_evidence",
+        "memory_items",
+        "memory_owner_observations",
+        "memory_relations",
+        "schema_migrations"
+      ])
     );
     expect(itemColumns.map((column) => column.name)).toEqual(
       expect.arrayContaining([
@@ -50,7 +56,7 @@ describe("memory database", () => {
     expect(relationIndexes).toEqual(
       expect.arrayContaining([expect.objectContaining({ name: "idx_memory_relations_unique", unique: 1 })])
     );
-    expect(migration).toEqual([{ version: 1 }, { version: 2 }]);
+    expect(migration).toEqual([{ version: 1 }, { version: 2 }, { version: 3 }]);
     expect(database.pragma("foreign_keys", { simple: true })).toBe(1);
 
     database.close();

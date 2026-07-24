@@ -1,7 +1,9 @@
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 
+import type { QaBrowserStreamEvent } from "@/lib/qa-browser-stream";
 import { QaPanel } from "./qa-panel";
+import { QaVoiceWorkspace } from "./qa-voice-workspace";
 
 function mockSettingsFetch() {
   return vi.fn((url: string | URL | Request) => {
@@ -28,6 +30,62 @@ function qaPromptPresets() {
     { id: "casual", label: "日常闲聊", description: "生活细节、轻松记录" },
     { id: "custom", label: "自定义", description: "使用你写的提示词" }
   ];
+}
+
+function controlledQaStreamResponse() {
+  const encoder = new TextEncoder();
+  let streamController: ReadableStreamDefaultController<Uint8Array> | undefined;
+  const response = new Response(
+    new ReadableStream<Uint8Array>({
+      start(controller) {
+        streamController = controller;
+      }
+    }),
+    {
+      status: 200,
+      headers: { "Content-Type": "application/x-ndjson; charset=utf-8" }
+    }
+  );
+
+  return {
+    response,
+    emit(event: QaBrowserStreamEvent) {
+      streamController?.enqueue(encoder.encode(`${JSON.stringify(event)}\n`));
+    },
+    close() {
+      streamController?.close();
+    }
+  };
+}
+
+function finalStreamAnswer(overrides: Record<string, unknown> = {}) {
+  return {
+    id: "answer_streamed",
+    uploadId: "upload_1",
+    question: "今天有什么重点？",
+    answer: "第一句。第二句。",
+    citedSegmentIds: ["seg_1", "seg_2"],
+    citations: [
+      {
+        id: "E1",
+        title: "第一条证据",
+        startSeconds: 0,
+        endSeconds: 5,
+        excerpt: "第一条摘录",
+        sourceSegmentIds: ["seg_1"]
+      },
+      {
+        id: "E2",
+        title: "第二条证据",
+        startSeconds: 6,
+        endSeconds: 10,
+        excerpt: "第二条摘录",
+        sourceSegmentIds: ["seg_2"]
+      }
+    ],
+    createdAt: "2026-07-23T08:00:00.000Z",
+    ...overrides
+  };
 }
 
 describe("QaPanel", () => {
@@ -446,6 +504,40 @@ describe("QaPanel", () => {
     expect(composer).toHaveClass("compose");
     expect(historyRegion).not.toContainElement(composer);
     expect(composer.querySelector("textarea[name='question']")).toBeInTheDocument();
+  });
+
+  it("places the production voice control immediately before send in the shared composer", async () => {
+    vi.stubGlobal("fetch", mockSettingsFetch());
+
+    render(
+      <QaVoiceWorkspace
+        active
+        scope="current"
+        uploadId="upload_1"
+      >
+        <QaPanel
+          uploadId="upload_1"
+          onLocalQuestion={async () => ({
+            id: "unused",
+            question: "unused",
+            answer: "unused",
+            citedSegmentIds: [],
+            createdAt: "2026-07-24T00:00:00.000Z"
+          })}
+        />
+      </QaVoiceWorkspace>
+    );
+
+    const composer = screen.getByRole("form", { name: "QA composer" });
+    const voiceButton = await screen.findByRole("button", { name: "开始语音提问" });
+    const sendButton = screen.getByRole("button", { name: "提问" });
+
+    expect(composer).toContainElement(voiceButton);
+    expect(composer).toContainElement(sendButton);
+    expect(
+      voiceButton.compareDocumentPosition(sendButton) & Node.DOCUMENT_POSITION_FOLLOWING
+    ).toBeTruthy();
+    expect(document.querySelector(".voice-qa-card")).not.toBeInTheDocument();
   });
 
   it("sends recent conversation context when the user asks a follow-up question", async () => {
@@ -1274,6 +1366,9 @@ describe("QaPanel", () => {
     expect(answer).not.toBeNull();
     expect(answer?.textContent).toBe("第一行\n第二行");
     expect(answer?.tagName).toBe("PRE");
+    expect(answer).toHaveClass("qa-answer-content");
+    expect(screen.getByText("今天有什么重点？")).not.toHaveClass("qa-answer-content");
+    expect(citationDetails).not.toHaveClass("qa-answer-content");
   });
 
   it("lets users select and save the QA model preset inside the composer", async () => {
@@ -1514,6 +1609,180 @@ describe("QaPanel", () => {
       );
     });
     expect(screen.getByText("基于本周记忆")).toBeInTheDocument();
+  });
+
+  it("renders grounded stream sentences in order, then atomically replaces them with the final answer", async () => {
+    const stream = controlledQaStreamResponse();
+    const onStreamQuestion = vi.fn().mockResolvedValue(stream.response);
+    const saveQuestionHistory = vi.fn();
+    const trace = vi.spyOn(console, "info").mockImplementation(() => undefined);
+    vi.stubGlobal("fetch", mockSettingsFetch());
+
+    render(
+      <QaPanel
+        uploadId="upload_1"
+        onStreamQuestion={onStreamQuestion}
+        saveQuestionHistory={saveQuestionHistory}
+      />
+    );
+
+    const input = document.querySelector('textarea[name="question"]') as HTMLTextAreaElement;
+    fireEvent.change(input, { target: { value: "今天有什么重点？" } });
+    fireEvent.submit(document.querySelector("form.compose") as HTMLFormElement);
+    await waitFor(() => expect(onStreamQuestion).toHaveBeenCalledOnce());
+
+    await act(async () => {
+      stream.emit({ type: "meta", version: 1, streamId: "11111111-1111-4111-8111-111111111111" });
+      stream.emit({
+        type: "sentence",
+        sequence: 1,
+        text: "第一句。",
+        supportIds: ["seg_1"],
+        citedSegmentIds: ["seg_1"],
+        groundingValidated: true
+      });
+    });
+
+    expect(await screen.findByText("第一句。")).toBeInTheDocument();
+    expect(document.querySelector(".typing")).not.toBeInTheDocument();
+    expect(saveQuestionHistory).not.toHaveBeenCalled();
+    await waitFor(() =>
+      expect(trace).toHaveBeenCalledWith(
+        "QA_STREAM_TRACE:",
+        expect.stringContaining('"event":"first_text_render"')
+      )
+    );
+
+    await act(async () => {
+      stream.emit({
+        type: "sentence",
+        sequence: 2,
+        text: "第二句。",
+        supportIds: ["seg_2"],
+        citedSegmentIds: ["seg_2"],
+        groundingValidated: true
+      });
+    });
+    expect(await screen.findByText("第一句。第二句。")).toBeInTheDocument();
+
+    await act(async () => {
+      stream.emit({
+        type: "final",
+        answer: finalStreamAnswer({ answer: "最终第一句。\n最终第二句。" }),
+        source: "provider_stream"
+      });
+      stream.emit({ type: "complete", status: "completed" });
+      stream.close();
+    });
+
+    await waitFor(() =>
+      expect(document.querySelector(".qa-answer-content")?.textContent).toBe("最终第一句。\n最终第二句。")
+    );
+    expect(screen.queryByText("第一句。第二句。")).not.toBeInTheDocument();
+    await waitFor(() => expect(saveQuestionHistory).toHaveBeenCalledOnce());
+    expect(saveQuestionHistory).toHaveBeenCalledWith(
+      expect.objectContaining({
+        id: "answer_streamed",
+        answer: "最终第一句。\n最终第二句。",
+        citedSegmentIds: ["seg_1", "seg_2"]
+      })
+    );
+    expect(onStreamQuestion).toHaveBeenCalledWith(
+      expect.objectContaining({
+        question: "今天有什么重点？",
+        conversation: [],
+        signal: expect.any(AbortSignal)
+      })
+    );
+  });
+
+  it("clears partially rendered text and preserves the existing panel error on stream failure", async () => {
+    const stream = controlledQaStreamResponse();
+    const onStreamQuestion = vi.fn().mockResolvedValue(stream.response);
+    const saveQuestionHistory = vi.fn();
+    vi.stubGlobal("fetch", mockSettingsFetch());
+
+    render(
+      <QaPanel
+        uploadId="upload_1"
+        onStreamQuestion={onStreamQuestion}
+        saveQuestionHistory={saveQuestionHistory}
+      />
+    );
+
+    const input = document.querySelector('textarea[name="question"]') as HTMLTextAreaElement;
+    fireEvent.change(input, { target: { value: "失败时怎么办？" } });
+    fireEvent.submit(document.querySelector("form.compose") as HTMLFormElement);
+    await waitFor(() => expect(onStreamQuestion).toHaveBeenCalledOnce());
+
+    await act(async () => {
+      stream.emit({ type: "meta", version: 1, streamId: "22222222-2222-4222-8222-222222222222" });
+      stream.emit({
+        type: "sentence",
+        sequence: 1,
+        text: "这段文字稍后必须清除。",
+        supportIds: ["seg_1"],
+        citedSegmentIds: ["seg_1"],
+        groundingValidated: true
+      });
+    });
+    expect(await screen.findByText("这段文字稍后必须清除。")).toBeInTheDocument();
+
+    await act(async () => {
+      stream.emit({ type: "error", code: "provider_stream_failed", recoverable: true });
+      stream.emit({ type: "complete", status: "failed" });
+      stream.close();
+    });
+
+    await waitFor(() => expect(screen.queryByText("这段文字稍后必须清除。")).not.toBeInTheDocument());
+    expect(document.querySelector(".form-error")).not.toBeNull();
+    expect(document.querySelector(".typing")).not.toBeInTheDocument();
+    expect(saveQuestionHistory).not.toHaveBeenCalled();
+  });
+
+  it("accepts a safe non-stream fallback final without exposing an intermediate answer", async () => {
+    const stream = controlledQaStreamResponse();
+    const onStreamQuestion = vi.fn().mockResolvedValue(stream.response);
+    const saveQuestionHistory = vi.fn();
+    vi.stubGlobal("fetch", mockSettingsFetch());
+
+    render(
+      <QaPanel
+        uploadId="upload_1"
+        onStreamQuestion={onStreamQuestion}
+        saveQuestionHistory={saveQuestionHistory}
+      />
+    );
+
+    const input = document.querySelector('textarea[name="question"]') as HTMLTextAreaElement;
+    fireEvent.change(input, { target: { value: "回退回答是什么？" } });
+    fireEvent.submit(document.querySelector("form.compose") as HTMLFormElement);
+    await waitFor(() => expect(onStreamQuestion).toHaveBeenCalledOnce());
+
+    await act(async () => {
+      stream.emit({ type: "meta", version: 1, streamId: "33333333-3333-4333-8333-333333333333" });
+      stream.emit({
+        type: "final",
+        answer: finalStreamAnswer({
+          question: "回退回答是什么？",
+          answer: "这是经过完整验证的回退回答。",
+          citedSegmentIds: ["seg_1"],
+          citations: undefined
+        }),
+        source: "non_stream_fallback"
+      });
+      stream.emit({ type: "complete", status: "completed_with_fallback" });
+      stream.close();
+    });
+
+    expect(await screen.findByText("这是经过完整验证的回退回答。")).toBeInTheDocument();
+    await waitFor(() => expect(saveQuestionHistory).toHaveBeenCalledOnce());
+    expect(saveQuestionHistory).toHaveBeenCalledWith(
+      expect.objectContaining({
+        answer: "这是经过完整验证的回退回答。",
+        citedSegmentIds: ["seg_1"]
+      })
+    );
   });
 
   it("posts questions to the all memory endpoint when all scope is selected", async () => {

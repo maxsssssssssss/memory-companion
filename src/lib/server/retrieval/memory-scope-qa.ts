@@ -12,9 +12,14 @@ import {
   answerQuestionWithAI,
   retrieveQaEvidence,
   type AnswerQuestionWithAIInput,
+  type QaRetrievedEvidence,
   type QaConversationMessage,
   type QaScope
 } from "@/lib/server/retrieval/ai-qa";
+import {
+  safeElapsedMs,
+  type QaExecutionDiagnosticsObserver
+} from "@/lib/server/retrieval/qa-observability";
 import {
   retrieveMemoryIndexEvidence,
   type MemoryIndexQaContext
@@ -147,8 +152,12 @@ export async function answerMemoryScopeQuestion(input: {
   shadowDateRange?: MemoryShadowDateRange;
   store?: JsonStore;
   qaPromptInstruction?: string;
+  onRetrievedMemoryIds?: (memoryIds: string[]) => unknown;
+  onDiagnostics?: QaExecutionDiagnosticsObserver;
+  answerQuestion?: typeof answerQuestionWithAI;
   includeUpload?: (upload: StoredUpload) => boolean;
 }): Promise<QuestionAnswer | null> {
+  const memoryRetrievalStartedAt = performance.now();
   const store = input.store ?? appStore;
   const uploads = await store.list<StoredUpload>("uploads");
   const scopedUploads = uploads
@@ -194,7 +203,27 @@ export async function answerMemoryScopeQuestion(input: {
       );
     }
   }
+  try {
+    const observerResult = input.onRetrievedMemoryIds?.(
+      memoryContext?.memories.map((memory) => memory.id) ?? []
+    );
+    if (observerResult && typeof (observerResult as PromiseLike<unknown>).then === "function") {
+      void Promise.resolve(observerResult).catch((error: unknown) => {
+        console.warn(
+          `[memory-qa] scope=${input.qaScope} memory_observer_failure=${error instanceof Error ? error.name : "unknown_error"}`
+        );
+      });
+    }
+  } catch (error) {
+    console.warn(
+      `[memory-qa] scope=${input.qaScope} memory_observer_failure=${error instanceof Error ? error.name : "unknown_error"}`
+    );
+  }
+  const memoryRetrievalMs = safeElapsedMs(memoryRetrievalStartedAt);
 
+  const shadowSnapshot: {
+    current: { evidence: QaRetrievedEvidence[]; elapsedMs: number } | null;
+  } = { current: null };
   const qaInput: AnswerQuestionWithAIInput = {
     uploadId: input.scopeId,
     question: input.question,
@@ -210,34 +239,54 @@ export async function answerMemoryScopeQuestion(input: {
     ...(input.qaPromptInstruction ? { qaPromptInstruction: input.qaPromptInstruction } : {}),
     ...(input.conversation && input.conversation.length > 0 ? { conversation: input.conversation } : {})
   };
-  let shadowSnapshot: { evidence: ReturnType<typeof retrieveQaEvidence>; elapsedMs: number } | null = null;
-  if (input.userId) {
-    try {
-      const jsonRetrievalStartedAt = performance.now();
-      shadowSnapshot = {
-        evidence: retrieveQaEvidence(qaInput),
-        elapsedMs: Math.max(
-          0,
-          Math.round((performance.now() - jsonRetrievalStartedAt) * 100) / 100
-        )
-      };
-    } catch (error) {
-      console.warn(
-        `[memory-shadow] scope=${input.qaScope} json_observer_failure=${error instanceof Error ? error.message : "unknown_error"}`
-      );
-    }
-  }
-  const answer = await answerQuestionWithAI(qaInput);
+  // These fields are internal observability hooks rather than part of the
+  // established QA request contract. Keep them non-enumerable so existing
+  // callers, mocks, and serialized request views retain their original shape.
+  Object.defineProperties(qaInput, {
+    memoryRetrievalMs: {
+      value: memoryRetrievalMs,
+      enumerable: false
+    },
+    ...(input.onDiagnostics ? {
+      onDiagnostics: {
+        value: input.onDiagnostics,
+        enumerable: false
+      }
+    } : {}),
+    ...(input.userId ? {
+      onRetrievedEvidence: {
+        value: (evidence: QaRetrievedEvidence[], retrievalMs: number) => {
+          shadowSnapshot.current = { evidence, elapsedMs: retrievalMs };
+        },
+        enumerable: false
+      }
+    } : {})
+  });
+  const answer = await (input.answerQuestion ?? answerQuestionWithAI)(qaInput);
 
-  if (input.userId && shadowSnapshot) {
+  let observedEvidence = shadowSnapshot.current as {
+    evidence: QaRetrievedEvidence[];
+    elapsedMs: number;
+  } | null;
+  // The production answerer reports the exact evidence it used, avoiding the
+  // historical second retrieval pass. Preserve compatibility with injected
+  // test/custom answerers that do not implement the observer hook.
+  if (input.userId && !observedEvidence) {
+    const fallbackRetrievalStartedAt = performance.now();
+    observedEvidence = {
+      evidence: retrieveQaEvidence(qaInput),
+      elapsedMs: safeElapsedMs(fallbackRetrievalStartedAt)
+    };
+  }
+  if (input.userId && observedEvidence) {
     try {
       observeMemoryShadowRetrieval({
         userId: input.userId,
         scope: input.qaScope,
         query: input.question,
         ...(input.shadowDateRange ? { dateRange: input.shadowDateRange } : {}),
-        jsonEvidence: shadowSnapshot.evidence,
-        jsonRetrievalTimeMs: shadowSnapshot.elapsedMs
+        jsonEvidence: observedEvidence.evidence,
+        jsonRetrievalTimeMs: observedEvidence.elapsedMs
       });
     } catch (error) {
       console.warn(

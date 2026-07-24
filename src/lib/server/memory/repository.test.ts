@@ -1,9 +1,10 @@
 // @vitest-environment node
 
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type Database from "better-sqlite3";
 import { openMemoryDatabase } from "./db";
 import { createMemoryRepository } from "./repository";
+import type { MemoryOwnerResolution } from "./owner-attribution/types";
 import type { MemoryWriteInput } from "./types";
 
 let database: Database.Database | undefined;
@@ -39,7 +40,35 @@ function memoryFixture(input: {
   };
 }
 
+function ownerResolution(memory: MemoryWriteInput, identityId: string): MemoryOwnerResolution {
+  const segmentIds = memory.evidence
+    .filter((evidence) => evidence.sourceType === "transcript")
+    .map((evidence) => evidence.sourceId);
+  const owner = {
+    type: "known_identity" as const,
+    identityId,
+    confidence: 0.95,
+    source: "explicit_statement" as const
+  };
+  return {
+    version: 1,
+    memoryId: memory.id,
+    memoryType: memory.type,
+    scope: "individual",
+    owner,
+    participants: [{
+      role: memory.type === "commitment" ? "actor" : "owner",
+      attribution: owner,
+      evidenceSegmentIds: segmentIds
+    }],
+    evidenceSegmentIds: segmentIds,
+    observations: [],
+    reasons: ["explicit_owner"]
+  };
+}
+
 afterEach(() => {
+  vi.restoreAllMocks();
   database?.close();
   database = undefined;
 });
@@ -100,6 +129,253 @@ describe("memory repository", () => {
     });
 
     expect(repository.getRelevantMemories({ userId: "user_1" })[0]?.evidence).toHaveLength(1);
+  });
+
+  it("deduplicates evidence by memory, source and normalized quote", () => {
+    database = openMemoryDatabase({ filePath: ":memory:" });
+    const repository = createMemoryRepository(database);
+    const memory = memoryFixture({ id: "memory_normalized_duplicate" });
+    memory.evidence = [
+      { ...memory.evidence[0], id: "evidence_first", quote: "同一 条 逐字证据。" },
+      { ...memory.evidence[0], id: "evidence_second", quote: " 同一条逐字证据！ " }
+    ];
+    const warning = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+
+    repository.replaceUploadMemories({
+      userId: "user_1",
+      uploadId: "upload_1",
+      memories: [memory]
+    });
+
+    expect(repository.getRelevantMemories({ userId: "user_1" })[0]?.evidence).toHaveLength(1);
+    expect(warning).toHaveBeenCalledWith(
+      "[memory-evidence-dedup] removed=1 user_id=user_1 upload_id=upload_1"
+    );
+  });
+
+  it("keeps the same source evidence for different memories", () => {
+    database = openMemoryDatabase({ filePath: ":memory:" });
+    const repository = createMemoryRepository(database);
+    const event = memoryFixture({ id: "event_same_source", type: "event" });
+    const commitment = {
+      ...memoryFixture({ id: "commitment_same_source", type: "commitment" }),
+      title: "确认周六见面",
+      summary: "我们会确认周六见面。"
+    };
+
+    repository.replaceUploadMemories({
+      userId: "user_1",
+      uploadId: "upload_1",
+      memories: [event, commitment]
+    });
+
+    expect(repository.getRelevantMemories({ userId: "user_1" })).toHaveLength(2);
+    expect(database.prepare("SELECT COUNT(*) AS count FROM memory_evidence").get()).toEqual({ count: 2 });
+  });
+
+  it("keeps distinct quotes from the same source", () => {
+    database = openMemoryDatabase({ filePath: ":memory:" });
+    const repository = createMemoryRepository(database);
+    const memory = memoryFixture({ id: "memory_distinct_quotes" });
+    memory.evidence = [
+      { ...memory.evidence[0], id: "evidence_first", quote: "第一条逐字内容。" },
+      { ...memory.evidence[0], id: "evidence_second", quote: "第二条逐字内容。" }
+    ];
+
+    repository.replaceUploadMemories({
+      userId: "user_1",
+      uploadId: "upload_1",
+      memories: [memory]
+    });
+
+    expect(repository.getRelevantMemories({ userId: "user_1" })[0]?.evidence).toHaveLength(2);
+  });
+
+  it("merges repeated preferences for one user without changing cross-upload occurrence semantics or importance", () => {
+    database = openMemoryDatabase({ filePath: ":memory:" });
+    const repository = createMemoryRepository(database);
+    const first = {
+      ...memoryFixture({ id: "preference_first", type: "preference", title: "饮食偏好" }),
+      summary: "我不喜欢香菜。",
+      evidence: [{
+        ...memoryFixture({ id: "preference_first" }).evidence[0],
+        id: "preference_first_evidence",
+        sourceId: "segment_preference_first",
+        quote: "我不喜欢香菜。"
+      }]
+    };
+    const repeated = {
+      ...memoryFixture({ id: "preference_repeated", type: "preference", title: "点餐习惯" }),
+      summary: "我不吃香菜。",
+      evidence: [{
+        ...memoryFixture({ id: "preference_repeated" }).evidence[0],
+        id: "preference_repeated_evidence",
+        sourceId: "segment_preference_repeated",
+        quote: "我不吃香菜。"
+      }]
+    };
+
+    repository.replaceUploadMemories({
+      userId: "user_1",
+      uploadId: "upload_1",
+      memories: [first, repeated]
+    });
+
+    const memories = repository.getRelevantMemories({ userId: "user_1" });
+    expect(memories).toHaveLength(1);
+    expect(memories[0]).toMatchObject({ type: "preference", occurrenceCount: 1 });
+    expect(memories[0]?.evidence).toHaveLength(2);
+    expect(memories[0]?.importanceReasons).not.toContain("repeated_occurrence");
+  });
+
+  it("keeps different preference identities and different users separate", () => {
+    database = openMemoryDatabase({ filePath: ":memory:" });
+    const repository = createMemoryRepository(database);
+    const cilantro = {
+      ...memoryFixture({ id: "preference_cilantro", type: "preference", title: "饮食偏好" }),
+      summary: "我不喜欢香菜。",
+      evidence: [{ ...memoryFixture({ id: "preference_cilantro" }).evidence[0], quote: "我不喜欢香菜。" }]
+    };
+    const quiet = {
+      ...memoryFixture({ id: "preference_quiet", type: "preference", title: "环境偏好" }),
+      summary: "我更喜欢安静的位置。",
+      evidence: [{ ...memoryFixture({ id: "preference_quiet" }).evidence[0], sourceId: "segment_2", quote: "我更喜欢安静的位置。" }]
+    };
+
+    repository.replaceUploadMemories({ userId: "user_1", uploadId: "upload_1", memories: [cilantro, quiet] });
+    repository.replaceUploadMemories({
+      userId: "user_2",
+      uploadId: "upload_1",
+      memories: [{ ...cilantro, id: "preference_other_user", evidence: [{ ...cilantro.evidence[0], id: "other_user_evidence" }] }]
+    });
+
+    expect(repository.getRelevantMemories({ userId: "user_1" })).toHaveLength(2);
+    expect(repository.getRelevantMemories({ userId: "user_2" })).toHaveLength(1);
+  });
+
+  it("keeps the same preference separate for different resolved owners", () => {
+    database = openMemoryDatabase({ filePath: ":memory:" });
+    const repository = createMemoryRepository(database);
+    const ownerA = {
+      ...memoryFixture({ id: "preference_owner_a", type: "preference", title: "饮食偏好" }),
+      summary: "我不太能吃辣。",
+      evidence: [{
+        ...memoryFixture({ id: "preference_owner_a" }).evidence[0],
+        id: "evidence_owner_a",
+        sourceId: "segment_owner_a",
+        quote: "我不太能吃辣。"
+      }]
+    };
+    const ownerB = {
+      ...memoryFixture({ id: "preference_owner_b", type: "preference", title: "饮食偏好" }),
+      summary: "我不爱吃辣。",
+      evidence: [{
+        ...memoryFixture({ id: "preference_owner_b" }).evidence[0],
+        id: "evidence_owner_b",
+        sourceId: "segment_owner_b",
+        quote: "我不爱吃辣。"
+      }]
+    };
+
+    repository.replaceUploadMemories({
+      userId: "user_1",
+      uploadId: "upload_1",
+      memories: [ownerA, ownerB],
+      ownerAttributions: [
+        ownerResolution(ownerA, "person_a"),
+        ownerResolution(ownerB, "person_b")
+      ]
+    });
+
+    expect(repository.getRelevantMemories({ userId: "user_1" })).toHaveLength(2);
+    expect(repository.getMemoryOwnerAttributions("user_1")).toEqual([
+      expect.objectContaining({ memoryId: ownerA.id, owner: expect.objectContaining({ identityId: "person_a" }) }),
+      expect.objectContaining({ memoryId: ownerB.id, owner: expect.objectContaining({ identityId: "person_b" }) })
+    ]);
+  });
+
+  it("merges repeated preferences for the same owner and retains owner observations", () => {
+    database = openMemoryDatabase({ filePath: ":memory:" });
+    const repository = createMemoryRepository(database);
+    const first = {
+      ...memoryFixture({ id: "preference_first_owner", type: "preference", uploadId: "upload_1", date: "2026-07-08" }),
+      summary: "我不喜欢香菜。",
+      evidence: [{
+        ...memoryFixture({ id: "preference_first_owner", uploadId: "upload_1", date: "2026-07-08" }).evidence[0],
+        sourceId: "segment_first_owner",
+        quote: "我不喜欢香菜。"
+      }]
+    };
+    const repeated = {
+      ...memoryFixture({ id: "preference_repeat_owner", type: "preference", uploadId: "upload_2", date: "2026-07-09" }),
+      summary: "我不吃香菜。",
+      evidence: [{
+        ...memoryFixture({ id: "preference_repeat_owner", uploadId: "upload_2", date: "2026-07-09" }).evidence[0],
+        sourceId: "segment_repeat_owner",
+        quote: "我不吃香菜。"
+      }]
+    };
+
+    repository.replaceUploadMemories({
+      userId: "user_1",
+      uploadId: "upload_1",
+      memories: [first],
+      ownerAttributions: [ownerResolution(first, "person_a")]
+    });
+    repository.replaceUploadMemories({
+      userId: "user_1",
+      uploadId: "upload_2",
+      memories: [repeated],
+      ownerAttributions: [ownerResolution(repeated, "person_a")]
+    });
+
+    const memories = repository.getRelevantMemories({ userId: "user_1" });
+    expect(memories).toHaveLength(1);
+    expect(memories[0]).toMatchObject({ id: first.id, occurrenceCount: 2 });
+    expect(repository.getMemoryOwnerAttributions("user_1", [first.id])).toEqual([
+      expect.objectContaining({
+        memoryId: first.id,
+        owner: expect.objectContaining({ identityId: "person_a" }),
+        evidenceSegmentIds: ["segment_first_owner", "segment_repeat_owner"]
+      })
+    ]);
+
+    repository.rebuildUserMemories("user_1");
+    expect(repository.getMemoryOwnerAttributions("user_1", [first.id])[0]?.evidenceSegmentIds)
+      .toEqual(["segment_first_owner", "segment_repeat_owner"]);
+
+    repository.deleteByUpload("user_1", "upload_2");
+    expect(repository.getMemoryOwnerAttributions("user_1", [first.id])[0]?.evidenceSegmentIds)
+      .toEqual(["segment_first_owner"]);
+  });
+
+  it("keeps similar commitments separate when their actors differ", () => {
+    database = openMemoryDatabase({ filePath: ":memory:" });
+    const repository = createMemoryRepository(database);
+    const commitment = (id: string, sourceId: string) => ({
+      ...memoryFixture({ id, type: "commitment", title: "周二排练" }),
+      summary: "我会周二晚上七点陪你排练。",
+      evidence: [{
+        ...memoryFixture({ id }).evidence[0],
+        id: `${id}_evidence`,
+        sourceId,
+        quote: "我会周二晚上七点陪你排练。"
+      }]
+    });
+    const first = commitment("commitment_actor_a", "segment_actor_a");
+    const second = commitment("commitment_actor_b", "segment_actor_b");
+
+    repository.replaceUploadMemories({
+      userId: "user_1",
+      uploadId: "upload_1",
+      memories: [first, second],
+      ownerAttributions: [
+        ownerResolution(first, "person_a"),
+        ownerResolution(second, "person_b")
+      ]
+    });
+
+    expect(repository.getRelevantMemories({ userId: "user_1" })).toHaveLength(2);
   });
 
   it("keeps derived evidence grounded in its matching source segment instead of the first memory segment", () => {

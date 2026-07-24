@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { transcriptSpeakerLabel } from "@/lib/domain/speaker-identity";
 import {
   RelationshipSignalCardSchema,
   RelationshipSignalCategorySchema,
@@ -162,7 +163,10 @@ function normalizeTextEvidence(item: RawRelationshipSignalItem, sourceSegments: 
 function normalizeSpeakerIds(item: RawRelationshipSignalItem, sourceSegments: TranscriptSegment[]) {
   return unique([
     ...item.involvedSpeakers.map((speaker) => speaker.trim()).filter(Boolean),
-    ...sourceSegments.flatMap((segment) => (segment.speaker ? [segment.speaker] : []))
+    ...sourceSegments.flatMap((segment) => {
+      const speaker = transcriptSpeakerLabel(segment);
+      return speaker ? [speaker] : [];
+    })
   ]);
 }
 
@@ -335,7 +339,7 @@ export function normalizeRelationshipSignalItems(input: {
 
     const evidenceSegments = sourceSegments.map((segment) => ({
       segmentId: segment.id,
-      speaker: segment.speaker,
+      speaker: transcriptSpeakerLabel(segment),
       startSeconds: segment.startSeconds,
       endSeconds: segment.endSeconds,
       text: segment.text

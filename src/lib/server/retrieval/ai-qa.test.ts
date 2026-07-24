@@ -20,8 +20,9 @@ vi.mock("@/lib/server/settings/provider-config", () => ({
 }));
 
 import type { AudioInsight, BriefItem, RelationshipSignalCard, SemanticSegment, TranscriptSegment } from "@/lib/domain/types";
-import { answerQuestionWithAI, buildHumanizedQaSystemPrompt } from "./ai-qa";
+import { answerQuestionWithAI, buildHumanizedQaSystemPrompt, retrieveQaEvidence } from "./ai-qa";
 import type { MemoryIndexQaContext } from "./memory-index-evidence";
+import type { MemoryOwnerMetadata } from "@/lib/server/memory/owner-attribution/types";
 
 const originalQaWireApi = process.env.OPENAI_QA_WIRE_API;
 const originalOpenAiWireApi = process.env.OPENAI_WIRE_API;
@@ -130,6 +131,7 @@ function memoryContext(input: {
   sourceIds?: string[];
   date?: string;
   summary?: string;
+  ownerAttributions?: MemoryOwnerMetadata[];
 } = {}): MemoryIndexQaContext {
   const date = input.date ?? "2026-07-09";
   const sourceIds = input.sourceIds ?? ["brief_1", "seg_memory_target"];
@@ -167,6 +169,7 @@ function memoryContext(input: {
   return {
     scope: "all",
     memories: [memory],
+    ownerAttributions: input.ownerAttributions ?? [],
     evidence,
     sourceIds,
     distinctDates: [date],
@@ -182,6 +185,62 @@ describe("answerQuestionWithAI", () => {
       config?.openRouterApiKey ? "openrouter" : "openai-compatible"
     );
     getQaPromptPreferenceMock.mockResolvedValue("场景可能是商务谈判，请优先识别各方诉求、让步、风险和待确认条件。");
+  });
+
+  it("uses trusted speaker identity labels in raw QA evidence", () => {
+    const evidence = retrieveQaEvidence({
+      uploadId: "upload_1",
+      question: "identity evidence marker",
+      segments: [
+        rawSegment({
+          id: "seg_identity_named",
+          speaker: "speaker_0",
+          text: "identity evidence marker one",
+          identity: {
+            globalSpeakerId: "person_1",
+            displayName: "Trusted contact",
+            identityType: "known_contact",
+            confidence: 0.95,
+            source: "voiceprint"
+          }
+        }),
+        rawSegment({
+          id: "seg_identity_global",
+          speaker: "speaker_1",
+          text: "identity evidence marker two",
+          identity: {
+            globalSpeakerId: "person_2",
+            identityType: "unknown_person",
+            confidence: 0.9,
+            source: "cross_chunk_matching"
+          }
+        }),
+        rawSegment({
+          id: "seg_identity_low",
+          speaker: "speaker_2",
+          text: "identity evidence marker three",
+          identity: {
+            globalSpeakerId: "person_3",
+            displayName: "Untrusted contact",
+            identityType: "known_contact",
+            confidence: 0.79,
+            source: "voiceprint"
+          }
+        })
+      ],
+      semanticSegments: [],
+      briefItems: []
+    });
+
+    expect(evidence.find((item) => item.id === "seg_identity_named")?.title).toBe(
+      "Trusted contact 的原始转写"
+    );
+    expect(evidence.find((item) => item.id === "seg_identity_global")?.title).toBe(
+      "person_2 的原始转写"
+    );
+    expect(evidence.find((item) => item.id === "seg_identity_low")?.title).toBe(
+      "speaker_2 的原始转写"
+    );
   });
 
   afterEach(() => {
@@ -202,9 +261,10 @@ describe("answerQuestionWithAI", () => {
 
     expect(prompt).toContain("长期陪用户复盘的人");
     expect(prompt).toContain("克制但懂你");
-    expect(prompt).toContain("直接回答");
-    expect(prompt).toContain("我留意到的模式");
-    expect(prompt).toContain("可以怎么做");
+    expect(prompt).toContain("先回答用户真正的问题");
+    expect(prompt).toContain("没有明确请求建议时，不主动提供建议");
+    expect(prompt).toContain("一次具体行为不代表所有情况");
+    expect(prompt).not.toContain("answer 采用三段式");
     expect(prompt).toContain("关键结论必须使用 [E1] 这样的证据编号");
     expect(prompt).toContain("没有找到足够证据");
     expect(prompt).toContain("不建立隐藏的用户画像");
@@ -218,6 +278,49 @@ describe("answerQuestionWithAI", () => {
 
     expect(prompt).toContain("Memories are compressed observations, not ground truth");
     expect(prompt).toContain("Always prioritize original evidence");
+    expect(prompt).toContain("If owner is unknown or upload-local");
+  });
+
+  it("normalizes legacy report headings and softens unsolicited advice for reflection questions", async () => {
+    getOpenAIClientRuntimeConfigMock.mockResolvedValue({ openRouterApiKey: "custom_key" });
+    getQaModelPreferenceMock.mockResolvedValue("openai/gpt-5-mini");
+    createOpenAIClientMock.mockReturnValue({
+      chat: { completions: { create: chatCreateMock } }
+    });
+    chatCreateMock.mockResolvedValue({
+      choices: [{
+        message: {
+          content: JSON.stringify({
+            mode: "memory_answer",
+            answer: [
+              "直接回答：可以把这次具体经历作为一个提醒。[E1]",
+              "我留意到的模式：当时有情绪，也有一次具体的照顾行为。[E1]",
+              "可以怎么做：下次生气时你应该先停下来复盘。"
+            ].join("\n\n"),
+            citationIds: ["E1"]
+          })
+        }
+      }]
+    });
+
+    const answer = await answerQuestionWithAI({
+      uploadId: "upload_1",
+      question: "这个例子以后是不是可以用来提醒自己？",
+      segments: [rawSegment({ id: "seg_reminder_1", text: "当时虽然有情绪，但还是问了我需不需要帮忙。" })],
+      semanticSegments: [],
+      briefItems: []
+    });
+
+    expect(answer.answer).toContain("可以把这次具体经历作为一个提醒。[E1]");
+    expect(answer.answer).not.toContain("我留意到的模式");
+    expect(answer.answer).not.toContain("可以怎么做");
+    expect(answer.answer).toContain("如果你愿意，下次生气时可以考虑先停下来复盘。");
+    expect(answer.answer).not.toContain("你应该");
+    expect(answer.citedSegmentIds).toEqual(["seg_reminder_1"]);
+    expect(answer.citations?.map((citation) => citation.id)).toEqual(["E1"]);
+    expect(chatCreateMock).toHaveBeenCalledTimes(1);
+    expect(chatCreateMock.mock.calls[0][0].messages[1].content).toContain("回答意图：复盘");
+    expect(chatCreateMock.mock.calls[0][0].messages[1].content).toContain("用户没有明确请求建议");
   });
 
   it("uses memory source ids to promote original evidence without creating memory citations", async () => {
@@ -255,13 +358,42 @@ describe("answerQuestionWithAI", () => {
         segments,
         semanticSegments: [],
         briefItems: [],
-        memoryContext: memoryContext({ sourceIds: ["seg_memory_target"] })
+        memoryContext: memoryContext({
+          sourceIds: ["seg_memory_target"],
+          ownerAttributions: [{
+            version: 1,
+            memoryId: "memory_1",
+            memoryType: "commitment",
+            scope: "individual",
+            owner: {
+              type: "known_identity",
+              identityId: "person_partner",
+              confidence: 0.95,
+              source: "manual_mapping"
+            },
+            participants: [{
+              role: "actor",
+              attribution: {
+                type: "known_identity",
+                identityId: "person_partner",
+                confidence: 0.95,
+                source: "manual_mapping"
+              },
+              evidenceSegmentIds: ["seg_memory_target"]
+            }],
+            evidenceSegmentIds: ["seg_memory_target"],
+            reasons: ["commitment_actor"]
+          }]
+        })
       });
 
       const request = chatCreateMock.mock.calls[0][0];
       expect(request.messages[1].content).toContain("[Long-term memory]");
       expect(request.messages[1].content).toContain("Original evidence: [E1]");
       expect(request.messages[1].content).toContain("The next meeting time still needs confirmation.");
+      expect(request.messages[1].content).toContain(
+        "Owner attribution: known_identity id=person_partner confidence=0.95 source=manual_mapping."
+      );
       expect(answer.citedSegmentIds).toEqual(["seg_memory_target"]);
       expect(answer.citations).toEqual([
         expect.objectContaining({ id: "E1", sourceSegmentIds: ["seg_memory_target"] })
@@ -780,6 +912,7 @@ describe("answerQuestionWithAI", () => {
   });
 
   it("includes audio insight signals as evidence for tone and interaction questions", async () => {
+    const info = vi.spyOn(console, "info").mockImplementation(() => undefined);
     getOpenAIClientRuntimeConfigMock.mockResolvedValue({ openRouterApiKey: "custom_key" });
     getQaModelPreferenceMock.mockResolvedValue("openai/gpt-5-mini");
     createOpenAIClientMock.mockReturnValue({
@@ -824,6 +957,24 @@ describe("answerQuestionWithAI", () => {
     expect(request.messages[1].content).toContain("语气/互动线索");
     expect(request.messages[1].content).toContain("对方以试探方式追问预算风险");
     expect(request.messages[1].content).toContain("hesitant");
+    expect(request.messages[1].content).toContain("声音估计：语速normal");
+    const shadowLog = info.mock.calls
+      .map(([message]) => String(message))
+      .find((message) => message.startsWith("EVIDENCE_COMPRESSION_SHADOW: "));
+    expect(shadowLog).toBeDefined();
+    const shadowMetrics = JSON.parse(
+      shadowLog!.slice("EVIDENCE_COMPRESSION_SHADOW: ".length)
+    ) as {
+      original_chars: number;
+      compact_chars: number;
+      provider_payload: string;
+      citation_mapping_unchanged: boolean;
+      source_ids_unchanged: boolean;
+    };
+    expect(shadowMetrics.compact_chars).toBeLessThan(shadowMetrics.original_chars);
+    expect(shadowMetrics.provider_payload).toBe("canonical");
+    expect(shadowMetrics.citation_mapping_unchanged).toBe(true);
+    expect(shadowMetrics.source_ids_unchanged).toBe(true);
     expect(answer.citedSegmentIds).toEqual(["seg_tone_1"]);
     expect(answer.citations?.[0]).toEqual(
       expect.objectContaining({
@@ -1407,6 +1558,48 @@ describe("answerQuestionWithAI", () => {
     expect(answer.answer).not.toContain("应该分手");
     expect(answer.answer).toContain("仅凭这一小段不能确定是在故意回避");
     expect(answer.citedSegmentIds).toEqual(["seg_relationship_1"]);
+  });
+
+  it("rejects absolute affection verdicts and keeps the existing evidence-backed fallback", async () => {
+    getOpenAIClientRuntimeConfigMock.mockResolvedValue({ openRouterApiKey: "custom_key" });
+    getQaModelPreferenceMock.mockResolvedValue("openai/gpt-5-mini");
+    createOpenAIClientMock.mockReturnValue({
+      chat: { completions: { create: chatCreateMock } }
+    });
+    chatCreateMock.mockResolvedValue({
+      choices: [{
+        message: {
+          content: JSON.stringify({
+            mode: "memory_answer",
+            answer: "他一定爱你，你们关系一定很好。[E1]",
+            citationIds: ["E1"]
+          })
+        }
+      }]
+    });
+
+    const answer = await answerQuestionWithAI({
+      uploadId: "upload_1",
+      question: "对方有没有回避关键问题？",
+      segments: [
+        rawSegment({
+          id: "seg_relationship_1",
+          startSeconds: 60,
+          endSeconds: 95,
+          speaker: "speaker_2",
+          text: "这个问题以后再说吧，先聊点别的。"
+        })
+      ],
+      semanticSegments: [],
+      briefItems: [],
+      relationshipSignals: [relationshipSignal()]
+    });
+
+    expect(answer.answer).not.toContain("一定爱你");
+    expect(answer.answer).not.toContain("关系一定很好");
+    expect(answer.answer).toContain("结构化关系观察");
+    expect(answer.citedSegmentIds).toEqual(["seg_relationship_1"]);
+    expect(chatCreateMock).toHaveBeenCalledTimes(1);
   });
 
   it("does not accept an all-memory recurring-pattern claim backed by one relationship-card date", async () => {
