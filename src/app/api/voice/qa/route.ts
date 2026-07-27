@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { ZodError } from "zod";
 
 import {
   MAX_VOICE_QA_CONTEXT_BYTES,
@@ -49,6 +50,7 @@ export const dynamic = "force-dynamic";
 const STORE_KEY_PATTERN = /^[A-Za-z0-9_-]+$/;
 const MULTIPART_OVERHEAD_ALLOWANCE_BYTES = 256 * 1024;
 const MAX_BROWSER_VOICE_CONVERSATION_BYTES = 16 * 1024;
+const MAX_VOICE_STREAM_SCHEMA_ISSUES = 10;
 const BrowserVoiceConversationSchema = VoiceSessionConversationMessageSchema
   .array()
   .max(8);
@@ -73,6 +75,38 @@ type ParsedVoiceQaForm = {
 type FormParseResult =
   | { ok: true; value: ParsedVoiceQaForm }
   | { ok: false; error: string; status: number };
+
+function safeVoiceStreamIssuePath(path: ZodError["issues"][number]["path"]) {
+  if (path.length === 0) return "$";
+
+  let result = "";
+  for (const part of path) {
+    if (typeof part === "number") {
+      result += `[${Math.max(0, Math.trunc(part))}]`;
+      continue;
+    }
+    const safePart = part.replace(/[^A-Za-z0-9_-]/gu, "_").slice(0, 64) || "unknown";
+    result += result ? `.${safePart}` : safePart;
+  }
+  return result.slice(0, 240);
+}
+
+function logVoiceStreamSchemaFailure(
+  eventType: VoiceBrowserStreamEvent["type"],
+  error: ZodError
+) {
+  const issueCodes = [...new Set(error.issues.map((issue) => issue.code))]
+    .slice(0, MAX_VOICE_STREAM_SCHEMA_ISSUES);
+  const issuePaths = [...new Set(
+    error.issues.map((issue) => safeVoiceStreamIssuePath(issue.path))
+  )].slice(0, MAX_VOICE_STREAM_SCHEMA_ISSUES);
+
+  console.warn(`VOICE_STREAM_SCHEMA_VALIDATION ${JSON.stringify({
+    event_type: eventType,
+    issue_codes: issueCodes,
+    issue_paths: issuePaths
+  })}`);
+}
 
 function noStoreJson(body: unknown, init: { status?: number } = {}) {
   return NextResponse.json(body, {
@@ -434,8 +468,17 @@ export async function POST(request: Request) {
     const writer = transport.writable.getWriter();
     void writer.closed.catch(() => abortController.abort());
     const writeEvent = async (event: VoiceBrowserStreamEvent) => {
+      let encodedEvent: Uint8Array;
+      try {
+        encodedEvent = encodeVoiceBrowserStreamEvent(event);
+      } catch (error) {
+        if (error instanceof ZodError) {
+          logVoiceStreamSchemaFailure(event.type, error);
+        }
+        throw error;
+      }
       await writer.ready;
-      await writer.write(encodeVoiceBrowserStreamEvent(event));
+      await writer.write(encodedEvent);
     };
 
     void (async () => {

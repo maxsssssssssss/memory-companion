@@ -7,9 +7,9 @@ const StoreKeySchema = z.string().min(1).max(256).regex(/^[A-Za-z0-9_-]+$/u);
 const QuestionAnswerCitationsSchema = QuestionAnswerSchema.shape.citations.unwrap();
 
 export const VoiceBrowserAnswerMetadataSchema = z.object({
-  id: StoreKeySchema,
-  citedSegmentIds: z.array(StoreKeySchema).max(128),
-  citations: QuestionAnswerCitationsSchema.max(128)
+  id: QuestionAnswerSchema.shape.id,
+  citedSegmentIds: QuestionAnswerSchema.shape.citedSegmentIds,
+  citations: QuestionAnswerCitationsSchema
 }).strict();
 
 export const VoiceBrowserStreamEventSchema = z.discriminatedUnion("type", [

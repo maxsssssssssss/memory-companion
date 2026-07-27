@@ -168,6 +168,27 @@ function successfulSession(overrides: Record<string, unknown> = {}) {
   };
 }
 
+function largeCanonicalAnswerMetadata() {
+  const sourceGroups = Array.from({ length: 6 }, (_, evidenceIndex) =>
+    Array.from(
+      { length: 24 },
+      (_, sourceIndex) => `segment:${evidenceIndex + 1}:${sourceIndex + 1}`
+    )
+  );
+  return {
+    id: "answer:canonical/long-recording",
+    citedSegmentIds: sourceGroups.flat(),
+    citations: sourceGroups.map((sourceSegmentIds, index) => ({
+      id: `E${index + 1}`,
+      title: `Evidence ${index + 1}`,
+      startSeconds: index * 60,
+      endSeconds: (index + 1) * 60,
+      excerpt: `Grounded excerpt ${index + 1}`,
+      sourceSegmentIds
+    }))
+  };
+}
+
 describe("POST /api/voice/qa", () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -321,6 +342,113 @@ describe("POST /api/voice/qa", () => {
       onStreamingEvent: expect.any(Function),
       signal: expect.any(AbortSignal)
     }));
+  });
+
+  it("preserves a large canonical source mapping after streamed audio and completes normally", async () => {
+    const answerMetadata = largeCanonicalAnswerMetadata();
+    runBrowserVoiceQaSessionMock.mockImplementation(async (input: {
+      onStreamingEvent?: (event: unknown) => Promise<void>;
+    }) => {
+      await input.onStreamingEvent?.({
+        type: "audio_chunk",
+        sequence: 1,
+        sentenceSequence: 1,
+        sentenceChunkSequence: 1,
+        supportIds: answerMetadata.citedSegmentIds,
+        audio: Buffer.from([1, 2]),
+        format: { encoding: "pcm_s16le", sampleRate: 24_000, channels: 1 }
+      });
+      const base = successfulSession().response;
+      return successfulSession({
+        response: {
+          ...base,
+          audio: undefined,
+          streamedAudio: true,
+          answer: {
+            ...base.answer,
+            ...answerMetadata
+          }
+        }
+      });
+    });
+
+    const response = await POST(request(
+      voiceForm({ scope: "all" }),
+      { accept: "application/x-ndjson" }
+    ));
+    const events = await ndjsonEvents(response);
+    const answerEvent = events.find((event) => event.type === "answer");
+
+    expect(answerMetadata.citedSegmentIds.length).toBeGreaterThan(128);
+    expect(events.map((event) => event.type)).toEqual([
+      "meta",
+      "audio_chunk",
+      "answer",
+      "complete"
+    ]);
+    expect(answerEvent).toMatchObject({
+      type: "answer",
+      answer: {
+        id: answerMetadata.id,
+        citedSegmentIds: answerMetadata.citedSegmentIds,
+        citations: answerMetadata.citations
+      }
+    });
+    expect(events.at(-1)).toEqual({
+      type: "complete",
+      status: "completed",
+      errors: []
+    });
+  });
+
+  it("logs only safe issue codes and paths when a stream event fails schema validation", async () => {
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const base = successfulSession().response;
+    runBrowserVoiceQaSessionMock.mockResolvedValue(successfulSession({
+      response: {
+        ...base,
+        text: "PRIVATE_ANSWER_BODY",
+        audio: undefined,
+        streamedAudio: true,
+        answer: {
+          ...base.answer,
+          id: "",
+          citedSegmentIds: ["private:source/content"],
+          citations: [{
+            ...base.answer.citations[0],
+            excerpt: "PRIVATE_EVIDENCE_BODY",
+            sourceSegmentIds: ["private:source/content"]
+          }]
+        }
+      }
+    }));
+
+    try {
+      const response = await POST(request(
+        voiceForm({ scope: "all" }),
+        { accept: "application/x-ndjson" }
+      ));
+      const events = await ndjsonEvents(response);
+      const prefix = "VOICE_STREAM_SCHEMA_VALIDATION ";
+      const diagnosticLine = warnSpy.mock.calls
+        .flatMap((call) => call)
+        .find((value): value is string =>
+          typeof value === "string" && value.startsWith(prefix)
+        );
+
+      expect(events.map((event) => event.type)).toEqual(["meta", "error", "complete"]);
+      expect(diagnosticLine).toBeDefined();
+      expect(JSON.parse(diagnosticLine!.slice(prefix.length))).toEqual({
+        event_type: "answer",
+        issue_codes: ["too_small"],
+        issue_paths: ["answer.id"]
+      });
+      expect(diagnosticLine).not.toContain("PRIVATE_ANSWER_BODY");
+      expect(diagnosticLine).not.toContain("PRIVATE_EVIDENCE_BODY");
+      expect(diagnosticLine).not.toContain("private:source/content");
+    } finally {
+      warnSpy.mockRestore();
+    }
   });
 
   it("keeps the legacy JSON/WAV response when NDJSON is not explicitly accepted", async () => {

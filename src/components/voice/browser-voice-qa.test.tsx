@@ -375,6 +375,13 @@ describe("BrowserVoiceQa", () => {
     const microphone = recorder();
     const audioQueue = streamingAudioQueue();
     const traceId = "11111111-1111-4111-8111-111111111111";
+    const sourceGroups = Array.from({ length: 6 }, (_, evidenceIndex) =>
+      Array.from(
+        { length: 24 },
+        (_, sourceIndex) => `segment:${evidenceIndex + 1}:${sourceIndex + 1}`
+      )
+    );
+    const citedSegmentIds = sourceGroups.flat();
     const fetcher = vi.fn(async (input: RequestInfo | URL, _init?: RequestInit) => {
       if (input === "/api/voice/qa") {
         return ndjsonResponse([
@@ -403,7 +410,19 @@ describe("BrowserVoiceQa", () => {
             type: "answer",
             sessionId: "voice_session_1",
             transcript: "streamed question",
-            text: "streamed answer"
+            text: "streamed answer",
+            answer: {
+              id: "answer:canonical/long-recording",
+              citedSegmentIds,
+              citations: sourceGroups.map((sourceSegmentIds, index) => ({
+                id: `E${index + 1}`,
+                title: `Evidence ${index + 1}`,
+                startSeconds: index * 60,
+                endSeconds: (index + 1) * 60,
+                excerpt: `Grounded excerpt ${index + 1}`,
+                sourceSegmentIds
+              }))
+            }
           },
           { type: "complete", status: "completed", errors: [] }
         ]);
@@ -424,6 +443,7 @@ describe("BrowserVoiceQa", () => {
 
     expect(await screen.findByText("streamed question")).toBeInTheDocument();
     expect(screen.getByText("streamed answer")).toBeInTheDocument();
+    expect(citedSegmentIds.length).toBeGreaterThan(128);
     await waitFor(() => expect(audioQueue.queue.finish).toHaveBeenCalledWith(2));
     expect(audioQueue.queue.enqueue.mock.calls.map((call) => call[0])).toEqual([
       { sequence: 1, pcm16le: new Uint8Array([1, 2]) },
