@@ -30,6 +30,11 @@ const memoryRepositoryMock = vi.hoisted(() => ({
   getRelevantMemories: vi.fn(),
   replaceUploadMemories: vi.fn()
 }));
+const dateCompanionRepositoryMock = vi.hoisted(() => ({
+  getInteractionVersionByUpload: vi.fn(),
+  markUploadSourceState: vi.fn(),
+  deleteInteractionByUpload: vi.fn()
+}));
 const answerQuestionWithAIMock = vi.hoisted(() => vi.fn());
 const normalizeQaConversationMock = vi.hoisted(() => vi.fn());
 const afterMock = vi.hoisted(() => vi.fn());
@@ -99,6 +104,14 @@ vi.mock("@/lib/server/memory", () => ({
   getMemoryRepository: vi.fn(() => memoryRepositoryMock)
 }));
 
+vi.mock("@/lib/server/date-companion", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/server/date-companion")>();
+  return {
+    ...actual,
+    getDateCompanionRepository: vi.fn(() => dateCompanionRepositoryMock)
+  };
+});
+
 vi.mock("@/lib/server/retrieval/qa", () => ({
   answerSameDayQuestion: vi.fn()
 }));
@@ -122,6 +135,7 @@ vi.mock("@/lib/server/retrieval/memory-index-evidence", () => ({
   retrieveMemoryIndexEvidence: retrieveMemoryIndexEvidenceMock
 }));
 
+import { DcConflictError } from "@/lib/server/date-companion";
 import { GET as getDay } from "./days/[uploadId]/route";
 import { GET as getAudioInsightCorrections, PUT as putAudioInsightCorrections } from "./days/[uploadId]/audio-insight-corrections/route";
 import { GET as getSpeakerAliases, PUT as putSpeakerAliases } from "./days/[uploadId]/speaker-aliases/route";
@@ -209,6 +223,9 @@ describe("API routes", () => {
       retrievalTimeMs: 1
     }));
     memoryRepositoryMock.deleteByUpload.mockReturnValue(undefined);
+    dateCompanionRepositoryMock.getInteractionVersionByUpload.mockReturnValue(null);
+    dateCompanionRepositoryMock.markUploadSourceState.mockReturnValue(true);
+    dateCompanionRepositoryMock.deleteInteractionByUpload.mockReturnValue(true);
     afterMock.mockImplementation((callback: () => void) => {
       callback();
     });
@@ -2497,8 +2514,342 @@ describe("API routes", () => {
     await expect(response.json()).resolves.toEqual({ deleted: true });
   });
 
+  it("marks an imported relationship snapshot after browser-cache parent cleanup", async () => {
+    dateCompanionRepositoryMock.getInteractionVersionByUpload.mockReturnValue({
+      interactionId: "interaction_1",
+      version: 3
+    });
+    storeMock.read.mockImplementation(async (collection: string) => {
+      if (collection === "uploads") {
+        return {
+          id: "upload_1",
+          originalName: "demo.m4a",
+          mimeType: "audio/mp4",
+          sizeBytes: 12,
+          recordingDate: "2026-06-03",
+          status: "ready"
+        };
+      }
+      return null;
+    });
+
+    const response = await deleteUpload(new Request(
+      "http://localhost/api/uploads/upload_1",
+      {
+        method: "DELETE",
+        headers: { "x-daily-brief-cleanup-mode": "browser-cache" }
+      }
+    ), {
+      params: Promise.resolve({ uploadId: "upload_1" })
+    });
+
+    expect(response.status).toBe(200);
+    expect(dateCompanionRepositoryMock.markUploadSourceState).toHaveBeenCalledWith(
+      "user_default",
+      "upload_1",
+      "server_cleaned"
+    );
+    expect(dateCompanionRepositoryMock.deleteInteractionByUpload).not.toHaveBeenCalled();
+    const parentDeleteIndex = storeMock.delete.mock.calls.findIndex(
+      ([collection, id]) => collection === "uploads" && id === "upload_1"
+    );
+    expect(parentDeleteIndex).toBeGreaterThanOrEqual(0);
+    expect(storeMock.delete.mock.invocationCallOrder[parentDeleteIndex]).toBeLessThan(
+      dateCompanionRepositoryMock.markUploadSourceState.mock.invocationCallOrder[0]
+    );
+    await expect(response.json()).resolves.toEqual({
+      deleted: true,
+      relationshipSnapshotRetained: true
+    });
+  });
+
+  it("keeps browser-cache cleanup idempotent after the upload parent is gone", async () => {
+    storeMock.read.mockResolvedValue(null);
+    dateCompanionRepositoryMock.getInteractionVersionByUpload.mockReturnValue({
+      interactionId: "interaction_1",
+      version: 3
+    });
+
+    const response = await deleteUpload(new Request(
+      "http://localhost/api/uploads/upload_1",
+      {
+        method: "DELETE",
+        headers: { "x-daily-brief-cleanup-mode": "browser-cache" }
+      }
+    ), {
+      params: Promise.resolve({ uploadId: "upload_1" })
+    });
+
+    expect(response.status).toBe(200);
+    expect(dateCompanionRepositoryMock.markUploadSourceState).toHaveBeenCalledWith(
+      "user_default",
+      "upload_1",
+      "server_cleaned"
+    );
+    await expect(response.json()).resolves.toMatchObject({
+      deleted: true,
+      uploadAlreadyDeleted: true,
+      relationshipSnapshotRetained: true
+    });
+  });
+
+  it("removes an imported relationship interaction on explicit upload deletion", async () => {
+    dateCompanionRepositoryMock.getInteractionVersionByUpload.mockReturnValue({
+      interactionId: "interaction_1",
+      version: 3
+    });
+    storeMock.read.mockImplementation(async (collection: string) => {
+      if (collection === "uploads") {
+        return {
+          id: "upload_1",
+          originalName: "demo.m4a",
+          mimeType: "audio/mp4",
+          sizeBytes: 12,
+          recordingDate: "2026-06-03",
+          status: "ready"
+        };
+      }
+      return null;
+    });
+
+    const response = await deleteUpload(new Request("http://localhost/api/uploads/upload_1", {
+      method: "DELETE",
+      headers: {
+        "x-date-companion-interaction-id": "interaction_1",
+        "if-match": "\"3\""
+      }
+    }), {
+      params: Promise.resolve({ uploadId: "upload_1" })
+    });
+
+    expect(response.status).toBe(200);
+    expect(dateCompanionRepositoryMock.deleteInteractionByUpload).toHaveBeenCalledWith(
+      "user_default",
+      "upload_1",
+      "interaction_1",
+      3
+    );
+    const parentDeleteIndex = storeMock.delete.mock.calls.findIndex(
+      ([collection, id]) => collection === "uploads" && id === "upload_1"
+    );
+    expect(parentDeleteIndex).toBeGreaterThanOrEqual(0);
+    expect(storeMock.delete.mock.invocationCallOrder[parentDeleteIndex]).toBeLessThan(
+      dateCompanionRepositoryMock.deleteInteractionByUpload.mock.invocationCallOrder[0]
+    );
+    await expect(response.json()).resolves.toMatchObject({
+      deleted: true,
+      relationshipInteractionDeleted: true
+    });
+  });
+
+  it("requires an interaction version before any explicit source cleanup", async () => {
+    dateCompanionRepositoryMock.getInteractionVersionByUpload.mockReturnValue({
+      interactionId: "interaction_1",
+      version: 3
+    });
+    storeMock.read.mockImplementation(async (collection: string) =>
+      collection === "uploads"
+        ? {
+          id: "upload_1",
+          originalName: "demo.m4a",
+          mimeType: "audio/mp4",
+          sizeBytes: 12,
+          recordingDate: "2026-06-03",
+          status: "ready"
+        }
+        : null
+    );
+
+    const response = await deleteUpload(
+      new Request("http://localhost/api/uploads/upload_1", { method: "DELETE" }),
+      { params: Promise.resolve({ uploadId: "upload_1" }) }
+    );
+
+    expect(response.status).toBe(428);
+    await expect(response.json()).resolves.toEqual({
+      error: "interaction_version_required",
+      requiredHeaders: ["x-date-companion-interaction-id", "if-match"]
+    });
+    expect(storeMock.write).not.toHaveBeenCalled();
+    expect(storeMock.delete).not.toHaveBeenCalled();
+    expect(dateCompanionRepositoryMock.deleteInteractionByUpload).not.toHaveBeenCalled();
+  });
+
+  it("rejects a stale explicit source delete before touching JsonStore", async () => {
+    dateCompanionRepositoryMock.getInteractionVersionByUpload.mockReturnValue({
+      interactionId: "interaction_1",
+      version: 4
+    });
+    storeMock.read.mockImplementation(async (collection: string) =>
+      collection === "uploads"
+        ? {
+          id: "upload_1",
+          originalName: "demo.m4a",
+          mimeType: "audio/mp4",
+          sizeBytes: 12,
+          recordingDate: "2026-06-03",
+          status: "ready"
+        }
+        : null
+    );
+
+    const response = await deleteUpload(new Request(
+      "http://localhost/api/uploads/upload_1",
+      {
+        method: "DELETE",
+        headers: {
+          "x-date-companion-interaction-id": "interaction_1",
+          "if-match": "\"3\""
+        }
+      }
+    ), {
+      params: Promise.resolve({ uploadId: "upload_1" })
+    });
+
+    expect(response.status).toBe(409);
+    await expect(response.json()).resolves.toEqual({
+      error: "version_conflict",
+      currentVersion: 4
+    });
+    expect(storeMock.write).not.toHaveBeenCalled();
+    expect(storeMock.delete).not.toHaveBeenCalled();
+  });
+
+  it("finishes a versioned relationship delete after the JsonStore parent is already gone", async () => {
+    storeMock.read.mockResolvedValue(null);
+    dateCompanionRepositoryMock.getInteractionVersionByUpload.mockReturnValue({
+      interactionId: "interaction_1",
+      version: 4
+    });
+
+    const response = await deleteUpload(new Request(
+      "http://localhost/api/uploads/upload_1",
+      {
+        method: "DELETE",
+        headers: {
+          "x-date-companion-interaction-id": "interaction_1",
+          "if-match": "4"
+        }
+      }
+    ), {
+      params: Promise.resolve({ uploadId: "upload_1" })
+    });
+
+    expect(response.status).toBe(200);
+    expect(dateCompanionRepositoryMock.deleteInteractionByUpload).toHaveBeenCalledWith(
+      "user_default",
+      "upload_1",
+      "interaction_1",
+      4
+    );
+    await expect(response.json()).resolves.toEqual({
+      deleted: true,
+      uploadAlreadyDeleted: true,
+      relationshipInteractionDeleted: true
+    });
+  });
+
+  it("maps a concurrent relationship source change to a conflict response", async () => {
+    dateCompanionRepositoryMock.getInteractionVersionByUpload.mockReturnValue({
+      interactionId: "interaction_1",
+      version: 4
+    });
+    dateCompanionRepositoryMock.deleteInteractionByUpload.mockImplementation(() => {
+      throw new DcConflictError("interaction_source_mismatch");
+    });
+    storeMock.read.mockImplementation(async (collection: string) =>
+      collection === "uploads"
+        ? {
+          id: "upload_1",
+          originalName: "demo.m4a",
+          mimeType: "audio/mp4",
+          sizeBytes: 12,
+          recordingDate: "2026-06-03",
+          status: "ready"
+        }
+        : null
+    );
+
+    const response = await deleteUpload(new Request(
+      "http://localhost/api/uploads/upload_1",
+      {
+        method: "DELETE",
+        headers: {
+          "x-date-companion-interaction-id": "interaction_1",
+          "if-match": "4"
+        }
+      }
+    ), {
+      params: Promise.resolve({ uploadId: "upload_1" })
+    });
+
+    expect(response.status).toBe(409);
+    await expect(response.json()).resolves.toEqual({
+      error: "interaction_source_mismatch"
+    });
+  });
+
+  it("retries the SQLite cascade after JsonStore deletion without losing relationship evidence first", async () => {
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    let parentAvailable = true;
+    dateCompanionRepositoryMock.getInteractionVersionByUpload.mockReturnValue({
+      interactionId: "interaction_1",
+      version: 4
+    });
+    dateCompanionRepositoryMock.deleteInteractionByUpload
+      .mockImplementationOnce(() => {
+        throw new Error("sqlite busy");
+      })
+      .mockReturnValueOnce(true);
+    storeMock.read.mockImplementation(async (collection: string) =>
+      collection === "uploads" && parentAvailable
+        ? {
+          id: "upload_1",
+          originalName: "demo.m4a",
+          mimeType: "audio/mp4",
+          sizeBytes: 12,
+          recordingDate: "2026-06-03",
+          status: "ready"
+        }
+        : null
+    );
+    storeMock.delete.mockImplementation(async (collection: string, id: string) => {
+      if (collection === "uploads" && id === "upload_1") parentAvailable = false;
+    });
+    const request = () => new Request("http://localhost/api/uploads/upload_1", {
+      method: "DELETE",
+      headers: {
+        "x-date-companion-interaction-id": "interaction_1",
+        "if-match": "4"
+      }
+    });
+
+    const first = await deleteUpload(request(), {
+      params: Promise.resolve({ uploadId: "upload_1" })
+    });
+    expect(first.status).toBe(500);
+    expect(parentAvailable).toBe(false);
+    expect(dateCompanionRepositoryMock.deleteInteractionByUpload).toHaveBeenCalledTimes(1);
+
+    const second = await deleteUpload(request(), {
+      params: Promise.resolve({ uploadId: "upload_1" })
+    });
+    expect(second.status).toBe(200);
+    expect(dateCompanionRepositoryMock.deleteInteractionByUpload).toHaveBeenCalledTimes(2);
+    await expect(second.json()).resolves.toMatchObject({
+      deleted: true,
+      uploadAlreadyDeleted: true,
+      relationshipInteractionDeleted: true
+    });
+    consoleError.mockRestore();
+  });
+
   it("retains upload, checkpoints and memory when evaluation cleanup is unconfirmed", async () => {
     process.env.EVALUATION_MODE = "true";
+    dateCompanionRepositoryMock.getInteractionVersionByUpload.mockReturnValue({
+      interactionId: "interaction_1",
+      version: 3
+    });
     storeMock.read.mockImplementation(async (collection: string) => {
       if (collection === "uploads") {
         return {
