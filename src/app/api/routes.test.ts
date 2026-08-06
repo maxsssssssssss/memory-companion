@@ -387,7 +387,7 @@ describe("API routes", () => {
     );
   });
 
-  it("fails closed and retains the upload when Redis enqueue is unavailable", async () => {
+  it("returns a recoverable waiting receipt and retains the upload when Redis enqueue is unavailable", async () => {
     process.env.PIPELINE_EXECUTION_MODE = "queue";
     enqueuePipelineJobMock.mockRejectedValueOnce(new Error("redis unavailable"));
     const formData = new FormData();
@@ -401,27 +401,29 @@ describe("API routes", () => {
       formData: vi.fn().mockResolvedValue(formData)
     } as unknown as Request);
 
-    expect(response.status).toBe(503);
+    expect(response.status).toBe(202);
     const body = await response.json();
     expect(body).toEqual({
-      error: "pipeline_queue_unavailable",
       uploadId: expect.any(String),
       jobId: expect.any(String),
-      status: "failed"
+      status: "waiting",
+      executionMode: "queue",
+      queueJobId: expect.stringMatching(/^pipeline-[a-f0-9]{64}$/),
+      enqueueDeferred: true,
+      warning: "pipeline_queue_unavailable"
     });
     expect(afterMock).not.toHaveBeenCalled();
     expect(processUploadMock).not.toHaveBeenCalled();
     expect(rmMock).not.toHaveBeenCalled();
-    expect(storeMock.write).toHaveBeenCalledWith(
+    expect(storeMock.write).not.toHaveBeenCalledWith(
       "uploads",
       body.uploadId,
       expect.objectContaining({
         status: "failed",
-        filePath: expect.stringContaining(`${body.uploadId}.m4a`),
         errorCode: "queue_unavailable"
       })
     );
-    expect(storeMock.write).toHaveBeenCalledWith(
+    expect(storeMock.write).not.toHaveBeenCalledWith(
       "jobs-by-upload",
       body.uploadId,
       expect.objectContaining({ status: "failed", errorCode: "queue_unavailable" })

@@ -185,6 +185,8 @@ export type UploadReceipt = {
   status: "uploaded" | "waiting";
   executionMode?: "inline" | "queue";
   queueJobId?: string;
+  enqueueDeferred?: boolean;
+  warning?: "pipeline_queue_unavailable";
   evaluationRetention?: boolean;
 };
 

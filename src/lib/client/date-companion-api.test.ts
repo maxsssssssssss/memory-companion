@@ -152,29 +152,33 @@ describe("date-companion API", () => {
     expect((request.body as FormData).get("recordingDate")).toBe("2026-08-04");
   });
 
-  it("retains the failed queue upload identifiers on a 503 response", async () => {
+  it("accepts a deferred queue receipt so the client can keep polling", async () => {
     const fetcher = vi.fn().mockResolvedValue(
       jsonResponse(
         {
-          error: "pipeline_queue_unavailable",
           uploadId: "upload_1",
           jobId: "job_1",
-          status: "failed"
+          status: "waiting",
+          executionMode: "queue",
+          queueJobId: "pipeline_upload_1",
+          enqueueDeferred: true,
+          warning: "pipeline_queue_unavailable"
         },
-        503
+        202
       )
     );
     const api = createDateCompanionApi(fetcher as typeof fetch);
 
-    const error = await api
-      .upload(new File(["audio"], "date.m4a", { type: "audio/mp4" }), "2026-08-04")
-      .catch((reason: unknown) => reason);
-
-    expect(error).toBeInstanceOf(DateCompanionApiError);
-    expect((error as DateCompanionApiError).details).toMatchObject({
+    await expect(
+      api.upload(new File(["audio"], "date.m4a", { type: "audio/mp4" }), "2026-08-04")
+    ).resolves.toEqual({
       uploadId: "upload_1",
       jobId: "job_1",
-      status: "failed"
+      status: "waiting",
+      executionMode: "queue",
+      queueJobId: "pipeline_upload_1",
+      enqueueDeferred: true,
+      warning: "pipeline_queue_unavailable"
     });
   });
 

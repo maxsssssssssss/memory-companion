@@ -55,6 +55,8 @@ export const UploadReceiptSchema = z
     status: z.enum(["uploaded", "waiting"]),
     executionMode: z.enum(["inline", "queue"]).optional(),
     queueJobId: StoreKeySchema.optional(),
+    enqueueDeferred: z.boolean().optional(),
+    warning: z.literal("pipeline_queue_unavailable").optional(),
     evaluationRetention: z.boolean().optional()
   })
   .strict()
@@ -71,6 +73,20 @@ export const UploadReceiptSchema = z
         code: z.ZodIssueCode.custom,
         path: ["queueJobId"],
         message: "queue uploads require queueJobId"
+      });
+    }
+    if (receipt.enqueueDeferred && receipt.executionMode !== "queue") {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["enqueueDeferred"],
+        message: "deferred enqueue is only valid for queue uploads"
+      });
+    }
+    if (receipt.enqueueDeferred && receipt.warning !== "pipeline_queue_unavailable") {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["warning"],
+        message: "deferred enqueue must identify the queue warning"
       });
     }
   });

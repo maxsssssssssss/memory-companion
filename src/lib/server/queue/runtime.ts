@@ -4,6 +4,11 @@ import { getPipelineQueueConfig, sanitizedRedisEndpoint } from "./config";
 import { enqueuePipelineJob } from "./producer";
 import { recoverPipelineJobs, type PipelineRecoveryReport } from "./recovery";
 import {
+  clearQueueWorkerStorageProbe,
+  publishQueueWorkerStorageProbe,
+  queueStorageMarkerFingerprint
+} from "./storage-probe";
+import {
   finalizePipelineQueueFailure,
   processPipelineJob,
   type PipelineWorkerResult
@@ -28,25 +33,46 @@ export async function startPipelineWorker(): Promise<PipelineWorkerRuntime> {
     enableReadyCheck: true,
     maxRetriesPerRequest: null
   });
-  await connection.connect();
-  await connection.ping();
+  let workerStorageSummary: Awaited<ReturnType<typeof publishQueueWorkerStorageProbe>>;
+  try {
+    await connection.connect();
+    await connection.ping();
+    workerStorageSummary = await publishQueueWorkerStorageProbe({
+      config,
+      redis: connection
+    });
+  } catch (error) {
+    connection.disconnect(false);
+    throw error;
+  }
 
-  const worker = new Worker<PipelineJobData, PipelineWorkerResult>(
-    config.queueName,
-    async (job: Job<PipelineJobData>) => {
-      const result = await processPipelineJob(job);
-      if (result.status === "failed") {
-        throw new UnrecoverableError(`Pipeline input is unavailable for upload ${result.uploadId}`);
+  let worker: Worker<PipelineJobData, PipelineWorkerResult>;
+  try {
+    worker = new Worker<PipelineJobData, PipelineWorkerResult>(
+      config.queueName,
+      async (job: Job<PipelineJobData>) => {
+        const result = await processPipelineJob(job);
+        if (result.status === "failed") {
+          throw new UnrecoverableError(`Pipeline input is unavailable for upload ${result.uploadId}`);
+        }
+        return result;
+      },
+      {
+        connection,
+        concurrency: config.workerConcurrency,
+        autorun: false,
+        maxStalledCount: 2
       }
-      return result;
-    },
-    {
-      connection,
-      concurrency: config.workerConcurrency,
-      autorun: false,
-      maxStalledCount: 2
-    }
-  );
+    );
+  } catch (error) {
+    await clearQueueWorkerStorageProbe({
+      config,
+      redis: connection,
+      workerId: workerStorageSummary.workerId
+    }).catch(() => undefined);
+    connection.disconnect(false);
+    throw error;
+  }
   const failureReconciliations = new Set<Promise<void>>();
 
   const trackFailureReconciliation = (promise: Promise<void>) => {
@@ -93,7 +119,7 @@ export async function startPipelineWorker(): Promise<PipelineWorkerRuntime> {
   });
 
   try {
-    const recovery = await recoverPipelineJobs({
+    const runRecovery = () => recoverPipelineJobs({
       enqueue: (payload, enqueueOptions) =>
         enqueuePipelineJob(payload, {
           config,
@@ -101,10 +127,30 @@ export async function startPipelineWorker(): Promise<PipelineWorkerRuntime> {
         }),
       staleAfterMs: config.processingStaleMs
     });
+    const recovery = await runRecovery();
     console.info(
-      `[pipeline-worker] ready queue=${config.queueName} redis=${sanitizedRedisEndpoint(config.redisUrl)} concurrency=${config.workerConcurrency} recovered_enqueued=${recovery.enqueued} recovered_existing=${recovery.existing}`
+      `[pipeline-worker] ready queue=${config.queueName} redis=${sanitizedRedisEndpoint(config.redisUrl)} concurrency=${config.workerConcurrency} storage=${queueStorageMarkerFingerprint(workerStorageSummary.storageId)} recovered_enqueued=${recovery.enqueued} recovered_existing=${recovery.existing}`
     );
     const runPromise = worker.run();
+    let periodicRecovery: Promise<void> | null = null;
+    const recoveryTimer = setInterval(() => {
+      if (periodicRecovery) return;
+      periodicRecovery = runRecovery()
+        .then((report) => {
+          console.info(
+            `[pipeline-worker] recovery users=${report.usersScanned} jobs=${report.jobsScanned} enqueued=${report.enqueued} existing=${report.existing} queue_unavailable=${report.queueUnavailableRecovered}`
+          );
+        })
+        .catch((error: unknown) => {
+          console.error(
+            `[pipeline-worker] periodic recovery failed error_name=${error instanceof Error ? error.name : "unknown"}`
+          );
+        })
+        .finally(() => {
+          periodicRecovery = null;
+        });
+    }, config.recoveryIntervalMs);
+    recoveryTimer.unref();
     let closePromise: Promise<void> | undefined;
     return {
       recovery,
@@ -112,9 +158,16 @@ export async function startPipelineWorker(): Promise<PipelineWorkerRuntime> {
       close() {
         closePromise ??= (async () => {
           console.info("[pipeline-worker] shutdown started");
+          clearInterval(recoveryTimer);
           await worker.close();
           await runPromise.catch(() => undefined);
+          await periodicRecovery?.catch(() => undefined);
           await Promise.allSettled(Array.from(failureReconciliations));
+          await clearQueueWorkerStorageProbe({
+            config,
+            redis: connection,
+            workerId: workerStorageSummary.workerId
+          }).catch(() => undefined);
           try {
             await connection.quit();
           } catch {
@@ -127,6 +180,11 @@ export async function startPipelineWorker(): Promise<PipelineWorkerRuntime> {
     };
   } catch (error) {
     await worker.close(true).catch(() => undefined);
+    await clearQueueWorkerStorageProbe({
+      config,
+      redis: connection,
+      workerId: workerStorageSummary.workerId
+    }).catch(() => undefined);
     connection.disconnect(false);
     throw error;
   }

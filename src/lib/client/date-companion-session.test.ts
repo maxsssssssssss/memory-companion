@@ -280,6 +280,42 @@ describe("DateCompanionSessionController", () => {
     expect(window.localStorage.getItem("daily-brief:active-user-id")).toBeNull();
   });
 
+  it("keeps polling after a deferred queue enqueue receipt", async () => {
+    const receipt = {
+      uploadId: "upload_deferred",
+      jobId: "job_deferred",
+      status: "waiting" as const,
+      executionMode: "queue" as const,
+      queueJobId: "pipeline_upload_deferred",
+      enqueueDeferred: true,
+      warning: "pipeline_queue_unavailable" as const
+    };
+    const pollDay = vi.fn(async (uploadId: string, options?: { onPayload?: (value: DayPayload) => void }) => {
+      const ready = payload(uploadId, "ready");
+      options?.onPayload?.(ready);
+      return ready;
+    });
+    const controller = new DateCompanionSessionController({
+      api: fakeApi({ upload: async () => receipt, pollDay }),
+      cache: memoryCache().cache,
+      storage: window.localStorage,
+      pollIntervalMs: 0
+    });
+    await controller.initialize();
+
+    await controller.upload(new File(["audio"], "date.m4a", { type: "audio/mp4" }), "2026-08-04");
+
+    expect(pollDay).toHaveBeenCalledWith(
+      "upload_deferred",
+      expect.objectContaining({ signal: expect.any(AbortSignal) })
+    );
+    expect(controller.getSnapshot().uploadState).toMatchObject({
+      status: "ready",
+      uploadId: "upload_deferred",
+      receipt
+    });
+  });
+
   it("never deletes server data when saving the ready payload locally fails", async () => {
     const cleanup = vi.fn(async () => undefined);
     const cacheState = memoryCache();
