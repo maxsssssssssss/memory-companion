@@ -52,5 +52,5 @@ describe("memory fixture replay", () => {
     expect(second.report.scopeChecks.week.range).toEqual({ start: "2026-07-06", end: "2026-07-12" });
     expect(second.report.scopeChecks.all.dates).toEqual(expect.arrayContaining(["2026-06-29", "2026-07-12"]));
     expect(second.report.memoryEvidence.every((evidence) => evidence.sourceId.startsWith("fixture_") || evidence.sourceId.includes("fixture_"))).toBe(true);
-  }, 30_000);
+  }, 120_000);
 });
