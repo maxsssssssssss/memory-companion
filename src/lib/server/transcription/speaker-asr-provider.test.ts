@@ -10,6 +10,7 @@ function restoreEnv() {
 
 describe("speaker-asr transcription provider", () => {
   afterEach(() => {
+    vi.useRealTimers();
     vi.restoreAllMocks();
     restoreEnv();
   });
@@ -113,6 +114,32 @@ describe("speaker-asr transcription provider", () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
+  it("rejects a malformed speaker_result before it reaches Transcript", async () => {
+    process.env.SPEAKER_ASR_BASE_URL = "http://14.103.196.9:8300";
+    process.env.SPEAKER_ASR_AUDIO_BASE_URL = "https://daydiary.example.com";
+    process.env.SPEAKER_ASR_AUDIO_ACCESS_TOKEN = "audio_token";
+    const fetchMock = vi.fn(async () =>
+      new Response(
+        JSON.stringify({
+          code: 0,
+          data: {
+            speaker_result: [{ speaker: 1, text: "must not reach Transcript" }]
+          }
+        }),
+        { status: 200 }
+      )
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(
+      speakerAsrTranscriptionProvider.transcribe({
+        uploadId: "upload_invalid_response",
+        filePath: "/var/data/daily-brief/users/user_1/uploads/upload_invalid_response.mp3",
+        mimeType: "audio/mpeg"
+      })
+    ).rejects.toThrow("speaker-asr provider returned an invalid response");
+  });
+
   it("submits a chunk URL and returns a global-timeline TranscriptChunk", async () => {
     process.env.SPEAKER_ASR_BASE_URL = "http://14.103.196.9:8300";
     process.env.SPEAKER_ASR_AUDIO_BASE_URL = "https://daydiary.example.com";
@@ -175,5 +202,103 @@ describe("speaker-asr transcription provider", () => {
       endSeconds: 304,
       speaker: "speaker_1"
     });
+  });
+
+  it("keeps polling when code=0 contains no usable transcript text", async () => {
+    vi.useFakeTimers();
+    process.env.SPEAKER_ASR_BASE_URL = "http://14.103.196.9:8300";
+    process.env.SPEAKER_ASR_AUDIO_BASE_URL = "https://daydiary.example.com";
+    process.env.SPEAKER_ASR_AUDIO_ACCESS_TOKEN = "audio_token";
+    process.env.SPEAKER_ASR_POLL_INTERVAL_MS = "500";
+    process.env.SPEAKER_ASR_EMPTY_RESULT_GRACE_MS = "1000";
+    let queryCount = 0;
+    const fetchMock = vi.fn(async (url: string) => {
+      if (url.endsWith("/api/ai/non-realtime-asr")) {
+        return new Response(
+          JSON.stringify({
+            code: 0,
+            data: {
+              asr_result: { sentences: [] },
+              speaker_result: []
+            }
+          }),
+          { status: 200 }
+        );
+      }
+      queryCount += 1;
+      if (queryCount === 1) {
+        return new Response(
+          JSON.stringify({
+            code: 0,
+            data: {
+              asr_result: { sentences: [] },
+              speaker_result: []
+            }
+          }),
+          { status: 200 }
+        );
+      }
+      return new Response(
+        JSON.stringify({
+          code: 0,
+          data: {
+            asr_result: {
+              sentences: [{ text: "late transcript", timestamp: [{ start: 0, end: 1_000 }] }]
+            },
+            speaker_result: [{ speaker: "speaker_1", text: "late transcript" }]
+          }
+        }),
+        { status: 200 }
+      );
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const resultPromise = speakerAsrTranscriptionProvider.transcribe({
+      uploadId: "upload_late_result",
+      filePath: "/var/data/daily-brief/users/user_1/uploads/upload_late_result.mp3",
+      mimeType: "audio/mpeg"
+    });
+    await vi.advanceTimersByTimeAsync(500);
+    const result = await resultPromise;
+
+    expect(queryCount).toBe(2);
+    expect(result).toHaveLength(1);
+    expect(result[0].text).toBe("late transcript");
+  });
+
+  it("returns a retryable empty-transcript error after the code=0 grace expires", async () => {
+    vi.useFakeTimers();
+    process.env.SPEAKER_ASR_BASE_URL = "http://14.103.196.9:8300";
+    process.env.SPEAKER_ASR_AUDIO_BASE_URL = "https://daydiary.example.com";
+    process.env.SPEAKER_ASR_AUDIO_ACCESS_TOKEN = "audio_token";
+    process.env.SPEAKER_ASR_POLL_INTERVAL_MS = "500";
+    process.env.SPEAKER_ASR_EMPTY_RESULT_GRACE_MS = "500";
+    const fetchMock = vi.fn(async () =>
+      new Response(
+        JSON.stringify({
+          code: 0,
+          data: {
+            asr_result: { sentences: [] },
+            speaker_result: []
+          }
+        }),
+        { status: 200 }
+      )
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const resultPromise = speakerAsrTranscriptionProvider.transcribe({
+      uploadId: "upload_permanently_empty",
+      filePath: "/var/data/daily-brief/users/user_1/uploads/upload_permanently_empty.mp3",
+      mimeType: "audio/mpeg"
+    });
+    const rejection = expect(resultPromise).rejects.toMatchObject({
+      code: "speaker_asr_empty_transcript",
+      retryable: true
+    });
+    await vi.advanceTimersByTimeAsync(500);
+
+    await rejection;
+    expect(fetchMock).toHaveBeenCalledTimes(3);
   });
 });

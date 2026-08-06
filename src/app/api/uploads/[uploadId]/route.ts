@@ -3,6 +3,10 @@ import { resolve, sep } from "path";
 import { NextResponse } from "next/server";
 import type { AudioUpload, ProcessingJob, QuestionAnswer } from "@/lib/domain/types";
 import { DcIdSchema } from "@/lib/domain/date-companion-stage2";
+import {
+  isDateCompanionMarkedUpload,
+  type DateCompanionMarkedUpload
+} from "@/lib/domain/date-companion-upload";
 import { proactiveInsightCacheIdForUpload } from "@/lib/domain/proactive-insights";
 import { isUnauthenticatedError, requireAuthContext, unauthorizedResponse } from "@/lib/server/auth/request-context";
 import { isConfirmedEvaluationDelete, isEvaluationRetentionUpload } from "@/lib/server/evaluation/retention";
@@ -12,13 +16,14 @@ import {
   DcVersionConflictError,
   getDateCompanionRepository
 } from "@/lib/server/date-companion";
+import { deleteDateCompanionAudioStaging } from "@/lib/server/date-companion/audio-staging";
 import { getMemoryRepository } from "@/lib/server/memory";
 import { cleanupGeneratedAudioChunks } from "@/lib/server/transcription/chunks/audio-planner";
 import { JsonChunkCheckpointStore } from "@/lib/server/transcription/chunks/checkpoint-store";
 import { JsonAnalysisChunkCheckpointStore } from "@/lib/server/analysis-chunks/checkpoint";
 import { JsonSpeakerIdentityRepository } from "@/lib/server/speaker-identity/repository";
 
-type StoredUpload = AudioUpload & {
+type StoredUpload = AudioUpload & DateCompanionMarkedUpload & {
   filePath?: string;
   evaluationRetention?: boolean;
 };
@@ -143,6 +148,17 @@ export async function DELETE(
       { status: 409 }
     );
   }
+  if (
+    upload &&
+    isBrowserCacheCleanup &&
+    isDateCompanionMarkedUpload(upload) &&
+    !relationshipInteraction
+  ) {
+    return NextResponse.json(
+      { error: "date_companion_import_required", retryable: true },
+      { status: 409 }
+    );
+  }
 
   const explicitDeletePrecondition =
     !isBrowserCacheCleanup && relationshipInteraction
@@ -150,6 +166,36 @@ export async function DELETE(
       : null;
   if (explicitDeletePrecondition && !explicitDeletePrecondition.ok) {
     return explicitDeletePrecondition.response;
+  }
+  if (relationshipInteraction && explicitDeletePrecondition?.ok) {
+    try {
+      const prepared = dateCompanionRepository.prepareInteractionDeletion(
+        authContext.user.id,
+        explicitDeletePrecondition.interactionId,
+        explicitDeletePrecondition.expectedVersion
+      );
+      if (prepared.sourceUploadId !== uploadId) {
+        throw new DcConflictError("interaction_source_mismatch");
+      }
+    } catch (error) {
+      if (error instanceof DcVersionConflictError) {
+        return NextResponse.json(
+          { error: error.code, currentVersion: error.currentVersion },
+          { status: 409 }
+        );
+      }
+      if (error instanceof DcConflictError) {
+        return NextResponse.json({ error: error.code }, { status: 409 });
+      }
+      console.error(
+        "[upload-cleanup] date companion delete preparation failed.",
+        error instanceof Error ? error.message : "unknown_error"
+      );
+      return NextResponse.json(
+        { error: "upload_cleanup_failed", deleted: false, retryable: true },
+        { status: 500 }
+      );
+    }
   }
 
   if (!upload) {
@@ -163,6 +209,7 @@ export async function DELETE(
         if (!markedServerCleaned) {
           throw new Error("date_companion_source_state_update_failed");
         }
+        await deleteDateCompanionAudioStaging(authContext.store, uploadId);
         return NextResponse.json({
           deleted: true,
           uploadAlreadyDeleted: true,
@@ -175,6 +222,7 @@ export async function DELETE(
         explicitDeletePrecondition &&
         explicitDeletePrecondition.ok
       ) {
+        await deleteDateCompanionAudioStaging(authContext.store, uploadId);
         const deletedRelationshipInteraction =
           dateCompanionRepository.deleteInteractionByUpload(
             authContext.user.id,
@@ -266,7 +314,8 @@ export async function DELETE(
       authContext.store.delete("speaker-identities", uploadId),
       authContext.store.delete("memory-owner-audits", uploadId),
       authContext.store.delete("proactive-insights", proactiveInsightCacheIdForUpload(uploadId)),
-      authContext.store.delete("answers-by-upload", uploadId)
+      authContext.store.delete("answers-by-upload", uploadId),
+      deleteDateCompanionAudioStaging(authContext.store, uploadId)
     ]);
 
     getMemoryRepository().deleteByUpload(authContext.user.id, uploadId);

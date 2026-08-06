@@ -3,6 +3,11 @@ import * as fs from "fs/promises";
 import { extname, join } from "path";
 import { after, NextResponse } from "next/server";
 import { mimeTypeToAudioExtension, normalizeAudioForTranscription } from "@/lib/audio/compat";
+import {
+  DATE_COMPANION_AUDIO_SNAPSHOT_VERSION,
+  requestsDateCompanionAudioSnapshot,
+  type DateCompanionMarkedUpload
+} from "@/lib/domain/date-companion-upload";
 import type { AudioUpload } from "@/lib/domain/types";
 import { isUnauthenticatedError, requireAuthContext, unauthorizedResponse } from "@/lib/server/auth/request-context";
 import { shouldMarkUploadForEvaluationRetention } from "@/lib/server/evaluation/retention";
@@ -13,7 +18,7 @@ import { enqueuePipelineJob } from "@/lib/server/queue/producer";
 import { buildPipelineJobId } from "@/lib/server/queue/types";
 import { validateAudioUpload } from "@/lib/server/uploads/validation";
 
-type StoredUpload = AudioUpload & {
+type StoredUpload = AudioUpload & DateCompanionMarkedUpload & {
   filePath: string;
   evaluationRetention?: boolean;
 };
@@ -57,6 +62,7 @@ export async function POST(request: Request) {
 
   const formData = await request.formData();
   const file = formData.get("file");
+  const dateCompanionAudioSnapshot = requestsDateCompanionAudioSnapshot(formData);
 
   if (!(file instanceof File)) {
     return NextResponse.json({ error: "missing_file" }, { status: 400 });
@@ -93,6 +99,9 @@ export async function POST(request: Request) {
     createdAt: new Date().toISOString(),
     status: "uploaded",
     filePath,
+    ...(dateCompanionAudioSnapshot
+      ? { dateCompanionAudioSnapshotVersion: DATE_COMPANION_AUDIO_SNAPSHOT_VERSION }
+      : {}),
     ...(evaluationRetention ? { evaluationRetention: true } : {})
   };
 

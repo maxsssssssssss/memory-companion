@@ -66,7 +66,7 @@ describe("voiceprint cross-recording continuity integration", () => {
     await rm(rootDir, { recursive: true, force: true });
   });
 
-  it("resolves a saved contact when the next recording diarization returns its provider label", async () => {
+  it("keeps a saved-contact Provider label pending until explicit manual identity mapping", async () => {
     const provider = new InMemoryVoiceprintProvider();
     const service = new VoiceprintService(
       provider,
@@ -110,21 +110,30 @@ describe("voiceprint cross-recording continuity integration", () => {
     expect(provider.saveCalls).toHaveLength(1);
     expect(recordingBMappings).toEqual([]);
     expect(voiceprintHints).toEqual([{
+      identityStatus: "verified",
       chunkId: recordingB.id,
       localSpeaker: "Alice",
       globalSpeakerId: "contact_alice",
       displayName: "Alice",
       identityType: "known_contact",
-      confidence: 0.9
+      evidence: {
+        type: "provider_label",
+        provider: "company_voiceprint",
+        providerLabel: "Alice"
+      }
     }]);
     expect(resolved.chunks[0].segments[0]).toMatchObject({
       speaker: "Alice",
       identity: {
-        globalSpeakerId: "contact_alice",
-        displayName: "Alice",
-        identityType: "known_contact",
-        source: "voiceprint",
-        confidence: 0.9
+        globalSpeakerId: expect.stringMatching(/^unknown_/),
+        identityType: "unknown_person",
+        source: "provider_speaker_result",
+        confidence: null,
+        evidence: {
+          type: "provider_label",
+          provider: "company_voiceprint",
+          providerLabel: "Alice"
+        }
       }
     });
     await expect(repository.getManualMapping({
@@ -160,11 +169,21 @@ describe("voiceprint cross-recording continuity integration", () => {
       voiceprintHints
     });
 
-    expect(voiceprintHints).toEqual([]);
+    expect(voiceprintHints).toEqual([{
+      identityStatus: "conflict",
+      chunkId: recordingB.id,
+      localSpeaker: "Shared",
+      conflictingGlobalSpeakerIds: ["contact_a", "contact_b"],
+      evidence: {
+        type: "provider_label",
+        provider: "company_voiceprint",
+        providerLabel: "Shared"
+      }
+    }]);
     expect(resolved.assignments).toHaveLength(1);
     expect(resolved.assignments[0]).toMatchObject({
       matched: false,
-      reason: "no_matching_evidence",
+      reason: "ambiguous_match",
       identity: {
         identityType: "unknown_person",
         confidence: 0

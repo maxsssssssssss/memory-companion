@@ -6,6 +6,7 @@ import {
   DcUpdateRecapRequestSchema
 } from "@/lib/domain/date-companion-stage2";
 import { getDateCompanionRepository } from "@/lib/server/date-companion";
+import { isDateCompanionVoiceEnrollmentRuntimeAvailable } from "@/lib/server/date-companion/voice-enrollment";
 import {
   dateCompanionAuth,
   dateCompanionErrorResponse,
@@ -40,7 +41,12 @@ export async function PUT(
       userId: auth.authContext.user.id,
       interactionId: interactionId.data,
       version: body.data.version,
+      ...(body.data.assignments ? { assignments: body.data.assignments } : {}),
       mutations: body.data.items,
+      ...(body.data.voiceEnrollmentIntents
+        ? { voiceEnrollmentIntents: body.data.voiceEnrollmentIntents }
+        : {}),
+      voiceEnrollmentEnabled: isDateCompanionVoiceEnrollmentRuntimeAvailable(),
       finalize: body.data.finalize
     });
     const view = repository.getRelationshipView(auth.authContext.user.id, relationshipId);

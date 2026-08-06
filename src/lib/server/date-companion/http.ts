@@ -10,6 +10,7 @@ import {
 import {
   DcConflictError,
   DcNotFoundError,
+  DcRetryableError,
   DcValidationError,
   DcVersionConflictError
 } from "./repository";
@@ -40,6 +41,12 @@ export function dateCompanionErrorResponse(error: unknown): Response | null {
   }
   if (error instanceof DcValidationError) {
     return NextResponse.json({ error: error.code }, { status: 422 });
+  }
+  if (error instanceof DcRetryableError) {
+    return NextResponse.json(
+      { error: error.code, retryable: true },
+      { status: 503, headers: { "Retry-After": "2" } }
+    );
   }
   return null;
 }

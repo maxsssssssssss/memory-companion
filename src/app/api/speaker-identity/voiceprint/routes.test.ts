@@ -310,7 +310,8 @@ describe("voiceprint API routes", () => {
     expect(providerBody).toMatchObject({
       user_id: "user_1",
       record_id: "audio_chunk_1",
-      speaker_id: "Alice"
+      speaker_id: "speaker_1",
+      speaker_name: "Alice"
     });
   });
 

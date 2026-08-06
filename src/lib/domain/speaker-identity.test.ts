@@ -2,7 +2,8 @@ import { describe, expect, it } from "vitest";
 import {
   transcriptSpeakerIdentityKey,
   transcriptSpeakerLabel,
-  trustedTranscriptSpeakerIdentity
+  trustedTranscriptSpeakerIdentity,
+  verifiedTranscriptSpeakerIdentity
 } from "./speaker-identity";
 
 describe("transcript speaker identity display", () => {
@@ -56,7 +57,7 @@ describe("transcript speaker identity display", () => {
         displayName: "Same display name",
         identityType: "known_contact" as const,
         confidence: 0.93,
-        source: "manual_mapping" as const
+        source: "voiceprint" as const
       }
     };
 
@@ -66,7 +67,7 @@ describe("transcript speaker identity display", () => {
     expect(transcriptSpeakerIdentityKey(first)).not.toBe(transcriptSpeakerIdentityKey(second));
   });
 
-  it("uses a trusted global ID as the display fallback when no name exists", () => {
+  it("keeps an anonymous cross-chunk identity outside the strict verified boundary", () => {
     const segment = {
       speaker: "speaker_3",
       identity: {
@@ -77,7 +78,78 @@ describe("transcript speaker identity display", () => {
       }
     };
 
-    expect(transcriptSpeakerLabel(segment)).toBe("person_3");
-    expect(transcriptSpeakerIdentityKey(segment)).toBe("person_3");
+    expect(verifiedTranscriptSpeakerIdentity(segment)).toBeUndefined();
+  });
+
+  it("trusts an exact Provider speaker_result label without an acoustic score", () => {
+    const segment = {
+      speaker: "Alice",
+      identity: {
+        globalSpeakerId: "contact_alice",
+        displayName: "Alice",
+        identityType: "known_contact" as const,
+        confidence: null,
+        source: "provider_speaker_result" as const,
+        evidence: {
+          type: "provider_label" as const,
+          provider: "company_voiceprint" as const,
+          providerLabel: "Alice"
+        }
+      }
+    };
+
+    expect(verifiedTranscriptSpeakerIdentity(segment)).toEqual(segment.identity);
+  });
+
+  it("rejects Provider evidence when its label differs from speaker_result", () => {
+    const segment = {
+      speaker: "speaker_1",
+      identity: {
+        globalSpeakerId: "contact_alice",
+        identityType: "known_contact" as const,
+        confidence: null,
+        source: "provider_speaker_result" as const,
+        evidence: {
+          type: "provider_label" as const,
+          provider: "company_voiceprint" as const,
+          providerLabel: "Alice"
+        }
+      }
+    };
+
+    expect(verifiedTranscriptSpeakerIdentity(segment)).toBeUndefined();
+  });
+
+  it("rejects an exact chunk-local label even when it is marked Provider-verified", () => {
+    const segment = {
+      speaker: "speaker_1",
+      identity: {
+        globalSpeakerId: "contact_invalid",
+        identityType: "known_contact" as const,
+        confidence: null,
+        source: "provider_speaker_result" as const,
+        evidence: {
+          type: "provider_label" as const,
+          provider: "company_voiceprint" as const,
+          providerLabel: "speaker_1"
+        }
+      }
+    };
+
+    expect(verifiedTranscriptSpeakerIdentity(segment)).toBeUndefined();
+  });
+
+  it("does not treat a manual-only mapping as Provider-verified identity", () => {
+    const segment = {
+      speaker: "speaker_4",
+      identity: {
+        globalSpeakerId: "person_4",
+        identityType: "known_contact" as const,
+        confidence: 1,
+        source: "manual_mapping" as const
+      }
+    };
+
+    expect(verifiedTranscriptSpeakerIdentity(segment)).toBeUndefined();
   });
 });

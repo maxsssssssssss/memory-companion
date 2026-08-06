@@ -5,15 +5,27 @@ export type SpeakerIdentityType = "known_user" | "known_contact" | "unknown_pers
 
 export type SpeakerIdentitySource =
   | "voiceprint"
+  | "provider_speaker_result"
   | "cross_chunk_matching"
   | "manual_mapping";
+
+export type ProviderLabelIdentityEvidence = {
+  type: "provider_label";
+  provider: "company_voiceprint";
+  providerLabel: string;
+};
 
 export type SpeakerIdentity = {
   globalSpeakerId: string;
   displayName?: string;
   identityType: SpeakerIdentityType;
-  confidence: number;
+  /**
+   * Local matcher/manual confidence only. The 8790 Provider does not expose an
+   * acoustic confidence, so Provider-label identities use null.
+   */
+  confidence: number | null;
   source: SpeakerIdentitySource;
+  evidence?: ProviderLabelIdentityEvidence;
 };
 
 export type VoiceIdentityProfileStatus = "active" | "disabled";
@@ -51,8 +63,9 @@ export type VoiceIdentityHint =
       identityType: Extract<SpeakerIdentityType, "known_user" | "known_contact">;
       globalSpeakerId: string;
       contactName?: string;
-      confidence: number;
+      confidence: number | null;
       source: SpeakerIdentitySource;
+      evidence?: ProviderLabelIdentityEvidence;
     }
   | {
       identityType: "unknown_person";
@@ -93,20 +106,33 @@ export type SpeakerIdentityDirectMapping = {
   confidence?: number;
 };
 
-export type VoiceprintIdentityHint = Omit<
-  SpeakerIdentityDirectMapping,
-  "identityType" | "confidence"
-> & {
-  identityType: Extract<SpeakerIdentityType, "known_user" | "known_contact">;
-  confidence: number;
-};
+export type VoiceprintIdentityHint =
+  | {
+      identityStatus: "verified";
+      chunkId: string;
+      localSpeaker: string;
+      globalSpeakerId: string;
+      displayName?: string;
+      identityType: Extract<SpeakerIdentityType, "known_user" | "known_contact">;
+      evidence: ProviderLabelIdentityEvidence;
+    }
+  | {
+      identityStatus: "conflict";
+      chunkId: string;
+      localSpeaker: string;
+      conflictingGlobalSpeakerIds: string[];
+      evidence: ProviderLabelIdentityEvidence;
+    };
 
 export type SpeakerIdentityAssignmentReason =
   | "manual_mapping"
+  | "provider_label_match"
+  | "provider_label_review_required"
   | "voiceprint_match"
   | "cross_chunk_match"
   | "no_matching_evidence"
   | "below_confidence_threshold"
+  | "provider_not_verified"
   | "ambiguous_match"
   | "same_chunk_identity_conflict";
 
@@ -150,7 +176,7 @@ export type SpeakerIdentityAudit = {
   globalSpeakers: number;
   matched: number;
   unknown: number;
-  averageConfidence: number;
+  averageConfidence: number | null;
   conflicts: number;
   assignments: PersistedSpeakerIdentityAuditAssignment[];
   comparisons: SpeakerIdentityComparisonAudit[];
@@ -169,11 +195,16 @@ export type ResolveSpeakerIdentitiesInput = {
   chunks: TranscriptChunk[];
   manualMappings?: SpeakerIdentityDirectMapping[];
   voiceprintHints?: VoiceprintIdentityHint[];
+  /**
+   * Provider labels are untrusted candidates in production. The trusted
+   * option exists only for explicit fixture replay and must never be selected
+   * from a production environment flag.
+   */
+  providerLabelTrust?: "review_required" | "trusted_test_fixture";
   matcher?: SpeakerIdentityMatcher;
   matcherFeatures?: Record<string, unknown>;
   matchThreshold?: number;
   matchMargin?: number;
-  voiceprintThreshold?: number;
   now?: () => string;
 };
 

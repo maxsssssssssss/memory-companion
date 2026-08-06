@@ -11,6 +11,10 @@ import {
   type TranscriptSegment
 } from "@/lib/domain/types";
 import {
+  isDateCompanionMarkedUpload,
+  type DateCompanionMarkedUpload
+} from "@/lib/domain/date-companion-upload";
+import {
   ProactiveInsightCacheDocumentSchema,
   proactiveInsightCacheIdForUpload,
   type ProactiveInsight,
@@ -29,6 +33,10 @@ import { processAudioInsightChunks } from "@/lib/server/audio-insights/chunk-pro
 import { resolveAnalysisTranscriptChunks } from "@/lib/server/analysis-chunks/transcript-chunks";
 import { JsonAnalysisChunkCheckpointStore } from "@/lib/server/analysis-chunks/checkpoint";
 import { getEmotionSignalProvider, type EmotionSignalProvider } from "@/lib/server/emotion-signals/provider";
+import {
+  deleteDateCompanionAudioStaging,
+  stageDateCompanionParticipantAudio
+} from "@/lib/server/date-companion/audio-staging";
 import {
   buildEvaluationAuditReport,
   type EvaluationMemoryIndexStageAudit
@@ -72,7 +80,7 @@ import {
   type UploadTranscriptionProcessor
 } from "@/lib/server/transcription/chunks/process-audio";
 
-type StoredUpload = AudioUpload & {
+type StoredUpload = AudioUpload & DateCompanionMarkedUpload & {
   filePath?: string;
   errorCode?: string;
   errorMessage?: string;
@@ -107,6 +115,7 @@ export type ProcessUploadDependencies = {
   relationshipSignalProvider?: RelationshipSignalProvider;
   memoryRelevanceJudge?: MemoryRelevanceJudge;
   proactiveInsightProvider?: ProactiveInsightProvider;
+  dateCompanionAudioStager?: typeof stageDateCompanionParticipantAudio;
   now?: () => string;
   evaluationRawResponseCapture?: boolean;
 };
@@ -195,7 +204,8 @@ async function cleanupProcessingArtifacts(
     store.delete("relationship-lifecycle", uploadId),
     store.delete("memory-owner-audits", uploadId),
     store.delete("speaker-identities", uploadId),
-    store.delete("proactive-insights", proactiveInsightCacheIdForUpload(uploadId))
+    store.delete("proactive-insights", proactiveInsightCacheIdForUpload(uploadId)),
+    deleteDateCompanionAudioStaging(store, uploadId)
   ]);
   deleteMemories?.();
 }
@@ -1114,6 +1124,29 @@ export async function processUpload(input: ProcessUploadInput): Promise<ProcessU
     }
 
     const currentUpload = await assertUploadWritable(store, upload.id);
+    if (isDateCompanionMarkedUpload(currentUpload)) {
+      activeStage = "date-companion-audio-staging";
+      if (!input.userId) {
+        throw new Error("Date companion audio staging requires an authenticated user");
+      }
+      const staging = await (
+        input.dependencies?.dateCompanionAudioStager ??
+        stageDateCompanionParticipantAudio
+      )({
+        store,
+        uploadId: upload.id,
+        userId: input.userId,
+        sourceFilePath: requireUploadFilePath(currentUpload),
+        segments,
+        now
+      });
+      // Close the delete race: if cleanup happened while ffmpeg was running,
+      // cancellation cleanup removes the just-written staging document too.
+      await assertUploadWritable(store, upload.id);
+      console.info(
+        `[date-companion-audio] staged upload_id=${upload.id} status=${staging.status} samples=${staging.status === "ready" ? staging.samples.length : 0}`
+      );
+    }
     if (evaluationRetention) {
       const retainedUpload = await store.read<StoredUpload>("uploads", upload.id);
       if (!retainedUpload || retainedUpload.evaluationRetention !== true) {

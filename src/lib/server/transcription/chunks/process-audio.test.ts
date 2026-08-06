@@ -1,6 +1,16 @@
 import { describe, expect, it, vi } from "vitest";
 import { buildAudioChunkId, type AudioChunk, type TranscriptChunk } from "@/lib/domain/chunks";
 import type { JsonStore } from "@/lib/server/storage/json-store";
+import {
+  CompositeIdentityResolver,
+  ManualMappingResolver,
+  VoiceprintResolver,
+  type IdentityResolver
+} from "@/lib/server/speaker-identity/identity-resolver";
+import type {
+  SpeakerIdentityDirectMapping,
+  VoiceprintIdentityHint
+} from "@/lib/server/speaker-identity/types";
 import { ChunkTranscriptionError, type ChunkTranscriptionAdapter } from "./adapter";
 import type { ChunkCheckpointStore } from "./checkpoint-store";
 import {
@@ -73,7 +83,7 @@ function testStore() {
   } as unknown as JsonStore;
 }
 
-function successfulAdapter(): ChunkTranscriptionAdapter {
+function successfulAdapter(speaker = "speaker_1"): ChunkTranscriptionAdapter {
   return {
     name: "fake-speaker-asr",
     async transcribeChunk({ chunk }) {
@@ -85,7 +95,7 @@ function successfulAdapter(): ChunkTranscriptionAdapter {
             uploadId: chunk.uploadId,
             startSeconds: 1,
             endSeconds: 3,
-            speaker: "speaker_1",
+            speaker,
             text: `chunk ${chunk.index}`,
             confidence: 0.9,
             sceneLabels: [],
@@ -96,6 +106,20 @@ function successfulAdapter(): ChunkTranscriptionAdapter {
       });
     }
   };
+}
+
+function testIdentityResolver(input: {
+  loadDirectMappings?: (uploadId: string) => Promise<SpeakerIdentityDirectMapping[]>;
+  loadVoiceprintHints?: (chunks: TranscriptChunk[]) => Promise<VoiceprintIdentityHint[]>;
+} = {}): IdentityResolver {
+  return new CompositeIdentityResolver({
+    manualMappingResolver: new ManualMappingResolver({
+      loadDirectMappings: input.loadDirectMappings ?? (async () => [])
+    }),
+    voiceprintResolver: new VoiceprintResolver({
+      loadVoiceprintHints: input.loadVoiceprintHints ?? (async () => [])
+    })
+  });
 }
 
 describe("chunked audio transcription orchestration", () => {
@@ -143,7 +167,14 @@ describe("chunked audio transcription orchestration", () => {
     await expect(store.read("speaker-identities", "upload_30m")).resolves.toMatchObject({
       chunksProcessed: 6,
       localSpeakerGroups: 6,
-      matched: 0
+      matched: 0,
+      resolutionStates: expect.arrayContaining([
+        expect.objectContaining({
+          localSpeaker: "speaker_1",
+          ownerIdentityId: null,
+          status: "unknown"
+        })
+      ])
     });
   });
 
@@ -218,11 +249,13 @@ describe("chunked audio transcription orchestration", () => {
     warn.mockRestore();
   });
 
-  it("fails open to completed transcript chunks when identity resolution dependencies fail", async () => {
+  it("fails open to completed transcript chunks when an injected identity resolver fails unexpectedly", async () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
-    const loadDirectMappings = vi.fn(async () => {
-      throw new Error("SENSITIVE_REPOSITORY_FAILURE");
-    });
+    const identityResolver: IdentityResolver = {
+      async resolve() {
+        throw new Error("SENSITIVE_RESOLVER_FAILURE");
+      }
+    };
 
     const result = await transcribeSpeakerAsrAudioInChunks(
       {
@@ -237,7 +270,7 @@ describe("chunked audio transcription orchestration", () => {
         adapter: successfulAdapter(),
         checkpoints: checkpoints(),
         cleanupChunks: async () => undefined,
-        speakerIdentityRepository: { loadDirectMappings },
+        identityResolver,
         schedulerOptions: {
           concurrency: 1,
           maxRetries: 0,
@@ -252,7 +285,7 @@ describe("chunked audio transcription orchestration", () => {
     expect(warn).toHaveBeenCalledWith(
       "[speaker-identity] resolution_failed upload_id=upload_30m error_name=Error"
     );
-    expect(warn.mock.calls.flat().join(" ")).not.toContain("SENSITIVE_REPOSITORY_FAILURE");
+    expect(warn.mock.calls.flat().join(" ")).not.toContain("SENSITIVE_RESOLVER_FAILURE");
     warn.mockRestore();
   });
 
@@ -274,14 +307,14 @@ describe("chunked audio transcription orchestration", () => {
         adapter: successfulAdapter(),
         checkpoints: checkpoints(),
         cleanupChunks: async () => undefined,
-        speakerIdentityRepository: {
+        identityResolver: testIdentityResolver({
           loadDirectMappings: async () => [{
             chunkId: "upload_30m_transcript_chunk_00000",
             localSpeaker: "speaker_1",
             globalSpeakerId: "contact_partner",
             displayName: "Partner"
           }]
-        },
+        }),
         schedulerOptions: {
           concurrency: 1,
           maxRetries: 0,
@@ -303,14 +336,19 @@ describe("chunked audio transcription orchestration", () => {
     warn.mockRestore();
   });
 
-  it("loads exact provider voiceprint hints before transcript merge", async () => {
+  it("preserves exact Provider labels as pending evidence before transcript merge", async () => {
     const store = testStore();
     const loadVoiceprintHints = vi.fn(async () => [{
+      identityStatus: "verified" as const,
       chunkId: "upload_30m_transcript_chunk_00000",
-      localSpeaker: "speaker_1",
+      localSpeaker: "我",
       globalSpeakerId: "user_user_1",
       identityType: "known_user" as const,
-      confidence: 0.9
+      evidence: {
+        type: "provider_label" as const,
+        provider: "company_voiceprint" as const,
+        providerLabel: "我"
+      }
     }]);
 
     const result = await transcribeSpeakerAsrAudioInChunks(
@@ -323,13 +361,10 @@ describe("chunked audio transcription orchestration", () => {
       },
       {
         planner: async () => chunks(1),
-        adapter: successfulAdapter(),
+        adapter: successfulAdapter("我"),
         checkpoints: checkpoints(),
         cleanupChunks: async () => undefined,
-        speakerIdentityRepository: {
-          loadDirectMappings: async () => [],
-          loadVoiceprintHints
-        },
+        identityResolver: testIdentityResolver({ loadVoiceprintHints }),
         schedulerOptions: {
           concurrency: 1,
           maxRetries: 0,
@@ -341,12 +376,17 @@ describe("chunked audio transcription orchestration", () => {
 
     expect(loadVoiceprintHints).toHaveBeenCalledTimes(1);
     expect(result[0]).toMatchObject({
-      speaker: "speaker_1",
+      speaker: "我",
       identity: {
-        globalSpeakerId: "user_user_1",
-        identityType: "known_user",
-        source: "voiceprint",
-        confidence: 0.9
+        globalSpeakerId: expect.stringMatching(/^unknown_/),
+        identityType: "unknown_person",
+        source: "provider_speaker_result",
+        confidence: null,
+        evidence: {
+          type: "provider_label",
+          provider: "company_voiceprint",
+          providerLabel: "我"
+        }
       }
     });
   });

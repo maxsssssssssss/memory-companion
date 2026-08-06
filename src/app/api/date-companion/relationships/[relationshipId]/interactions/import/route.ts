@@ -38,7 +38,8 @@ export async function POST(
       store: auth.authContext.store,
       userId: auth.authContext.user.id,
       relationshipId: relationshipId.data,
-      uploadId: body.data.uploadId
+      uploadId: body.data.uploadId,
+      uploadsRootDir: auth.authContext.uploadsRootDir
     });
     return NextResponse.json(
       DcImportInteractionResponseSchema.parse(result),

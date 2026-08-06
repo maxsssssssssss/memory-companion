@@ -4,7 +4,7 @@ import { trustedTranscriptSpeakerIdentity } from "@/lib/domain/speaker-identity"
 import type { TranscriptSegment } from "@/lib/domain/types";
 import { speakerIdentityCandidateKey } from "./matching";
 import { resolveSpeakerIdentities } from "./resolver";
-import type { SpeakerIdentityMatcher } from "./types";
+import type { SpeakerIdentityMatcher, VoiceprintIdentityHint } from "./types";
 
 const timestamp = "2026-07-17T00:00:00.000Z";
 
@@ -68,6 +68,24 @@ function identityOf(result: Awaited<ReturnType<typeof resolveSpeakerIdentities>>
   return result.assignmentsByCandidateKey[
     speakerIdentityCandidateKey(result.chunks[chunkIndex].id, speaker)
   ].identity;
+}
+
+function providerHint(input: {
+  chunkId: string;
+  localSpeaker: string;
+  globalSpeakerId: string;
+  identityType: "known_user" | "known_contact";
+  displayName?: string;
+}): VoiceprintIdentityHint {
+  return {
+    identityStatus: "verified",
+    ...input,
+    evidence: {
+      type: "provider_label",
+      provider: "company_voiceprint",
+      providerLabel: input.localSpeaker
+    }
+  };
 }
 
 describe("resolveSpeakerIdentities", () => {
@@ -178,29 +196,34 @@ describe("resolveSpeakerIdentities", () => {
 
   it("uses an accepted voiceprint hint before consulting the matcher for that group", async () => {
     const chunks = [chunk(0, [
-      segment({ id: "s0", speaker: "speaker_0", startSeconds: 1, endSeconds: 4 })
+      segment({ id: "s0", speaker: "Alice", startSeconds: 1, endSeconds: 4 })
     ])];
     const matcher: SpeakerIdentityMatcher = { score: vi.fn(() => 0.99) };
 
     const result = await resolveSpeakerIdentities({
       uploadId: "upload_1",
       chunks,
-      voiceprintHints: [{
+      voiceprintHints: [providerHint({
         chunkId: chunks[0].id,
-        localSpeaker: "speaker_0",
+        localSpeaker: "Alice",
         globalSpeakerId: "contact_voiceprint",
         displayName: "Known contact",
-        identityType: "known_contact",
-        confidence: 0.93
-      }],
+        identityType: "known_contact"
+      })],
+      providerLabelTrust: "trusted_test_fixture",
       matcher
     });
 
-    expect(identityOf(result, 0, "speaker_0")).toMatchObject({
+    expect(identityOf(result, 0, "Alice")).toMatchObject({
       globalSpeakerId: "contact_voiceprint",
       displayName: "Known contact",
-      confidence: 0.93,
-      source: "voiceprint"
+      confidence: null,
+      source: "provider_speaker_result",
+      evidence: {
+        type: "provider_label",
+        provider: "company_voiceprint",
+        providerLabel: "Alice"
+      }
     });
     expect(result.audit.assignments[0].identity).not.toHaveProperty("displayName");
     expect(JSON.stringify(result.audit)).not.toContain("Known contact");
@@ -209,36 +232,109 @@ describe("resolveSpeakerIdentities", () => {
 
   it("preserves a provider-confirmed known-user identity without changing the local label", async () => {
     const chunks = [chunk(0, [
-      segment({ id: "s0", speaker: "speaker_0", startSeconds: 1, endSeconds: 4 })
+      segment({ id: "s0", speaker: "我", startSeconds: 1, endSeconds: 4 })
     ])];
 
     const result = await resolveSpeakerIdentities({
       uploadId: "upload_1",
       chunks,
-      voiceprintHints: [{
+      voiceprintHints: [providerHint({
         chunkId: chunks[0].id,
-        localSpeaker: "speaker_0",
+        localSpeaker: "我",
         globalSpeakerId: "user_user_1",
-        identityType: "known_user",
-        confidence: 0.94
-      }]
+        identityType: "known_user"
+      })],
+      providerLabelTrust: "trusted_test_fixture"
     });
 
     expect(result.chunks[0].segments[0]).toMatchObject({
-      speaker: "speaker_0",
+      speaker: "我",
       identity: {
         globalSpeakerId: "user_user_1",
         identityType: "known_user",
-        confidence: 0.94,
-        source: "voiceprint"
+        confidence: null,
+        source: "provider_speaker_result",
+        evidence: {
+          type: "provider_label",
+          provider: "company_voiceprint",
+          providerLabel: "我"
+        }
       }
     });
+  });
+
+  it("accepts exact Provider-label evidence without inventing a score or threshold", async () => {
+    const chunks = [chunk(0, [
+      segment({ id: "s0", speaker: "我", startSeconds: 1, endSeconds: 4 })
+    ])];
+
+    const result = await resolveSpeakerIdentities({
+      uploadId: "upload_1",
+      chunks,
+      voiceprintHints: [providerHint({
+        chunkId: chunks[0].id,
+        localSpeaker: "我",
+        globalSpeakerId: "user_user_1",
+        identityType: "known_user"
+      })],
+      providerLabelTrust: "trusted_test_fixture"
+    });
+
+    expect(result.assignments[0]).toMatchObject({
+      matched: true,
+      reason: "provider_label_match",
+      identity: {
+        identityType: "known_user",
+        confidence: null,
+        source: "provider_speaker_result"
+      }
+    });
+  });
+
+  it("rejects a chunk-local label as a Provider-verified identity", async () => {
+    const chunks = [chunk(0, [
+      segment({ id: "s0", speaker: "speaker_0", startSeconds: 1, endSeconds: 4 })
+    ])];
+
+    await expect(resolveSpeakerIdentities({
+      uploadId: "upload_1",
+      chunks,
+      voiceprintHints: [providerHint({
+        chunkId: chunks[0].id,
+        localSpeaker: "speaker_0",
+        globalSpeakerId: "contact_invalid",
+        identityType: "known_contact"
+      })]
+    })).rejects.toThrow("Chunk-local speaker labels cannot be Provider-verified identities");
+  });
+
+  it("rejects evidence whose Provider label does not match speaker_result", async () => {
+    const chunks = [chunk(0, [
+      segment({ id: "s0", speaker: "Alice", startSeconds: 1, endSeconds: 4 })
+    ])];
+
+    await expect(resolveSpeakerIdentities({
+      uploadId: "upload_1",
+      chunks,
+      voiceprintHints: [{
+        identityStatus: "verified",
+        chunkId: chunks[0].id,
+        localSpeaker: "Alice",
+        globalSpeakerId: "user_user_1",
+        identityType: "known_user",
+        evidence: {
+          type: "provider_label",
+          provider: "company_voiceprint",
+          providerLabel: "Bob"
+        }
+      }]
+    })).rejects.toThrow("exact Provider speaker_result label");
   });
 
   it("gives a manual mapping priority over voiceprint and matcher evidence", async () => {
     const chunks = [
       chunk(0, [segment({ id: "s0", speaker: "speaker_0", startSeconds: 1, endSeconds: 4 })]),
-      chunk(1, [segment({ id: "s1", speaker: "speaker_7", startSeconds: 301, endSeconds: 304 })])
+      chunk(1, [segment({ id: "s1", speaker: "Alice", startSeconds: 301, endSeconds: 304 })])
     ];
 
     const result = await resolveSpeakerIdentities({
@@ -246,21 +342,20 @@ describe("resolveSpeakerIdentities", () => {
       chunks,
       manualMappings: [{
         chunkId: chunks[1].id,
-        localSpeaker: "speaker_7",
+        localSpeaker: "Alice",
         globalSpeakerId: "contact_partner",
         displayName: "Partner"
       }],
-      voiceprintHints: [{
+      voiceprintHints: [providerHint({
         chunkId: chunks[1].id,
-        localSpeaker: "speaker_7",
+        localSpeaker: "Alice",
         globalSpeakerId: "wrong_voiceprint",
-        identityType: "known_contact",
-        confidence: 0.99
-      }],
+        identityType: "known_contact"
+      })],
       matcher: { score: () => 0.95 }
     });
 
-    expect(identityOf(result, 1, "speaker_7")).toEqual({
+    expect(identityOf(result, 1, "Alice")).toEqual({
       globalSpeakerId: "contact_partner",
       displayName: "Partner",
       identityType: "known_contact",
@@ -305,27 +400,25 @@ describe("resolveSpeakerIdentities", () => {
 
   it("fails closed when one local speaker has conflicting voiceprint identities", async () => {
     const chunks = [chunk(0, [
-      segment({ id: "s0", speaker: "speaker_0", startSeconds: 1, endSeconds: 4 })
+      segment({ id: "s0", speaker: "Alice", startSeconds: 1, endSeconds: 4 })
     ])];
 
     const result = await resolveSpeakerIdentities({
       uploadId: "upload_1",
       chunks,
       voiceprintHints: [
-        {
+        providerHint({
           chunkId: chunks[0].id,
-          localSpeaker: "speaker_0",
+          localSpeaker: "Alice",
           globalSpeakerId: "contact_alice",
-          identityType: "known_contact",
-          confidence: 0.95
-        },
-        {
+          identityType: "known_contact"
+        }),
+        providerHint({
           chunkId: chunks[0].id,
-          localSpeaker: "speaker_0",
+          localSpeaker: "Alice",
           globalSpeakerId: "contact_bob",
-          identityType: "known_contact",
-          confidence: 0.94
-        }
+          identityType: "known_contact"
+        })
       ]
     });
 
@@ -339,44 +432,47 @@ describe("resolveSpeakerIdentities", () => {
 
   it("rejects a voiceprint hint that omits an explicit known identity type", async () => {
     const chunks = [chunk(0, [
-      segment({ id: "s0", speaker: "speaker_0", startSeconds: 1, endSeconds: 4 })
+      segment({ id: "s0", speaker: "Alice", startSeconds: 1, endSeconds: 4 })
     ])];
 
     await expect(resolveSpeakerIdentities({
       uploadId: "upload_1",
       chunks,
       voiceprintHints: [{
+        identityStatus: "verified",
         chunkId: chunks[0].id,
-        localSpeaker: "speaker_0",
+        localSpeaker: "Alice",
         globalSpeakerId: "contact_alice",
-        confidence: 0.95
+        evidence: {
+          type: "provider_label",
+          provider: "company_voiceprint",
+          providerLabel: "Alice"
+        }
       } as never]
-    })).rejects.toThrow("explicit known_user or known_contact");
+    })).rejects.toThrow("known user or contact identity");
   });
 
   it("fails closed when the same voiceprint id has conflicting identity types", async () => {
     const chunks = [chunk(0, [
-      segment({ id: "s0", speaker: "speaker_0", startSeconds: 1, endSeconds: 4 })
+      segment({ id: "s0", speaker: "Alice", startSeconds: 1, endSeconds: 4 })
     ])];
 
     const result = await resolveSpeakerIdentities({
       uploadId: "upload_1",
       chunks,
       voiceprintHints: [
-        {
+        providerHint({
           chunkId: chunks[0].id,
-          localSpeaker: "speaker_0",
+          localSpeaker: "Alice",
           globalSpeakerId: "identity_1",
-          identityType: "known_user",
-          confidence: 0.95
-        },
-        {
+          identityType: "known_user"
+        }),
+        providerHint({
           chunkId: chunks[0].id,
-          localSpeaker: "speaker_0",
+          localSpeaker: "Alice",
           globalSpeakerId: "identity_1",
-          identityType: "known_contact",
-          confidence: 0.95
-        }
+          identityType: "known_contact"
+        })
       ]
     });
 
@@ -389,20 +485,20 @@ describe("resolveSpeakerIdentities", () => {
 
   it("fails closed when two speakers in one chunk receive the same voiceprint identity", async () => {
     const chunks = [chunk(0, [
-      segment({ id: "s0", speaker: "speaker_0", startSeconds: 1, endSeconds: 4 }),
-      segment({ id: "s1", speaker: "speaker_1", startSeconds: 5, endSeconds: 8 })
+      segment({ id: "s0", speaker: "Alice", startSeconds: 1, endSeconds: 4 }),
+      segment({ id: "s1", speaker: "Bob", startSeconds: 5, endSeconds: 8 })
     ])];
 
     const result = await resolveSpeakerIdentities({
       uploadId: "upload_1",
       chunks,
-      voiceprintHints: ["speaker_0", "speaker_1"].map((localSpeaker) => ({
+      voiceprintHints: ["Alice", "Bob"].map((localSpeaker) => providerHint({
         chunkId: chunks[0].id,
         localSpeaker,
         globalSpeakerId: "contact_alice",
-        identityType: "known_contact" as const,
-        confidence: 0.95
-      }))
+        identityType: "known_contact"
+      })),
+      providerLabelTrust: "trusted_test_fixture"
     });
 
     expect(result.assignments).toEqual([

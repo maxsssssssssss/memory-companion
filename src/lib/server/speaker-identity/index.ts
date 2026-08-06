@@ -1,5 +1,6 @@
 export * from "./evaluation";
 export * from "./identity-hint";
+export * from "./identity-resolver";
 export * from "./matching";
 export * from "./repository";
 export * from "./resolver";

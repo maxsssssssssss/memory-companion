@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { resolve, sep } from "node:path";
 
 import {
   ProactiveInsightCacheDocumentSchema,
@@ -15,15 +16,78 @@ import {
   type TranscriptSegment
 } from "@/lib/domain/types";
 import { DayPayloadSchema, type DayPayload } from "@/lib/domain/day-payload";
+import { dateCompanionParticipantKey } from "@/lib/domain/date-companion-speaker";
+import {
+  isDateCompanionMarkedUpload,
+  type DateCompanionMarkedUpload
+} from "@/lib/domain/date-companion-upload";
 import type { JsonStore } from "@/lib/server/storage/json-store";
 
 import {
   DateCompanionRepository,
   DcConflictError,
   DcNotFoundError,
+  DcRetryableError,
   DcValidationError
 } from "./repository";
 import type { DcImportRecapCandidate } from "./types";
+import { buildParticipantAudioSamples } from "./participant-audio";
+import {
+  participantAudioSamplesFromStaging,
+  readDateCompanionAudioStaging
+} from "./audio-staging";
+import {
+  buildDateCompanionParticipantPlan,
+  type DateCompanionParticipantBuildOptions
+} from "./participant-plan";
+import { buildDateCompanionVoiceEnrollmentSnapshots } from "./enrollment-snapshot";
+import { isDateCompanionVoiceEnrollmentRuntimeAvailable } from "./voice-enrollment";
+
+export { isDateCompanionProviderLabelContinuityEnabled } from "./participant-plan";
+
+type StoredAudioUpload = DateCompanionMarkedUpload & {
+  filePath?: unknown;
+};
+
+export function safeDateCompanionUploadFilePath(value: unknown, uploadsRootDir?: string) {
+  if (typeof value !== "string" || !value.trim() || !uploadsRootDir) return null;
+  const root = resolve(uploadsRootDir);
+  const candidate = resolve(value);
+  if (!candidate.startsWith(`${root}${sep}`)) throw new DcValidationError("invalid_upload_file_path");
+  return candidate;
+}
+
+export function normalizeDateCompanionSpeakerId(value: unknown) {
+  if (typeof value !== "string") return undefined;
+  const normalized = value.trim();
+  return normalized.length > 0 && normalized.length <= 512 ? normalized : undefined;
+}
+
+function normalizeDateCompanionPayloadSpeakers(payload: DayPayload): DayPayload {
+  return {
+    ...payload,
+    segments: payload.segments.map((segment) => {
+      const speaker = normalizeDateCompanionSpeakerId(segment.speaker);
+      const { speaker: _rawSpeaker, ...withoutSpeaker } = segment;
+      return speaker ? { ...withoutSpeaker, speaker } : withoutSpeaker;
+    })
+  };
+}
+
+export async function buildDateCompanionParticipants(
+  store: JsonStore,
+  payload: DayPayload,
+  userId: string,
+  options: DateCompanionParticipantBuildOptions = {}
+) {
+  return (await buildDateCompanionParticipantPlan({
+    store,
+    uploadId: payload.upload.id,
+    segments: payload.segments,
+    userId,
+    options
+  })).participants;
+}
 
 async function readDayPayload(store: JsonStore, uploadId: string): Promise<DayPayload> {
   const rawUpload = await store.read<unknown>("uploads", uploadId);
@@ -96,7 +160,9 @@ function resolveEvidence(
       sourceSegmentId: segment.id,
       startSeconds: segment.startSeconds,
       endSeconds: segment.endSeconds,
-      ...(segment.speaker ? { speakerId: segment.speaker } : {}),
+      ...(dateCompanionParticipantKey(segment)
+        ? { speakerId: dateCompanionParticipantKey(segment) }
+        : {}),
       quote: segment.text
     }));
 }
@@ -164,31 +230,108 @@ export function buildDateCompanionImportCandidates(payload: DayPayload): DcImpor
 }
 
 export class DateCompanionService {
-  constructor(private readonly repository: DateCompanionRepository) {}
+  constructor(
+    private readonly repository: DateCompanionRepository,
+    private readonly options: {
+      buildAudioSamples?: typeof buildParticipantAudioSamples;
+      buildVoiceEnrollmentSnapshots?: typeof buildDateCompanionVoiceEnrollmentSnapshots;
+      voiceEnrollmentEnabled?: boolean;
+    } = {}
+  ) {}
 
   async importInteraction(input: {
     store: JsonStore;
     userId: string;
     relationshipId: string;
     uploadId: string;
+    uploadsRootDir?: string;
   }) {
-    if (this.repository.hasInteractionForUpload(input.userId, input.uploadId)) {
-      const existing = this.repository.importInteraction({
-        userId: input.userId,
-        relationshipId: input.relationshipId,
-        sourceUploadId: input.uploadId,
-        recordingDate: "1970-01-01",
-        originalName: "reused",
-        speakerIds: [],
-        recapCandidates: []
-      });
-      return {
-        ...existing,
-        view: this.repository.getRelationshipView(input.userId, input.relationshipId)
-      };
+    const existing = this.repository.getInteractionVersionByUpload(input.userId, input.uploadId);
+    if (existing) {
+      if (this.repository.getInteractionRelationshipId(input.userId, existing.interactionId) !== input.relationshipId) {
+        throw new DcConflictError("interaction_relationship_conflict");
+      }
     }
 
-    const payload = await readDayPayload(input.store, input.uploadId);
+    let payload: DayPayload;
+    try {
+      payload = normalizeDateCompanionPayloadSpeakers(await readDayPayload(input.store, input.uploadId));
+    } catch (error) {
+      if (existing && error instanceof DcNotFoundError) {
+        return {
+          interactionId: existing.interactionId,
+          reused: true,
+          view: this.repository.getRelationshipView(input.userId, input.relationshipId)
+        };
+      }
+      throw error;
+    }
+    const storedUpload = await input.store.read<StoredAudioUpload>("uploads", input.uploadId);
+    const markedForAudioStaging = isDateCompanionMarkedUpload(storedUpload ?? {});
+    let stagedAudioSamples = null as ReturnType<
+      typeof participantAudioSamplesFromStaging
+    > | null;
+    if (markedForAudioStaging) {
+      try {
+        const staging = await readDateCompanionAudioStaging({
+          store: input.store,
+          uploadId: input.uploadId,
+          userId: input.userId
+        });
+        if (!staging) {
+          throw new Error("date_companion_audio_staging_missing");
+        }
+        stagedAudioSamples = participantAudioSamplesFromStaging(staging);
+      } catch (error) {
+        console.warn(
+          `[date-companion-audio] staging_unavailable upload_id=${input.uploadId} error_name=${error instanceof Error ? error.name : "unknown"}`
+        );
+        throw new DcRetryableError("participant_audio_staging_unavailable");
+      }
+    }
+    const sourceFilePath = markedForAudioStaging
+      ? null
+      : safeDateCompanionUploadFilePath(
+        storedUpload?.filePath,
+        input.uploadsRootDir
+      );
+    const participantPlan = await buildDateCompanionParticipantPlan({
+      store: input.store,
+      uploadId: payload.upload.id,
+      segments: payload.segments,
+      userId: input.userId
+    });
+    const voiceEnrollmentEnabled = this.options.voiceEnrollmentEnabled
+      ?? isDateCompanionVoiceEnrollmentRuntimeAvailable();
+    let voiceEnrollmentSnapshots = null as Awaited<ReturnType<
+      typeof buildDateCompanionVoiceEnrollmentSnapshots
+    >> | null;
+    if (
+      voiceEnrollmentEnabled
+      && (!existing || !this.repository.hasVoiceEnrollmentSnapshots(
+        input.userId,
+        existing.interactionId
+      ))
+    ) {
+      try {
+        voiceEnrollmentSnapshots = await (
+          this.options.buildVoiceEnrollmentSnapshots
+          ?? buildDateCompanionVoiceEnrollmentSnapshots
+        )({
+          store: input.store,
+          uploadId: payload.upload.id,
+          segments: payload.segments,
+          participantPlan
+        });
+      } catch (error) {
+        console.warn(
+          `[date-companion-voice-enrollment] snapshot_build_failed upload_id=${input.uploadId} `
+          + `error_name=${error instanceof Error ? error.name : "unknown"}`
+        );
+        throw new DcRetryableError("voice_enrollment_snapshot_failed");
+      }
+    }
+
     const result = this.repository.importInteraction({
       userId: input.userId,
       relationshipId: input.relationshipId,
@@ -198,9 +341,63 @@ export class DateCompanionService {
       ...(payload.upload.durationSeconds !== undefined
         ? { durationSeconds: payload.upload.durationSeconds }
         : {}),
-      speakerIds: payload.segments.flatMap((segment) => segment.speaker ? [segment.speaker] : []),
+      participants: participantPlan.participants,
       recapCandidates: buildDateCompanionImportCandidates(payload)
     });
+
+    if (voiceEnrollmentSnapshots !== null && voiceEnrollmentSnapshots.length > 0) {
+      try {
+        this.repository.saveVoiceEnrollmentSnapshots({
+          userId: input.userId,
+          relationshipId: input.relationshipId,
+          interactionId: result.interactionId,
+          snapshots: voiceEnrollmentSnapshots
+        });
+      } catch (error) {
+        console.warn(
+          `[date-companion-voice-enrollment] snapshot_persist_failed upload_id=${input.uploadId} `
+          + `error_name=${error instanceof Error ? error.name : "unknown"}`
+        );
+        throw new DcRetryableError("voice_enrollment_snapshot_failed");
+      }
+    }
+
+    if (stagedAudioSamples !== null) {
+      try {
+        if (stagedAudioSamples.length > 0) {
+          this.repository.saveParticipantAudioSamples({
+            userId: input.userId,
+            interactionId: result.interactionId,
+            samples: stagedAudioSamples
+          });
+        }
+      } catch (error) {
+        console.warn(
+          `[date-companion-audio] staging_persist_failed upload_id=${input.uploadId} error_name=${error instanceof Error ? error.name : "unknown"}`
+        );
+        throw new DcRetryableError("participant_audio_snapshot_failed");
+      }
+    } else if (sourceFilePath) {
+      try {
+        const audioSamples = await (this.options.buildAudioSamples ?? buildParticipantAudioSamples)({
+          uploadId: input.uploadId,
+          sourceFilePath,
+          segments: payload.segments
+        });
+        if (audioSamples.length > 0) {
+          this.repository.saveParticipantAudioSamples({
+            userId: input.userId,
+            interactionId: result.interactionId,
+            samples: audioSamples
+          });
+        }
+      } catch (error) {
+        console.warn(
+          `[date-companion-audio] generation_failed upload_id=${input.uploadId} error_name=${error instanceof Error ? error.name : "unknown"}`
+        );
+        throw new DcRetryableError("participant_audio_snapshot_failed");
+      }
+    }
     return {
       ...result,
       view: this.repository.getRelationshipView(input.userId, input.relationshipId)

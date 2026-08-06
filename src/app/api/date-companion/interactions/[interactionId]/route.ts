@@ -5,10 +5,12 @@ import {
   DcIdSchema
 } from "@/lib/domain/date-companion-stage2";
 import { getDateCompanionRepository } from "@/lib/server/date-companion";
+import { deleteDateCompanionAudioStaging } from "@/lib/server/date-companion/audio-staging";
 import {
   dateCompanionAuth,
   dateCompanionErrorResponse
 } from "@/lib/server/date-companion/http";
+import { JsonSpeakerIdentityRepository } from "@/lib/server/speaker-identity/repository";
 
 export const runtime = "nodejs";
 
@@ -48,7 +50,31 @@ export async function DELETE(
   const expectedVersion = expectedVersionFromIfMatch(request);
   if ("response" in expectedVersion) return expectedVersion.response;
   try {
-    getDateCompanionRepository().deleteInteraction(
+    const repository = getDateCompanionRepository();
+    const deletion = repository.prepareInteractionDeletion(
+      auth.authContext.user.id,
+      interactionId.data,
+      expectedVersion.version
+    );
+    try {
+      await deleteDateCompanionAudioStaging(
+        auth.authContext.store,
+        deletion.sourceUploadId
+      );
+      await new JsonSpeakerIdentityRepository(
+        auth.authContext.store
+      ).deleteUploadMappings(deletion.sourceUploadId);
+    } catch (error) {
+      console.error(
+        `[date-companion-delete] voice_cleanup_failed upload_id=${deletion.sourceUploadId} `
+        + `error_name=${error instanceof Error ? error.name : "unknown"}`
+      );
+      return NextResponse.json(
+        { error: "interaction_voice_cleanup_failed", deleted: false, retryable: true },
+        { status: 500 }
+      );
+    }
+    repository.deleteInteraction(
       auth.authContext.user.id,
       interactionId.data,
       expectedVersion.version

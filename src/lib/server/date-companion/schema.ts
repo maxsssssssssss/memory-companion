@@ -1,6 +1,6 @@
 import type Database from "better-sqlite3";
 
-export const DATE_COMPANION_SCHEMA_VERSION = 2;
+export const DATE_COMPANION_SCHEMA_VERSION = 5;
 
 const DATE_COMPANION_SCHEMA_V1 = `
   CREATE TABLE dc_relationships (
@@ -122,9 +122,124 @@ const DATE_COMPANION_SCHEMA_V2 = `
     ADD COLUMN confirmation_fingerprint TEXT;
 `;
 
+const DATE_COMPANION_SCHEMA_V3 = `
+  CREATE TABLE dc_participant_audio_samples (
+    user_id TEXT NOT NULL,
+    interaction_id TEXT NOT NULL,
+    speaker_id TEXT NOT NULL,
+    mime_type TEXT NOT NULL CHECK (mime_type = 'audio/mpeg'),
+    duration_milliseconds INTEGER NOT NULL CHECK (duration_milliseconds > 0),
+    audio BLOB NOT NULL CHECK (length(audio) > 0),
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (user_id, interaction_id, speaker_id),
+    FOREIGN KEY (user_id, interaction_id, speaker_id)
+      REFERENCES dc_participant_assignments(user_id, interaction_id, speaker_id)
+      ON DELETE CASCADE
+  );
+`;
+
+const DATE_COMPANION_SCHEMA_V4 = `
+  ALTER TABLE dc_participant_assignments
+    ADD COLUMN continuity_key TEXT;
+
+  CREATE TABLE dc_relationship_speaker_bindings (
+    user_id TEXT NOT NULL,
+    relationship_id TEXT NOT NULL,
+    continuity_key TEXT NOT NULL,
+    source_interaction_id TEXT NOT NULL,
+    role TEXT NOT NULL CHECK (role IN ('self', 'companion')),
+    confirmed_by TEXT NOT NULL,
+    confirmed_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (user_id, relationship_id, continuity_key),
+    FOREIGN KEY (relationship_id, user_id)
+      REFERENCES dc_relationships(id, user_id) ON DELETE CASCADE,
+    FOREIGN KEY (source_interaction_id, user_id)
+      REFERENCES dc_interactions(id, user_id) ON DELETE CASCADE
+  );
+
+  CREATE INDEX idx_dc_relationship_speaker_bindings_role
+    ON dc_relationship_speaker_bindings(user_id, relationship_id, role);
+`;
+
+const DATE_COMPANION_SCHEMA_V5 = `
+  CREATE TABLE dc_voice_enrollment_snapshots (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    relationship_id TEXT NOT NULL,
+    interaction_id TEXT NOT NULL,
+    review_group_id TEXT NOT NULL,
+    source_upload_id TEXT NOT NULL,
+    provider_record_id TEXT NOT NULL,
+    chunk_id TEXT NOT NULL,
+    local_speaker TEXT NOT NULL,
+    audit_status TEXT NOT NULL CHECK (audit_status IN ('verified', 'pending', 'unknown')),
+    audit_reason TEXT NOT NULL,
+    audit_digest TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    UNIQUE (id, user_id),
+    UNIQUE (user_id, interaction_id, review_group_id),
+    FOREIGN KEY (relationship_id, user_id)
+      REFERENCES dc_relationships(id, user_id) ON DELETE CASCADE,
+    FOREIGN KEY (interaction_id, user_id)
+      REFERENCES dc_interactions(id, user_id) ON DELETE CASCADE
+  );
+
+  CREATE TABLE dc_voice_enrollment_snapshot_members (
+    user_id TEXT NOT NULL,
+    snapshot_id TEXT NOT NULL,
+    interaction_id TEXT NOT NULL,
+    speaker_id TEXT NOT NULL,
+    PRIMARY KEY (user_id, snapshot_id, speaker_id),
+    UNIQUE (user_id, interaction_id, speaker_id),
+    FOREIGN KEY (snapshot_id, user_id)
+      REFERENCES dc_voice_enrollment_snapshots(id, user_id) ON DELETE CASCADE,
+    FOREIGN KEY (user_id, interaction_id, speaker_id)
+      REFERENCES dc_participant_assignments(user_id, interaction_id, speaker_id)
+      ON DELETE CASCADE
+  );
+
+  CREATE TABLE dc_voice_enrollment_outbox (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    relationship_id TEXT NOT NULL,
+    interaction_id TEXT NOT NULL,
+    snapshot_id TEXT NOT NULL,
+    idempotency_key TEXT NOT NULL,
+    provider_speaker_id TEXT NOT NULL,
+    expected_global_speaker_id TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('pending', 'processing', 'completed', 'failed', 'cancelled')),
+    attempt_count INTEGER NOT NULL DEFAULT 0 CHECK (attempt_count >= 0),
+    claim_token TEXT,
+    lease_expires_at TEXT,
+    last_error_code TEXT,
+    profile_global_speaker_id TEXT,
+    requested_by TEXT NOT NULL,
+    requested_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    completed_at TEXT,
+    UNIQUE (id, user_id),
+    UNIQUE (user_id, idempotency_key),
+    UNIQUE (user_id, interaction_id),
+    FOREIGN KEY (relationship_id, user_id)
+      REFERENCES dc_relationships(id, user_id) ON DELETE CASCADE,
+    FOREIGN KEY (interaction_id, user_id)
+      REFERENCES dc_interactions(id, user_id) ON DELETE CASCADE,
+    FOREIGN KEY (snapshot_id, user_id)
+      REFERENCES dc_voice_enrollment_snapshots(id, user_id) ON DELETE CASCADE
+  );
+
+  CREATE INDEX idx_dc_voice_enrollment_outbox_status
+    ON dc_voice_enrollment_outbox(status, updated_at, id);
+`;
+
 const MIGRATIONS = [
   { version: 1, sql: DATE_COMPANION_SCHEMA_V1 },
-  { version: 2, sql: DATE_COMPANION_SCHEMA_V2 }
+  { version: 2, sql: DATE_COMPANION_SCHEMA_V2 },
+  { version: 3, sql: DATE_COMPANION_SCHEMA_V3 },
+  { version: 4, sql: DATE_COMPANION_SCHEMA_V4 },
+  { version: 5, sql: DATE_COMPANION_SCHEMA_V5 }
 ] as const;
 
 export function migrateDateCompanionSchema(database: Database.Database) {

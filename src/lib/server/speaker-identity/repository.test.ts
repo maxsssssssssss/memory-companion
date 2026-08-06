@@ -119,8 +119,15 @@ describe("JsonSpeakerIdentityRepository", () => {
     const repository = new JsonSpeakerIdentityRepository(store, () => clock);
     await repository.saveProfile({
       globalSpeakerId: "user_user_1",
+      userId: "user_1",
       identityType: "known_user",
-      voiceprintSpeakerId: "user_1"
+      providerReference: {
+        provider: "company_voiceprint",
+        speakerLabel: "我",
+        lastRequestId: "train_1",
+        operationType: "train"
+      },
+      voiceprintSpeakerId: "我"
     });
     await repository.saveProfile({
       globalSpeakerId: "contact_alice",
@@ -130,28 +137,89 @@ describe("JsonSpeakerIdentityRepository", () => {
     });
 
     await expect(repository.loadVoiceprintHints([
-      transcriptChunk("chunk_0", ["user_1", "speaker_1"]),
+      transcriptChunk("chunk_0", ["我", "speaker_1"]),
       transcriptChunk("chunk_1", ["Alice"])
     ])).resolves.toEqual([
       {
+        identityStatus: "verified",
         chunkId: "chunk_0",
-        localSpeaker: "user_1",
+        localSpeaker: "我",
         globalSpeakerId: "user_user_1",
         identityType: "known_user",
-        confidence: 0.9
+        evidence: {
+          type: "provider_label",
+          provider: "company_voiceprint",
+          providerLabel: "我"
+        }
       },
       {
+        identityStatus: "verified",
         chunkId: "chunk_1",
         localSpeaker: "Alice",
         globalSpeakerId: "contact_alice",
         displayName: "Alice",
         identityType: "known_contact",
-        confidence: 0.9
+        evidence: {
+          type: "provider_label",
+          provider: "company_voiceprint",
+          providerLabel: "Alice"
+        }
       }
     ]);
   });
 
-  it("fails closed when legacy profiles share the same provider identity", async () => {
+  it("never promotes a chunk-local Provider label even when a profile row contains it", async () => {
+    const repository = new JsonSpeakerIdentityRepository(store, () => clock);
+    await repository.saveProfile({
+      globalSpeakerId: "contact_invalid_local_label",
+      userId: "user_1",
+      contactName: "Invalid local label",
+      identityType: "known_contact",
+      providerReference: {
+        provider: "company_voiceprint",
+        speakerLabel: "speaker_1",
+        lastRequestId: "legacy_invalid_save",
+        operationType: "save"
+      }
+    });
+
+    await expect(repository.loadVoiceprintHints([
+      transcriptChunk("chunk_0", ["speaker_1"])
+    ])).resolves.toEqual([]);
+  });
+
+  it("maps the Provider self label through a legacy trained user profile", async () => {
+    const repository = new JsonSpeakerIdentityRepository(store, () => clock);
+    await repository.saveProfile({
+      globalSpeakerId: "user_user_1",
+      userId: "user_1",
+      identityType: "known_user",
+      providerReference: {
+        provider: "company_voiceprint",
+        speakerLabel: "user_1",
+        lastRequestId: "legacy_train_1",
+        operationType: "train"
+      },
+      voiceprintSpeakerId: "user_1"
+    });
+
+    await expect(repository.loadVoiceprintHints([
+      transcriptChunk("chunk_0", ["我"])
+    ])).resolves.toEqual([{
+      identityStatus: "verified",
+      chunkId: "chunk_0",
+      localSpeaker: "我",
+      globalSpeakerId: "user_user_1",
+      identityType: "known_user",
+      evidence: {
+        type: "provider_label",
+        provider: "company_voiceprint",
+        providerLabel: "我"
+      }
+    }]);
+  });
+
+  it("reports a conflict when profiles share the same Provider label", async () => {
     const repository = new JsonSpeakerIdentityRepository(store, () => clock);
     await repository.saveProfile({
       globalSpeakerId: "contact_a",
@@ -166,7 +234,17 @@ describe("JsonSpeakerIdentityRepository", () => {
 
     await expect(repository.loadVoiceprintHints([
       transcriptChunk("chunk_0", ["Shared"])
-    ])).resolves.toEqual([]);
+    ])).resolves.toEqual([{
+      identityStatus: "conflict",
+      chunkId: "chunk_0",
+      localSpeaker: "Shared",
+      conflictingGlobalSpeakerIds: ["contact_a", "contact_b"],
+      evidence: {
+        type: "provider_label",
+        provider: "company_voiceprint",
+        providerLabel: "Shared"
+      }
+    }]);
   });
 
   it("preserves profile and mapping creation timestamps on update", async () => {

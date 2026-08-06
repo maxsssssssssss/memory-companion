@@ -36,4 +36,30 @@ describe("toVoiceIdentityHint", () => {
       source: "unknown"
     });
   });
+
+  it("preserves Provider-label evidence without inventing confidence", () => {
+    expect(toVoiceIdentityHint({
+      globalSpeakerId: "contact_alice",
+      displayName: "Alice",
+      identityType: "known_contact",
+      confidence: null,
+      source: "provider_speaker_result",
+      evidence: {
+        type: "provider_label",
+        provider: "company_voiceprint",
+        providerLabel: "Alice"
+      }
+    })).toEqual({
+      globalSpeakerId: "contact_alice",
+      contactName: "Alice",
+      identityType: "known_contact",
+      confidence: null,
+      source: "provider_speaker_result",
+      evidence: {
+        type: "provider_label",
+        provider: "company_voiceprint",
+        providerLabel: "Alice"
+      }
+    });
+  });
 });
