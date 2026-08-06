@@ -30,6 +30,15 @@ export type SourceRefVM = {
 
 export type DateCompanionParticipantRole = "self" | "companion" | "unresolved";
 
+/**
+ * Explicit, one-time opt-in collected while the user reviews a draft recap.
+ * Only recording-local raw speaker ids cross this boundary; synthetic UI
+ * grouping ids are deliberately excluded.
+ */
+export type DateCompanionVoiceEnrollmentIntent = {
+  speakerIds: string[];
+};
+
 export type RelationshipVM = {
   id?: string;
   displayName?: string;
@@ -84,10 +93,17 @@ export type RecapItemVM = {
 
 export type ParticipantReviewVM = {
   speakerId: string;
+  memberSpeakerIds?: string[];
+  audioSpeakerId?: string;
+  voiceEnrollmentEligible?: true;
   displayLabel: string;
   alias?: string;
   state: "unresolved" | "confirmed";
   role: DateCompanionParticipantRole;
+  roleSuggestion?: {
+    role: Exclude<DateCompanionParticipantRole, "unresolved">;
+    source: "previous_confirmation";
+  };
   version?: number;
   sampleQuotes: SourceRefVM[];
 };

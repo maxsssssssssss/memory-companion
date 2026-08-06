@@ -4,6 +4,10 @@ import { parseQaBrowserNdjsonStream } from "@/lib/client/qa-ndjson-stream";
 import { DayPayloadSchema, RecordingDateSchema, type DayPayload } from "@/lib/domain/day-payload";
 import type { AuthUser, FailedUploadReceipt, UploadReceipt } from "@/lib/domain/date-companion";
 import {
+  DATE_COMPANION_UPLOAD_CONTEXT_FIELD,
+  DATE_COMPANION_UPLOAD_CONTEXT_VALUE
+} from "@/lib/domain/date-companion-upload";
+import {
   DcCreateRelationshipRequestSchema,
   DcCreateRelationshipResponseSchema,
   DcDeleteInteractionResponseSchema,
@@ -335,6 +339,10 @@ export function createDateCompanionApi(fetcher: typeof fetch = fetch): DateCompa
       const body = new FormData();
       body.append("file", file);
       body.append("recordingDate", normalizedDate);
+      body.append(
+        DATE_COMPANION_UPLOAD_CONTEXT_FIELD,
+        DATE_COMPANION_UPLOAD_CONTEXT_VALUE
+      );
       const response = await sameOrigin("/api/uploads", {
         method: "POST",
         body,

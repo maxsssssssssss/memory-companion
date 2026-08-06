@@ -10,7 +10,10 @@ const dateCompanionServerScreens: readonly DateCompanionScreen[] = ["home", "per
 
 type DateCompanionScreenPageProps = {
   params: Promise<{ screen?: string[] }>;
-  searchParams: Promise<{ segment?: string | string[] }>;
+  searchParams: Promise<{
+    interaction?: string | string[];
+    segment?: string | string[];
+  }>;
 };
 
 export default async function DateCompanionScreenPage({ params, searchParams }: DateCompanionScreenPageProps) {
@@ -22,10 +25,18 @@ export default async function DateCompanionScreenPage({ params, searchParams }: 
 
   const query = await searchParams;
   const initialSegmentId = typeof query.segment === "string" && query.segment.trim() ? query.segment : null;
+  const initialInteractionId = typeof query.interaction === "string" && query.interaction.trim()
+    ? query.interaction
+    : null;
 
   return (
     <div className={styles.root}>
-      <DateCompanionShell entry="companion" initialSegmentId={initialSegmentId} screen={screen} />
+      <DateCompanionShell
+        entry="companion"
+        initialInteractionId={initialInteractionId}
+        initialSegmentId={initialSegmentId}
+        screen={screen}
+      />
     </div>
   );
 }

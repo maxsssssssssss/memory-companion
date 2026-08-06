@@ -21,6 +21,10 @@ import type {
   DcSearchResult
 } from "@/lib/domain/date-companion-stage2";
 import type { TranscriptSegment } from "@/lib/domain/types";
+import {
+  dateCompanionParticipantKey,
+  dateCompanionParticipantLabel
+} from "@/lib/domain/date-companion-speaker";
 
 import { isRealDateCompanionUploadId } from "./date-companion-api";
 
@@ -34,6 +38,7 @@ export class DateCompanionAdapterError extends Error {
 export type DateCompanionRelationshipAdapterOptions = {
   hasLocalDay?: (uploadId: string) => boolean;
   getLocalDay?: (uploadId: string) => DayPayload | null;
+  selectedInteractionId?: string | null;
 };
 
 type SourceKind = SourceRefVM["kind"];
@@ -67,8 +72,10 @@ function sortedTranscript(payload: DayPayload): TranscriptLineVM[] {
       uploadId: segment.uploadId,
       startSeconds: segment.startSeconds,
       endSeconds: segment.endSeconds,
-      speakerId: segment.speaker,
-      speakerLabel: explicitSpeakerAlias(segment.speaker, payload.speakerAliases),
+      speakerId: dateCompanionParticipantKey(segment),
+      speakerLabel:
+        explicitSpeakerAlias(segment.speaker, payload.speakerAliases) ??
+        dateCompanionParticipantLabel(segment),
       text: segment.text
     }));
 }
@@ -98,7 +105,10 @@ function sourceRef(input: {
 }): SourceRefVM | null {
   const segments = resolveSegments(input.segmentIds, input.segmentById, input.payload.upload.id);
   if (!segments) return null;
-  const speakers = [...new Set(segments.map((segment) => segment.speaker).filter((speaker): speaker is string => Boolean(speaker)))];
+  const speakers = [...new Set(segments.flatMap((segment) => {
+    const participantKey = dateCompanionParticipantKey(segment);
+    return participantKey ? [participantKey] : [];
+  }))];
 
   return {
     id: input.id,
@@ -110,7 +120,15 @@ function sourceRef(input: {
     ...(speakers.length === 1
       ? {
           speakerId: speakers[0],
-          speakerLabel: explicitSpeakerAlias(speakers[0], input.payload.speakerAliases)
+          speakerLabel: (() => {
+            const segment = segments.find(
+              (candidate) => dateCompanionParticipantKey(candidate) === speakers[0]
+            );
+            return segment
+              ? explicitSpeakerAlias(segment.speaker, input.payload.speakerAliases) ??
+                  dateCompanionParticipantLabel(segment)
+              : undefined;
+          })()
         }
       : {}),
     quote: segments.map((segment) => segment.text).join(" "),
@@ -279,14 +297,16 @@ function buildParticipants(payload: DayPayload, segmentById: Map<string, Transcr
   const speakerIds = [
     ...new Set(
       payload.segments
-        .map((segment) => segment.speaker)
-        .filter((speaker): speaker is string => Boolean(speaker))
+        .flatMap((segment) => {
+          const participantKey = dateCompanionParticipantKey(segment);
+          return participantKey ? [participantKey] : [];
+        })
     )
   ];
 
   return speakerIds.map((speakerId) => {
     const samples = payload.segments
-      .filter((segment) => segment.speaker === speakerId)
+      .filter((segment) => dateCompanionParticipantKey(segment) === speakerId)
       .slice(0, 3)
       .flatMap((segment) => {
         const source = sourceRef({
@@ -299,11 +319,21 @@ function buildParticipants(payload: DayPayload, segmentById: Map<string, Transcr
         });
         return source ? [source] : [];
       });
-    const alias = payload.speakerAliases[speakerId]?.trim();
+    const representative = payload.segments.find(
+      (segment) => dateCompanionParticipantKey(segment) === speakerId
+    );
+    const alias = representative?.speaker
+      ? payload.speakerAliases[representative.speaker]?.trim()
+      : undefined;
 
     return {
       speakerId,
-      displayLabel: displaySpeaker(speakerId, payload.speakerAliases) ?? "说话人",
+      displayLabel:
+        (representative
+          ? explicitSpeakerAlias(representative.speaker, payload.speakerAliases) ??
+            dateCompanionParticipantLabel(representative) ??
+            displaySpeaker(representative.speaker, payload.speakerAliases)
+          : undefined) ?? "说话人",
       ...(alias ? { alias } : {}),
       state: "unresolved" as const,
       role: "unresolved" as const,
@@ -523,16 +553,64 @@ function participantReviews(
   existing: ParticipantReviewVM[]
 ): ParticipantReviewVM[] {
   const bySpeaker = new Map(existing.map((participant) => [participant.speakerId, participant]));
-  return interaction.participants.map((assignment) => {
-    const local = bySpeaker.get(assignment.speakerId);
+  const groups = new Map<string, DcInteractionDetail["participants"]>();
+  for (const assignment of interaction.participants) {
+    const groupId = assignment.reviewGroupId ?? assignment.speakerId;
+    const group = groups.get(groupId) ?? [];
+    group.push(assignment);
+    groups.set(groupId, group);
+  }
+  return [...groups.entries()].map(([groupId, assignments]) => {
+    const memberSpeakerIds = assignments
+      .map((assignment) => assignment.speakerId)
+      .sort((left, right) => left.localeCompare(right));
+    const locals = memberSpeakerIds.flatMap((speakerId) => {
+      const local = bySpeaker.get(speakerId);
+      return local ? [local] : [];
+    });
+    const persistedRoles = new Set(assignments.map((assignment) => assignment.role));
+    const persistedRole = persistedRoles.size === 1
+      ? assignments[0].role
+      : "unresolved";
+    const suggestionRoles = assignments.flatMap((assignment) =>
+      assignment.role === "unresolved" && assignment.roleSuggestion
+        ? [assignment.roleSuggestion.role]
+        : []
+    );
+    const suggestedRoleSet = new Set(suggestionRoles);
+    const suggestedRole = assignments.every((assignment) => assignment.role === "unresolved")
+      && suggestionRoles.length === assignments.length
+      && suggestedRoleSet.size === 1
+      ? suggestionRoles[0]
+      : undefined;
+    const sampleQuotes = locals
+      .flatMap((participant) => participant.sampleQuotes)
+      .filter((source, index, sources) =>
+        sources.findIndex((candidate) => candidate.id === source.id) === index
+      )
+      .slice(0, 3);
+    const audioSpeakerId = assignments.find(
+      (assignment) => assignment.audioSampleAvailable
+    )?.speakerId;
+    const voiceEnrollmentEligible = assignments.length > 0
+      && assignments.every((assignment) => assignment.voiceEnrollmentEligible === true);
+    const local = locals[0];
     return {
-      speakerId: assignment.speakerId,
+      speakerId: groupId,
+      memberSpeakerIds,
+      ...(audioSpeakerId ? { audioSpeakerId } : {}),
+      ...(voiceEnrollmentEligible ? { voiceEnrollmentEligible: true as const } : {}),
       displayLabel: local?.displayLabel ?? "说话人",
       alias: local?.alias,
-      state: assignment.role === "unresolved" ? "unresolved" : "confirmed",
-      role: assignment.role,
+      state: assignments.every((assignment) => assignment.confirmedAt)
+        ? "confirmed"
+        : "unresolved",
+      role: suggestedRole ?? persistedRole,
+      ...(suggestedRole
+        ? { roleSuggestion: { role: suggestedRole, source: "previous_confirmation" as const } }
+        : {}),
       version: interaction.version,
-      sampleQuotes: local?.sampleQuotes ?? []
+      sampleQuotes
     };
   });
 }
@@ -570,6 +648,12 @@ export function applyDateCompanionRelationshipView(
   const importedCurrent = currentUploadId
     ? view.interactions.find((interaction) => interaction.sourceUploadId === currentUploadId)
     : undefined;
+  const explicitlySelected = options.selectedInteractionId
+    ? view.interactions.find((interaction) =>
+        interaction.id === options.selectedInteractionId && interaction.status === "confirmed"
+      )
+    : undefined;
+  const recapTarget = explicitlySelected ?? importedCurrent;
   const currentInteraction = current.currentInteraction && importedCurrent
     ? {
         ...current.currentInteraction,
@@ -580,13 +664,21 @@ export function applyDateCompanionRelationshipView(
         version: importedCurrent.version
       }
     : current.currentInteraction;
-  const currentRecapItems = importedCurrent
-    ? importedCurrent.recapItems
+  const recapInteraction = recapTarget
+    ? currentInteraction && importedCurrent?.id === recapTarget.id
+      ? currentInteraction
+      : persistentInteraction(recapTarget, options)
+    : currentInteraction;
+  const currentRecapItems = recapTarget
+    ? [...recapTarget.recapItems]
         .sort((left, right) => left.sortOrder - right.sortOrder || left.id.localeCompare(right.id))
-        .map((item) => persistentRecapItem(item, importedCurrent.recordingDate, options))
+        .map((item) => persistentRecapItem(item, recapTarget.recordingDate, options))
     : current.recap.items;
-  const currentParticipants = importedCurrent
-    ? participantReviews(importedCurrent, current.recap.participants)
+  const currentParticipants = recapTarget
+    ? participantReviews(
+        recapTarget,
+        importedCurrent?.id === recapTarget.id ? current.recap.participants : []
+      )
     : current.recap.participants;
   const mentioned = confirmedItems.filter((item) => item.kind === "mentioned");
   const moments = confirmedItems.filter((item) => item.kind === "moment");
@@ -596,7 +688,7 @@ export function applyDateCompanionRelationshipView(
     openPromises.some((promise) => promise.originatingRecapItemId === item.id)
   );
   const prepareItems = [...mentioned.slice(-1), ...moments.slice(-1), ...openPromiseItems, ...continuations.slice(-1)];
-  const unresolved = currentParticipants.some((participant) => participant.role === "unresolved");
+  const unresolved = currentParticipants.some((participant) => participant.state === "unresolved");
 
   return {
     ...current,
@@ -618,9 +710,12 @@ export function applyDateCompanionRelationshipView(
     },
     recap: {
       ...current.recap,
-      interaction: currentInteraction,
+      interaction: recapInteraction,
       items: currentRecapItems,
-      participants: currentParticipants
+      participants: currentParticipants,
+      chapters: recapTarget && recapTarget.id !== importedCurrent?.id
+        ? []
+        : current.recap.chapters
     },
     prepare: {
       ...current.prepare,

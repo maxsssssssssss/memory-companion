@@ -37,6 +37,7 @@ function normalizedSpeakerLabel(line: TranscriptLineVM, speakerOrder: Map<string
 }
 
 export function CompanionTranscript({ chapters = [], highlightedSegmentId, lines }: CompanionTranscriptProps) {
+  const [expanded, setExpanded] = useState(() => Boolean(highlightedSegmentId));
   const [query, setQuery] = useState("");
   const lineElements = useRef(new Map<string, HTMLLIElement>());
   const normalizedQuery = query.trim().toLocaleLowerCase("zh-CN");
@@ -97,70 +98,91 @@ export function CompanionTranscript({ chapters = [], highlightedSegmentId, lines
 
   useEffect(() => {
     if (!highlightedSegmentId) return;
+    setExpanded(true);
+    setQuery("");
+  }, [highlightedSegmentId]);
+
+  useEffect(() => {
+    if (!expanded || !highlightedSegmentId) return;
     const element = lineElements.current.get(highlightedSegmentId);
     if (!element) return;
     element.scrollIntoView({ behavior: "smooth", block: "center" });
     element.focus({ preventScroll: true });
-  }, [highlightedSegmentId, visibleLines]);
+  }, [expanded, highlightedSegmentId, visibleLines]);
 
   return (
     <section className={`${styles.contentPanel} ${styles.transcriptPanel}`} id="full-transcript" aria-labelledby="transcript-title">
       <h2 id="transcript-title">完整文字稿</h2>
-      <p className={styles.contentIntro}>来源会定位到真实文字片段。当前原始音频不会在这里播放。</p>
+      <p className={styles.contentIntro}>
+        {expanded
+          ? "来源会定位到真实文字片段。当前原始音频不会在这里播放。"
+          : `默认收起 · 共 ${sortedLines.length} 条文字片段`}
+      </p>
+      <button
+        aria-controls="full-transcript-content"
+        aria-expanded={expanded}
+        className={styles.secondaryButton}
+        onClick={() => setExpanded((current) => !current)}
+        type="button"
+      >{expanded ? "收起完整文字稿" : "展开完整文字稿"}</button>
 
-      {sortedLines.length === 0 ? (
-        <div className={styles.emptyState}>
-          <div><b>没有识别到可用文字</b><span>处理未完成时，空数组不代表最终没有内容。</span></div>
+      {expanded ? (
+        <div id="full-transcript-content">
+          {sortedLines.length === 0 ? (
+            <div className={styles.emptyState}>
+              <div><b>没有识别到可用文字</b><span>处理未完成时，空数组不代表最终没有内容。</span></div>
+            </div>
+          ) : (
+            <>
+              <div className={styles.transcriptToolbar}>
+                <input
+                  aria-label="搜索完整文字稿"
+                  className={styles.transcriptSearch}
+                  onChange={(event) => setQuery(event.target.value)}
+                  placeholder="在这次相处的文字稿里搜索"
+                  type="search"
+                  value={query}
+                />
+                <span className={styles.transcriptCount}>{visibleLines.length} / {sortedLines.length} 条</span>
+              </div>
+              <div className={styles.transcriptScroll} tabIndex={0} aria-label="完整文字稿内容">
+                {visibleLines.length === 0 ? <p className={styles.transcriptNoResult}>没有找到匹配的片段</p> : null}
+                {visibleChapters.map((chapter) => chapter.lines.length > 0 ? (
+                  <section className={styles.chapter} key={chapter.id}>
+                    <header className={styles.chapterHeader}>
+                      <h3>{chapter.title}</h3>
+                      <span>{formatTimestamp(chapter.startSeconds)} – {formatTimestamp(chapter.endSeconds)}</span>
+                    </header>
+                    <ol className={styles.transcriptList}>
+                      {chapter.lines.map((line) => {
+                        const highlighted = line.id === highlightedSegmentId;
+                        return (
+                          <li
+                            aria-current={highlighted ? "true" : undefined}
+                            className={`${styles.transcriptLine} ${highlighted ? styles.transcriptHighlighted : ""}`}
+                            data-segment-id={line.id}
+                            id={`transcript-${line.id}`}
+                            key={`${line.uploadId}:${line.id}`}
+                            ref={(element) => {
+                              if (element) lineElements.current.set(line.id, element);
+                              else lineElements.current.delete(line.id);
+                            }}
+                            tabIndex={highlighted ? 0 : -1}
+                          >
+                            <time>{formatTimestamp(line.startSeconds)}</time>
+                            <b title={normalizedSpeakerLabel(line, speakerOrder)}>{normalizedSpeakerLabel(line, speakerOrder)}</b>
+                            <p>{line.text}</p>
+                          </li>
+                        );
+                      })}
+                    </ol>
+                  </section>
+                ) : null)}
+              </div>
+            </>
+          )}
         </div>
-      ) : (
-        <>
-          <div className={styles.transcriptToolbar}>
-            <input
-              aria-label="搜索完整文字稿"
-              className={styles.transcriptSearch}
-              onChange={(event) => setQuery(event.target.value)}
-              placeholder="在这次相处的文字稿里搜索"
-              type="search"
-              value={query}
-            />
-            <span className={styles.transcriptCount}>{visibleLines.length} / {sortedLines.length} 条</span>
-          </div>
-          <div className={styles.transcriptScroll} tabIndex={0} aria-label="完整文字稿内容">
-            {visibleLines.length === 0 ? <p className={styles.transcriptNoResult}>没有找到匹配的片段</p> : null}
-            {visibleChapters.map((chapter) => chapter.lines.length > 0 ? (
-              <section className={styles.chapter} key={chapter.id}>
-                <header className={styles.chapterHeader}>
-                  <h3>{chapter.title}</h3>
-                  <span>{formatTimestamp(chapter.startSeconds)} – {formatTimestamp(chapter.endSeconds)}</span>
-                </header>
-                <ol className={styles.transcriptList}>
-                  {chapter.lines.map((line) => {
-                    const highlighted = line.id === highlightedSegmentId;
-                    return (
-                      <li
-                        aria-current={highlighted ? "true" : undefined}
-                        className={`${styles.transcriptLine} ${highlighted ? styles.transcriptHighlighted : ""}`}
-                        data-segment-id={line.id}
-                        id={`transcript-${line.id}`}
-                        key={`${line.uploadId}:${line.id}`}
-                        ref={(element) => {
-                          if (element) lineElements.current.set(line.id, element);
-                          else lineElements.current.delete(line.id);
-                        }}
-                        tabIndex={highlighted ? 0 : -1}
-                      >
-                        <time>{formatTimestamp(line.startSeconds)}</time>
-                        <b title={normalizedSpeakerLabel(line, speakerOrder)}>{normalizedSpeakerLabel(line, speakerOrder)}</b>
-                        <p>{line.text}</p>
-                      </li>
-                    );
-                  })}
-                </ol>
-              </section>
-            ) : null)}
-          </div>
-        </>
-      )}
+      ) : null}
     </section>
   );
 }

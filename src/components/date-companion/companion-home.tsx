@@ -6,6 +6,7 @@ import { type FormEvent, useEffect, useRef, useState } from "react";
 import type { InteractionVM, RecapItemVM } from "@/lib/domain/date-companion";
 
 import styles from "./date-companion.module.css";
+import { LocalTimeGreeting } from "./local-time-greeting";
 
 export type CompanionUploadPresentation = {
   status: "idle" | "uploading" | "processing" | "ready" | "failed";
@@ -20,6 +21,9 @@ type CompanionHomeProps = {
   currentInteraction: InteractionVM | null;
   rememberedItem?: RecapItemVM | null;
   prepareItem?: RecapItemVM | null;
+  recentItem?: RecapItemVM | null;
+  relationshipName?: string;
+  participantNotice?: string | null;
   uploadState: CompanionUploadPresentation;
   onRetryRead: () => Promise<void> | void;
   onUpload: (file: File, recordingDate: string) => Promise<void> | void;
@@ -53,7 +57,7 @@ function statusCopy(state: CompanionUploadPresentation) {
 }
 
 function rememberedText(item: RecapItemVM | null | undefined) {
-  if (!item || item.sources.length === 0) return null;
+  if (!item || item.disposition !== "kept" || item.sources.length === 0) return null;
   return item.displayedText.trim() || item.proposedText.trim() || null;
 }
 
@@ -61,6 +65,9 @@ export function CompanionHome({
   currentInteraction,
   rememberedItem,
   prepareItem,
+  recentItem,
+  relationshipName,
+  participantNotice,
   uploadState,
   onRetryRead,
   onUpload
@@ -73,6 +80,8 @@ export function CompanionHome({
   const remembered = rememberedText(rememberedItem);
   const rememberedIsDirectQuote = Boolean(rememberedItem?.sources.length) && rememberedItem!.sources.every((source) => source.presentation === "direct_quote");
   const preparation = rememberedText(prepareItem);
+  const recent = rememberedText(recentItem);
+  const displayName = relationshipName?.trim() || "Ta";
   const busy = uploadState.status === "uploading" || uploadState.status === "processing";
   const hasUploadState = uploadState.status !== "idle";
 
@@ -110,7 +119,7 @@ export function CompanionHome({
   return (
     <div className={styles.home}>
       <section className={styles.homeHero}>
-        <p className={styles.homeDate}>此刻 · 私人空间</p>
+        <LocalTimeGreeting className={styles.homeDate} />
         <h1>今天，有什么值得留在心里？</h1>
         <p>上传这次相处的完整录音。整理完成后，你可以查看复盘、完整文字稿和每条内容的来源。</p>
 
@@ -224,26 +233,40 @@ export function CompanionHome({
 
       <section className={styles.homeSideCard}>
         <div className={styles.sectionHeading}>
-          <h2>关于 Ta</h2>
+          <h2>{displayName === "Ta" ? "关于 Ta" : `你和 ${displayName}`}</h2>
           <span>只显示你确认留下的内容</span>
         </div>
-        <div className={styles.personEmpty}>
+        <Link
+          aria-label={`打开关于 ${displayName}`}
+          className={styles.personEmpty}
+          href="/date-companion/a/person"
+        >
           <span className={styles.personEmptyMark} aria-hidden="true">Ta</span>
-          <b>这次相处中的人物还没有核对</b>
-          <span>说话人昵称只用于本次录音显示，不会被当作长期人物身份。</span>
-        </div>
-        <Link className={styles.sideLink} href="/date-companion/a/person">查看关于 Ta <span aria-hidden="true">→</span></Link>
+          <b>{recent ?? participantNotice ?? `还没有留下关于 ${displayName} 的近况`}</b>
+          <span>{recent
+            ? "Ta 最近 · 来自你确认留下的相处记录"
+            : participantNotice
+              ? "人物尚未核对的内容不会进入长期记录"
+              : "整理并确认一段相处后，值得记住的近况会出现在这里"}</span>
+        </Link>
+        {currentInteraction ? (
+          <div className={styles.relationshipMeta}>
+            <span>最近一次相处</span>
+            <b>{currentInteraction.recordingDate}</b>
+          </div>
+        ) : null}
       </section>
 
       <Link className={styles.preparePreview} href="/date-companion/a/prepare">
-        <small>见 Ta 前看一眼</small>
-        <b>{preparation ?? "有了带来源的约定或开放问题，会出现在这里"}</b>
+        <small>下次见面前</small>
+        <b>{preparation ?? "还没有需要特别记住的事"}</b>
         <p>{preparation ? "来自你确认留下的相处记录，不包含虚构的见面时间和地点。" : "不会猜测下次见面的日期、地点，也不会创建提醒。"}</p>
+        <span className={styles.sideLink}>打开准备卡 <span aria-hidden="true">→</span></span>
       </Link>
 
       {remembered ? (
         <section className={styles.remembered}>
-          <p>这次相处，记住了什么</p>
+          <p>最近一次相处，记住了什么</p>
           {rememberedIsDirectQuote ? (
             <blockquote>“{remembered}”</blockquote>
           ) : (

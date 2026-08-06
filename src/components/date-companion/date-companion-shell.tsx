@@ -24,7 +24,12 @@ export type DateCompanionScreen = (typeof dateCompanionScreens)[number];
 type DateCompanionShellProps =
   | { entry: "login" }
   | { entry: "modules" }
-  | { entry: "companion"; screen: DateCompanionScreen; initialSegmentId?: string | null };
+  | {
+      entry: "companion";
+      screen: DateCompanionScreen;
+      initialSegmentId?: string | null;
+      initialInteractionId?: string | null;
+    };
 
 const SCREEN_LABELS: Record<DateCompanionScreen, string> = {
   home: "此刻",
@@ -49,7 +54,9 @@ function translatedError(message: string) {
     unsupported_audio_format: "暂不支持这种录音格式。",
     queue_unavailable: "整理服务暂时不可用，请稍后再试。",
     pipeline_queue_unavailable: "整理服务暂时不可用，请稍后再试。",
-    day_context_not_found: "这次相处里还没有可用于回答的内容。"
+    day_context_not_found: "这次相处里还没有可用于回答的内容。",
+    qa_stream_failed: "回答服务暂时没有完成这次提问，请重新发送。",
+    qa_stream_incomplete: "这次回答没有完整返回，请重新发送。"
   };
   return messages[message] ?? message;
 }
@@ -107,8 +114,12 @@ function uploadPresentation(uploadState: UploadState, currentReady: boolean): Co
 }
 
 function qaPresentation(qaState: QaState): CompanionQaPresentationState {
-  if (qaState.status === "streaming") return { status: "streaming", committedText: qaState.committedText };
-  if (qaState.status === "failed") return { status: "failed", errorMessage: translatedError(qaState.message) };
+  if (qaState.status === "streaming") {
+    return { status: "streaming", question: qaState.question, committedText: qaState.committedText };
+  }
+  if (qaState.status === "failed") {
+    return { status: "failed", question: qaState.question, errorMessage: translatedError(qaState.message) };
+  }
   return { status: qaState.status };
 }
 
@@ -121,6 +132,22 @@ export function DateCompanionShell(props: DateCompanionShellProps) {
     if (props.entry === "login" && auth.status === "authenticated") router.replace("/date-companion/modules");
     if (props.entry !== "login" && auth.status === "anonymous") router.replace("/date-companion");
   }, [auth.status, props.entry, router]);
+
+  useEffect(() => {
+    if (
+      props.entry === "companion"
+      && props.screen === "recap"
+      && session.relationshipState.status === "ready"
+    ) {
+      session.selectRelationshipInteraction(props.initialInteractionId ?? null);
+    }
+  }, [
+    props.entry,
+    props.entry === "companion" ? props.initialInteractionId : undefined,
+    props.entry === "companion" ? props.screen : undefined,
+    session.relationshipState.status,
+    session.selectRelationshipInteraction
+  ]);
 
   const validSegmentIds = useMemo(
     () => new Set(viewModel.currentInteraction?.transcript.map((line) => line.id) ?? []),
@@ -194,7 +221,16 @@ export function DateCompanionShell(props: DateCompanionShellProps) {
   const recapInteraction = viewModel.recap.interaction;
   const canPersistRecap = Boolean(
     recapInteraction?.relationshipInteractionId
+    && recapInteraction.persistenceStatus === "draft"
     && typeof recapInteraction.version === "number"
+  );
+  const latestConfirmedInteractionId = viewModel.person.interactions.at(-1)?.relationshipInteractionId;
+  const qaEnabled = interaction?.status === "ready" && (
+    screen !== "recap"
+    || Boolean(
+      recapInteraction?.transcript.length
+      && recapInteraction.sourceUploadId === interaction.sourceUploadId
+    )
   );
 
   const openSource = async (source: SourceRefVM, segmentId: string) => {
@@ -203,20 +239,21 @@ export function DateCompanionShell(props: DateCompanionShellProps) {
   };
 
   return (
-    <main className={styles.companionPage}>
-      <div className={styles.topBar}>
-        <Link className={styles.backLink} href="/date-companion/modules"><span aria-hidden="true">←</span>返回空间选择</Link>
-        <span className={styles.topBarNote}>约会陪伴 · {relationshipName}</span>
-      </div>
-
-      <div className={styles.shell}>
+    <main className={styles.companionPage} data-screen={screen}>
+      <div className={styles.companionChrome}>
+        <div className={styles.topBar}>
+          <Link className={styles.backLink} href="/date-companion/modules"><span aria-hidden="true">←</span>返回空间选择</Link>
+          <span className={styles.topBarNote}>约会陪伴 · {relationshipName}</span>
+        </div>
         <nav className={styles.nav} aria-label="约会陪伴页面">
           <div className={styles.navLinks}>
             {dateCompanionScreens.map((candidate) => (
               <Link
                 aria-current={screen === candidate ? "page" : undefined}
                 className={`${styles.navLink} ${screen === candidate ? styles.navLinkActive : ""}`}
-                href={screenPath(candidate)}
+                href={candidate === "recap" && !interaction && latestConfirmedInteractionId
+                  ? `${screenPath(candidate)}?interaction=${encodeURIComponent(latestConfirmedInteractionId)}`
+                  : screenPath(candidate)}
                 key={candidate}
               >
                 {SCREEN_LABELS[candidate]}
@@ -226,7 +263,7 @@ export function DateCompanionShell(props: DateCompanionShellProps) {
           <div className={styles.navActions}>
             <CompanionQuestionDrawer
               answers={session.qaHistory}
-              enabled={interaction?.status === "ready"}
+              enabled={qaEnabled}
               onAsk={async (question) => { await session.ask(question); }}
               onCancel={session.cancelQa}
               qaState={qaPresentation(session.qaState)}
@@ -235,15 +272,20 @@ export function DateCompanionShell(props: DateCompanionShellProps) {
             />
           </div>
         </nav>
+      </div>
 
+      <div className={styles.shell}>
         <div className={styles.page}>
           {screen === "home" ? (
             <CompanionHome
               currentInteraction={interaction}
               onRetryRead={session.retryRead}
               onUpload={session.upload}
+              participantNotice={viewModel.home.participantNotice}
               prepareItem={viewModel.home.preparePreview}
+              recentItem={viewModel.person.recent.at(-1) ?? null}
               rememberedItem={viewModel.home.remembered}
+              relationshipName={relationshipName}
               uploadState={uploadPresentation(session.uploadState, interaction?.status === "ready")}
             />
           ) : null}
@@ -252,8 +294,18 @@ export function DateCompanionShell(props: DateCompanionShellProps) {
               currentInteraction={interaction}
               onOpenInteraction={async (candidate) => {
                 const uploadId = candidate.sourceUploadId ?? candidate.uploadIds[0];
-                if (!uploadId || !session.selectCachedInteraction(uploadId)) return;
-                router.push("/date-companion/a/recap");
+                if (uploadId && session.selectCachedInteraction(uploadId)) {
+                  router.push("/date-companion/a/recap");
+                  return;
+                }
+                if (
+                  candidate.relationshipInteractionId
+                  && session.selectRelationshipInteraction(candidate.relationshipInteractionId)
+                ) {
+                  router.push(
+                    `/date-companion/a/recap?interaction=${encodeURIComponent(candidate.relationshipInteractionId)}`
+                  );
+                }
               }}
               onDeleteInteraction={async (candidate) => {
                 if (!candidate.relationshipInteractionId) return;
@@ -277,24 +329,13 @@ export function DateCompanionShell(props: DateCompanionShellProps) {
               interaction={recapInteraction}
               items={viewModel.recap.items}
               mutationState={session.mutationState}
-              onFinalize={canPersistRecap ? async () => {
+              onFinalize={canPersistRecap ? async (assignments, recapItems, voiceEnrollmentIntents) => {
                 await session.finalizeRecap(
                   recapInteraction!.relationshipInteractionId!,
-                  recapInteraction!.version!
-                );
-              } : undefined}
-              onSaveParticipants={canPersistRecap ? async (assignments) => {
-                await session.updateParticipants(
-                  recapInteraction!.relationshipInteractionId!,
                   recapInteraction!.version!,
-                  assignments
-                );
-              } : undefined}
-              onSaveRecap={canPersistRecap ? async (recapItems) => {
-                await session.updateRecap(
-                  recapInteraction!.relationshipInteractionId!,
-                  recapInteraction!.version!,
-                  recapItems
+                  assignments,
+                  recapItems,
+                  voiceEnrollmentIntents
                 );
               } : undefined}
               participants={viewModel.recap.participants}
@@ -303,6 +344,7 @@ export function DateCompanionShell(props: DateCompanionShellProps) {
           {screen === "prepare" ? (
             <CompanionPrepare
               items={viewModel.prepare.items}
+              latestInteractionId={latestConfirmedInteractionId}
               onOpenSource={openSource}
               openPromises={viewModel.prepare.openPromises}
               relationshipName={relationshipName}

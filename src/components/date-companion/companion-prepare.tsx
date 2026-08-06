@@ -10,6 +10,7 @@ type CompanionPrepareProps = {
   items: RecapItemVM[];
   openPromises?: PromiseVM[];
   relationshipName?: string;
+  latestInteractionId?: string;
   onOpenSource?: (source: SourceRefVM, segmentId: string) => Promise<void> | void;
 };
 
@@ -59,27 +60,35 @@ function PrepareSources({
   );
 }
 
-export function CompanionPrepare({ items, onOpenSource, openPromises = [], relationshipName }: CompanionPrepareProps) {
+export function CompanionPrepare({
+  items,
+  latestInteractionId,
+  onOpenSource,
+  openPromises = [],
+  relationshipName
+}: CompanionPrepareProps) {
   const validItems = items.filter((item) => item.disposition === "kept" && item.sources.length > 0);
   const validOpenPromises = openPromises.filter((promise) => promise.status === "open" && promise.sources.length > 0);
   const displayName = relationshipName?.trim() || "Ta";
 
   return (
-    <div className={styles.twoColumnPage}>
-      <header className={styles.stickyHero}>
+    <div className={`${styles.twoColumnPage} ${styles.preparePage} date-companion-prepare-page`}>
+      <header className={`${styles.stickyHero} ${styles.prepareHero} date-companion-prepare-header`}>
         <span className={styles.heroMark} aria-hidden="true">想</span>
         <p>见 {displayName} 前看一眼</p>
         <h1>见 {displayName} 之前，花半分钟想一想</h1>
         <span>这里只回看你确认留下的内容和待完成约定，不猜见面时间，也不会自动创建提醒。</span>
+        <blockquote className={`${styles.prepareClosing} date-companion-prepare-closing`}>
+          不用准备很多。见面时，认真听 {displayName} 说话就好。
+        </blockquote>
       </header>
 
-      <div className={styles.contentColumn}>
-        <div className={styles.boundaryNote} role="note">被排除、尚未确认或说话人仍不确定的片段不会进入准备卡。已完成约定会保留原话，但不再作为待办出现。</div>
-        <section className={styles.letterStack} aria-label="见面前准备卡">
+      <div className={`${styles.contentColumn} ${styles.prepareContent} date-companion-prepare-content`}>
+        <section className={`${styles.letterStack} ${styles.prepareLetterStack} date-companion-prepare-letter-stack`} aria-label="见面前准备卡">
           {PREPARE_GROUPS.map((group, index) => {
             const groupItems = validItems.filter((item) => item.kind === group.kind);
             return (
-              <details className={styles.letterCard} key={group.kind} open={index === 0 ? true : undefined}>
+              <details className={styles.letterCard} data-card-kind={group.kind} key={group.kind} open={index === 0 ? true : undefined}>
                 <summary>{group.title}</summary>
                 <div className={styles.letterBody}>
                   {group.kind === "promise" ? (
@@ -100,8 +109,14 @@ export function CompanionPrepare({ items, onOpenSource, openPromises = [], relat
             );
           })}
         </section>
-        <div className={styles.prepareActions}>
-          <Link className={styles.returnLink} href="/date-companion/a">看完了，回到此刻</Link>
+        <div className={`${styles.prepareActions} date-companion-prepare-actions`}>
+          <Link
+            className={`${styles.secondaryButton} ${styles.prepareReviewLink} date-companion-prepare-review-link`}
+            href={latestInteractionId
+              ? `/date-companion/a/recap?interaction=${encodeURIComponent(latestInteractionId)}`
+              : "/date-companion/a/recap"}
+          >查看最近一次相处</Link>
+          <Link className={`${styles.returnLink} ${styles.preparePersonLink} date-companion-prepare-person-link`} href="/date-companion/a/person">回到关于 Ta</Link>
         </div>
       </div>
     </div>

@@ -1,6 +1,7 @@
 "use client";
 
-import { type FormEvent, useState } from "react";
+import Link from "next/link";
+import { type FormEvent, useLayoutEffect, useRef, useState } from "react";
 
 import type {
   DateCompanionMutationState,
@@ -20,6 +21,7 @@ type ProfileSection = {
   eyebrow: string;
   title: string;
   empty: string;
+  side: "left" | "right";
 };
 
 type CompanionPersonProps = {
@@ -36,10 +38,10 @@ type CompanionPersonProps = {
 };
 
 const PROFILE_SECTIONS: ProfileSection[] = [
-  { id: "remembered", eyebrow: "记得的片段", title: "你记得的 Ta", empty: "还没有留下这一类片段" },
-  { id: "recent", eyebrow: "最近提到", title: "Ta 最近", empty: "还没有留下这一类片段" },
-  { id: "relationship", eyebrow: "相处片段", title: "你们之间", empty: "还没有经过你确认、且有原话来源的内容" },
-  { id: "promises", eyebrow: "明确约定", title: "你答应了", empty: "还没有确认由“我”说出的约定" }
+  { id: "remembered", eyebrow: "记得的片段", title: "你记得的 Ta", empty: "还没有留下这一类片段", side: "left" },
+  { id: "recent", eyebrow: "最近提到", title: "Ta 最近", empty: "还没有留下这一类片段", side: "right" },
+  { id: "relationship", eyebrow: "相处片段", title: "你们之间", empty: "还没有经过你确认、且有原话来源的内容", side: "left" },
+  { id: "promises", eyebrow: "明确约定", title: "你答应了", empty: "还没有确认由“我”说出的约定", side: "right" }
 ];
 
 const EMPTY_PERSON: PersonVM = {
@@ -60,6 +62,15 @@ function formatDate(recordingDate: string) {
 function sourceTime(source: SourceRefVM) {
   const seconds = Math.max(0, Math.floor(source.startSeconds));
   return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}`;
+}
+
+function visibleRecapItems(items: RecapItemVM[]) {
+  return items.filter((item) => item.disposition === "kept" && item.sources.length > 0);
+}
+
+function shortenSummary(value: string, maxLength = 84) {
+  const normalized = value.trim();
+  return normalized.length <= maxLength ? normalized : `${normalized.slice(0, maxLength).trimEnd()}…`;
 }
 
 function EvidenceList({
@@ -102,7 +113,7 @@ function RecapItems({
   items: RecapItemVM[];
   onOpenSource?: (source: SourceRefVM, segmentId: string) => Promise<void> | void;
 }) {
-  const kept = items.filter((item) => item.disposition === "kept" && item.sources.length > 0);
+  const kept = visibleRecapItems(items);
   if (kept.length === 0) return <p className={styles.profileEmpty}>{empty}</p>;
   return (
     <ul className={styles.profileFactList}>
@@ -184,17 +195,85 @@ export function CompanionPerson({
   const [deleteCandidateId, setDeleteCandidateId] = useState<string | null>(null);
   const [deletingId, setDeletingId] = useState<string | null>(null);
   const [deleteError, setDeleteError] = useState<string | null>(null);
+  const cardRefs = useRef<Record<ProfileSection["id"], HTMLElement | null>>({
+    remembered: null,
+    recent: null,
+    relationship: null,
+    promises: null
+  });
+  const previousCardRects = useRef<Map<ProfileSection["id"], DOMRect> | null>(null);
   const displayName = relationship?.displayName?.trim() || "Ta";
   const confirmedInteractions = person.interactions.filter((interaction) => interaction.persistenceStatus === "confirmed");
   const relationshipMutationError = mutationState.status === "error"
     && (mutationState.operation === "promise" || mutationState.operation === "delete")
     ? mutationState.message
     : null;
+  const expandedProfileSection = PROFILE_SECTIONS.find((section) => section.id === expandedSection);
+  const squeezeSide = expandedProfileSection
+    ? expandedProfileSection.side === "left" ? "right" : "left"
+    : "none";
+  const compactSections = expandedSection
+    ? PROFILE_SECTIONS.filter((section) => section.id !== expandedSection)
+    : [];
+  const continuationItem = [...person.recent, ...person.relationship]
+    .filter((item) => item.disposition === "kept" && item.sources.length > 0)
+    .at(-1);
+
+  useLayoutEffect(() => {
+    const firstRects = previousCardRects.current;
+    previousCardRects.current = null;
+    if (!firstRects || window.matchMedia?.("(prefers-reduced-motion: reduce)").matches) return;
+
+    for (const section of PROFILE_SECTIONS) {
+      const card = cardRefs.current[section.id];
+      const first = firstRects.get(section.id);
+      if (!card || !first || typeof card.animate !== "function") continue;
+
+      const last = card.getBoundingClientRect();
+      if (!first.width || !first.height || !last.width || !last.height) continue;
+      card.animate(
+        [
+          {
+            transform: `translate(${first.left - last.left}px, ${first.top - last.top}px) scale(${first.width / last.width}, ${first.height / last.height})`,
+            transformOrigin: "top left"
+          },
+          { transform: "none", transformOrigin: "top left" }
+        ],
+        { duration: 440, easing: "cubic-bezier(0.22, 1, 0.36, 1)" }
+      );
+    }
+  }, [expandedSection]);
 
   const submitSearch = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     const normalized = query.trim();
     if (normalized && onSearch) void onSearch(normalized);
+  };
+
+  const toggleSection = (sectionId: ProfileSection["id"]) => {
+    previousCardRects.current = new Map(
+      PROFILE_SECTIONS.flatMap((section) => {
+        const card = cardRefs.current[section.id];
+        return card ? [[section.id, card.getBoundingClientRect()] as const] : [];
+      })
+    );
+    setExpandedSection((current) => current === sectionId ? null : sectionId);
+  };
+
+  const sectionSummary = (section: ProfileSection) => {
+    if (section.id === "promises") {
+      if (person.promises.length === 0) return section.empty;
+      const openCount = person.promises.filter((promise) => promise.status === "open").length;
+      const doneCount = person.promises.length - openCount;
+      return [openCount > 0 ? `${openCount} 件待完成` : null, doneCount > 0 ? `${doneCount} 件已完成` : null]
+        .filter(Boolean)
+        .join(" · ");
+    }
+
+    const kept = visibleRecapItems(person[section.id]);
+    if (kept.length === 0) return section.empty;
+    const first = shortenSummary(kept[0].displayedText || kept[0].proposedText);
+    return kept.length > 1 ? `${first} · 另有 ${kept.length - 1} 条` : first;
   };
 
   const sectionContent = (section: ProfileSection) => {
@@ -212,50 +291,112 @@ export function CompanionPerson({
   };
 
   return (
-    <div className={styles.twoColumnPage}>
-      <header className={styles.stickyHero}>
+    <div className={`${styles.twoColumnPage} ${styles.personPage}`}>
+      <header className={`${styles.stickyHero} ${styles.personHero}`}>
         <span className={styles.heroMark} aria-hidden="true">Ta</span>
         <p>当前这段关系</p>
         <h1>{displayName}</h1>
         <span>这里只留下你亲自确认、并且能核对原话的内容。说话人编号和昵称不会替你判断谁是 Ta。</span>
       </header>
 
-      <div className={styles.contentColumn}>
-        <div className={styles.boundaryNote} role="note">
-          被排除、尚未决定或说话人仍不确定的内容，不会出现在这里，也不会进入见面前准备和关键词搜索。
-        </div>
-        {relationshipMutationError ? <p className={styles.inlineError} role="alert">{relationshipMutationError}</p> : null}
+      <div className={`${styles.contentColumn} ${styles.personContent}`}>
+        <section className={`${styles.contentPanel} ${styles.personSearchPanel}`} aria-labelledby="relationship-search-title">
+          <h2 id="relationship-search-title">在这段关系里找一找</h2>
+          <p className={styles.contentIntro}>只搜索当前 Ta 已确认留下的内容。</p>
+          <div className={styles.boundaryNote} role="note">
+            被排除、尚未决定或说话人仍不确定的内容，不会出现在这里，也不会进入见面前准备和关键词搜索。
+          </div>
+          {relationshipMutationError ? <p className={styles.inlineError} role="alert">{relationshipMutationError}</p> : null}
+          <form className={styles.relationshipSearch} onSubmit={submitSearch}>
+            <label>
+              <span className={styles.visuallyHidden}>关键词</span>
+              <input
+                aria-label="关系内关键词"
+                disabled={!onSearch || searchState.status === "loading"}
+                onChange={(event) => setQuery(event.target.value)}
+                placeholder="例如：旅行、考试、想去的地方"
+                type="search"
+                value={query}
+              />
+            </label>
+            <button className={styles.secondaryButton} disabled={!onSearch || !query.trim() || searchState.status === "loading"} type="submit">
+              {searchState.status === "loading" ? "正在找…" : "找一找"}
+            </button>
+          </form>
+          {searchState.status === "error" ? <p className={styles.inlineError} role="alert">{searchState.message}</p> : null}
+          {searchState.status === "ready" ? (
+            searchState.results.length === 0 ? (
+              <div className={styles.emptyState}><div><b>没有找到已确认内容</b><span>被排除或尚未确认的片段不会出现在结果里。</span></div></div>
+            ) : (
+              <ul className={styles.searchResults}>
+                {searchState.results.map((result) => (
+                  <li key={result.id}>
+                    <time dateTime={result.recordingDate}>{formatDate(result.recordingDate)}</time>
+                    <p>{result.text}</p>
+                    <EvidenceList onOpenSource={onOpenSource} sources={result.sources} />
+                  </li>
+                ))}
+              </ul>
+            )
+          ) : null}
+        </section>
 
         <section
           aria-label="关于 Ta 的四类内容"
-          className={styles.profileGrid}
+          className={[
+            styles.profileGrid,
+            expandedSection ? styles.profileGridExpanded : "",
+            squeezeSide === "left" ? styles.profileGridSqueezeLeft : "",
+            squeezeSide === "right" ? styles.profileGridSqueezeRight : ""
+          ].filter(Boolean).join(" ")}
           data-expanded={expandedSection ?? undefined}
+          data-expanded-card={expandedSection ?? "none"}
+          data-squeeze-side={squeezeSide}
         >
           {PROFILE_SECTIONS.map((section) => {
             const expanded = expandedSection === section.id;
             const compact = expandedSection !== null && !expanded;
+            const state = expanded ? "expanded" : compact ? "compact" : "idle";
+            const railOrder = compact ? compactSections.findIndex((candidate) => candidate.id === section.id) + 1 : 0;
+            const contentId = `profile-section-${section.id}`;
             return (
               <article
                 className={`${styles.profileCard} ${expanded ? styles.profileCardExpanded : ""} ${compact ? styles.profileCardCompact : ""}`}
-                data-card-state={expanded ? "expanded" : compact ? "compact" : "idle"}
+                data-card-id={section.id}
+                data-card-state={state}
+                data-rail-order={railOrder || undefined}
+                id={`profile-card-${section.id}`}
                 key={section.id}
+                ref={(node) => {
+                  cardRefs.current[section.id] = node;
+                }}
               >
                 <div className={styles.profileCardHeading}>
-                  <div><small>{section.eyebrow}</small><h2>{section.title}</h2></div>
-                  <button
-                    aria-expanded={expanded}
-                    aria-label={expanded ? `收起${section.title}` : `放大${section.title}`}
-                    onClick={() => setExpandedSection(expanded ? null : section.id)}
-                    type="button"
-                  >{expanded ? "收起" : "细看"}</button>
+                  <div>
+                    <small hidden={compact}>{section.eyebrow}</small>
+                    <h2>
+                      <button
+                        aria-controls={contentId}
+                        aria-expanded={expanded}
+                        onClick={(event) => {
+                          event.currentTarget.focus();
+                          toggleSection(section.id);
+                        }}
+                        title={expanded ? "再次点击恢复四张卡片" : "点击放大这张卡片"}
+                        type="button"
+                      >{section.title}</button>
+                    </h2>
+                  </div>
                 </div>
-                {sectionContent(section)}
+                <div data-profile-card-content hidden={compact} id={contentId}>
+                  {expanded ? sectionContent(section) : <p className={styles.profileEmpty}>{sectionSummary(section)}</p>}
+                </div>
               </article>
             );
           })}
         </section>
 
-        <section className={styles.contentPanel}>
+        <section className={`${styles.contentPanel} ${styles.personHistoryPanel}`}>
           <h2>一起走过的几次</h2>
           <p className={styles.contentIntro}>只有最终确认过的相处会留在这里。</p>
           {deleteError ? <p className={styles.inlineError} role="alert">{deleteError}</p> : null}
@@ -266,13 +407,17 @@ export function CompanionPerson({
           ) : (
             <ol className={styles.interactionHistory}>
               {confirmedInteractions.map((interaction) => {
-                const canOpen = interaction.transcript.length > 0 && Boolean(onOpenInteraction);
+                const canOpen = Boolean(onOpenInteraction && interaction.relationshipInteractionId);
                 return (
                   <li key={interaction.id}>
                     <time dateTime={interaction.recordingDate}>{formatDate(interaction.recordingDate)}</time>
                     <div><b>{interaction.title || interaction.fileName}</b><span>{interaction.fileName}</span></div>
                     <div className={styles.interactionActions}>
-                      {canOpen ? <button onClick={() => onOpenInteraction?.(interaction)} type="button">查看完整复盘</button> : <small>可核对原话已保留</small>}
+                      {canOpen ? (
+                        <button onClick={() => onOpenInteraction?.(interaction)} type="button">
+                          {interaction.transcript.length > 0 ? "查看完整复盘" : "查看保留的复盘"}
+                        </button>
+                      ) : <small>可核对原话已保留</small>}
                       {onDeleteInteraction ? (
                         <button
                           className={styles.removeInteractionAction}
@@ -316,51 +461,27 @@ export function CompanionPerson({
           )}
         </section>
 
-        <section className={styles.contentPanel} aria-labelledby="relationship-search-title">
-          <h2 id="relationship-search-title">在这段关系里找一找</h2>
-          <p className={styles.contentIntro}>只搜索当前 Ta 已确认留下的内容。</p>
-          <form className={styles.relationshipSearch} onSubmit={submitSearch}>
-            <label>
-              <span className={styles.visuallyHidden}>关键词</span>
-              <input
-                aria-label="关系内关键词"
-                disabled={!onSearch || searchState.status === "loading"}
-                onChange={(event) => setQuery(event.target.value)}
-                placeholder="例如：旅行、考试、想去的地方"
-                type="search"
-                value={query}
-              />
-            </label>
-            <button className={styles.secondaryButton} disabled={!onSearch || !query.trim() || searchState.status === "loading"} type="submit">
-              {searchState.status === "loading" ? "正在找…" : "找一找"}
-            </button>
-          </form>
-          {searchState.status === "error" ? <p className={styles.inlineError} role="alert">{searchState.message}</p> : null}
-          {searchState.status === "ready" ? (
-            searchState.results.length === 0 ? (
-              <div className={styles.emptyState}><div><b>没有找到已确认内容</b><span>被排除或尚未确认的片段不会出现在结果里。</span></div></div>
-            ) : (
-              <ul className={styles.searchResults}>
-                {searchState.results.map((result) => (
-                  <li key={result.id}>
-                    <time dateTime={result.recordingDate}>{formatDate(result.recordingDate)}</time>
-                    <p>{result.text}</p>
-                    <EvidenceList onOpenSource={onOpenSource} sources={result.sources} />
-                  </li>
-                ))}
-              </ul>
-            )
-          ) : null}
-        </section>
-
-        {person.observation?.disposition === "kept" && person.observation.sources.length > 0 ? (
-          <section className={styles.contentPanel}>
-            <h2>关于你们的一点观察</h2>
-            <p className={styles.contentIntro}>这只是根据已确认片段整理的观察，可能并不完整。</p>
+        <section className={`${styles.contentPanel} ${styles.personObservationPanel}`}>
+          <h2>关于你们的一点观察</h2>
+          <p className={styles.contentIntro}>这只是根据已确认片段整理的观察，可能并不完整。</p>
+          {person.observation?.disposition === "kept" && person.observation.sources.length > 0 ? (
+            <>
             <p className={styles.observationCopy}>{person.observation.displayedText || person.observation.proposedText}</p>
             <EvidenceList onOpenSource={onOpenSource} sources={person.observation.sources} />
-          </section>
-        ) : null}
+            </>
+          ) : <div className={styles.emptyState}><div><b>还没有足够片段形成观察</b><span>确认更多相处后，这里只会根据有原话来源的内容整理。</span></div></div>}
+        </section>
+
+        <section className={`${styles.contentPanel} ${styles.personContinue}`}>
+          <small>下次可以从这里继续</small>
+          <p className={styles.observationCopy}>{continuationItem
+            ? `“${continuationItem.displayedText || continuationItem.proposedText}”`
+            : "见面前，再看一眼你确认留下的片段和仍未完成的约定。"}</p>
+          <Link className={`${styles.primaryButton} ${styles.personContinueAction}`} href="/date-companion/a/prepare">
+            <span><b>见 {displayName} 前看一眼</b><small>只会阅读，不会修改任何记录</small></span>
+            <span aria-hidden="true">→</span>
+          </Link>
+        </section>
       </div>
     </div>
   );

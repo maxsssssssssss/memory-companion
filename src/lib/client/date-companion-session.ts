@@ -20,6 +20,7 @@ import {
   type DateCompanionParticipantRole,
   type DateCompanionRelationshipState,
   type DateCompanionSearchState,
+  type DateCompanionVoiceEnrollmentIntent,
   type DateCompanionViewModel,
   type FailedUploadReceipt,
   type QaState,
@@ -107,11 +108,18 @@ export type DateCompanionSessionValue = DateCompanionSessionSnapshot & {
     version: number,
     items: Array<{ id: string; version: number; userText?: string | null; disposition: RecapItemVM["disposition"] }>
   ): Promise<void>;
-  finalizeRecap(interactionId: string, version: number): Promise<void>;
+  finalizeRecap(
+    interactionId: string,
+    version: number,
+    assignments: Array<{ speakerId: string; role: DateCompanionParticipantRole }>,
+    items: Array<{ id: string; version: number; userText?: string | null; disposition: RecapItemVM["disposition"] }>,
+    voiceEnrollmentIntents?: DateCompanionVoiceEnrollmentIntent[]
+  ): Promise<void>;
   updatePromise(promiseId: string, version: number, status: "open" | "done"): Promise<void>;
   searchRelationship(query: string): Promise<void>;
   deleteInteraction(interactionId: string): Promise<void>;
   selectCachedInteraction(uploadId: string): boolean;
+  selectRelationshipInteraction(interactionId: string | null): boolean;
   ask(question: string): Promise<QuestionAnswer | null>;
   cancelQa(): void;
 };
@@ -236,6 +244,7 @@ export class DateCompanionSessionController {
   private activeUploadId: string | null = null;
   private currentPayload: DayPayload | null = null;
   private relationshipView: DcRelationshipView | null = null;
+  private selectedRelationshipInteractionId: string | null = null;
   private uploadRequestVersion = 0;
   private qaRequestVersion = 0;
   private relationshipRequestVersion = 0;
@@ -292,7 +301,8 @@ export class DateCompanionSessionController {
     const viewModel = this.relationshipView
       ? applyDateCompanionRelationshipView(current, this.relationshipView, {
           hasLocalDay: (uploadId) => this.localPayload(uploadId) !== null,
-          getLocalDay: (uploadId) => this.localPayload(uploadId)
+          getLocalDay: (uploadId) => this.localPayload(uploadId),
+          selectedInteractionId: this.selectedRelationshipInteractionId
         })
       : current;
     this.update({ viewModel });
@@ -300,6 +310,12 @@ export class DateCompanionSessionController {
 
   private applyRelationshipView(view: DcRelationshipView) {
     this.relationshipView = view;
+    if (
+      this.selectedRelationshipInteractionId
+      && !view.interactions.some((interaction) => interaction.id === this.selectedRelationshipInteractionId)
+    ) {
+      this.selectedRelationshipInteractionId = null;
+    }
     this.update({
       relationshipState: {
         status: "ready",
@@ -322,6 +338,7 @@ export class DateCompanionSessionController {
     this.uploadRequestVersion += 1;
     this.currentPayload = null;
     this.relationshipView = null;
+    this.selectedRelationshipInteractionId = null;
     this.activeUploadId = null;
     this.setActiveUser(null);
     this.update({
@@ -403,6 +420,7 @@ export class DateCompanionSessionController {
   }
 
   private showPayload(payload: DayPayload) {
+    this.selectedRelationshipInteractionId = null;
     this.currentPayload = payload;
     this.activeUploadId = payload.upload.id;
     this.refreshViewModel();
@@ -594,7 +612,11 @@ export class DateCompanionSessionController {
     }
 
     let importedInteraction = this.relationshipInteractionForUpload(uploadId);
-    if (!importedInteraction) {
+    // sourceState=available can also mean a previous import persisted the text
+    // snapshot but returned a retryable participant-audio error. Re-run the
+    // idempotent import before cleanup so a reload cannot delete the only source
+    // audio before speaker previews are durable (or declared not applicable).
+    if (!importedInteraction || importedInteraction.sourceState === "available") {
       try {
         const imported = await this.api.importInteraction(
           relationshipId,
@@ -932,6 +954,7 @@ export class DateCompanionSessionController {
     this.uploadRequestVersion += 1;
     this.currentPayload = null;
     this.relationshipView = null;
+    this.selectedRelationshipInteractionId = null;
     this.activeUploadId = null;
     this.setActiveUser(null);
     this.authController = new AbortController();
@@ -991,6 +1014,7 @@ export class DateCompanionSessionController {
     this.uploadRequestVersion += 1;
     this.currentPayload = null;
     this.relationshipView = null;
+    this.selectedRelationshipInteractionId = null;
     this.activeUploadId = null;
     try {
       await this.api.logout();
@@ -1168,9 +1192,21 @@ export class DateCompanionSessionController {
     );
   };
 
-  readonly finalizeRecap = async (interactionId: string, version: number): Promise<void> => {
+  readonly finalizeRecap = async (
+    interactionId: string,
+    version: number,
+    assignments: Array<{ speakerId: string; role: DateCompanionParticipantRole }>,
+    items: Array<{ id: string; version: number; userText?: string | null; disposition: RecapItemVM["disposition"] }>,
+    voiceEnrollmentIntents: DateCompanionVoiceEnrollmentIntent[] = []
+  ): Promise<void> => {
     await this.runRelationshipMutation("finalize", (signal) =>
-      this.api.updateRecap(interactionId, { version, items: [], finalize: true }, signal)
+      this.api.updateRecap(interactionId, {
+        version,
+        assignments,
+        items,
+        ...(voiceEnrollmentIntents.length > 0 ? { voiceEnrollmentIntents } : {}),
+        finalize: true
+      }, signal)
     );
   };
 
@@ -1268,6 +1304,26 @@ export class DateCompanionSessionController {
         serverCleanupStatus: "completed"
       }
     });
+    return true;
+  };
+
+  readonly selectRelationshipInteraction = (interactionId: string | null): boolean => {
+    const normalized = interactionId?.trim() || null;
+    if (
+      normalized
+      && !this.relationshipView?.interactions.some((interaction) =>
+        interaction.id === normalized && interaction.status === "confirmed"
+      )
+    ) {
+      if (this.selectedRelationshipInteractionId !== null) {
+        this.selectedRelationshipInteractionId = null;
+        this.refreshViewModel();
+      }
+      return false;
+    }
+    if (this.selectedRelationshipInteractionId === normalized) return true;
+    this.selectedRelationshipInteractionId = normalized;
+    this.refreshViewModel();
     return true;
   };
 
@@ -1400,6 +1456,7 @@ export function useDateCompanionSession(options: DateCompanionSessionOptions = {
     searchRelationship: controller.searchRelationship,
     deleteInteraction: controller.deleteInteraction,
     selectCachedInteraction: controller.selectCachedInteraction,
+    selectRelationshipInteraction: controller.selectRelationshipInteraction,
     ask: controller.ask,
     cancelQa: controller.cancelQa
   };
