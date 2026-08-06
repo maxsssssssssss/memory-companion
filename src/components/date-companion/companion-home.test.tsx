@@ -1,7 +1,29 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 
+import type { RecapItemVM } from "@/lib/domain/date-companion";
+
 import { CompanionHome, type CompanionUploadPresentation } from "./companion-home";
+
+const recentItem: RecapItemVM = {
+  id: "recent-1",
+  kind: "mentioned",
+  title: "Ta 最近",
+  proposedText: "Ta 最近在准备一场重要考试",
+  displayedText: "Ta 最近在准备一场重要考试",
+  disposition: "kept",
+  sources: [{
+    id: "source-1",
+    uploadId: "upload-1",
+    segmentIds: ["segment-1"],
+    recordingDate: "2026-08-04",
+    startSeconds: 12,
+    endSeconds: 18,
+    quote: "最近都在准备考试。",
+    kind: "transcript",
+    presentation: "direct_quote"
+  }]
+};
 
 function renderHome(uploadState: CompanionUploadPresentation) {
   return render(
@@ -15,6 +37,34 @@ function renderHome(uploadState: CompanionUploadPresentation) {
 }
 
 describe("CompanionHome", () => {
+  it("shows a local-time greeting without inventing a person name", async () => {
+    renderHome({ status: "idle" });
+
+    await waitFor(() => expect(document.querySelector("[data-local-time-greeting]")).toHaveTextContent(
+      /^(早上好|上午好|中午好|下午好|晚上好)$/u
+    ));
+    expect(screen.getByRole("heading", { name: "关于 Ta" })).toBeInTheDocument();
+    expect(screen.getByText("还没有留下关于 Ta 的近况")).toBeInTheDocument();
+  });
+
+  it("presents only the real relationship name and confirmed recent item", () => {
+    render(
+      <CompanionHome
+        currentInteraction={null}
+        onRetryRead={vi.fn()}
+        onUpload={vi.fn()}
+        recentItem={recentItem}
+        relationshipName="小林"
+        uploadState={{ status: "idle" }}
+      />
+    );
+
+    expect(screen.getByRole("heading", { name: "你和 小林" })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "打开关于 小林" })).toHaveAttribute("href", "/date-companion/a/person");
+    expect(screen.getByText("Ta 最近在准备一场重要考试")).toBeInTheDocument();
+    expect(screen.queryByText(/认识.*天|河边|周六/u)).not.toBeInTheDocument();
+  });
+
   it("uses an indeterminate uploading state instead of displaying a fabricated percentage", () => {
     renderHome({ status: "uploading", progress: 73 });
 

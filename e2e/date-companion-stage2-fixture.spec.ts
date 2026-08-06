@@ -12,11 +12,17 @@ type RelationshipView = {
     sourceUploadId: string;
     sourceState: "available" | "server_cleaned" | "explicitly_deleted";
     status: "draft" | "confirmed";
+    version: number;
+    participants: Array<{
+      speakerId: string;
+      audioSampleAvailable?: true;
+    }>;
     recapItems: Array<{
       id: string;
       kind: "moment" | "mentioned" | "promise" | "continue";
       displayedText: string;
       disposition: "pending" | "kept" | "excluded";
+      version: number;
       evidence: Array<{ speakerId?: string; sourceSegmentId: string }>;
     }>;
   }>;
@@ -50,8 +56,13 @@ type NetworkAudit = {
 const password = "DateE2e!2026";
 const firstDate = "2026-08-02";
 const secondDate = "2026-08-03";
-const keptKeyword = "星河计划";
-const excludedKeyword = "火星咖啡";
+const keptKeyword = "报价方案";
+const absentKeyword = "火星咖啡";
+function fixtureRoleForParticipant(speakerId: string) {
+  if (/(?:^|_)speaker_1$/u.test(speakerId)) return "self" as const;
+  if (/(?:^|_)speaker_2$/u.test(speakerId)) return "companion" as const;
+  return undefined;
+}
 
 function progress(completed: number, total: number, message: string) {
   console.log(`[date-companion-stage2-fixture] ${completed}/${total} ${message}`);
@@ -243,76 +254,157 @@ async function uploadFixture(input: {
   return { receipt, imported, view: relationshipPayload.view };
 }
 
-async function setSpeakerRoles(page: Page) {
-  await expect(page.getByRole("heading", { name: "这次录音里的说话人" })).toBeVisible();
-  const firstSpeaker = page.locator("article").filter({ hasText: "原始编号 speaker_1" }).first();
-  const secondSpeaker = page.locator("article").filter({ hasText: "原始编号 speaker_2" }).first();
-  await expect(firstSpeaker).toBeVisible();
-  await expect(secondSpeaker).toBeVisible();
-  await firstSpeaker.getByRole("button", { name: "我", exact: true }).click();
-  await secondSpeaker.getByRole("button", { name: "Ta", exact: true }).click();
-  const responsePromise = page.waitForResponse((response) =>
-    /\/api\/date-companion\/interactions\/[^/]+\/participants$/u.test(applicationPath(response.url()))
-    && response.request().method() === "PUT"
-  );
-  await page.getByRole("button", { name: "保存说话人判断" }).click();
-  expect((await responsePromise).ok()).toBe(true);
-  await expect(firstSpeaker.getByRole("button", { name: "我", exact: true })).toHaveAttribute("aria-pressed", "true");
-  await expect(secondSpeaker.getByRole("button", { name: "Ta", exact: true })).toHaveAttribute("aria-pressed", "true");
+function expectedDisposition(
+  item: RelationshipView["interactions"][number]["recapItems"][number]
+) {
+  const roles = item.evidence.map((evidence) => evidence.speakerId
+    ? fixtureRoleForParticipant(evidence.speakerId)
+    : undefined);
+  const hasResolvedSources = roles.length > 0 && roles.every(Boolean);
+  if (!hasResolvedSources) return "excluded" as const;
+  if (item.kind === "mentioned") return roles.every((role) => role === "companion") ? "kept" as const : "excluded" as const;
+  if (item.kind === "promise") return roles.every((role) => role === "self") ? "kept" as const : "excluded" as const;
+  return "kept" as const;
 }
 
-async function decideAndFinalizeRecap(input: {
+async function assertParticipantAudio(input: {
   page: Page;
-  keptText: string;
-  excludedText?: string;
+  interactionId: string;
+  speakerId: string;
+  speakerCard: ReturnType<Page["locator"]>;
+}) {
+  const { page, interactionId, speakerId, speakerCard } = input;
+  const audio = speakerCard.locator("audio");
+  const expectedPath = `/api/date-companion/interactions/${interactionId}/participants/${speakerId}/audio`;
+  await expect(audio).toHaveAttribute("src", expectedPath);
+
+  const full = await page.request.get(expectedPath);
+  expect(full.status()).toBe(200);
+  expect(full.headers()["content-type"]).toMatch(/^audio\/mpeg\b/u);
+  expect(full.headers()["accept-ranges"]).toBe("bytes");
+  expect((await full.body()).length).toBeGreaterThan(128);
+
+  const range = await page.request.get(expectedPath, { headers: { Range: "bytes=0-63" } });
+  expect(range.status()).toBe(206);
+  expect(range.headers()["content-range"]).toMatch(/^bytes 0-63\/\d+$/u);
+  expect((await range.body()).length).toBe(64);
+
+  const playable = await audio.evaluate(async (element) => {
+    const player = element as HTMLAudioElement;
+    player.muted = true;
+    player.load();
+    if (player.readyState < HTMLMediaElement.HAVE_METADATA) {
+      await new Promise<void>((resolve, reject) => {
+        const timeout = window.setTimeout(() => reject(new Error("audio metadata timeout")), 10_000);
+        player.addEventListener("loadedmetadata", () => {
+          window.clearTimeout(timeout);
+          resolve();
+        }, { once: true });
+        player.addEventListener("error", () => {
+          window.clearTimeout(timeout);
+          reject(new Error("audio metadata failed"));
+        }, { once: true });
+      });
+    }
+    await player.play();
+    const result = !player.paused && Number.isFinite(player.duration) && player.duration > 0;
+    player.pause();
+    return result;
+  });
+  expect(playable).toBe(true);
+}
+
+async function confirmSpeakersAndFinalize(input: {
+  page: Page;
+  interaction: RelationshipView["interactions"][number];
   screenshotPath?: string;
 }) {
-  const { page, keptText, excludedText, screenshotPath } = input;
-  const recapGrid = page.getByRole("region", { name: "这次相处复盘" });
-  const promiseCard = recapGrid.locator("article").filter({ has: page.getByRole("heading", { name: "这次出现的约定" }) });
-  const keptEditor = promiseCard.locator('[data-disposition]').first();
-  await expect(keptEditor).toBeVisible();
-  await keptEditor.getByRole("textbox").fill(keptText);
-  await keptEditor.getByRole("button", { name: "留下", exact: true }).click();
-
-  const editors = recapGrid.locator('[data-disposition]');
-  expect(await editors.count()).toBeGreaterThan(1);
-  let excludedEditorIndex = -1;
-  for (let index = 0; index < await editors.count(); index += 1) {
-    const editor = editors.nth(index);
-    const text = await editor.getByRole("textbox").inputValue();
-    if (text === keptText) continue;
-    if (excludedText && excludedEditorIndex < 0) {
-      await editor.getByRole("textbox").fill(excludedText);
-      excludedEditorIndex = index;
-    }
-    const exclude = editor.getByRole("button", { name: "不留下", exact: true });
-    if (await exclude.count()) await exclude.click();
-  }
-  if (excludedText) expect(excludedEditorIndex).toBeGreaterThanOrEqual(0);
-
-  const saveResponsePromise = page.waitForResponse((response) =>
-    /\/api\/date-companion\/interactions\/[^/]+\/recap$/u.test(applicationPath(response.url()))
-    && response.request().method() === "PUT"
-    && postBody(response.request()).finalize === false
+  const { page, interaction, screenshotPath } = input;
+  await expect(page.getByRole("heading", { name: "这次录音里的说话人" })).toBeVisible();
+  const selfParticipant = interaction.participants.find((participant) =>
+    fixtureRoleForParticipant(participant.speakerId) === "self"
   );
-  await page.getByRole("button", { name: "保存本次修改" }).click();
-  expect((await saveResponsePromise).ok()).toBe(true);
-  await expect(page.getByRole("button", { name: "最终确认" })).toBeEnabled();
+  const companionParticipant = interaction.participants.find((participant) =>
+    fixtureRoleForParticipant(participant.speakerId) === "companion"
+  );
+  if (!selfParticipant || !companionParticipant) {
+    throw new Error("fixture participants could not be mapped to self and companion");
+  }
+  const speakerCard = (speakerId: string) => {
+    const expectedPath = `/api/date-companion/interactions/${interaction.id}/participants/${speakerId}/audio`;
+    return page.locator("article").filter({ has: page.locator(`audio[src="${expectedPath}"]`) }).first();
+  };
+  const selfSpeaker = speakerCard(selfParticipant.speakerId);
+  const companionSpeaker = speakerCard(companionParticipant.speakerId);
+  await expect(selfSpeaker).toBeVisible();
+  await expect(companionSpeaker).toBeVisible();
+  await assertParticipantAudio({
+    page,
+    interactionId: interaction.id,
+    speakerId: selfParticipant.speakerId,
+    speakerCard: selfSpeaker
+  });
+  await assertParticipantAudio({
+    page,
+    interactionId: interaction.id,
+    speakerId: companionParticipant.speakerId,
+    speakerCard: companionSpeaker
+  });
 
-  if (screenshotPath) await page.screenshot({ path: screenshotPath, fullPage: true });
+  const recapBodies: Record<string, unknown>[] = [];
+  const participantBodies: Record<string, unknown>[] = [];
+  const captureMutation = (request: { method(): string; url(): string; postDataJSON(): unknown }) => {
+    const path = applicationPath(request.url());
+    if (request.method() !== "PUT") return;
+    if (/\/api\/date-companion\/interactions\/[^/]+\/recap$/u.test(path)) recapBodies.push(postBody(request));
+    if (/\/api\/date-companion\/interactions\/[^/]+\/participants$/u.test(path)) participantBodies.push(postBody(request));
+  };
+  page.on("request", captureMutation);
+
+  await selfSpeaker.getByRole("button", { name: "我", exact: true }).click();
+  await companionSpeaker.getByRole("button", { name: "Ta", exact: true }).click();
+  await expect(selfSpeaker.getByRole("button", { name: "我", exact: true })).toHaveAttribute("aria-pressed", "true");
+  await expect(companionSpeaker.getByRole("button", { name: "Ta", exact: true })).toHaveAttribute("aria-pressed", "true");
+  await expect(page.getByRole("button", { name: "保存说话人判断" })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "留下", exact: true })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "不留下", exact: true })).toHaveCount(0);
+  await expect(page.getByRole("textbox")).toHaveCount(0);
 
   const finalizeResponsePromise = page.waitForResponse((response) =>
     /\/api\/date-companion\/interactions\/[^/]+\/recap$/u.test(applicationPath(response.url()))
     && response.request().method() === "PUT"
     && postBody(response.request()).finalize === true
   );
-  await page.getByRole("button", { name: "最终确认" }).click();
+  const confirmButton = page.getByRole("button", { name: "确认并留下这次相处" });
+  await expect(confirmButton).toHaveCount(1);
+  if (screenshotPath) await page.screenshot({ path: screenshotPath, fullPage: true });
+  await confirmButton.click();
   const finalizeResponse = await finalizeResponsePromise;
+  page.off("request", captureMutation);
   expect(finalizeResponse.ok()).toBe(true);
-  await expect(page.getByRole("button", { name: "已经确认留下" })).toBeDisabled();
+  await expect(page.getByText("已确认：我", { exact: true })).toBeVisible();
+  await expect(page.getByText("已确认：Ta", { exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "确认并留下这次相处" })).toHaveCount(0);
+
+  const expectedItems = interaction.recapItems.map((item) => ({
+    id: item.id,
+    version: item.version,
+    disposition: expectedDisposition(item)
+  }));
+  expect(recapBodies).toHaveLength(1);
+  expect(participantBodies).toHaveLength(0);
+  expect(recapBodies[0]).toEqual({
+    version: interaction.version,
+    assignments: [
+      { speakerId: selfParticipant.speakerId, role: "self" },
+      { speakerId: companionParticipant.speakerId, role: "companion" }
+    ],
+    items: expectedItems,
+    finalize: true
+  });
+
   const finalized = await finalizeResponse.json() as { view: RelationshipView };
-  return finalized.view;
+  return { view: finalized.view, expectedItems };
 }
 
 function assertOrderedLifecycle(audit: NetworkAudit, uploadId: string) {
@@ -363,27 +455,36 @@ test("Stage 2 keeps one confirmed relationship across two fixture interactions a
   progress(5, 30, "first server Day was cleaned while its relationship snapshot became server_cleaned");
 
   await page.getByRole("link", { name: /查看这次复盘/u }).first().click();
-  await setSpeakerRoles(page);
-  progress(6, 30, "speaker_1 was explicitly confirmed as me and speaker_2 as Ta");
-
-  const firstFinalView = await decideAndFinalizeRecap({
+  const firstDraftInteraction = firstUpload.view.interactions.find((item) => item.id === firstUpload.imported.interactionId);
+  if (!firstDraftInteraction) throw new Error("first imported interaction is missing from the relationship view");
+  const firstFinalization = await confirmSpeakersAndFinalize({
     page,
-    keptText: `${keptKeyword}：明天下午前把确认过的方案发给 Ta`,
-    excludedText: `${excludedKeyword}：这条内容由用户明确排除`,
-    screenshotPath: `${artifactDir}/stage2-recap-edit-confirm.png`
+    interaction: firstDraftInteraction,
+    screenshotPath: `${artifactDir}/stage2-recap-speaker-confirm.png`
   });
+  progress(6, 30, "one confirmation assigned the two fixture voices to me and Ta and submitted every automatic decision");
+
+  const firstFinalView = firstFinalization.view;
   const firstInteraction = firstFinalView.interactions.find((item) => item.id === firstUpload.imported.interactionId);
   expect(firstInteraction?.status).toBe("confirmed");
-  expect(firstInteraction?.recapItems.filter((item) => item.disposition === "kept")).toHaveLength(1);
-  expect(firstInteraction?.recapItems.find((item) => item.disposition === "kept")?.displayedText).toContain(keptKeyword);
-  expect(firstInteraction?.recapItems.find((item) => item.disposition === "excluded")?.displayedText).toContain(excludedKeyword);
-  expect(firstFinalView.promises).toHaveLength(1);
-  progress(7, 30, "the kept keyword was edited, all other items were decided, and one promise was created exactly once");
+  const firstExpectedById = new Map(firstFinalization.expectedItems.map((item) => [item.id, item.disposition]));
+  expect(firstInteraction?.recapItems.map((item) => ({ id: item.id, disposition: item.disposition }))).toEqual(
+    firstDraftInteraction.recapItems.map((item) => ({ id: item.id, disposition: firstExpectedById.get(item.id) }))
+  );
+  const firstKeptItems = firstInteraction?.recapItems.filter((item) => item.disposition === "kept") ?? [];
+  const firstExcludedItems = firstInteraction?.recapItems.filter((item) => item.disposition === "excluded") ?? [];
+  expect(firstKeptItems.length).toBeGreaterThan(0);
+  expect(firstExcludedItems.length).toBeGreaterThan(0);
+  expect(firstKeptItems.some((item) => item.displayedText.includes(keptKeyword))).toBe(true);
+  const firstKeptPromises = firstKeptItems.filter((item) => item.kind === "promise");
+  expect(firstKeptPromises.length).toBeGreaterThan(0);
+  expect(firstFinalView.promises).toHaveLength(firstKeptPromises.length);
+  progress(7, 30, "automatic kept/excluded semantics matched the single request and created only self-sourced promises");
 
-  await page.getByRole("link", { name: "关于 Ta" }).click();
+  await page.getByRole("link", { name: "关于 Ta", exact: true }).click();
   await expect(page.getByText(keptKeyword, { exact: false }).first()).toBeVisible();
-  await expect(page.getByText(excludedKeyword, { exact: false })).toHaveCount(0);
-  await expect(page.getByText("待完成")).toBeVisible();
+  await expect(page.getByText(absentKeyword, { exact: false })).toHaveCount(0);
+  await expect(page.getByText("待完成").first()).toBeVisible();
   await page.screenshot({ path: `${artifactDir}/stage2-person-1920x1080.png`, fullPage: true });
   await page.setViewportSize({ width: 2560, height: 1440 });
   await page.screenshot({ path: `${artifactDir}/stage2-person-2560x1440.png`, fullPage: true });
@@ -394,24 +495,26 @@ test("Stage 2 keeps one confirmed relationship across two fixture interactions a
   await expect(page).toHaveURL(/\/date-companion\/a\/prepare$/u);
   await expect(page.getByRole("heading", { name: "见 Ta 之前，花半分钟想一想", exact: true })).toBeVisible();
   await page.locator("summary").filter({ hasText: "你答应过" }).click();
-  await expect(page.getByText(keptKeyword, { exact: false })).toBeVisible();
-  await expect(page.getByText(excludedKeyword, { exact: false })).toHaveCount(0);
+  await expect(page.getByText(keptKeyword, { exact: false }).first()).toBeVisible();
+  await expect(page.getByText(absentKeyword, { exact: false })).toHaveCount(0);
   await page.screenshot({ path: `${artifactDir}/stage2-prepare.png`, fullPage: true });
   progress(9, 30, "prepare view used the open kept promise and excluded the rejected item");
 
-  await page.getByRole("link", { name: "关于 Ta" }).click();
+  await page.getByRole("link", { name: "关于 Ta", exact: true }).click();
+  await page.getByRole("button", { name: "你答应了", exact: true }).click();
   const promiseResponsePromise = page.waitForResponse((response) =>
     /\/api\/date-companion\/promises\/[^/]+$/u.test(applicationPath(response.url()))
     && response.request().method() === "PATCH"
   );
-  await page.getByRole("button", { name: "标为已完成" }).click();
+  await page.getByRole("button", { name: "标为已完成" }).first().click();
   expect((await promiseResponsePromise).ok()).toBe(true);
-  await expect(page.getByText("已完成")).toBeVisible();
+  await expect(page.getByText("已完成").first()).toBeVisible();
   progress(10, 30, "the promise changed from open to done through the real API");
 
   await page.reload();
   await expect(page.getByRole("heading", { name: "Ta", exact: true })).toBeVisible();
-  await expect(page.getByText("已完成")).toBeVisible();
+  await page.getByRole("button", { name: "你答应了", exact: true }).click();
+  await expect(page.getByText("已完成").first()).toBeVisible();
   await expect(page.getByText(keptKeyword, { exact: false }).first()).toBeVisible();
   progress(11, 30, "reload restored the confirmed recap and completed promise");
 
@@ -420,16 +523,22 @@ test("Stage 2 keeps one confirmed relationship across two fixture interactions a
   progress(12, 30, "second date used the same relationship and strict persistence order");
 
   await page.getByRole("link", { name: /查看这次复盘/u }).first().click();
-  await setSpeakerRoles(page);
-  const secondFinalView = await decideAndFinalizeRecap({
+  const secondDraftInteraction = secondUpload.view.interactions.find((item) => item.id === secondUpload.imported.interactionId);
+  if (!secondDraftInteraction) throw new Error("second imported interaction is missing from the relationship view");
+  const secondFinalization = await confirmSpeakersAndFinalize({
     page,
-    keptText: `${keptKeyword}：第二次相处继续跟进`,
-    screenshotPath: undefined
+    interaction: secondDraftInteraction
   });
+  const secondFinalView = secondFinalization.view;
   expect(secondFinalView.interactions.filter((interaction) => interaction.status === "confirmed")).toHaveLength(2);
-  progress(13, 30, "second interaction kept one sourced item and was finally confirmed");
+  const secondInteraction = secondFinalView.interactions.find((item) => item.id === secondUpload.imported.interactionId);
+  const secondExpectedById = new Map(secondFinalization.expectedItems.map((item) => [item.id, item.disposition]));
+  expect(secondInteraction?.recapItems.map((item) => ({ id: item.id, disposition: item.disposition }))).toEqual(
+    secondDraftInteraction.recapItems.map((item) => ({ id: item.id, disposition: secondExpectedById.get(item.id) }))
+  );
+  progress(13, 30, "second interaction used the same one-click speaker confirmation and automatic decisions");
 
-  await page.getByRole("link", { name: "关于 Ta" }).click();
+  await page.getByRole("link", { name: "关于 Ta", exact: true }).click();
   const historySection = page.locator("section").filter({ has: page.getByRole("heading", { name: "一起走过的几次" }) });
   await expect(historySection.locator("ol > li")).toHaveCount(2);
   await expect(historySection.getByText("8 月 2 日")).toBeVisible();
@@ -447,18 +556,34 @@ test("Stage 2 keeps one confirmed relationship across two fixture interactions a
   expect((await keptSearchPromise).ok()).toBe(true);
   await expect(page.locator("ul").filter({ hasText: keptKeyword }).first()).toBeVisible();
   await page.screenshot({ path: `${artifactDir}/stage2-search-results.png`, fullPage: true });
-  progress(15, 30, "relationship search found the kept unique keyword");
+  progress(15, 30, "relationship search found a fixture keyword retained by automatic confirmation");
 
-  await searchInput.fill(excludedKeyword);
-  const excludedSearchPromise = page.waitForResponse((response) =>
+  const excludedIds = new Set([
+    ...firstExcludedItems.map((item) => item.id),
+    ...(secondInteraction?.recapItems.filter((item) => item.disposition === "excluded").map((item) => item.id) ?? [])
+  ]);
+  const excludedProbe = firstExcludedItems[0];
+  if (!excludedProbe) throw new Error("fixture did not produce an automatically excluded recap item");
+  const excludedProbeQuery = excludedProbe.displayedText.slice(0, 120).trim();
+  const excludedProbeResponse = await page.request.get(
+    `/api/date-companion/relationships/${relationshipId}/search?q=${encodeURIComponent(excludedProbeQuery)}`
+  );
+  expect(excludedProbeResponse.ok()).toBe(true);
+  const excludedProbePayload = await excludedProbeResponse.json() as {
+    results: Array<{ recapItemId: string; text: string }>;
+  };
+  expect(excludedProbePayload.results.every((result) => !excludedIds.has(result.recapItemId))).toBe(true);
+
+  await searchInput.fill(absentKeyword);
+  const absentSearchPromise = page.waitForResponse((response) =>
     /\/api\/date-companion\/relationships\/[^/]+\/search$/u.test(applicationPath(response.url()))
-    && new URL(response.url()).searchParams.get("q") === excludedKeyword
+    && new URL(response.url()).searchParams.get("q") === absentKeyword
   );
   await page.getByRole("button", { name: "找一找" }).click();
-  expect((await excludedSearchPromise).ok()).toBe(true);
+  expect((await absentSearchPromise).ok()).toBe(true);
   await expect(page.getByText("没有找到已确认内容")).toBeVisible();
-  await expect(page.getByText(excludedKeyword, { exact: false })).toHaveCount(0);
-  progress(16, 30, "relationship search did not return the excluded unique keyword");
+  await expect(page.getByText(absentKeyword, { exact: false })).toHaveCount(0);
+  progress(16, 30, "search omitted excluded recap IDs and returned no fabricated absent keyword");
 
   const restoredAudit: NetworkAudit = {
     externalRequests: [],
@@ -471,13 +596,25 @@ test("Stage 2 keeps one confirmed relationship across two fixture interactions a
   await login(restoredPage, firstEmail);
   await restoredPage.goto("/date-companion/a/person");
   await expect(restoredPage.getByRole("heading", { name: "Ta", exact: true })).toBeVisible();
+  await restoredPage.getByRole("button", { name: "你答应了", exact: true }).click();
   await expect(restoredPage.getByText(keptKeyword, { exact: false }).first()).toBeVisible();
-  await expect(restoredPage.getByText(excludedKeyword, { exact: false })).toHaveCount(0);
+  await expect(restoredPage.getByText(absentKeyword, { exact: false })).toHaveCount(0);
   await expect(restoredPage.locator("ol").locator("li")).toHaveCount(2);
-  await expect(restoredPage.getByText("可核对原话已保留").first()).toBeVisible();
-  await expect(restoredPage.getByRole("button", { name: "查看完整复盘" })).toHaveCount(0);
+  await restoredPage.locator("summary").filter({ hasText: "核对原话" }).first().click();
+  await expect(restoredPage.getByText("已保留可核对原话").first()).toBeVisible();
+  const restoredHistory = restoredPage.locator("section").filter({
+    has: restoredPage.getByRole("heading", { name: "一起走过的几次" })
+  });
+  await restoredHistory.locator("ol > li").filter({ hasText: "8 月 2 日" })
+    .getByRole("button", { name: "查看保留的复盘" }).click();
+  await expect(restoredPage).toHaveURL(
+    new RegExp(`/date-companion/a/recap\\?interaction=${firstUpload.imported.interactionId}$`, "u")
+  );
+  await expect(restoredPage.getByRole("heading", { name: "这次录音里的说话人" })).toBeVisible();
+  await expect(restoredPage.getByText(/这台设备没有完整文字稿/u)).toBeVisible();
+  await expect(restoredPage.getByRole("button", { name: "查看完整文字稿" })).toHaveCount(0);
   progress(17, 30, "a new browser context restored confirmed server content and evidence snapshots");
-  progress(18, 30, "the new context did not render broken complete-transcript actions");
+  progress(18, 30, "the new context opened an evidence-only historical recap without broken transcript actions");
 
   await registerFixtureUser(baseURL, secondEmail, "Other Fixture User");
   const isolatedAudit: NetworkAudit = {
@@ -496,7 +633,13 @@ test("Stage 2 keeps one confirmed relationship across two fixture interactions a
   expect(await otherRelationships.json()).toEqual({ relationships: [] });
   const crossUserView = await isolatedPage.request.get(`/api/date-companion/relationships/${relationshipId}/view`);
   expect(crossUserView.status()).toBe(404);
-  progress(19, 30, "another user saw no relationship and cross-user IDs returned 404");
+  const crossUserSpeakerId = firstDraftInteraction.participants[0]?.speakerId;
+  if (!crossUserSpeakerId) throw new Error("first fixture interaction has no participant for the isolation check");
+  const crossUserAudio = await isolatedPage.request.get(
+    `/api/date-companion/interactions/${firstUpload.imported.interactionId}/participants/${crossUserSpeakerId}/audio`
+  );
+  expect(crossUserAudio.status()).toBe(404);
+  progress(19, 30, "another user saw no relationship and both cross-user view/audio IDs returned 404");
 
   expect(primaryAudit.externalRequests).toEqual([]);
   expect(restoredAudit.externalRequests).toEqual([]);
@@ -505,11 +648,11 @@ test("Stage 2 keeps one confirmed relationship across two fixture interactions a
   progress(21, 30, "auth, relationship creation, upload, Pipeline, polling and Day APIs were never mocked");
   progress(22, 30, "relationship import and browser-cache DELETE were never mocked");
   progress(23, 30, "participant, recap, promise and search APIs were never mocked");
-  progress(24, 30, "both uploads retained fixed Evidence snapshots after server cleanup");
+  progress(24, 30, "both uploads retained fixed Evidence and playable speaker audio snapshots after server cleanup");
   progress(25, 30, "speaker aliases and provider labels were not used as identity proof");
   progress(26, 30, "unresolved and excluded content stayed outside long-term surfaces");
   progress(27, 30, "current-interaction QA was intentionally not exercised or intercepted in this Stage 2 flow");
-  progress(28, 30, "fixture transcription used the fixed office sample and does not validate dating content quality");
+  progress(28, 30, "fixture transcription used the fixed office sample and synthetic silent transport audio, not dating-content or voice-quality evidence");
   progress(29, 30, `screenshots saved under ${artifactDir}`);
 
   await isolatedContext.close();

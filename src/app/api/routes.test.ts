@@ -33,6 +33,7 @@ const memoryRepositoryMock = vi.hoisted(() => ({
 const dateCompanionRepositoryMock = vi.hoisted(() => ({
   getInteractionVersionByUpload: vi.fn(),
   markUploadSourceState: vi.fn(),
+  prepareInteractionDeletion: vi.fn(),
   deleteInteractionByUpload: vi.fn()
 }));
 const answerQuestionWithAIMock = vi.hoisted(() => vi.fn());
@@ -225,6 +226,12 @@ describe("API routes", () => {
     memoryRepositoryMock.deleteByUpload.mockReturnValue(undefined);
     dateCompanionRepositoryMock.getInteractionVersionByUpload.mockReturnValue(null);
     dateCompanionRepositoryMock.markUploadSourceState.mockReturnValue(true);
+    dateCompanionRepositoryMock.prepareInteractionDeletion.mockReturnValue({
+      interactionId: "interaction_1",
+      relationshipId: "relationship_1",
+      sourceUploadId: "upload_1",
+      version: 3
+    });
     dateCompanionRepositoryMock.deleteInteractionByUpload.mockReturnValue(true);
     afterMock.mockImplementation((callback: () => void) => {
       callback();
@@ -318,6 +325,7 @@ describe("API routes", () => {
     expect(payload.originalName).toBe("../../../demo.m4a");
     expect(payload.filePath).toBe(join(testUploadsRootDir, `${uploadId}.m4a`));
     expect(payload.filePath.includes("..")).toBe(false);
+    expect(payload.dateCompanionAudioSnapshotVersion).toBeUndefined();
     expect(mkdirMock).toHaveBeenCalledWith(testUploadsRootDir, { recursive: true });
     expect(writeFileMock).toHaveBeenCalledOnce();
     expect(storeMock.write).toHaveBeenCalledWith("jobs", jobId, {
@@ -340,6 +348,27 @@ describe("API routes", () => {
     expect(enqueuePipelineJobMock).not.toHaveBeenCalled();
     expect(authContextMock.requireAuthContext).toHaveBeenCalledWith(request);
     expect(processUploadMock).toHaveBeenCalledWith({ uploadId, store: storeMock, userId: "user_default" });
+  });
+
+  it("stores only the normalized internal marker for an exact date-companion upload context", async () => {
+    const formData = new FormData();
+    const file = new File(["audio-data"], "date.m4a", { type: "audio/mp4" });
+    Object.defineProperty(file, "arrayBuffer", {
+      value: vi.fn().mockResolvedValue(new TextEncoder().encode("audio-data").buffer)
+    });
+    formData.set("file", file);
+    formData.set("uploadContext", "date-companion");
+    formData.set("dateCompanionAudioSnapshotVersion", "999");
+
+    const response = await postUpload({
+      formData: vi.fn().mockResolvedValue(formData)
+    } as unknown as Request);
+    const uploadWrite = storeMock.write.mock.calls.find(([collection]) => collection === "uploads");
+
+    expect(response.status).toBe(201);
+    expect(uploadWrite?.[2]).toMatchObject({ dateCompanionAudioSnapshotVersion: 1 });
+    expect(uploadWrite?.[2]).not.toHaveProperty("uploadContext");
+    expect(uploadWrite?.[2]).not.toHaveProperty("dateCompanionAudioSnapshotVersion", 999);
   });
 
   it("enqueues a minimal stable BullMQ job without invoking after in queue mode", async () => {
@@ -2511,9 +2540,55 @@ describe("API routes", () => {
     expect(storeMock.delete).toHaveBeenCalledWith("answers", "answer_1");
     expect(storeMock.delete).toHaveBeenCalledWith("answers", "answer_2");
     expect(storeMock.delete).toHaveBeenCalledWith("answers-by-upload", "upload_1");
+    expect(storeMock.delete).toHaveBeenCalledWith(
+      "date-companion-audio-staging",
+      "upload_1"
+    );
     expect(storeMock.listIds).toHaveBeenCalledWith("analysis-chunks");
     expect(memoryRepositoryMock.deleteByUpload).toHaveBeenCalledWith("user_default", "upload_1");
     await expect(response.json()).resolves.toEqual({ deleted: true });
+  });
+
+  it("does not clean a marked date-companion upload before its SQLite import exists", async () => {
+    storeMock.read.mockImplementation(async (collection: string) => {
+      if (collection === "uploads") {
+        return {
+          id: "upload_1",
+          originalName: "date.m4a",
+          mimeType: "audio/mp4",
+          sizeBytes: 12,
+          recordingDate: "2026-06-03",
+          status: "ready",
+          dateCompanionAudioSnapshotVersion: 1
+        };
+      }
+      return null;
+    });
+
+    const response = await deleteUpload(new Request(
+      "http://localhost/api/uploads/upload_1",
+      {
+        method: "DELETE",
+        headers: { "x-daily-brief-cleanup-mode": "browser-cache" }
+      }
+    ), {
+      params: Promise.resolve({ uploadId: "upload_1" })
+    });
+
+    expect(response.status).toBe(409);
+    expect(storeMock.write).not.toHaveBeenCalledWith(
+      "deleted-uploads",
+      "upload_1",
+      expect.anything()
+    );
+    expect(storeMock.delete).not.toHaveBeenCalledWith(
+      "date-companion-audio-staging",
+      "upload_1"
+    );
+    await expect(response.json()).resolves.toEqual({
+      error: "date_companion_import_required",
+      retryable: true
+    });
   });
 
   it("marks an imported relationship snapshot after browser-cache parent cleanup", async () => {
@@ -2552,6 +2627,10 @@ describe("API routes", () => {
       "server_cleaned"
     );
     expect(dateCompanionRepositoryMock.deleteInteractionByUpload).not.toHaveBeenCalled();
+    expect(storeMock.delete).toHaveBeenCalledWith(
+      "date-companion-audio-staging",
+      "upload_1"
+    );
     const parentDeleteIndex = storeMock.delete.mock.calls.findIndex(
       ([collection, id]) => collection === "uploads" && id === "upload_1"
     );
@@ -2625,6 +2704,11 @@ describe("API routes", () => {
     });
 
     expect(response.status).toBe(200);
+    expect(dateCompanionRepositoryMock.prepareInteractionDeletion).toHaveBeenCalledWith(
+      "user_default",
+      "interaction_1",
+      3
+    );
     expect(dateCompanionRepositoryMock.deleteInteractionByUpload).toHaveBeenCalledWith(
       "user_default",
       "upload_1",
@@ -2635,6 +2719,9 @@ describe("API routes", () => {
       ([collection, id]) => collection === "uploads" && id === "upload_1"
     );
     expect(parentDeleteIndex).toBeGreaterThanOrEqual(0);
+    expect(dateCompanionRepositoryMock.prepareInteractionDeletion.mock.invocationCallOrder[0]).toBeLessThan(
+      storeMock.delete.mock.invocationCallOrder[parentDeleteIndex]
+    );
     expect(storeMock.delete.mock.invocationCallOrder[parentDeleteIndex]).toBeLessThan(
       dateCompanionRepositoryMock.deleteInteractionByUpload.mock.invocationCallOrder[0]
     );
@@ -2672,6 +2759,47 @@ describe("API routes", () => {
       error: "interaction_version_required",
       requiredHeaders: ["x-date-companion-interaction-id", "if-match"]
     });
+    expect(storeMock.write).not.toHaveBeenCalled();
+    expect(storeMock.delete).not.toHaveBeenCalled();
+    expect(dateCompanionRepositoryMock.deleteInteractionByUpload).not.toHaveBeenCalled();
+  });
+
+  it("blocks explicit upload cleanup while voice enrollment is processing", async () => {
+    dateCompanionRepositoryMock.getInteractionVersionByUpload.mockReturnValue({
+      interactionId: "interaction_1",
+      version: 3
+    });
+    dateCompanionRepositoryMock.prepareInteractionDeletion.mockImplementation(() => {
+      throw new DcConflictError("voice_enrollment_in_progress");
+    });
+    storeMock.read.mockImplementation(async (collection: string) =>
+      collection === "uploads"
+        ? {
+          id: "upload_1",
+          originalName: "demo.m4a",
+          mimeType: "audio/mp4",
+          sizeBytes: 12,
+          recordingDate: "2026-06-03",
+          status: "ready"
+        }
+        : null
+    );
+
+    const response = await deleteUpload(new Request(
+      "http://localhost/api/uploads/upload_1",
+      {
+        method: "DELETE",
+        headers: {
+          "x-date-companion-interaction-id": "interaction_1",
+          "if-match": "3"
+        }
+      }
+    ), {
+      params: Promise.resolve({ uploadId: "upload_1" })
+    });
+
+    expect(response.status).toBe(409);
+    await expect(response.json()).resolves.toEqual({ error: "voice_enrollment_in_progress" });
     expect(storeMock.write).not.toHaveBeenCalled();
     expect(storeMock.delete).not.toHaveBeenCalled();
     expect(dateCompanionRepositoryMock.deleteInteractionByUpload).not.toHaveBeenCalled();

@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import { combineDayPayloads } from "@/lib/client/day-aggregation";
 import { parseDayPayload, type DayPayload } from "@/lib/domain/day-payload";
+import { emptyDateCompanionViewModel } from "@/lib/domain/date-companion";
 import type { DcRelationshipView } from "@/lib/domain/date-companion-stage2";
 
 import {
@@ -269,8 +270,8 @@ describe("date-companion adapter", () => {
 
     expect(viewModel.relationship).toBeNull();
     expect(viewModel.recap.participants).toEqual([
-      expect.objectContaining({ speakerId: "speaker_1", alias: "Ta", state: "unresolved" }),
-      expect.objectContaining({ speakerId: "speaker_0", alias: "我", state: "unresolved" })
+      expect.objectContaining({ speakerId: "local_speaker_1", alias: "Ta", state: "unresolved" }),
+      expect.objectContaining({ speakerId: "local_speaker_0", alias: "我", state: "unresolved" })
     ]);
     expect(viewModel.person.remembered).toEqual([]);
     expect(viewModel.person.promises).toEqual([]);
@@ -290,10 +291,12 @@ describe("date-companion adapter", () => {
 
     const viewModel = buildDateCompanionViewModel(payload);
     const providerSpeakerLine = viewModel.currentInteraction?.transcript.find(
-      (line) => line.speakerId === "Provider Alice"
+      (line) => line.text === "今晚聊得很放松。"
     );
     const providerParticipant = viewModel.recap.participants.find(
-      (participant) => participant.speakerId === "Provider Alice"
+      (participant) => participant.sampleQuotes.some(
+        (quote) => quote.quote === "今晚聊得很放松。"
+      )
     );
 
     expect(providerSpeakerLine?.speakerLabel).toBeUndefined();
@@ -392,6 +395,137 @@ describe("date-companion adapter", () => {
       "segment_1",
       "segment_2"
     ]);
+  });
+
+  it("opens a selected confirmed interaction as an evidence-only recap without making it current QA context", () => {
+    const viewModel = applyDateCompanionRelationshipView(
+      emptyDateCompanionViewModel(),
+      relationshipViewFixture(),
+      {
+        selectedInteractionId: "interaction_1",
+        hasLocalDay: () => false,
+        getLocalDay: () => null
+      }
+    );
+
+    expect(viewModel.currentInteraction).toBeNull();
+    expect(viewModel.recap.interaction).toMatchObject({
+      relationshipInteractionId: "interaction_1",
+      persistenceStatus: "confirmed",
+      transcript: []
+    });
+    expect(viewModel.recap.items.map((item) => item.id)).toContain("recap_moment");
+    expect(viewModel.recap.items[0].sources[0].canOpenTranscript).toBe(false);
+    expect(viewModel.recap.chapters).toEqual([]);
+  });
+
+  it("refuses to open a server-only draft through a historical interaction deep link", () => {
+    const view = relationshipViewFixture();
+    view.interactions = [{
+      ...view.interactions[0],
+      status: "draft",
+      confirmedAt: undefined
+    }];
+
+    const viewModel = applyDateCompanionRelationshipView(
+      emptyDateCompanionViewModel(),
+      view,
+      { selectedInteractionId: "interaction_1" }
+    );
+
+    expect(viewModel.currentInteraction).toBeNull();
+    expect(viewModel.recap.interaction).toBeNull();
+    expect(viewModel.recap.items).toEqual([]);
+  });
+
+  it("preselects a continuity suggestion without marking the speaker confirmed", () => {
+    const relationshipView = relationshipViewFixture();
+    relationshipView.interactions = [{
+      ...relationshipView.interactions[0],
+      status: "draft",
+      confirmedAt: undefined,
+      participants: [
+        {
+          speakerId: "speaker_0",
+          role: "unresolved",
+          roleSuggestion: {
+            role: "self",
+            source: "previous_confirmation"
+          }
+        },
+        { speakerId: "speaker_1", role: "unresolved" }
+      ]
+    }];
+    const current = buildDateCompanionViewModel(payloadFixture());
+    const viewModel = applyDateCompanionRelationshipView(current, relationshipView, {
+      hasLocalDay: () => true,
+      getLocalDay: () => payloadFixture()
+    });
+
+    expect(viewModel.recap.participants).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        speakerId: "speaker_0",
+        role: "self",
+        state: "unresolved",
+        roleSuggestion: { role: "self", source: "previous_confirmation" }
+      }),
+      expect.objectContaining({ speakerId: "speaker_1", role: "unresolved" })
+    ]));
+    expect(viewModel.home.participantNotice).toBeTruthy();
+  });
+
+  it("does not invent a playable audio sample for a singleton assignment", () => {
+    const viewModel = applyDateCompanionRelationshipView(
+      buildDateCompanionViewModel(payloadFixture()),
+      relationshipViewFixture()
+    );
+
+    expect(viewModel.recap.participants.find((participant) => participant.speakerId === "speaker_1"))
+      .not.toHaveProperty("audioSpeakerId");
+  });
+
+  it("merges reviewed chunk candidates while preserving every raw speaker id", () => {
+    const relationshipView = relationshipViewFixture();
+    relationshipView.interactions = [{
+      ...relationshipView.interactions[0],
+      status: "draft",
+      confirmedAt: undefined,
+      participants: [
+        {
+          speakerId: "speaker_0",
+          reviewGroupId: "review_same_voice",
+          audioSampleAvailable: true,
+          voiceEnrollmentEligible: true,
+          role: "unresolved",
+          roleSuggestion: { role: "self", source: "previous_confirmation" }
+        },
+        {
+          speakerId: "speaker_x",
+          reviewGroupId: "review_same_voice",
+          voiceEnrollmentEligible: true,
+          role: "unresolved",
+          roleSuggestion: { role: "self", source: "previous_confirmation" }
+        },
+        { speakerId: "speaker_1", role: "unresolved" }
+      ]
+    }];
+
+    const viewModel = applyDateCompanionRelationshipView(
+      buildDateCompanionViewModel(payloadFixture()),
+      relationshipView,
+      { hasLocalDay: () => true, getLocalDay: () => payloadFixture() }
+    );
+
+    expect(viewModel.recap.participants).toHaveLength(2);
+    expect(viewModel.recap.participants).toContainEqual(expect.objectContaining({
+      speakerId: "review_same_voice",
+      memberSpeakerIds: ["speaker_0", "speaker_x"],
+      audioSpeakerId: "speaker_0",
+      voiceEnrollmentEligible: true,
+      role: "self",
+      state: "unresolved",
+      roleSuggestion: { role: "self", source: "previous_confirmation" }
+    }));
   });
 
   it("defensively hides a legacy confirmed interaction with no eligible kept evidence", () => {

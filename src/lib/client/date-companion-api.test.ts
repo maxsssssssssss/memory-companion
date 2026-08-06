@@ -150,6 +150,7 @@ describe("date-companion API", () => {
     expect(request.body).toBeInstanceOf(FormData);
     expect(new Headers(request.headers).has("Content-Type")).toBe(false);
     expect((request.body as FormData).get("recordingDate")).toBe("2026-08-04");
+    expect((request.body as FormData).get("uploadContext")).toBe("date-companion");
   });
 
   it("accepts a deferred queue receipt so the client can keep polling", async () => {
@@ -330,6 +331,7 @@ describe("date-companion API", () => {
       .mockResolvedValueOnce(jsonResponse({ view }))
       .mockResolvedValueOnce(jsonResponse({ view }))
       .mockResolvedValueOnce(jsonResponse({ view }))
+      .mockResolvedValueOnce(jsonResponse({ view }))
       .mockResolvedValueOnce(jsonResponse({ results: [searchResult] }))
       .mockResolvedValueOnce(jsonResponse({ deleted: true }));
     const api = createDateCompanionApi(fetcher as typeof fetch);
@@ -350,6 +352,13 @@ describe("date-companion API", () => {
       items: [{ id: "recap_1", version: 0, userText: "一起去看展", disposition: "kept" }],
       finalize: false
     });
+    await api.updateRecap("interaction_1", {
+      version: 1,
+      assignments: [{ speakerId: "speaker_1", role: "companion" }],
+      items: [{ id: "recap_1", version: 1, disposition: "kept" }],
+      voiceEnrollmentIntents: [{ speakerIds: ["speaker_1"] }],
+      finalize: true
+    });
     await api.patchPromise("promise_1", { version: 0, status: "done" });
     await expect(api.searchRelationship("relationship_1", " 看展 ")).resolves.toEqual([searchResult]);
     await expect(api.deleteInteraction("interaction_1", 3)).resolves.toBeUndefined();
@@ -362,6 +371,7 @@ describe("date-companion API", () => {
       ["POST", "/api/date-companion/relationships/relationship_1/interactions/import"],
       ["PUT", "/api/date-companion/interactions/interaction_1/participants"],
       ["PUT", "/api/date-companion/interactions/interaction_1/recap"],
+      ["PUT", "/api/date-companion/interactions/interaction_1/recap"],
       ["PATCH", "/api/date-companion/promises/promise_1"],
       ["GET", "/api/date-companion/relationships/relationship_1/search?q=%E7%9C%8B%E5%B1%95"],
       ["DELETE", "/api/date-companion/interactions/interaction_1"]
@@ -369,6 +379,13 @@ describe("date-companion API", () => {
     expect(JSON.parse(String(calls[3].init.body))).toEqual({ uploadId: "upload_1" });
     expect(JSON.parse(String(calls[4].init.body))).not.toHaveProperty("userId");
     expect(JSON.parse(String(calls[5].init.body))).not.toHaveProperty("provider");
-    expect(new Headers(calls[8].init.headers).get("if-match")).toBe('"3"');
+    expect(JSON.parse(String(calls[6].init.body))).toEqual({
+      version: 1,
+      assignments: [{ speakerId: "speaker_1", role: "companion" }],
+      items: [{ id: "recap_1", version: 1, disposition: "kept" }],
+      voiceEnrollmentIntents: [{ speakerIds: ["speaker_1"] }],
+      finalize: true
+    });
+    expect(new Headers(calls[9].init.headers).get("if-match")).toBe('"3"');
   });
 });

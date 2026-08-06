@@ -76,15 +76,17 @@ describe("CompanionRecap", () => {
     );
   });
 
-  it("saves an explicit speaker role instead of inferring it from the transcript", async () => {
-    const onSaveParticipants = vi.fn().mockResolvedValue(undefined);
+  it("submits the explicitly selected role and automatic dispositions in one confirmation", async () => {
+    const onFinalize = vi.fn().mockResolvedValue(undefined);
     render(
       <CompanionRecap
         interaction={{ ...interaction, persistenceStatus: "draft", relationshipInteractionId: "interaction-1", version: 0 }}
-        items={items}
-        onSaveParticipants={onSaveParticipants}
+        items={[{ ...items[0], version: 3 }]}
+        onFinalize={onFinalize}
         participants={[{
           speakerId: "speaker_1",
+          audioSpeakerId: "speaker_1",
+          voiceEnrollmentEligible: true,
           displayLabel: "说话人 1",
           state: "confirmed",
           role: "unresolved",
@@ -93,30 +95,248 @@ describe("CompanionRecap", () => {
       />
     );
 
+    const audio = screen.getByLabelText("说话人 1的声音节选");
+    expect(audio).toHaveAttribute(
+      "src",
+      "/api/date-companion/interactions/interaction-1/participants/speaker_1/audio"
+    );
+    expect(screen.queryByText(/Provider/u)).not.toBeInTheDocument();
+    fireEvent.error(audio);
+    expect(screen.getByText("声音节选暂不可用，请结合下面的原话判断。")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "暂不确定" })).toHaveAttribute("aria-pressed", "true");
     fireEvent.click(screen.getByRole("button", { name: "我" }));
-    fireEvent.click(screen.getByRole("button", { name: "保存说话人判断" }));
+    fireEvent.click(screen.getByRole("button", { name: "确认并留下这次相处" }));
 
-    await waitFor(() => expect(onSaveParticipants).toHaveBeenCalledWith([
-      { speakerId: "speaker_1", role: "self" }
-    ]));
+    await waitFor(() => expect(onFinalize).toHaveBeenCalledWith(
+      [{ speakerId: "speaker_1", role: "self" }],
+      [{ id: "moment-1", version: 3, disposition: "kept" }],
+      []
+    ));
   });
 
-  it("keeps edits and disposition decisions separate from final confirmation", async () => {
-    const onSaveRecap = vi.fn().mockResolvedValue(undefined);
+  it("shows a cross-recording suggestion as selected but still asks for review", () => {
+    render(
+      <CompanionRecap
+        interaction={{
+          ...interaction,
+          persistenceStatus: "draft",
+          relationshipInteractionId: "interaction-1",
+          version: 0
+        }}
+        items={items}
+        onFinalize={vi.fn().mockResolvedValue(undefined)}
+        participants={[{
+          speakerId: "speaker_1",
+          audioSpeakerId: "speaker_1",
+          voiceEnrollmentEligible: true,
+          displayLabel: "说话人 1",
+          state: "unresolved",
+          role: "companion",
+          roleSuggestion: {
+            role: "companion",
+            source: "previous_confirmation"
+          },
+          sampleQuotes: []
+        }]}
+      />
+    );
+
+    expect(screen.getByText("已按你上次的确认预选，请再听一次核对")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Ta" })).toHaveAttribute("aria-pressed", "true");
+    expect(screen.queryByRole("radio", { name: /记住这段声音/u })).not.toBeInTheDocument();
+  });
+
+  it("does not offer voice enrollment when audio exists but the server eligibility gate is absent", () => {
+    render(
+      <CompanionRecap
+        interaction={{
+          ...interaction,
+          persistenceStatus: "draft",
+          relationshipInteractionId: "interaction-1",
+          version: 0
+        }}
+        items={items}
+        onFinalize={vi.fn().mockResolvedValue(undefined)}
+        participants={[{
+          speakerId: "speaker_1",
+          audioSpeakerId: "speaker_1",
+          displayLabel: "说话人 1",
+          state: "unresolved",
+          role: "unresolved",
+          sampleQuotes: []
+        }]}
+      />
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Ta" }));
+    expect(screen.queryByRole("radio", { name: /记住这段声音/u })).not.toBeInTheDocument();
+  });
+
+  it("submits one explicit voice enrollment intent only after the user opts in", async () => {
     const onFinalize = vi.fn().mockResolvedValue(undefined);
-    const draftItem: RecapItemVM = { ...items[0], version: 3 };
-    const draftInteraction: InteractionVM = {
-      ...interaction,
-      persistenceStatus: "draft",
-      relationshipInteractionId: "interaction-1",
-      version: 2
+    render(
+      <CompanionRecap
+        interaction={{
+          ...interaction,
+          persistenceStatus: "draft",
+          relationshipInteractionId: "interaction-1",
+          version: 0
+        }}
+        items={[{ ...items[0], version: 2 }]}
+        onFinalize={onFinalize}
+        participants={[{
+          speakerId: "review_same_voice",
+          memberSpeakerIds: ["speaker_1", "speaker_chunk_2"],
+          audioSpeakerId: "speaker_1",
+          voiceEnrollmentEligible: true,
+          displayLabel: "说话人 1",
+          state: "unresolved",
+          role: "unresolved",
+          sampleQuotes: []
+        }]}
+      />
+    );
+
+    expect(screen.queryByRole("radio", { name: /记住这段声音/u })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Ta" }));
+    const enrollment = screen.getByRole("radio", { name: /记住这段声音/u });
+    expect(enrollment).not.toBeChecked();
+    fireEvent.click(enrollment);
+    fireEvent.click(screen.getByRole("button", { name: "确认并留下这次相处" }));
+
+    await waitFor(() => expect(onFinalize).toHaveBeenCalledWith(
+      [
+        { speakerId: "speaker_1", role: "companion" },
+        { speakerId: "speaker_chunk_2", role: "companion" }
+      ],
+      [{ id: "moment-1", version: 2, disposition: "kept" }],
+      [{ speakerIds: ["speaker_1", "speaker_chunk_2"] }]
+    ));
+  });
+
+  it("offers multiple unproven Ta voice groups separately but submits only the one explicitly selected", async () => {
+    const onFinalize = vi.fn().mockResolvedValue(undefined);
+    render(
+      <CompanionRecap
+        interaction={{
+          ...interaction,
+          persistenceStatus: "draft",
+          relationshipInteractionId: "interaction-1",
+          version: 0
+        }}
+        items={[{ ...items[0], version: 2 }]}
+        onFinalize={onFinalize}
+        participants={[
+          {
+            speakerId: "speaker_1",
+            audioSpeakerId: "speaker_1",
+            voiceEnrollmentEligible: true,
+            displayLabel: "说话人 1",
+            state: "unresolved",
+            role: "unresolved",
+            sampleQuotes: []
+          },
+          {
+            speakerId: "speaker_2",
+            audioSpeakerId: "speaker_2",
+            voiceEnrollmentEligible: true,
+            displayLabel: "说话人 2",
+            state: "unresolved",
+            role: "unresolved",
+            sampleQuotes: []
+          }
+        ]}
+      />
+    );
+
+    const companionChoices = screen.getAllByRole("button", { name: "Ta" });
+    fireEvent.click(companionChoices[0]);
+    fireEvent.click(companionChoices[1]);
+    const enrollmentChoices = screen.getAllByRole("radio", { name: /记住这段声音/u });
+    expect(enrollmentChoices).toHaveLength(2);
+    expect(enrollmentChoices[0]).not.toBeChecked();
+    expect(enrollmentChoices[1]).not.toBeChecked();
+
+    fireEvent.click(enrollmentChoices[0]);
+    expect(enrollmentChoices[0]).toBeChecked();
+    fireEvent.click(enrollmentChoices[1]);
+    expect(enrollmentChoices[0]).not.toBeChecked();
+    expect(enrollmentChoices[1]).toBeChecked();
+    fireEvent.click(screen.getByRole("button", { name: "确认并留下这次相处" }));
+
+    await waitFor(() => expect(onFinalize).toHaveBeenCalledWith(
+      [
+        { speakerId: "speaker_1", role: "companion" },
+        { speakerId: "speaker_2", role: "companion" }
+      ],
+      [{ id: "moment-1", version: 2, disposition: "kept" }],
+      [{ speakerIds: ["speaker_2"] }]
+    ));
+  });
+
+  it("confirms one reviewed voice group for every underlying chunk candidate", async () => {
+    const onFinalize = vi.fn().mockResolvedValue(undefined);
+    render(
+      <CompanionRecap
+        interaction={{
+          ...interaction,
+          persistenceStatus: "draft",
+          relationshipInteractionId: "interaction-1",
+          version: 0
+        }}
+        items={[{ ...items[0], version: 2 }]}
+        onFinalize={onFinalize}
+        participants={[{
+          speakerId: "review_same_voice",
+          memberSpeakerIds: ["speaker_1", "speaker_chunk_2"],
+          audioSpeakerId: "speaker_chunk_2",
+          displayLabel: "说话人 1",
+          state: "unresolved",
+          role: "unresolved",
+          sampleQuotes: []
+        }]}
+      />
+    );
+
+    expect(screen.getByLabelText("说话人 1的声音节选")).toHaveAttribute(
+      "src",
+      "/api/date-companion/interactions/interaction-1/participants/speaker_chunk_2/audio"
+    );
+    fireEvent.click(screen.getByRole("button", { name: "我" }));
+    expect(screen.getByText("根据原话整理的内容").closest("[data-disposition]")).toHaveAttribute(
+      "data-disposition",
+      "kept"
+    );
+    fireEvent.click(screen.getByRole("button", { name: "确认并留下这次相处" }));
+
+    await waitFor(() => expect(onFinalize).toHaveBeenCalledWith(
+      [
+        { speakerId: "speaker_1", role: "self" },
+        { speakerId: "speaker_chunk_2", role: "self" }
+      ],
+      [{ id: "moment-1", version: 2, disposition: "kept" }],
+      []
+    ));
+  });
+
+  it("keeps per-item editing and exclusion optional while preserving automatic safety", async () => {
+    const onFinalize = vi.fn().mockResolvedValue(undefined);
+    const mentioned: RecapItemVM = {
+      ...items[0],
+      id: "mentioned-1",
+      kind: "mentioned",
+      version: 4
     };
-    const { rerender } = render(
+    render(
       <CompanionRecap
-        interaction={draftInteraction}
-        items={[draftItem]}
+        interaction={{
+          ...interaction,
+          persistenceStatus: "draft",
+          relationshipInteractionId: "interaction-1",
+          version: 2
+        }}
+        items={[{ ...items[0], version: 3 }, mentioned]}
         onFinalize={onFinalize}
-        onSaveRecap={onSaveRecap}
         participants={[{
           speakerId: "speaker_1",
           displayLabel: "说话人 1",
@@ -127,37 +347,83 @@ describe("CompanionRecap", () => {
       />
     );
 
-    const finalButton = screen.getByRole("button", { name: /最终确认/u });
-    expect(finalButton).toBeDisabled();
-    fireEvent.change(screen.getByRole("textbox", { name: "编辑“这次值得记住”" }), {
-      target: { value: "  我想留下的版本  " }
-    });
-    fireEvent.click(screen.getByRole("button", { name: "不留下" }));
-    expect(screen.getByText("不会进入长期记录")).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "恢复" }));
-    expect(screen.getByText("还没有决定")).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "留下" }));
-    fireEvent.click(screen.getByRole("button", { name: "保存本次修改" }));
+    expect(screen.getByRole("button", { name: "修改" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "这条不留下" })).toBeInTheDocument();
+    expect(screen.getByText("未留下 1 条")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "修改" }));
+    const editor = screen.getByRole("textbox", { name: "修改这条：值得记住" });
+    fireEvent.change(editor, { target: { value: "用户修改后的内容" } });
+    fireEvent.click(screen.getByRole("button", { name: "应用修改" }));
+    fireEvent.click(screen.getByRole("button", { name: "这条不留下" }));
+    expect(screen.getAllByText("你选择不留下这条")).toHaveLength(1);
+    fireEvent.click(screen.getAllByText("未留下 1 条")[0]);
+    fireEvent.click(screen.getByRole("button", { name: "恢复这条" }));
+    fireEvent.click(screen.getByRole("button", { name: "确认并留下这次相处" }));
+    await waitFor(() => expect(onFinalize).toHaveBeenCalledWith(
+      [{ speakerId: "speaker_1", role: "self" }],
+      [
+        { id: "moment-1", version: 3, userText: "用户修改后的内容", disposition: "kept" },
+        { id: "mentioned-1", version: 4, disposition: "excluded" }
+      ],
+      []
+    ));
+  });
 
-    await waitFor(() => expect(onSaveRecap).toHaveBeenCalledWith([{
-      id: "moment-1",
-      version: 3,
-      userText: "我想留下的版本",
-      disposition: "kept"
-    }]));
-    expect(onFinalize).not.toHaveBeenCalled();
-
-    rerender(
+  it("lets the speaker review collapse without changing its controls", () => {
+    const { container } = render(
       <CompanionRecap
-        interaction={{ ...draftInteraction, version: 3 }}
-        items={[{
-          ...draftItem,
-          displayedText: "我想留下的版本",
-          disposition: "kept",
-          version: 4
-        }]}
-        onFinalize={onFinalize}
-        onSaveRecap={onSaveRecap}
+        interaction={{ ...interaction, persistenceStatus: "draft", relationshipInteractionId: "interaction-1" }}
+        items={items}
+        onFinalize={vi.fn()}
+      />
+    );
+
+    const summary = screen.getByText("这次录音里的说话人").closest("summary");
+    const details = summary?.closest("details");
+    expect(details).toHaveAttribute("open");
+    const selfChoice = screen.getByRole("button", { name: "我" });
+    fireEvent.click(selfChoice);
+    expect(selfChoice).toHaveAttribute("aria-pressed", "true");
+    expect(summary).not.toBeNull();
+    fireEvent.click(summary!);
+    expect(details).not.toHaveAttribute("open");
+    fireEvent.click(summary!);
+    expect(details).toHaveAttribute("open");
+    expect(selfChoice).toHaveAttribute("aria-pressed", "true");
+  });
+
+  it("shows only five recap items until that group is expanded", () => {
+    const manyMoments = Array.from({ length: 7 }, (_, index) => ({
+      ...items[0],
+      id: `moment-${index + 1}`,
+      displayedText: `值得记住的内容 ${index + 1}`,
+      proposedText: `值得记住的内容 ${index + 1}`
+    }));
+    render(
+      <CompanionRecap
+        interaction={{ ...interaction, persistenceStatus: "confirmed" }}
+        items={manyMoments.map((item) => ({ ...item, disposition: "kept" }))}
+      />
+    );
+
+    expect(screen.getByText("值得记住的内容 5")).toBeInTheDocument();
+    expect(screen.queryByText("值得记住的内容 6")).not.toBeInTheDocument();
+    const expand = screen.getByRole("button", { name: "展开其余 2 条" });
+    expect(expand).toHaveAttribute("aria-expanded", "false");
+    fireEvent.click(expand);
+    expect(screen.getByText("值得记住的内容 6")).toBeInTheDocument();
+    expect(screen.getByText("值得记住的内容 7")).toBeInTheDocument();
+    const collapse = screen.getByRole("button", { name: "收起，仅显示前 5 条" });
+    expect(collapse).toHaveAttribute("aria-expanded", "true");
+    fireEvent.click(collapse);
+    expect(screen.queryByText("值得记住的内容 6")).not.toBeInTheDocument();
+  });
+
+  it("shows confirmed participant roles on the read-only recap", () => {
+    render(
+      <CompanionRecap
+        interaction={{ ...interaction, persistenceStatus: "confirmed" }}
+        items={[{ ...items[0], disposition: "kept" }]}
         participants={[{
           speakerId: "speaker_1",
           displayLabel: "说话人 1",
@@ -168,9 +434,8 @@ describe("CompanionRecap", () => {
       />
     );
 
-    await waitFor(() => expect(screen.getByRole("button", { name: /最终确认/u })).toBeEnabled());
-    fireEvent.click(screen.getByRole("button", { name: /最终确认/u }));
-    await waitFor(() => expect(onFinalize).toHaveBeenCalledTimes(1));
+    expect(screen.getByText("已确认：我")).toBeInTheDocument();
+    expect(screen.queryByText("尚未核对")).not.toBeInTheDocument();
   });
 
   it("shows evidence without creating a broken transcript link on a new device", () => {
@@ -185,6 +450,70 @@ describe("CompanionRecap", () => {
     expect(screen.getByText("已保留可核对原话")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "在文字稿中查看" })).not.toBeInTheDocument();
     expect(screen.getByText(/这台设备没有完整文字稿/u)).toBeInTheDocument();
+  });
+
+  it("uses the complete server participant set when this device has no transcript", async () => {
+    const onFinalize = vi.fn().mockResolvedValue(undefined);
+    const companionSource = {
+      ...items[0].sources[0],
+      id: "source-2",
+      speakerId: "speaker_2",
+      quote: "Ta 在服务端保留的原话。"
+    };
+    render(
+      <CompanionRecap
+        interaction={{
+          ...interaction,
+          transcript: [],
+          persistenceStatus: "draft",
+          relationshipInteractionId: "interaction-1"
+        }}
+        items={[
+          { ...items[0], version: 1 },
+          { ...items[0], id: "mentioned-1", kind: "mentioned", sources: [companionSource], version: 2 }
+        ]}
+        onFinalize={onFinalize}
+        participants={[
+          {
+            speakerId: "speaker_1",
+            displayLabel: "第一段声音",
+            state: "confirmed",
+            role: "self",
+            sampleQuotes: [items[0].sources[0]]
+          },
+          {
+            speakerId: "speaker_2",
+            displayLabel: "第二段声音",
+            state: "confirmed",
+            role: "companion",
+            sampleQuotes: [companionSource]
+          }
+        ]}
+      />
+    );
+
+    expect(screen.getByLabelText("第一段声音的声音节选")).toHaveAttribute(
+      "src",
+      "/api/date-companion/interactions/interaction-1/participants/speaker_1/audio"
+    );
+    expect(screen.getByLabelText("第二段声音的声音节选")).toHaveAttribute(
+      "src",
+      "/api/date-companion/interactions/interaction-1/participants/speaker_2/audio"
+    );
+    expect(screen.getAllByText("“Ta 在服务端保留的原话。”")).toHaveLength(2);
+    fireEvent.click(screen.getByRole("button", { name: "确认并留下这次相处" }));
+
+    await waitFor(() => expect(onFinalize).toHaveBeenCalledWith(
+      [
+        { speakerId: "speaker_1", role: "self" },
+        { speakerId: "speaker_2", role: "companion" }
+      ],
+      [
+        { id: "moment-1", version: 1, disposition: "kept" },
+        { id: "mentioned-1", version: 2, disposition: "kept" }
+      ],
+      []
+    ));
   });
 
   it("allows finalize when an unresolved speaker appears only in an excluded item", async () => {
@@ -220,14 +549,23 @@ describe("CompanionRecap", () => {
       />
     );
 
-    const finalButton = screen.getByRole("button", { name: /最终确认/u });
+    const finalButton = screen.getByRole("button", { name: "确认并留下这次相处" });
     expect(finalButton).toBeEnabled();
     fireEvent.click(finalButton);
-    await waitFor(() => expect(onFinalize).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(onFinalize).toHaveBeenCalledWith(
+      [
+        { speakerId: "speaker_1", role: "self" },
+        { speakerId: "speaker_2", role: "unresolved" }
+      ],
+      [
+        { id: "moment-1", version: 1, disposition: "kept" },
+        { id: "mentioned-excluded", version: 1, disposition: "excluded" }
+      ],
+      []
+    ));
   });
 
   it("does not invent a participant for transcript lines without a speaker label", () => {
-    const onSaveParticipants = vi.fn().mockResolvedValue(undefined);
     render(
       <CompanionRecap
         interaction={{
@@ -237,13 +575,12 @@ describe("CompanionRecap", () => {
           transcript: [{ ...interaction.transcript[0], speakerId: undefined }]
         }}
         items={[]}
-        onSaveParticipants={onSaveParticipants}
+        onFinalize={vi.fn().mockResolvedValue(undefined)}
       />
     );
 
     expect(screen.getAllByText(/没有稳定的说话人标记/u)).toHaveLength(2);
     expect(screen.getByText("没有可核对的说话人")).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "保存说话人判断" })).not.toBeInTheDocument();
-    expect(onSaveParticipants).not.toHaveBeenCalled();
+    expect(screen.getByRole("button", { name: "确认并留下这次相处" })).toBeDisabled();
   });
 });

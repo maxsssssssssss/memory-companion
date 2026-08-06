@@ -12,6 +12,10 @@ import * as extractionProviderModule from "@/lib/server/extraction/provider";
 import { openMemoryDatabase } from "@/lib/server/memory/db";
 import { createMemoryRepository } from "@/lib/server/memory/repository";
 import { JsonStore } from "@/lib/server/storage/json-store";
+import {
+  DATE_COMPANION_AUDIO_STAGING_COLLECTION,
+  stageDateCompanionParticipantAudio
+} from "@/lib/server/date-companion/audio-staging";
 import { UploadProcessingCancelledError, processUpload } from "./process-upload";
 
 const {
@@ -63,6 +67,7 @@ type StoredUpload = AudioUpload & {
   errorCode?: string;
   errorMessage?: string;
   evaluationRetention?: boolean;
+  dateCompanionAudioSnapshotVersion?: 1;
 };
 
 type DeleteTrigger = (collection: string, id: string, value: unknown) => boolean;
@@ -1432,6 +1437,131 @@ describe("processUpload", () => {
         ])
       );
       expect(storedSemanticSegments).not.toBeNull();
+    } finally {
+      restoreProviderEnv("TRANSCRIPTION_PROVIDER", originalTranscriptionProvider);
+      restoreProviderEnv("EXTRACTION_PROVIDER", originalExtractionProvider);
+    }
+  });
+
+  it("stages participant audio only for a marked date-companion upload before deleting raw audio", async () => {
+    tempDir = await mkdtemp(join(tmpdir(), "brief-pipeline-date-companion-stage-"));
+    const store = new JsonStore(tempDir);
+    const originalTranscriptionProvider = process.env.TRANSCRIPTION_PROVIDER;
+    const originalExtractionProvider = process.env.EXTRACTION_PROVIDER;
+    const stager = vi.fn(async (input: Parameters<typeof stageDateCompanionParticipantAudio>[0]) => {
+      await expect(access(input.sourceFilePath)).resolves.toBeUndefined();
+      return stageDateCompanionParticipantAudio({
+        ...input,
+        buildAudioSamples: async () => [{
+          speakerId: "speaker_0",
+          mimeType: "audio/mpeg" as const,
+          durationMilliseconds: 2_000,
+          audio: new Uint8Array([1, 2, 3]),
+          sourceRanges: [{ startMilliseconds: 0, endMilliseconds: 2_000 }]
+        }]
+      });
+    });
+    const memoryRepository = {
+      replaceUploadMemories: vi.fn(() => ({ inputCount: 0, memoryCount: 0, mergedCount: 0, relationCount: 0 })),
+      getRelevantMemories: vi.fn(() => []),
+      deleteByUpload: vi.fn()
+    };
+
+    try {
+      process.env.TRANSCRIPTION_PROVIDER = "fixture";
+      process.env.EXTRACTION_PROVIDER = "rule";
+      for (const marked of [true, false]) {
+        const uploadId = marked ? "upload_date_companion" : "upload_regular";
+        const filePath = join(tempDir, `${uploadId}.wav`);
+        await writeFile(filePath, "fake audio");
+        await store.write("uploads", uploadId, {
+          id: uploadId,
+          originalName: "demo.wav",
+          mimeType: "audio/wav",
+          sizeBytes: 10,
+          recordingDate: "2026-08-04",
+          status: "uploaded",
+          filePath,
+          ...(marked ? { dateCompanionAudioSnapshotVersion: 1 } : {})
+        });
+
+        const result = await processUpload({
+          uploadId,
+          store,
+          userId: "user_1",
+          memoryRepository,
+          dependencies: { dateCompanionAudioStager: stager }
+        });
+        expect(result.job.status).toBe("ready");
+        await expect(access(filePath)).rejects.toThrow();
+      }
+
+      expect(stager).toHaveBeenCalledOnce();
+      expect(await store.read(
+        DATE_COMPANION_AUDIO_STAGING_COLLECTION,
+        "upload_date_companion"
+      )).toMatchObject({ status: "ready", userId: "user_1" });
+      expect(await store.read(
+        DATE_COMPANION_AUDIO_STAGING_COLLECTION,
+        "upload_regular"
+      )).toBeNull();
+    } finally {
+      restoreProviderEnv("TRANSCRIPTION_PROVIDER", originalTranscriptionProvider);
+      restoreProviderEnv("EXTRACTION_PROVIDER", originalExtractionProvider);
+    }
+  });
+
+  it("keeps raw audio and retry metadata when marked staging fails", async () => {
+    tempDir = await mkdtemp(join(tmpdir(), "brief-pipeline-date-companion-stage-fail-"));
+    const store = new JsonStore(tempDir);
+    const filePath = join(tempDir, "demo.wav");
+    await writeFile(filePath, "fake audio");
+    const originalTranscriptionProvider = process.env.TRANSCRIPTION_PROVIDER;
+    const originalExtractionProvider = process.env.EXTRACTION_PROVIDER;
+    const uploadId = "upload_date_companion_stage_fail";
+
+    try {
+      process.env.TRANSCRIPTION_PROVIDER = "fixture";
+      process.env.EXTRACTION_PROVIDER = "rule";
+      await store.write("uploads", uploadId, {
+        id: uploadId,
+        originalName: "demo.wav",
+        mimeType: "audio/wav",
+        sizeBytes: 10,
+        recordingDate: "2026-08-04",
+        status: "uploaded",
+        filePath,
+        dateCompanionAudioSnapshotVersion: 1
+      });
+
+      const result = await processUpload({
+        uploadId,
+        store,
+        userId: "user_1",
+        memoryRepository: {
+          replaceUploadMemories: vi.fn(() => ({ inputCount: 0, memoryCount: 0, mergedCount: 0, relationCount: 0 })),
+          getRelevantMemories: vi.fn(() => []),
+          deleteByUpload: vi.fn()
+        },
+        dependencies: {
+          dateCompanionAudioStager: vi.fn(async () => {
+            throw new Error("snapshot unavailable");
+          })
+        }
+      });
+
+      expect(result.job.status).toBe("failed");
+      await expect(access(filePath)).resolves.toBeUndefined();
+      expect(await store.read<StoredUpload>("uploads", uploadId)).toMatchObject({
+        status: "failed",
+        filePath,
+        errorCode: "processing_failed",
+        dateCompanionAudioSnapshotVersion: 1
+      });
+      expect(await store.read(
+        DATE_COMPANION_AUDIO_STAGING_COLLECTION,
+        uploadId
+      )).toBeNull();
     } finally {
       restoreProviderEnv("TRANSCRIPTION_PROVIDER", originalTranscriptionProvider);
       restoreProviderEnv("EXTRACTION_PROVIDER", originalExtractionProvider);

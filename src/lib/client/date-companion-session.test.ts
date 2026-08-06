@@ -223,6 +223,42 @@ describe("DateCompanionSessionController", () => {
     expect(window.localStorage.getItem("daily-brief:active-user-id")).toBeNull();
   });
 
+  it("selects a server interaction for evidence-only recap without creating current QA context", async () => {
+    const serverView = relationshipView(["upload_server_only"]);
+    serverView.interactions[0] = {
+      ...serverView.interactions[0],
+      status: "confirmed",
+      confirmedAt: "2026-08-04T11:00:00.000Z"
+    };
+    serverView.interactions.push({
+      ...serverView.interactions[0],
+      id: "interaction_draft",
+      sourceUploadId: "upload_draft",
+      originalName: "upload_draft.m4a",
+      status: "draft",
+      confirmedAt: undefined
+    });
+    const controller = new DateCompanionSessionController({
+      api: fakeApi({ getRelationshipView: async () => serverView }),
+      cache: memoryCache().cache,
+      storage: window.localStorage
+    });
+
+    await controller.initialize();
+    expect(controller.getSnapshot().viewModel.currentInteraction).toBeNull();
+    expect(controller.getSnapshot().viewModel.recap.interaction).toBeNull();
+
+    expect(controller.selectRelationshipInteraction("interaction_1")).toBe(true);
+    expect(controller.getSnapshot().viewModel.currentInteraction).toBeNull();
+    expect(controller.getSnapshot().viewModel.recap.interaction).toMatchObject({
+      relationshipInteractionId: "interaction_1",
+      transcript: []
+    });
+    expect(controller.selectRelationshipInteraction("interaction_draft")).toBe(false);
+    expect(controller.getSnapshot().viewModel.recap.interaction).toBeNull();
+    expect(controller.selectRelationshipInteraction("interaction_other_user")).toBe(false);
+  });
+
   it("can initialize again after the immediate effect cleanup used by React Strict Mode", async () => {
     let callCount = 0;
     const getCurrentUser = vi.fn(async (signal?: AbortSignal) => {
@@ -343,10 +379,10 @@ describe("DateCompanionSessionController", () => {
     expect(cleanup).not.toHaveBeenCalled();
   });
 
-  it("never cleans the server upload when relationship import fails", async () => {
+  it("keeps the server upload when participant audio snapshot import is retryable", async () => {
     const cleanup = vi.fn(async () => undefined);
     const importInteraction = vi.fn(async () => {
-      throw new DateCompanionApiError({ status: 500, code: "relationship_import_failed" });
+      throw new DateCompanionApiError({ status: 503, code: "participant_audio_snapshot_failed" });
     });
     const controller = new DateCompanionSessionController({
       api: fakeApi({ importInteraction, cleanupUpload: cleanup }),
@@ -369,8 +405,74 @@ describe("DateCompanionSessionController", () => {
       failureStage: "relationship_import",
       serverDataRetained: true
     });
-    expect(controller.getSnapshot().uploadState).not.toHaveProperty("message", expect.stringContaining("relationship_import_failed"));
+    expect(controller.getSnapshot().uploadState).not.toHaveProperty("message", expect.stringContaining("participant_audio_snapshot_failed"));
     expect(cleanup).not.toHaveBeenCalled();
+  });
+
+  it("retries an available interaction import after reload before cleaning its source audio", async () => {
+    const cached = payload("upload_1", "ready");
+    const receipt = { uploadId: "upload_1", jobId: "job_1", status: "uploaded" as const };
+    window.localStorage.setItem(
+      "daily-brief:user_1:date-companion:session",
+      JSON.stringify({ version: 1, currentUploadId: "upload_1", receipt })
+    );
+    const order: string[] = [];
+    const pollDay = vi.fn(async () => payload("upload_1", "ready"));
+    const importedView = relationshipView(["upload_1"]);
+    const importInteraction = vi.fn()
+      .mockImplementationOnce(async () => {
+        order.push("import-failed");
+        throw new DateCompanionApiError({ status: 503, code: "participant_audio_snapshot_failed" });
+      })
+      .mockImplementationOnce(async () => {
+        order.push("import-succeeded");
+        return { interactionId: "interaction_1", reused: true, view: importedView };
+      });
+    const cleanupUpload = vi.fn(async () => {
+      order.push("cleanup");
+    });
+    const api = fakeApi({
+      getRelationshipView: async () => importedView,
+      importInteraction,
+      cleanupUpload,
+      pollDay
+    });
+    const cache = memoryCache({ upload_1: cached }).cache;
+    const first = new DateCompanionSessionController({
+      api,
+      cache,
+      storage: window.localStorage,
+      pollIntervalMs: 0
+    });
+
+    await first.initialize();
+
+    expect(first.getSnapshot().uploadState).toMatchObject({
+      status: "failed",
+      failureStage: "relationship_import",
+      serverDataRetained: true
+    });
+    expect(cleanupUpload).not.toHaveBeenCalled();
+    first.dispose();
+
+    const reloaded = new DateCompanionSessionController({
+      api,
+      cache,
+      storage: window.localStorage,
+      pollIntervalMs: 0
+    });
+    await reloaded.initialize();
+
+    expect(order).toEqual(["import-failed", "import-succeeded", "cleanup"]);
+    expect(importInteraction).toHaveBeenCalledTimes(2);
+    expect(cleanupUpload).toHaveBeenCalledTimes(1);
+    expect(pollDay).not.toHaveBeenCalled();
+    expect(reloaded.getSnapshot().uploadState).toMatchObject({
+      status: "ready",
+      uploadId: "upload_1",
+      cacheStatus: "saved",
+      serverCleanupStatus: "completed"
+    });
   });
 
   it("retries partial server cleanup from the full local cache without polling or overwriting it", async () => {
@@ -602,7 +704,25 @@ describe("DateCompanionSessionController", () => {
     await controller.updateRecap("interaction_1", 3, [
       { id: "recap_1", version: 4, userText: "改过的内容", disposition: "kept" }
     ]);
-    await controller.finalizeRecap("interaction_1", 4);
+    await controller.finalizeRecap(
+      "interaction_1",
+      4,
+      [
+        { speakerId: "speaker_0", role: "self" },
+        { speakerId: "speaker_1", role: "companion" }
+      ],
+      [{ id: "recap_1", version: 5, disposition: "kept" }],
+      [{ speakerIds: ["speaker_1"] }]
+    );
+    await controller.finalizeRecap(
+      "interaction_1",
+      5,
+      [
+        { speakerId: "speaker_0", role: "self" },
+        { speakerId: "speaker_1", role: "companion" }
+      ],
+      [{ id: "recap_1", version: 6, disposition: "kept" }]
+    );
     await controller.updatePromise("promise_1", 5, "done");
 
     expect(updateParticipants).toHaveBeenCalledWith("interaction_1", {
@@ -619,7 +739,21 @@ describe("DateCompanionSessionController", () => {
     }, expect.any(AbortSignal));
     expect(updateRecap).toHaveBeenNthCalledWith(2, "interaction_1", {
       version: 4,
-      items: [],
+      assignments: [
+        { speakerId: "speaker_0", role: "self" },
+        { speakerId: "speaker_1", role: "companion" }
+      ],
+      items: [{ id: "recap_1", version: 5, disposition: "kept" }],
+      voiceEnrollmentIntents: [{ speakerIds: ["speaker_1"] }],
+      finalize: true
+    }, expect.any(AbortSignal));
+    expect(updateRecap).toHaveBeenNthCalledWith(3, "interaction_1", {
+      version: 5,
+      assignments: [
+        { speakerId: "speaker_0", role: "self" },
+        { speakerId: "speaker_1", role: "companion" }
+      ],
+      items: [{ id: "recap_1", version: 6, disposition: "kept" }],
       finalize: true
     }, expect.any(AbortSignal));
     expect(patchPromise).toHaveBeenCalledWith("promise_1", { version: 5, status: "done" }, expect.any(AbortSignal));

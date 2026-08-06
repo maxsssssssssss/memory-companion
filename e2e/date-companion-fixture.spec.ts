@@ -265,9 +265,11 @@ test("real local fixture closes the current-interaction browser loop without ext
 
   await page.getByRole("link", { name: /查看这次复盘/u }).first().click();
   await expect(page.getByRole("heading", { name: "这次相处，已经整理好了" })).toBeVisible();
-  const sourceDetails = page.locator("details").filter({ hasText: "个真实来源" }).first();
+  await page.locator("summary").filter({ hasText: /^未留下 \d+ 条$/u }).first().click();
+  const sourceSummary = page.locator("summary").filter({ hasText: "个真实来源" }).first();
+  const sourceDetails = sourceSummary.locator("xpath=..");
   await expect(sourceDetails).toBeVisible();
-  await sourceDetails.locator("summary").click();
+  await sourceSummary.click();
   await expect(sourceDetails.getByRole("button", { name: "在文字稿中查看" })).toBeVisible();
   await page.screenshot({ path: `${artifactDir}/phase-a-recap-source-expanded.png`, fullPage: true });
   progress(8, 20, "recap rendered a real evidence source");
@@ -295,8 +297,11 @@ test("real local fixture closes the current-interaction browser loop without ext
   const requestedSegmentIds = new Set(qaRequests[0].segments.map((segment) => segment.id));
   expect(requestedSegmentIds.size).toBeGreaterThan(0);
   expect([...requestedSegmentIds].every((segmentId) => segmentIds.includes(segmentId))).toBe(true);
-  await page.getByText("来自这次相处 · 当前相处的文字片段").click();
-  await expect(page.getByRole("link", { name: "在完整文字稿中查看" })).toHaveAttribute(
+  const evidenceGroup = page.locator("[data-evidence-group]");
+  await evidenceGroup.locator(":scope > summary").click();
+  const firstEvidence = evidenceGroup.locator('[data-evidence-id="E1"]');
+  await firstEvidence.locator(":scope > summary").click();
+  await expect(firstEvidence.getByRole("link", { name: "在完整文字稿中查看" })).toHaveAttribute(
     "href",
     new RegExp(`segment=${encodeURIComponent(segmentIds[0])}`, "u")
   );

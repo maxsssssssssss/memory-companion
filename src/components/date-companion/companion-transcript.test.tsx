@@ -52,6 +52,7 @@ describe("CompanionTranscript", () => {
   it("searches only the loaded transcript and reports the filtered count", () => {
     render(<CompanionTranscript lines={lines} />);
 
+    fireEvent.click(screen.getByRole("button", { name: "展开完整文字稿" }));
     fireEvent.change(screen.getByRole("searchbox", { name: "搜索完整文字稿" }), {
       target: { value: "电影" }
     });
@@ -59,5 +60,43 @@ describe("CompanionTranscript", () => {
     expect(screen.getByText("下次可以一起看那部电影。")).toBeInTheDocument();
     expect(screen.queryByText("我记得你喜欢手冲咖啡。")).not.toBeInTheDocument();
     expect(screen.getByText("1 / 2 条")).toBeInTheDocument();
+  });
+
+  it("keeps the full transcript collapsed by default and lets the user expand or collapse it", () => {
+    render(<CompanionTranscript lines={lines} />);
+
+    const expandButton = screen.getByRole("button", { name: "展开完整文字稿" });
+    expect(expandButton).toHaveAttribute("aria-expanded", "false");
+    expect(screen.queryByRole("searchbox", { name: "搜索完整文字稿" })).not.toBeInTheDocument();
+    expect(screen.queryByText("我记得你喜欢手冲咖啡。")).not.toBeInTheDocument();
+
+    fireEvent.click(expandButton);
+    const collapseButton = screen.getByRole("button", { name: "收起完整文字稿" });
+    expect(collapseButton).toHaveAttribute("aria-expanded", "true");
+    expect(screen.getByRole("searchbox", { name: "搜索完整文字稿" })).toBeInTheDocument();
+    expect(screen.getByText("我记得你喜欢手冲咖啡。")).toBeInTheDocument();
+
+    fireEvent.click(collapseButton);
+    expect(screen.getByRole("button", { name: "展开完整文字稿" })).toHaveAttribute("aria-expanded", "false");
+    expect(screen.queryByRole("searchbox", { name: "搜索完整文字稿" })).not.toBeInTheDocument();
+  });
+
+  it("opens automatically and clears filtering when a source segment is requested", async () => {
+    const { rerender } = render(<CompanionTranscript lines={lines} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "展开完整文字稿" }));
+    fireEvent.change(screen.getByRole("searchbox", { name: "搜索完整文字稿" }), {
+      target: { value: "电影" }
+    });
+    fireEvent.click(screen.getByRole("button", { name: "收起完整文字稿" }));
+
+    rerender(<CompanionTranscript highlightedSegmentId="segment-earlier" lines={lines} />);
+
+    await waitFor(() => expect(screen.getByRole("button", { name: "收起完整文字稿" })).toHaveAttribute("aria-expanded", "true"));
+    expect(screen.getByRole("searchbox", { name: "搜索完整文字稿" })).toHaveValue("");
+    const highlightedLine = document.getElementById("transcript-segment-earlier");
+    expect(highlightedLine).toHaveAttribute("aria-current", "true");
+    await waitFor(() => expect(scrollIntoView).toHaveBeenCalledWith({ behavior: "smooth", block: "center" }));
+    expect(highlightedLine).toHaveFocus();
   });
 });

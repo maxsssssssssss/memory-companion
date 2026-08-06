@@ -1,5 +1,6 @@
 import { spawn, spawnSync } from "node:child_process";
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir } from "node:fs/promises";
+import { createRequire } from "node:module";
 import net from "node:net";
 import { resolve } from "node:path";
 
@@ -21,39 +22,39 @@ const artifactDir = resolve(
   process.env.DATE_COMPANION_E2E_ARTIFACT_DIR ? "" : "artifacts"
 );
 const fixtureDirectory = resolve(workspaceDir, relativeDataDir, "fixtures");
-const fixturePath = resolve(fixtureDirectory, "date-companion-fixture.wav");
+const fixturePath = resolve(fixtureDirectory, "date-companion-fixture.mp3");
 const networkGuardPath = resolve(workspaceDir, "scripts/date-companion-e2e-network-guard.cjs").replaceAll("\\", "/");
+const require = createRequire(import.meta.url);
+const ffmpegExecutable = process.env.FFMPEG_PATH?.trim() || require("ffmpeg-static");
 
-function createDeterministicPcmWav() {
-  const sampleRate = 16_000;
-  const channels = 1;
-  const bitsPerSample = 16;
-  const durationSeconds = 5;
-  const bytesPerSample = bitsPerSample / 8;
-  const sampleCount = sampleRate * durationSeconds;
-  const pcmByteLength = sampleCount * channels * bytesPerSample;
-  const wav = Buffer.alloc(44 + pcmByteLength);
-
-  wav.write("RIFF", 0, "ascii");
-  wav.writeUInt32LE(36 + pcmByteLength, 4);
-  wav.write("WAVE", 8, "ascii");
-  wav.write("fmt ", 12, "ascii");
-  wav.writeUInt32LE(16, 16);
-  wav.writeUInt16LE(1, 20);
-  wav.writeUInt16LE(channels, 22);
-  wav.writeUInt32LE(sampleRate, 24);
-  wav.writeUInt32LE(sampleRate * channels * bytesPerSample, 28);
-  wav.writeUInt16LE(channels * bytesPerSample, 32);
-  wav.writeUInt16LE(bitsPerSample, 34);
-  wav.write("data", 36, "ascii");
-  wav.writeUInt32LE(pcmByteLength, 40);
-
-  for (let sampleIndex = 0; sampleIndex < sampleCount; sampleIndex += 1) {
-    const sample = ((sampleIndex % 200) - 100) * 80;
-    wav.writeInt16LE(sample, 44 + sampleIndex * bytesPerSample);
+function createDeterministicFixtureAudio(outputPath) {
+  const result = spawnSync(ffmpegExecutable, [
+    "-hide_banner",
+    "-loglevel",
+    "error",
+    "-y",
+    "-f",
+    "lavfi",
+    "-i",
+    "anullsrc=r=16000:cl=mono",
+    "-t",
+    "5525",
+    "-codec:a",
+    "libmp3lame",
+    "-b:a",
+    "8k",
+    "-f",
+    "mp3",
+    outputPath
+  ], {
+    encoding: "utf8",
+    stdio: ["ignore", "ignore", "pipe"],
+    timeout: 120_000,
+    windowsHide: true
+  });
+  if (result.status !== 0) {
+    throw new Error(`Unable to create long fixture audio: ${result.stderr?.trim() || `ffmpeg status ${result.status}`}`);
   }
-
-  return wav;
 }
 
 function progress(completed, total, message) {
@@ -130,7 +131,8 @@ await Promise.all([
   mkdir(artifactDir, { recursive: true }),
   mkdir(fixtureDirectory, { recursive: true })
 ]);
-await writeFile(fixturePath, createDeterministicPcmWav());
+progress(0, 5, "creating compact synthetic audio that covers every fixture transcript timestamp");
+createDeterministicFixtureAudio(fixturePath);
 const port = await reserveFreePort();
 const baseURL = `http://127.0.0.1:${port}`;
 const nodeOptions = [process.env.NODE_OPTIONS?.trim(), `--require=${networkGuardPath}`].filter(Boolean).join(" ");
@@ -178,7 +180,7 @@ progress(1, 5, `loopback port verified port=${port}`);
 progress(
   2,
   5,
-  `isolated environment ready data_dir=${relativeDataDir} fixture=${fixturePath} spec=${requestedSpec}`
+  `isolated environment ready data_dir=${relativeDataDir} fixture=${fixturePath} fixture_audio=5525s_synthetic_silence spec=${requestedSpec}`
 );
 console.log(
   `[date-companion-e2e] providers transcription=fixture extraction=rule audio_insight=rule ` +

@@ -41,6 +41,7 @@ import { PUT as updateRecap } from "./interactions/[interactionId]/recap/route";
 import { PATCH as patchPromise } from "./promises/[promiseId]/route";
 import { GET as searchRelationship } from "./relationships/[relationshipId]/search/route";
 import { DELETE as deleteInteraction } from "./interactions/[interactionId]/route";
+import { GET as getParticipantAudio } from "./interactions/[interactionId]/participants/[speakerId]/audio/route";
 
 const roots: string[] = [];
 
@@ -52,7 +53,10 @@ describe("Date Companion API isolation", () => {
     database = openDateCompanionDatabase({ filePath: ":memory:" });
     repository = new DateCompanionRepository(database);
     state.repository = repository;
-    state.store = {};
+    state.store = {
+      delete: vi.fn(async () => undefined),
+      list: vi.fn(async () => [])
+    };
   });
 
   afterEach(async () => {
@@ -96,7 +100,7 @@ describe("Date Companion API isolation", () => {
       sourceUploadId: "upload_1",
       recordingDate: "2026-08-04",
       originalName: "fixture.wav",
-      speakerIds: ["speaker_0"],
+      participants: [{ speakerId: "speaker_0" }],
       recapCandidates: [{
         kind: "promise",
         proposedText: "我来跟进",
@@ -129,6 +133,60 @@ describe("Date Companion API isolation", () => {
     const stale = (await call(0, "speaker_0"))!;
     expect(stale.status).toBe(409);
     await expect(stale.json()).resolves.toMatchObject({ error: "version_conflict", currentVersion: 1 });
+  });
+
+  it("serves participant audio only to its user and honors byte ranges", async () => {
+    const relationship = repository.createOrGetRelationship("user_a").relationship;
+    const imported = repository.importInteraction({
+      userId: "user_a",
+      relationshipId: relationship.id,
+      sourceUploadId: "upload_audio",
+      recordingDate: "2026-08-04",
+      originalName: "audio.wav",
+      participants: [{ speakerId: "speaker_0" }],
+      recapCandidates: []
+    });
+    repository.saveParticipantAudioSamples({
+      userId: "user_a",
+      interactionId: imported.interactionId,
+      samples: [{
+        speakerId: "speaker_0",
+        mimeType: "audio/mpeg",
+        durationMilliseconds: 1_500,
+        audio: new Uint8Array([10, 20, 30, 40, 50])
+      }]
+    });
+    const call = (userId?: string, range?: string) => getParticipantAudio(new Request(
+      `http://localhost/api/date-companion/interactions/${imported.interactionId}/participants/speaker_0/audio`,
+      {
+        headers: {
+          ...(userId ? { "x-test-user": userId } : {}),
+          ...(range ? { range } : {})
+        }
+      }
+    ), {
+      params: Promise.resolve({ interactionId: imported.interactionId, speakerId: "speaker_0" })
+    });
+
+    const anonymous = (await call())!;
+    expect(anonymous.status).toBe(401);
+    expect(anonymous.headers.get("cache-control")).toBe("private, no-store");
+    const otherUser = (await call("user_b"))!;
+    expect(otherUser.status).toBe(404);
+    expect(otherUser.headers.get("cache-control")).toBe("private, no-store");
+    const full = (await call("user_a"))!;
+    expect(full.status).toBe(200);
+    expect(full.headers.get("content-type")).toBe("audio/mpeg");
+    expect(full.headers.get("accept-ranges")).toBe("bytes");
+    expect(full.headers.get("cache-control")).toBe("private, no-store");
+    expect(new Uint8Array(await full.arrayBuffer())).toEqual(new Uint8Array([10, 20, 30, 40, 50]));
+
+    const partial = (await call("user_a", "bytes=1-3"))!;
+    expect(partial.status).toBe(206);
+    expect(partial.headers.get("content-range")).toBe("bytes 1-3/5");
+    expect(partial.headers.get("cache-control")).toBe("private, no-store");
+    expect(new Uint8Array(await partial.arrayBuffer())).toEqual(new Uint8Array([20, 30, 40]));
+    expect((await call("user_a", "bytes=99-100"))!.status).toBe(416);
   });
 
   it("imports through the route from server DayPayload and accepts only uploadId", async () => {
@@ -217,7 +275,7 @@ describe("Date Companion API isolation", () => {
       sourceUploadId: "upload_routes",
       recordingDate: "2026-08-04",
       originalName: "routes.wav",
-      speakerIds: ["speaker_0"],
+      participants: [{ speakerId: "speaker_0" }],
       recapCandidates: [{
         kind: "promise",
         proposedText: "book the restaurant",
@@ -248,20 +306,9 @@ describe("Date Companion API isolation", () => {
 
     expect((await recapRequest(null, { version: 0, items: [], finalize: true }))!.status).toBe(401);
     expect((await recapRequest("user_b", { version: 0, items: [], finalize: true }))!.status).toBe(404);
-    expect((await updateParticipants(new Request(
-      `http://localhost/api/date-companion/interactions/${interactionId}/participants`,
-      {
-        method: "PUT",
-        headers: { "content-type": "application/json", "x-test-user": "user_a" },
-        body: JSON.stringify({
-          version: 0,
-          assignments: [{ speakerId: "speaker_0", role: "self" }]
-        })
-      }
-    ), { params: Promise.resolve({ interactionId }) }))!.status).toBe(200);
-
     const finalizeBody = {
-      version: 1,
+      version: 0,
+      assignments: [{ speakerId: "speaker_0", role: "self" }],
       items: [{ id: recapItem.id, version: 0, disposition: "kept" }],
       finalize: true
     };
@@ -278,7 +325,7 @@ describe("Date Companion API isolation", () => {
     await expect(repeated.json()).resolves.toMatchObject({ view: { promises: [{ id: promise.id }] } });
     const mismatchedReplay = (await recapRequest(
       "user_a",
-      { version: 1, items: [], finalize: true }
+      { version: 0, items: [], finalize: true }
     ))!;
     expect(mismatchedReplay.status).toBe(409);
     await expect(mismatchedReplay.json()).resolves.toEqual({
@@ -339,8 +386,135 @@ describe("Date Companion API isolation", () => {
       currentVersion: interactionVersion
     });
     expect((await remove("user_b", `"${interactionVersion}"`))!.status).toBe(404);
+    expect((state.store as { delete: ReturnType<typeof vi.fn> }).delete).not.toHaveBeenCalled();
+    expect((state.store as { list: ReturnType<typeof vi.fn> }).list).not.toHaveBeenCalled();
     expect((await remove("user_a", `"${interactionVersion}"`))!.status).toBe(200);
+    expect((state.store as { delete: ReturnType<typeof vi.fn> }).delete).toHaveBeenCalledWith(
+      "date-companion-audio-staging",
+      "upload_routes"
+    );
+    expect((state.store as { list: ReturnType<typeof vi.fn> }).list).toHaveBeenCalledWith(
+      "speaker-identity-manual-mappings"
+    );
     expect(repository.getRelationshipView("user_a", relationship.id).interactions).toEqual([]);
     expect(repository.getRelationshipView("user_a", relationship.id).promises).toEqual([]);
+  });
+
+  it("rejects bootstrap voice enrollment through the API when the participant already has continuity", async () => {
+    const relationship = repository.createOrGetRelationship("user_existing", "Ta").relationship;
+    const imported = repository.importInteraction({
+      userId: "user_existing",
+      relationshipId: relationship.id,
+      sourceUploadId: "upload_existing",
+      recordingDate: "2026-08-05",
+      originalName: "existing.wav",
+      participants: [{ speakerId: "partner_existing", continuityKey: "identity_existing" }],
+      recapCandidates: [{
+        kind: "moment",
+        proposedText: "一起散步",
+        sortOrder: 0,
+        evidence: [{
+          uploadId: "upload_existing",
+          sourceSegmentId: "segment_existing",
+          startSeconds: 0,
+          endSeconds: 2,
+          speakerId: "partner_existing",
+          quote: "一起散步"
+        }]
+      }]
+    });
+    repository.saveVoiceEnrollmentSnapshots({
+      userId: "user_existing",
+      relationshipId: relationship.id,
+      interactionId: imported.interactionId,
+      snapshots: [{
+        reviewGroupId: "partner_existing",
+        speakerIds: ["partner_existing"],
+        sourceUploadId: "upload_existing",
+        providerRecordId: "record_existing",
+        chunkId: "chunk_existing",
+        localSpeaker: "speaker_1",
+        auditStatus: "verified",
+        auditReason: "voiceprint_match",
+        auditDigest: "e".repeat(64),
+        expiresAt: "2099-01-01T00:00:00.000Z"
+      }]
+    });
+    const detail = repository.getRelationshipView("user_existing", relationship.id).interactions[0];
+    const previousVoiceEnrollmentEnvironment = {
+      DATE_COMPANION_VOICE_ENROLLMENT_ENABLED:
+        process.env.DATE_COMPANION_VOICE_ENROLLMENT_ENABLED,
+      PIPELINE_EXECUTION_MODE: process.env.PIPELINE_EXECUTION_MODE,
+      APP_DATA_DIR: process.env.APP_DATA_DIR,
+      APP_STORAGE_MODE: process.env.APP_STORAGE_MODE,
+      PIPELINE_WORKER_CONCURRENCY: process.env.PIPELINE_WORKER_CONCURRENCY
+    };
+    process.env.DATE_COMPANION_VOICE_ENROLLMENT_ENABLED = "true";
+    process.env.PIPELINE_EXECUTION_MODE = "queue";
+    process.env.APP_DATA_DIR = join(tmpdir(), "date-companion-route-queue-data");
+    process.env.APP_STORAGE_MODE = "server";
+    process.env.PIPELINE_WORKER_CONCURRENCY = "1";
+    try {
+      const response = (await updateRecap(new Request(
+        `http://localhost/api/date-companion/interactions/${imported.interactionId}/recap`,
+        {
+          method: "PUT",
+          headers: { "content-type": "application/json", "x-test-user": "user_existing" },
+          body: JSON.stringify({
+            version: 0,
+            assignments: [{ speakerId: "partner_existing", role: "companion" }],
+            items: [{ id: detail.recapItems[0].id, version: 0, disposition: "kept" }],
+            voiceEnrollmentIntents: [{ speakerIds: ["partner_existing"] }],
+            finalize: true
+          })
+        }
+      ), { params: Promise.resolve({ interactionId: imported.interactionId }) }))!;
+      expect(response.status).toBe(409);
+      await expect(response.json()).resolves.toEqual({
+        error: "voice_enrollment_bootstrap_requires_empty_profile"
+      });
+      expect(repository.getRelationshipView("user_existing", relationship.id)
+        .interactions[0].status).toBe("draft");
+    } finally {
+      for (const [key, value] of Object.entries(previousVoiceEnrollmentEnvironment)) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+    }
+  });
+
+  it("retains the interaction when explicit-delete voice cleanup fails", async () => {
+    const relationship = repository.createOrGetRelationship("user_cleanup", "Ta").relationship;
+    const imported = repository.importInteraction({
+      userId: "user_cleanup",
+      relationshipId: relationship.id,
+      sourceUploadId: "upload_cleanup_failure",
+      recordingDate: "2026-08-05",
+      originalName: "cleanup.wav",
+      participants: [],
+      recapCandidates: []
+    });
+    (state.store as { delete: ReturnType<typeof vi.fn> }).delete
+      .mockRejectedValueOnce(new Error("cleanup failed"));
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    try {
+      const response = (await deleteInteraction(new Request(
+        `http://localhost/api/date-companion/interactions/${imported.interactionId}`,
+        {
+          method: "DELETE",
+          headers: { "x-test-user": "user_cleanup", "if-match": "0" }
+        }
+      ), { params: Promise.resolve({ interactionId: imported.interactionId }) }))!;
+      expect(response.status).toBe(500);
+      await expect(response.json()).resolves.toEqual({
+        error: "interaction_voice_cleanup_failed",
+        deleted: false,
+        retryable: true
+      });
+      expect(repository.getRelationshipView("user_cleanup", relationship.id)
+        .interactions).toHaveLength(1);
+    } finally {
+      consoleError.mockRestore();
+    }
   });
 });
