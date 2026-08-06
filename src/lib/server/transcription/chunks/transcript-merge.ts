@@ -42,7 +42,7 @@ const MIN_DUPLICATE_TEXT_LENGTH = 4;
 const MIN_TIME_OVERLAP_RATIO = 0.6;
 const MIN_TEXT_SIMILARITY = 0.78;
 
-function buildChunkSegmentId(uploadId: string, chunkIndex: number, segmentIndex: number) {
+export function buildChunkSegmentId(uploadId: string, chunkIndex: number, segmentIndex: number) {
   return `${uploadId}_chunk_${String(chunkIndex).padStart(5, "0")}_seg_${String(segmentIndex + 1).padStart(5, "0")}`;
 }
 

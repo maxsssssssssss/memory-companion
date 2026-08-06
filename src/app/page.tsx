@@ -423,7 +423,10 @@ function saveAudioInsightCorrectionsToLocalCache(uploadId: string, corrections: 
 async function cleanupServerUploadAfterLocalCache(uploadId: string) {
   try {
     await fetch(`/api/uploads/${uploadId}`, {
-      method: "DELETE"
+      method: "DELETE",
+      headers: {
+        "x-daily-brief-cleanup-mode": "browser-cache"
+      }
     });
   } catch {
     // Cleanup is best-effort; if it fails, the user can still delete the record manually.
@@ -1601,6 +1604,18 @@ function DailyBriefApp({ user, onLogout }: { user: AuthUser; onLogout: () => Pro
 
   async function deleteUploadRecord(targetUploadId: string) {
     const cachedPayload = readLocalDayPayload(targetUploadId);
+
+    if (cachedPayload && !isLocalUploadId(targetUploadId)) {
+      const response = await fetch(`/api/uploads/${targetUploadId}`, {
+        method: "DELETE"
+      });
+      if (!response.ok && response.status !== 404) {
+        const errorPayload = (await response.json()) as { error?: string };
+        return { ok: false, errorMessage: errorPayload.error ?? "删除失败。" };
+      }
+      deleteLocalDayPayload(targetUploadId);
+      return { ok: true };
+    }
 
     if (cachedPayload || isLocalUploadId(targetUploadId)) {
       deleteLocalDayPayload(targetUploadId);

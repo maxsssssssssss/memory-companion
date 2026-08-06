@@ -1,6 +1,7 @@
 import { Queue, type JobsOptions } from "bullmq";
 import IORedis from "ioredis";
 import { getPipelineQueueConfig, type PipelineQueueConfig } from "./config";
+import { assertQueueStorageProbe } from "./storage-probe";
 import {
   buildPipelineJobId,
   PIPELINE_QUEUE_JOB_NAME,
@@ -24,6 +25,7 @@ export type PipelineQueueAdapter = {
 export type RedisConnectionAdapter = {
   connect(): Promise<unknown>;
   ping(): Promise<unknown>;
+  get(key: string): Promise<string | null>;
   quit(): Promise<unknown>;
   disconnect(reconnect?: boolean): void;
 };
@@ -31,6 +33,10 @@ export type RedisConnectionAdapter = {
 export type PipelineProducerDependencies = {
   createRedis: (config: PipelineQueueConfig) => RedisConnectionAdapter;
   createQueue: (config: PipelineQueueConfig, connection: RedisConnectionAdapter) => PipelineQueueAdapter;
+  verifyStorageProbe: (
+    config: PipelineQueueConfig,
+    connection: RedisConnectionAdapter
+  ) => Promise<unknown>;
 };
 
 const defaultDependencies: PipelineProducerDependencies = {
@@ -45,7 +51,11 @@ const defaultDependencies: PipelineProducerDependencies = {
   createQueue: (config, connection) =>
     new Queue<PipelineJobData>(config.queueName, {
       connection: connection as IORedis
-    }) as unknown as PipelineQueueAdapter
+    }) as unknown as PipelineQueueAdapter,
+  verifyStorageProbe: (config, connection) => assertQueueStorageProbe({
+    config,
+    redis: connection
+  })
 };
 
 export type EnqueuePipelineJobResult = { jobId: string; enqueued: boolean };
@@ -89,10 +99,12 @@ export async function enqueuePipelineJob(
   const jobId = buildPipelineJobId(payload);
   const redis = dependencies.createRedis(config);
   let queue: PipelineQueueAdapter | undefined;
+  let addAttempted = false;
 
   try {
     await redis.connect();
     await redis.ping();
+    await dependencies.verifyStorageProbe(config, redis);
     queue = dependencies.createQueue(config, redis);
     await queue.waitUntilReady();
     const existing = await queue.getJob(jobId);
@@ -110,17 +122,28 @@ export async function enqueuePipelineJob(
       }
       await existing.remove();
     }
+    addAttempted = true;
     await queue.add(PIPELINE_QUEUE_JOB_NAME, payload, {
       jobId,
       attempts: config.attempts,
       backoff: { type: "exponential", delay: config.backoffMs },
-      removeOnComplete: false,
-      removeOnFail: false
+      removeOnComplete: config.retention.completed,
+      removeOnFail: config.retention.failed
     });
     return { jobId, enqueued: true };
   } catch (error) {
     if (error instanceof PipelineQueueUnavailableError) {
       throw error;
+    }
+    // BullMQ may persist the stable job and then lose the producer response.
+    // Treat a readable job as accepted so the Web route never overwrites a
+    // concurrently running/ready product state with a false terminal failure.
+    if (queue && addAttempted) {
+      try {
+        if (await queue.getJob(jobId)) return { jobId, enqueued: false };
+      } catch {
+        // Preserve the original availability error when Redis is ambiguous.
+      }
     }
     throw new PipelineQueueUnavailableError(error);
   } finally {

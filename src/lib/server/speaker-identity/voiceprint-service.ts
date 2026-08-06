@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 
+import { isChunkLocalSpeakerLabel } from "@/lib/domain/speaker-identity";
 import {
   JsonSpeakerIdentityRepository,
   type ManualSpeakerIdentityMapping,
@@ -8,6 +9,7 @@ import {
 } from "./repository";
 import {
   createConfiguredVoiceprintProvider,
+  VOICEPRINT_PROVIDER_KNOWN_USER_LABEL,
   VoiceprintProviderError,
   type VoiceprintProvider,
   type VoiceprintTrainingAudio
@@ -21,7 +23,6 @@ import type { VoiceIdentityProfile } from "./types";
 import type { JsonStore } from "@/lib/server/storage/json-store";
 
 const MAX_CONTACT_PROFILES = 10;
-const LOCAL_SPEAKER_LABEL_PATTERN = /^speaker[_-]?\d+$/iu;
 const workflowLocks = new Map<string, Promise<unknown>>();
 
 type ProfileRepository = Pick<
@@ -84,6 +85,21 @@ function knownUserGlobalSpeakerId(userId: string) {
 
 function providerSpeakerLabel(profile: SpeakerIdentityProfile) {
   return profile.providerReference?.speakerLabel ?? profile.voiceprintSpeakerId;
+}
+
+function matchesKnownUserProviderLabel(
+  profile: SpeakerIdentityProfile,
+  userId: string
+) {
+  const speakerLabel = providerSpeakerLabel(profile);
+  return (
+    speakerLabel === VOICEPRINT_PROVIDER_KNOWN_USER_LABEL ||
+    (
+      profile.identityType === "known_user" &&
+      profile.providerReference?.operationType === "train" &&
+      speakerLabel === userId
+    )
+  );
 }
 
 function completeVoiceIdentityProfile(
@@ -202,11 +218,11 @@ export class VoiceprintService {
       status: "active",
       providerReference: {
         provider: "company_voiceprint",
-        speakerLabel: input.userId,
+        speakerLabel: VOICEPRINT_PROVIDER_KNOWN_USER_LABEL,
         lastRequestId: input.requestId,
         operationType: "train"
       },
-      voiceprintSpeakerId: input.userId
+      voiceprintSpeakerId: VOICEPRINT_PROVIDER_KNOWN_USER_LABEL
     });
     return requireCompleteVoiceIdentityProfile(profile);
   }
@@ -296,7 +312,9 @@ export class VoiceprintService {
           "completed voiceprint training is missing its local profile"
         );
       }
-      const completedProfile = completeVoiceIdentityProfile(profile)
+      const completedProfile =
+        completeVoiceIdentityProfile(profile) &&
+        profile.providerReference.speakerLabel === VOICEPRINT_PROVIDER_KNOWN_USER_LABEL
         ? profile
         : await this.saveKnownUserProfile(input);
       return { operation: existingOperation, profile: completedProfile, reused: true };
@@ -310,8 +328,12 @@ export class VoiceprintService {
         profile.userId === input.userId &&
         profile.providerReference.operationType === "train" &&
         profile.providerReference.lastRequestId === input.requestId &&
-        profile.providerReference.speakerLabel === input.userId
+        matchesKnownUserProviderLabel(profile, input.userId)
       ) {
+        const completedProfile =
+          profile.providerReference.speakerLabel === VOICEPRINT_PROVIDER_KNOWN_USER_LABEL
+            ? profile
+            : await this.saveKnownUserProfile(input);
         const operation = await this.operations.save({
           providerRequestId: input.requestId,
           operationType: "train",
@@ -326,7 +348,7 @@ export class VoiceprintService {
             globalSpeakerId
           }
         });
-        return { operation, profile, reused: true };
+        return { operation, profile: completedProfile, reused: true };
       }
       throw new VoiceprintWorkflowError(
         "operation_in_progress",
@@ -344,7 +366,10 @@ export class VoiceprintService {
     const conflictingProviderIdentity = (await this.profiles.listProfiles()).find(
       (profile) =>
         profile.globalSpeakerId !== globalSpeakerId &&
-        providerSpeakerLabel(profile) === input.userId
+        (
+          providerSpeakerLabel(profile) === VOICEPRINT_PROVIDER_KNOWN_USER_LABEL ||
+          matchesKnownUserProviderLabel(profile, input.userId)
+        )
     );
     if (conflictingProviderIdentity) {
       throw new VoiceprintWorkflowError(
@@ -485,8 +510,8 @@ export class VoiceprintService {
     input: SaveContactVoiceprintInput
   ): Promise<SaveContactVoiceprintResult> {
     if (
-      LOCAL_SPEAKER_LABEL_PATTERN.test(input.displayName.trim()) ||
-      LOCAL_SPEAKER_LABEL_PATTERN.test(input.providerSpeakerId.trim())
+      isChunkLocalSpeakerLabel(input.displayName) ||
+      isChunkLocalSpeakerLabel(input.providerSpeakerId)
     ) {
       throw new VoiceprintWorkflowError(
         "invalid_contact_name",
@@ -622,7 +647,8 @@ export class VoiceprintService {
         providerResult = await this.provider.save({
           userId: input.userId,
           recordId: input.recordId,
-          speakerId: input.providerSpeakerId,
+          speakerId: input.localSpeaker,
+          speakerName: input.providerSpeakerId,
           requestId: input.requestId
         });
         await this.operations.save({

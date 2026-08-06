@@ -3,17 +3,22 @@ import * as fs from "fs/promises";
 import { extname, join } from "path";
 import { after, NextResponse } from "next/server";
 import { mimeTypeToAudioExtension, normalizeAudioForTranscription } from "@/lib/audio/compat";
+import {
+  DATE_COMPANION_AUDIO_SNAPSHOT_VERSION,
+  requestsDateCompanionAudioSnapshot,
+  type DateCompanionMarkedUpload
+} from "@/lib/domain/date-companion-upload";
 import type { AudioUpload } from "@/lib/domain/types";
 import { isUnauthenticatedError, requireAuthContext, unauthorizedResponse } from "@/lib/server/auth/request-context";
 import { shouldMarkUploadForEvaluationRetention } from "@/lib/server/evaluation/retention";
-import { createJob, updateJob } from "@/lib/server/jobs/job-store";
+import { createJob } from "@/lib/server/jobs/job-store";
 import { isUploadProcessingCancelled, processUpload } from "@/lib/server/pipeline/process-upload";
 import { resolvePipelineExecutionMode } from "@/lib/server/queue/config";
 import { enqueuePipelineJob } from "@/lib/server/queue/producer";
 import { buildPipelineJobId } from "@/lib/server/queue/types";
 import { validateAudioUpload } from "@/lib/server/uploads/validation";
 
-type StoredUpload = AudioUpload & {
+type StoredUpload = AudioUpload & DateCompanionMarkedUpload & {
   filePath: string;
   evaluationRetention?: boolean;
 };
@@ -57,6 +62,7 @@ export async function POST(request: Request) {
 
   const formData = await request.formData();
   const file = formData.get("file");
+  const dateCompanionAudioSnapshot = requestsDateCompanionAudioSnapshot(formData);
 
   if (!(file instanceof File)) {
     return NextResponse.json({ error: "missing_file" }, { status: 400 });
@@ -93,6 +99,9 @@ export async function POST(request: Request) {
     createdAt: new Date().toISOString(),
     status: "uploaded",
     filePath,
+    ...(dateCompanionAudioSnapshot
+      ? { dateCompanionAudioSnapshotVersion: DATE_COMPANION_AUDIO_SNAPSHOT_VERSION }
+      : {}),
     ...(evaluationRetention ? { evaluationRetention: true } : {})
   };
 
@@ -108,7 +117,7 @@ export async function POST(request: Request) {
       userRef: authContext.user.id
     };
     const queueJobId = buildPipelineJobId(queuePayload);
-    let job = await createJob(authContext.store, uploadId, {
+    const job = await createJob(authContext.store, uploadId, {
       executionMode: "queue",
       queueJobId,
       queuedAt,
@@ -121,31 +130,25 @@ export async function POST(request: Request) {
         throw new Error("Queue returned an unexpected stable job id");
       }
     } catch (error) {
-      const failedAt = new Date().toISOString();
-      const errorMessage = "Pipeline queue is unavailable";
-      job = await updateJob(authContext.store, job, {
-        status: "failed",
-        errorCode: "queue_unavailable",
-        errorMessage,
-        finishedAt: failedAt
-      });
-      await authContext.store.write("uploads", uploadId, {
-        ...upload,
-        status: "failed",
-        errorCode: "queue_unavailable",
-        errorMessage
-      });
+      // The waiting product job is a durable outbox record. Do not mark it or
+      // the upload terminal here: queue.add may have succeeded before its
+      // response was lost, and startup/periodic recovery can safely enqueue the
+      // same stable job id once Redis is available again.
       console.error(
         `[pipeline-queue] enqueue failed upload_id=${uploadId} error_name=${error instanceof Error ? error.name : "unknown"}`
       );
       return NextResponse.json(
         {
-          error: "pipeline_queue_unavailable",
           uploadId,
           jobId: job.id,
-          status: "failed"
+          status: "waiting",
+          executionMode: "queue",
+          queueJobId,
+          enqueueDeferred: true,
+          warning: "pipeline_queue_unavailable",
+          ...(evaluationRetention ? { evaluationRetention: true } : {})
         },
-        { status: 503 }
+        { status: 202 }
       );
     }
 

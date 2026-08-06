@@ -78,7 +78,10 @@ function identityAttribution(segment: TranscriptSegment): {
   if (!identity) {
     return { attribution: unknownOwner(), reason: "identity_missing" };
   }
-  if (identity.confidence < MIN_OWNER_IDENTITY_CONFIDENCE) {
+  if (
+    identity.confidence === null ||
+    identity.confidence < MIN_OWNER_IDENTITY_CONFIDENCE
+  ) {
     return { attribution: unknownOwner(), reason: "identity_below_threshold" };
   }
 

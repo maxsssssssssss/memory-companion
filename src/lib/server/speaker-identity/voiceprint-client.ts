@@ -1,3 +1,9 @@
+/**
+ * Provider-emitted speaker label for the authenticated user's trained voice.
+ * It is meaningful only inside that user's isolated Voiceprint profile store.
+ */
+export const VOICEPRINT_PROVIDER_KNOWN_USER_LABEL = "我";
+
 export type VoiceprintTrainingAudio = {
   url: string;
   rule: Array<[startMilliseconds: number, endMilliseconds: number]>;
@@ -13,6 +19,7 @@ export type VoiceprintSaveInput = {
   userId: string;
   recordId: string;
   speakerId: string;
+  speakerName: string;
   requestId: string;
 };
 
@@ -475,6 +482,7 @@ export class HttpVoiceprintProvider implements VoiceprintProvider {
       user_id: requiredIdentifier(input.userId, "userId"),
       record_id: requiredIdentifier(input.recordId, "recordId"),
       speaker_id: requiredIdentifier(input.speakerId, "speakerId"),
+      speaker_name: requiredIdentifier(input.speakerName, "speakerName"),
       req_id: requiredIdentifier(input.requestId, "requestId")
     });
   }

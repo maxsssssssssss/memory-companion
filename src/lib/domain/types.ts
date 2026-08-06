@@ -137,18 +137,43 @@ export const SpeakerIdentityTypeSchema = z.enum([
 ]);
 export const SpeakerIdentitySourceSchema = z.enum([
   "voiceprint",
+  "provider_speaker_result",
   "cross_chunk_matching",
   "manual_mapping"
 ]);
+export const ProviderLabelIdentityEvidenceSchema = z.object({
+  type: z.literal("provider_label"),
+  provider: z.literal("company_voiceprint"),
+  providerLabel: z.string().min(1)
+}).strict();
 export const TranscriptSpeakerIdentitySchema = z
   .object({
     globalSpeakerId: z.string().min(1),
     displayName: z.string().min(1).optional(),
     identityType: SpeakerIdentityTypeSchema,
-    confidence: z.number().min(0).max(1),
-    source: SpeakerIdentitySourceSchema
+    confidence: z.number().min(0).max(1).nullable(),
+    source: SpeakerIdentitySourceSchema,
+    evidence: ProviderLabelIdentityEvidenceSchema.optional()
   })
-  .strict();
+  .strict()
+  .superRefine((identity, context) => {
+    if (identity.source === "provider_speaker_result") {
+      if (identity.confidence !== null) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["confidence"],
+          message: "Provider speaker-result identity cannot contain an acoustic confidence"
+        });
+      }
+      if (!identity.evidence || identity.evidence.type !== "provider_label") {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["evidence"],
+          message: "Provider speaker-result identity requires provider-label evidence"
+        });
+      }
+    }
+  });
 
 export const TranscriptSegmentSchema = z
   .object({

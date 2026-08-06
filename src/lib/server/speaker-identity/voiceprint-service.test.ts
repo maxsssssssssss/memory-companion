@@ -78,7 +78,7 @@ describe("VoiceprintService", () => {
     await rm(rootDir, { recursive: true, force: true });
   });
 
-  it("records first and incremental user training without assigning a local speaker", async () => {
+  it("records user training but keeps the Provider self label pending for Memory review", async () => {
     const provider = new InMemoryVoiceprintProvider();
     const service = new VoiceprintService(provider, profiles, operations);
 
@@ -99,7 +99,7 @@ describe("VoiceprintService", () => {
       status: "active",
       providerReference: {
         provider: "company_voiceprint",
-        speakerLabel: "user_1",
+        speakerLabel: "我",
         lastRequestId: "train_1",
         operationType: "train"
       }
@@ -114,11 +114,35 @@ describe("VoiceprintService", () => {
       }
     });
 
-    const unresolved = await resolveSpeakerIdentities({
+    const chunks = [transcriptChunk(["我", "speaker_0"])];
+    const voiceprintHints = await profiles.loadVoiceprintHints(chunks);
+    const resolved = await resolveSpeakerIdentities({
       uploadId: "upload_1",
-      chunks: [transcriptChunk(["speaker_0"])]
+      chunks,
+      voiceprintHints
     });
-    expect(unresolved.assignments[0]).toMatchObject({
+    expect(
+      resolved.assignments.find((assignment) => assignment.localSpeaker === "我")
+    ).toMatchObject({
+      localSpeaker: "我",
+      matched: false,
+      reason: "provider_label_review_required",
+      identity: {
+        globalSpeakerId: expect.stringMatching(/^unknown_/),
+        identityType: "unknown_person",
+        confidence: null,
+        source: "provider_speaker_result",
+        evidence: {
+          type: "provider_label",
+          provider: "company_voiceprint",
+          providerLabel: "我"
+        }
+      }
+    });
+    expect(
+      resolved.assignments.find((assignment) => assignment.localSpeaker === "speaker_0")
+    ).toMatchObject({
+      localSpeaker: "speaker_0",
       matched: false,
       identity: { identityType: "unknown_person", confidence: 0 }
     });
@@ -168,7 +192,8 @@ describe("VoiceprintService", () => {
       userId: "user_1",
       requestId: "save_1",
       recordId: "chunk_1",
-      speakerId: "Alice"
+      speakerId: "speaker_1",
+      speakerName: "Alice"
     }]);
     expect(result.profile).toMatchObject({
       globalSpeakerId: "contact_alice",
@@ -531,7 +556,10 @@ describe("VoiceprintService", () => {
     expect(recovered).toMatchObject({
       reused: true,
       operation: { status: "succeeded" },
-      profile: { identityType: "known_user" }
+      profile: {
+        identityType: "known_user",
+        providerReference: { speakerLabel: "我" }
+      }
     });
     expect(provider.trainCalls).toHaveLength(1);
     warn.mockRestore();

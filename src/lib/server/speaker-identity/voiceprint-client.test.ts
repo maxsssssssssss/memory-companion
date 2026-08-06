@@ -65,7 +65,8 @@ describe("HttpVoiceprintProvider", () => {
     await provider.save({
       userId: "user_1",
       recordId: "record_1",
-      speakerId: "partner",
+      speakerId: "speaker_1",
+      speakerName: "Partner",
       requestId: "request_2"
     });
 
@@ -74,7 +75,8 @@ describe("HttpVoiceprintProvider", () => {
     expect(JSON.parse(String(init?.body))).toEqual({
       user_id: "user_1",
       record_id: "record_1",
-      speaker_id: "partner",
+      speaker_id: "speaker_1",
+      speaker_name: "Partner",
       req_id: "request_2"
     });
   });
@@ -93,6 +95,7 @@ describe("HttpVoiceprintProvider", () => {
         userId: "user_1",
         recordId: "record_1",
         speakerId: "partner",
+        speakerName: "Partner",
         requestId: "request_2"
       })).rejects.toBeInstanceOf(VoiceprintProviderError);
     }
@@ -160,6 +163,7 @@ describe("HttpVoiceprintProvider", () => {
       userId: "user_1",
       recordId: "record_1",
       speakerId: "partner",
+      speakerName: "Partner",
       requestId: "request_network"
     })).rejects.toMatchObject({
       reason: "network_error",
@@ -176,6 +180,7 @@ describe("HttpVoiceprintProvider", () => {
       userId: "user_1",
       recordId: "record_1",
       speakerId: "partner",
+      speakerName: "Partner",
       requestId: "request_rate_limit"
     })).rejects.toMatchObject({
       reason: "http_error",
@@ -202,6 +207,7 @@ describe("HttpVoiceprintProvider", () => {
       userId: "user_1",
       recordId: "record_1",
       speakerId: "partner",
+      speakerName: "Partner",
       requestId: "request_retry"
     })).resolves.toEqual({
       code: 0,
@@ -247,6 +253,7 @@ describe("HttpVoiceprintProvider", () => {
       userId: "user_1",
       recordId: "record_1",
       speakerId: "partner",
+      speakerName: "Partner",
       requestId: "request_retry_after"
     })).resolves.toMatchObject({ attemptCount: 2 });
     expect(sleeper).toHaveBeenCalledWith(10_000);
@@ -274,6 +281,7 @@ describe("HttpVoiceprintProvider", () => {
         userId: "user_1",
         recordId: "record_1",
         speakerId: "partner",
+        speakerName: "Partner",
         requestId: "request_non_retryable"
       })).rejects.toMatchObject({
         retryable: false,
@@ -304,6 +312,7 @@ describe("HttpVoiceprintProvider", () => {
         userId: "user_1",
         recordId: "record_1",
         speakerId: "partner",
+        speakerName: "Partner",
         requestId: `request_http_${status}`
       })).rejects.toMatchObject({
         reason: "http_error",
@@ -334,6 +343,7 @@ describe("HttpVoiceprintProvider", () => {
       userId: "user_1",
       recordId: "record_1",
       speakerId: "partner",
+      speakerName: "Partner",
       requestId: "request_stalled_body"
     });
     const assertion = expect(request).rejects.toMatchObject({
@@ -361,6 +371,7 @@ describe("HttpVoiceprintProvider", () => {
       userId: "user_1",
       recordId: "record_1",
       speakerId: "partner",
+      speakerName: "Partner",
       requestId: "request_oversized_response"
     })).rejects.toMatchObject({
       reason: "invalid_response",
@@ -378,6 +389,7 @@ describe("HttpVoiceprintProvider", () => {
     vi.stubEnv("VOICEPRINT_BASE_URL", "https://voiceprint.example.test");
     expect(createConfiguredVoiceprintProvider()).toBeInstanceOf(HttpVoiceprintProvider);
   });
+
 });
 
 describe("InMemoryVoiceprintProvider", () => {
@@ -398,6 +410,7 @@ describe("InMemoryVoiceprintProvider", () => {
       userId: "user_1",
       recordId: "record_1",
       speakerId: "partner",
+      speakerName: "Partner",
       requestId: "request_2"
     });
 

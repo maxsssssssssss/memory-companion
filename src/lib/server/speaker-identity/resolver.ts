@@ -1,5 +1,9 @@
 import type { TranscriptChunk } from "@/lib/domain/chunks";
 import {
+  isChunkLocalSpeakerLabel,
+  normalizeSpeakerIdentityLabel
+} from "@/lib/domain/speaker-identity";
+import {
   DEFAULT_SPEAKER_MATCH_MARGIN,
   DEFAULT_SPEAKER_MATCH_THRESHOLD,
   buildSpeakerIdentityCandidates,
@@ -14,24 +18,38 @@ import type {
   SpeakerIdentityAssignmentReason,
   SpeakerIdentityCandidate,
   SpeakerIdentityDirectMapping,
+  ProviderLabelIdentityEvidence,
   SpeakerIdentityResolutionResult,
   SpeakerIdentitySource,
   VoiceprintIdentityHint
 } from "./types";
 
+type VerifiedProviderLabelHint = Extract<
+  VoiceprintIdentityHint,
+  { identityStatus: "verified" }
+>;
+
 type DirectPlan = {
   candidate: SpeakerIdentityCandidate;
-  mapping: SpeakerIdentityDirectMapping | VoiceprintIdentityHint;
-  source: Extract<SpeakerIdentitySource, "manual_mapping" | "voiceprint">;
-  confidence: number;
+  mapping: SpeakerIdentityDirectMapping | VerifiedProviderLabelHint;
+  source: Extract<
+    SpeakerIdentitySource,
+    "manual_mapping" | "provider_speaker_result"
+  >;
+  confidence: number | null;
 };
 
 type RejectedDirectEvidence = {
   reason: Extract<
     SpeakerIdentityAssignmentReason,
-    "below_confidence_threshold" | "ambiguous_match" | "same_chunk_identity_conflict"
+    | "below_confidence_threshold"
+    | "provider_not_verified"
+    | "provider_label_review_required"
+    | "ambiguous_match"
+    | "same_chunk_identity_conflict"
   >;
-  confidence: number;
+  confidence: number | null;
+  evidence?: ProviderLabelIdentityEvidence;
 };
 
 function policyValue(value: number | undefined, fallback: number, name: string) {
@@ -53,14 +71,46 @@ function validateMapping(mapping: SpeakerIdentityDirectMapping) {
 }
 
 function validateVoiceprintHint(mapping: VoiceprintIdentityHint) {
-  validateMapping(mapping);
+  if (!mapping.chunkId.trim() || !mapping.localSpeaker.trim()) {
+    throw new Error("Provider-label evidence requires chunkId and localSpeaker");
+  }
   if (
-    mapping.identityType !== "known_user" &&
-    mapping.identityType !== "known_contact"
+    mapping.evidence.type !== "provider_label" ||
+    mapping.evidence.provider !== "company_voiceprint" ||
+    normalizeSpeakerIdentityLabel(mapping.evidence.providerLabel) !==
+      normalizeSpeakerIdentityLabel(mapping.localSpeaker)
   ) {
     throw new Error(
-      "Voiceprint identity hints require an explicit known_user or known_contact identity type"
+      "Provider-label evidence must contain the exact Provider speaker_result label"
     );
+  }
+  if (
+    mapping.identityStatus === "verified" &&
+    isChunkLocalSpeakerLabel(mapping.localSpeaker)
+  ) {
+    throw new Error(
+      "Chunk-local speaker labels cannot be Provider-verified identities"
+    );
+  }
+  if (
+    mapping.identityStatus === "verified" &&
+    (
+      !mapping.globalSpeakerId.trim() ||
+      (
+        mapping.identityType !== "known_user" &&
+        mapping.identityType !== "known_contact"
+      )
+    )
+  ) {
+    throw new Error(
+      "Verified Provider-label evidence requires a known user or contact identity"
+    );
+  }
+  if (
+    mapping.identityStatus === "conflict" &&
+    new Set(mapping.conflictingGlobalSpeakerIds.map((item) => item.trim()).filter(Boolean)).size < 2
+  ) {
+    throw new Error("Conflicting Provider-label evidence requires at least two identities");
   }
 }
 
@@ -73,7 +123,7 @@ function bestMapping<T extends SpeakerIdentityDirectMapping>(mappings: T[]) {
     })[0];
 }
 
-function mappingsForCandidate<T extends SpeakerIdentityDirectMapping>(
+function mappingsForCandidate<T extends { chunkId: string; localSpeaker: string }>(
   candidate: SpeakerIdentityCandidate,
   mappings: T[]
 ) {
@@ -84,6 +134,19 @@ function mappingsForCandidate<T extends SpeakerIdentityDirectMapping>(
 }
 
 function directIdentity(plan: DirectPlan): SpeakerIdentity {
+  if (plan.source === "provider_speaker_result") {
+    const mapping = plan.mapping as VerifiedProviderLabelHint;
+    return {
+      globalSpeakerId: mapping.globalSpeakerId.trim(),
+      ...(mapping.displayName?.trim()
+        ? { displayName: mapping.displayName.trim() }
+        : {}),
+      identityType: mapping.identityType,
+      confidence: null,
+      source: "provider_speaker_result",
+      evidence: { ...mapping.evidence }
+    };
+  }
   return {
     globalSpeakerId: plan.mapping.globalSpeakerId.trim(),
     ...(plan.mapping.displayName?.trim()
@@ -159,13 +222,9 @@ export async function resolveSpeakerIdentities(
     DEFAULT_SPEAKER_MATCH_MARGIN,
     "speaker match margin"
   );
-  const voiceprintThreshold = policyValue(
-    input.voiceprintThreshold,
-    threshold,
-    "voiceprint threshold"
-  );
   const manualMappings = input.manualMappings ?? [];
   const voiceprintHints = input.voiceprintHints ?? [];
+  const providerLabelTrust = input.providerLabelTrust ?? "review_required";
   manualMappings.forEach(validateMapping);
   voiceprintHints.forEach(validateVoiceprintHint);
 
@@ -193,42 +252,56 @@ export async function resolveSpeakerIdentities(
     }
 
     const candidateVoiceprintHints = mappingsForCandidate(candidate, voiceprintHints);
+    if (candidateVoiceprintHints.some((hint) => hint.identityStatus === "conflict")) {
+      const conflict = candidateVoiceprintHints.find(
+        (hint) => hint.identityStatus === "conflict"
+      )!;
+      rejectedDirectEvidence.set(candidate.key, {
+        reason: "ambiguous_match",
+        confidence: null,
+        evidence: { ...conflict.evidence }
+      });
+      continue;
+    }
+    const verifiedVoiceprintHints = candidateVoiceprintHints.filter(
+      (hint): hint is VerifiedProviderLabelHint => hint.identityStatus === "verified"
+    );
     const distinctVoiceprintIdentities = new Set(
-      candidateVoiceprintHints.map(
+      verifiedVoiceprintHints.map(
         (hint) => `${hint.globalSpeakerId.trim()}\u001f${hint.identityType}`
       )
     );
     if (distinctVoiceprintIdentities.size > 1) {
       rejectedDirectEvidence.set(candidate.key, {
         reason: "ambiguous_match",
-        confidence: Math.max(
-          0,
-          ...candidateVoiceprintHints.map((hint) => mappingConfidence(hint, 0))
-        )
+        confidence: null,
+        evidence: { ...verifiedVoiceprintHints[0].evidence }
       });
       continue;
     }
-    const voiceprint = bestMapping(candidateVoiceprintHints);
+    const voiceprint = [...verifiedVoiceprintHints].sort(
+      (left, right) => left.globalSpeakerId.localeCompare(right.globalSpeakerId, "en")
+    )[0];
     if (!voiceprint) continue;
-    const confidence = mappingConfidence(voiceprint, 0);
-    if (confidence < voiceprintThreshold) {
+    if (providerLabelTrust !== "trusted_test_fixture") {
       rejectedDirectEvidence.set(candidate.key, {
-        reason: "below_confidence_threshold",
-        confidence
+        reason: "provider_label_review_required",
+        confidence: null,
+        evidence: { ...voiceprint.evidence }
       });
       continue;
     }
     directPlans.push({
       candidate,
       mapping: voiceprint,
-      source: "voiceprint",
-      confidence
+      source: "provider_speaker_result",
+      confidence: null
     });
   }
 
   const voiceprintPlansByChunkIdentity = new Map<string, DirectPlan[]>();
   for (const plan of directPlans) {
-    if (plan.source !== "voiceprint") continue;
+    if (plan.source !== "provider_speaker_result") continue;
     const key = `${plan.candidate.chunkId}\u001f${plan.mapping.globalSpeakerId.trim()}`;
     const plans = voiceprintPlansByChunkIdentity.get(key) ?? [];
     plans.push(plan);
@@ -241,7 +314,10 @@ export async function resolveSpeakerIdentities(
       conflictingVoiceprintCandidateKeys.add(plan.candidate.key);
       rejectedDirectEvidence.set(plan.candidate.key, {
         reason: "same_chunk_identity_conflict",
-        confidence: plan.confidence
+        confidence: plan.confidence,
+        ...(plan.source === "provider_speaker_result"
+          ? { evidence: { ...(plan.mapping as VerifiedProviderLabelHint).evidence } }
+          : {})
       });
     }
   }
@@ -249,7 +325,7 @@ export async function resolveSpeakerIdentities(
   directPlans.sort(
     (left, right) =>
       Number(right.source === "manual_mapping") - Number(left.source === "manual_mapping") ||
-      right.confidence - left.confidence ||
+      (right.confidence ?? -1) - (left.confidence ?? -1) ||
       (candidateOrder.get(left.candidate.key) ?? 0) - (candidateOrder.get(right.candidate.key) ?? 0)
   );
 
@@ -261,7 +337,10 @@ export async function resolveSpeakerIdentities(
     if (occupiedByChunk(assignments, plan.candidate.chunkId).has(identity.globalSpeakerId)) {
       rejectedDirectEvidence.set(plan.candidate.key, {
         reason: "same_chunk_identity_conflict",
-        confidence: plan.confidence
+        confidence: plan.confidence,
+        ...(plan.source === "provider_speaker_result"
+          ? { evidence: { ...(plan.mapping as VerifiedProviderLabelHint).evidence } }
+          : {})
       });
       continue;
     }
@@ -271,7 +350,10 @@ export async function resolveSpeakerIdentities(
         candidate: plan.candidate,
         identity,
         matched: true,
-        reason: plan.source === "manual_mapping" ? "manual_mapping" : "voiceprint_match"
+        reason:
+          plan.source === "manual_mapping"
+            ? "manual_mapping"
+            : "provider_label_match"
       })
     );
   }
@@ -291,7 +373,28 @@ export async function resolveSpeakerIdentities(
             globalSpeakerId: stableUnknownSpeakerId(candidate),
             identityType: "unknown_person",
             confidence: 0,
-            source: "cross_chunk_matching"
+            source: "cross_chunk_matching",
+            ...(rejectedDirect.evidence
+              ? { evidence: { ...rejectedDirect.evidence } }
+              : {})
+          },
+          matched: false,
+          reason: rejectedDirect.reason
+        })
+      );
+      continue;
+    }
+    if (rejectedDirect?.reason === "provider_label_review_required") {
+      assignments.set(
+        candidate.key,
+        assignment({
+          candidate,
+          identity: {
+            globalSpeakerId: stableUnknownSpeakerId(candidate),
+            identityType: "unknown_person",
+            confidence: null,
+            source: "provider_speaker_result",
+            evidence: { ...rejectedDirect.evidence! }
           },
           matched: false,
           reason: rejectedDirect.reason
@@ -354,9 +457,11 @@ export async function resolveSpeakerIdentities(
   }
 
   const orderedAssignments = candidates.map((candidate) => assignments.get(candidate.key)!);
-  const confidenceTotal = orderedAssignments.reduce(
-    (total, item) => total + item.identity.confidence,
-    0
+  const confidenceValues = orderedAssignments.flatMap((item) =>
+    item.identity.identityType !== "unknown_person" &&
+    typeof item.identity.confidence === "number"
+      ? [item.identity.confidence]
+      : []
   );
   const audit: SpeakerIdentityResolutionResult["audit"] = {
     version: 1,
@@ -372,7 +477,10 @@ export async function resolveSpeakerIdentities(
       (item) => item.identity.identityType === "unknown_person"
     ).length,
     averageConfidence:
-      orderedAssignments.length > 0 ? confidenceTotal / orderedAssignments.length : 0,
+      confidenceValues.length > 0
+        ? confidenceValues.reduce((total, value) => total + value, 0) /
+          confidenceValues.length
+        : null,
     conflicts: orderedAssignments.filter(
       (item) =>
         item.reason === "same_chunk_identity_conflict" ||

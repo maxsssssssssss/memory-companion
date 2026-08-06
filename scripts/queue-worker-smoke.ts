@@ -17,7 +17,7 @@ runtimeEnv.PIPELINE_WORKER_CONCURRENCY = "1";
 runtimeEnv.PIPELINE_JOB_ATTEMPTS = "3";
 runtimeEnv.PIPELINE_JOB_BACKOFF_MS = "100";
 runtimeEnv.PIPELINE_PROCESSING_STALE_MS = "60000";
-runtimeEnv.REDIS_URL ||= "redis://127.0.0.1:6379";
+runtimeEnv.REDIS_URL ||= "redis://127.0.0.1:6380";
 runtimeEnv.PROACTIVE_INSIGHT_PROVIDER = "none";
 runtimeEnv.MEMORY_RELEVANCE_PROVIDER = "none";
 
@@ -31,6 +31,7 @@ type SmokeReport = {
   recovery?: unknown;
   checkpoint?: unknown;
   evidenceFirst?: unknown;
+  health?: unknown;
   final?: unknown;
   error?: string;
 };
@@ -100,7 +101,14 @@ async function main() {
     { recoverPipelineJobs },
     { enqueuePipelineJob },
     { getPipelineQueueConfig },
-    { buildPipelineJobId }
+    { buildPipelineJobId },
+    { evaluatePipelineQueueHealth },
+    {
+      assertQueueStorageProbe,
+      clearQueueWorkerStorageProbe,
+      inspectQueueStorageProbe,
+      publishQueueWorkerStorageProbe
+    }
   ] = await Promise.all([
     import("bullmq"),
     import("ioredis"),
@@ -115,7 +123,9 @@ async function main() {
     import("@/lib/server/queue/recovery"),
     import("@/lib/server/queue/producer"),
     import("@/lib/server/queue/config"),
-    import("@/lib/server/queue/types")
+    import("@/lib/server/queue/types"),
+    import("@/lib/server/queue/health"),
+    import("@/lib/server/queue/storage-probe")
   ]);
 
   const config = getPipelineQueueConfig();
@@ -220,12 +230,32 @@ async function main() {
     }
   });
 
-  const queueConnection = new IORedis(config.redisUrl, { maxRetriesPerRequest: null });
-  const queue = new Queue(config.queueName, { connection: queueConnection });
-  const firstEnqueue = await enqueuePipelineJob(payload, { config });
+  const firstWorkerConnection = new IORedis(config.redisUrl, { maxRetriesPerRequest: null });
+  await firstWorkerConnection.ping();
+  const firstWorkerStorage = await publishQueueWorkerStorageProbe({
+    config,
+    redis: firstWorkerConnection,
+    workerId: "queue-smoke-worker-1"
+  });
+  report.assertions.sharedStorageProbeMatchedBeforeEnqueue = (
+    await assertQueueStorageProbe({ config, redis: firstWorkerConnection })
+  ).status === "matched";
+  let firstEnqueue: Awaited<ReturnType<typeof enqueuePipelineJob>>;
+  try {
+    firstEnqueue = await enqueuePipelineJob(payload, { config });
+  } catch (error) {
+    await clearQueueWorkerStorageProbe({
+      config,
+      redis: firstWorkerConnection,
+      workerId: firstWorkerStorage.workerId
+    }).catch(() => undefined);
+    firstWorkerConnection.disconnect(false);
+    throw error;
+  }
   report.assertions.enqueueSucceeded = firstEnqueue.enqueued && firstEnqueue.jobId === queueJobId;
 
-  const firstWorkerConnection = new IORedis(config.redisUrl, { maxRetriesPerRequest: null });
+  const queueConnection = new IORedis(config.redisUrl, { maxRetriesPerRequest: null });
+  const queue = new Queue(config.queueName, { connection: queueConnection });
   const firstWorker = new Worker(config.queueName, processor, {
     connection: firstWorkerConnection,
     concurrency: 1,
@@ -278,6 +308,15 @@ async function main() {
     recoveredProductJob?.status === "waiting";
 
   const secondWorkerConnection = new IORedis(config.redisUrl, { maxRetriesPerRequest: null });
+  await secondWorkerConnection.ping();
+  const secondWorkerStorage = await publishQueueWorkerStorageProbe({
+    config,
+    redis: secondWorkerConnection,
+    workerId: "queue-smoke-worker-2"
+  });
+  report.assertions.workerRestartRepublishedSharedStorageProbe = (
+    await assertQueueStorageProbe({ config, redis: secondWorkerConnection })
+  ).status === "matched";
   const secondWorker = new Worker(config.queueName, processor, {
     connection: secondWorkerConnection,
     concurrency: 1,
@@ -301,6 +340,37 @@ async function main() {
 
   const duplicateEnqueue = await enqueuePipelineJob(payload, { config });
   await new Promise((resolvePromise) => setTimeout(resolvePromise, 250));
+  const healthPing = await secondWorkerConnection.ping();
+  const healthWorkerCount = await queue.getWorkersCount();
+  const healthProbe = await inspectQueueStorageProbe({
+    config,
+    redis: secondWorkerConnection
+  });
+  const healthFailedJobs = await queue.getJobs(
+    ["failed"],
+    0,
+    Math.max(0, config.retention.failed.count - 1),
+    false
+  );
+  const healthFailedCutoff = Date.now() - config.failedHealthWindowMs;
+  const healthRecentFailedCount = healthFailedJobs.filter((job) =>
+    typeof job.finishedOn === "number" && job.finishedOn >= healthFailedCutoff
+  ).length;
+  const health = evaluatePipelineQueueHealth({
+    executionMode: config.executionMode,
+    redisPing: healthPing,
+    workerCount: healthWorkerCount,
+    storageProbeStatus: healthProbe.status,
+    recentFailedCount: healthRecentFailedCount
+  });
+  report.assertions.queueHealthAcceptedOneMatchingWorker = health.ok;
+  report.health = {
+    ...health,
+    redisPing: healthPing,
+    workerCount: healthWorkerCount,
+    storageProbeStatus: healthProbe.status,
+    recentFailedCount: healthRecentFailedCount
+  };
   const checkpointsAfterRecovery = await new JsonAnalysisChunkCheckpointStore(store).list({
     userId: userRef,
     uploadId,
@@ -361,6 +431,11 @@ async function main() {
   };
 
   await secondWorker.close();
+  await clearQueueWorkerStorageProbe({
+    config,
+    redis: secondWorkerConnection,
+    workerId: secondWorkerStorage.workerId
+  });
   await secondWorkerConnection.quit();
   await queue.obliterate({ force: true });
   await queue.close();

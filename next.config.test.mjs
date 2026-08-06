@@ -8,4 +8,14 @@ describe("Next server package configuration", () => {
       expect.arrayContaining(["better-sqlite3", "bullmq", "ffmpeg-static", "ffprobe-static", "ioredis", "ws"])
     );
   });
+
+  it("cuts the root entry over to Date Companion with a rollback-friendly redirect", async () => {
+    await expect(nextConfig.redirects()).resolves.toEqual([
+      {
+        source: "/",
+        destination: "/date-companion",
+        permanent: false
+      }
+    ]);
+  });
 });

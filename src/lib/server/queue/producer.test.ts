@@ -1,6 +1,7 @@
 // @vitest-environment node
 
 import { describe, expect, it, vi } from "vitest";
+import { resolve } from "node:path";
 import type { PipelineQueueConfig } from "./config";
 import {
   enqueuePipelineJob,
@@ -12,13 +13,23 @@ import { buildPipelineJobId, type PipelineJobData } from "./types";
 
 const config: PipelineQueueConfig = {
   executionMode: "queue",
-  redisUrl: "redis://127.0.0.1:6379",
+  redisUrl: "redis://127.0.0.1:6380",
   queueName: "daily-brief-pipeline-test",
   workerConcurrency: 1,
   attempts: 3,
   backoffMs: 5_000,
-  processingStaleMs: 60_000
+  processingStaleMs: 60_000,
+  recoveryIntervalMs: 60_000,
+  failedHealthWindowMs: 60_000,
+  retention: {
+    completed: { age: 3_600, count: 10 },
+    failed: { age: 7_200, count: 20 }
+  },
+  dataDirectory: resolve(".data-producer-test"),
+  storageMode: "server"
 };
+
+const verifyStorageProbe = vi.fn(async () => undefined);
 
 function fixture(
   existing: {
@@ -30,6 +41,7 @@ function fixture(
   const redis: RedisConnectionAdapter = {
     connect: vi.fn(async () => undefined),
     ping: vi.fn(async () => "PONG"),
+    get: vi.fn(async () => null),
     quit: vi.fn(async () => "OK"),
     disconnect: vi.fn()
   };
@@ -42,6 +54,17 @@ function fixture(
   return { redis, queue };
 }
 
+function dependenciesFor(
+  redis: RedisConnectionAdapter,
+  queue: PipelineQueueAdapter
+) {
+  return {
+    createRedis: () => redis,
+    createQueue: () => queue,
+    verifyStorageProbe
+  };
+}
+
 const data: PipelineJobData = { version: 1, uploadId: "upload_1", userRef: "user_1" };
 
 describe("pipeline queue producer", () => {
@@ -49,10 +72,7 @@ describe("pipeline queue producer", () => {
     const { redis, queue } = fixture();
     const result = await enqueuePipelineJob(data, {
       config,
-      dependencies: {
-        createRedis: () => redis,
-        createQueue: () => queue
-      }
+      dependencies: dependenciesFor(redis, queue)
     });
 
     const jobId = buildPipelineJobId(data);
@@ -61,8 +81,8 @@ describe("pipeline queue producer", () => {
       jobId,
       attempts: 3,
       backoff: { type: "exponential", delay: 5_000 },
-      removeOnComplete: false,
-      removeOnFail: false
+      removeOnComplete: config.retention.completed,
+      removeOnFail: config.retention.failed
     });
     expect(queue.close).toHaveBeenCalledOnce();
     expect(redis.quit).toHaveBeenCalledOnce();
@@ -79,7 +99,7 @@ describe("pipeline queue producer", () => {
     await expect(
       enqueuePipelineJob(data, {
         config,
-        dependencies: { createRedis: () => redis, createQueue: () => queue }
+        dependencies: dependenciesFor(redis, queue)
       })
     ).resolves.toEqual({ jobId, enqueued: false });
     expect(queue.add).not.toHaveBeenCalled();
@@ -100,7 +120,7 @@ describe("pipeline queue producer", () => {
       enqueuePipelineJob(data, {
         config,
         reviveTerminal: true,
-        dependencies: { createRedis: () => redis, createQueue: () => queue }
+        dependencies: dependenciesFor(redis, queue)
       })
     ).resolves.toEqual({ jobId, enqueued: true });
 
@@ -123,7 +143,7 @@ describe("pipeline queue producer", () => {
         enqueuePipelineJob(data, {
           config,
           reviveTerminal: true,
-          dependencies: { createRedis: () => redis, createQueue: () => queue }
+          dependencies: dependenciesFor(redis, queue)
         })
       ).resolves.toEqual({ jobId, enqueued: false });
 
@@ -145,7 +165,7 @@ describe("pipeline queue producer", () => {
       enqueuePipelineJob(data, {
         config,
         reviveTerminal: true,
-        dependencies: { createRedis: () => redis, createQueue: () => queue }
+        dependencies: dependenciesFor(redis, queue)
       })
     ).resolves.toEqual({ jobId, enqueued: true });
 
@@ -160,10 +180,46 @@ describe("pipeline queue producer", () => {
     await expect(
       enqueuePipelineJob(data, {
         config,
-        dependencies: { createRedis: () => redis, createQueue: () => queue }
+        dependencies: dependenciesFor(redis, queue)
       })
     ).rejects.toBeInstanceOf(PipelineQueueUnavailableError);
     expect(queue.add).not.toHaveBeenCalled();
     expect(redis.quit).toHaveBeenCalledOnce();
+  });
+
+  it("treats an add response failure as accepted when the stable job was persisted", async () => {
+    const jobId = buildPipelineJobId(data);
+    const { redis, queue } = fixture();
+    vi.mocked(queue.getJob)
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce({ id: jobId });
+    vi.mocked(queue.add).mockRejectedValueOnce(new Error("response lost after add"));
+
+    await expect(enqueuePipelineJob(data, {
+      config,
+      dependencies: dependenciesFor(redis, queue)
+    })).resolves.toEqual({ jobId, enqueued: false });
+    expect(queue.getJob).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not mistake a failed terminal-job removal for a successful enqueue", async () => {
+    const jobId = buildPipelineJobId(data);
+    const existing = {
+      id: jobId,
+      getState: vi.fn(async () => "failed"),
+      remove: vi.fn(async () => {
+        throw new Error("remove failed");
+      })
+    };
+    const { redis, queue } = fixture(existing);
+
+    await expect(enqueuePipelineJob(data, {
+      config,
+      reviveTerminal: true,
+      dependencies: dependenciesFor(redis, queue)
+    })).rejects.toBeInstanceOf(PipelineQueueUnavailableError);
+
+    expect(queue.add).not.toHaveBeenCalled();
+    expect(queue.getJob).toHaveBeenCalledOnce();
   });
 });

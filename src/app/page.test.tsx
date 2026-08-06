@@ -3095,7 +3095,10 @@ describe("HomePage", () => {
     expect(fetchMock).toHaveBeenCalledWith(
       "/api/uploads/upload_online",
       expect.objectContaining({
-        method: "DELETE"
+        method: "DELETE",
+        headers: {
+          "x-daily-brief-cleanup-mode": "browser-cache"
+        }
       })
     );
   });
