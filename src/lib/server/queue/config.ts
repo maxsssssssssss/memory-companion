@@ -23,6 +23,7 @@ export type PipelineQueueConfig = {
   backoffMs: number;
   processingStaleMs: number;
   recoveryIntervalMs: number;
+  hybridIndexRecoveryIntervalMs: number;
   failedHealthWindowMs: number;
   retention: PipelineQueueRetention;
   dataDirectory: string;
@@ -37,6 +38,7 @@ const DEFAULTS = {
   backoffMs: 5_000,
   processingStaleMs: 2 * 60 * 60 * 1_000,
   recoveryIntervalMs: 60_000,
+  hybridIndexRecoveryIntervalMs: 15 * 60 * 1_000,
   failedHealthWindowMs: 60 * 60 * 1_000,
   completedRetentionAgeSeconds: 24 * 60 * 60,
   completedRetentionCount: 1_000,
@@ -87,6 +89,14 @@ export function getPipelineQueueConfig(
   env: Record<string, string | undefined> = process.env
 ): PipelineQueueConfig {
   const executionMode = resolvePipelineExecutionMode(env.PIPELINE_EXECUTION_MODE);
+  const production = env.NODE_ENV?.trim().toLowerCase() === "production";
+  if (
+    production &&
+    executionMode === "queue" &&
+    !env.REDIS_URL?.trim()
+  ) {
+    throw new Error("Production queue mode requires REDIS_URL to be explicitly configured");
+  }
   const queueName = env.PIPELINE_QUEUE_NAME?.trim() || DEFAULTS.queueName;
   if (!/^[A-Za-z0-9_-]+$/u.test(queueName)) {
     throw new Error("PIPELINE_QUEUE_NAME may contain only letters, numbers, underscores, and hyphens");
@@ -126,6 +136,12 @@ export function getPipelineQueueConfig(
       DEFAULTS.recoveryIntervalMs,
       10_000,
       60 * 60 * 1_000
+    ),
+    hybridIndexRecoveryIntervalMs: boundedInteger(
+      env.HYBRID_INDEX_RECOVERY_INTERVAL_MS,
+      DEFAULTS.hybridIndexRecoveryIntervalMs,
+      5 * 60 * 1_000,
+      24 * 60 * 60 * 1_000
     ),
     failedHealthWindowMs: boundedInteger(
       env.PIPELINE_FAILED_HEALTH_WINDOW_MS,

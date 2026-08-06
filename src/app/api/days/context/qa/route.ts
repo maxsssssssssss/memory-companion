@@ -7,6 +7,11 @@ import {
   SemanticSegmentSchema,
   TranscriptSegmentSchema
 } from "@/lib/domain/types";
+import {
+  applySpeakerAliasesToPayload,
+  sanitizeSpeakerAliases,
+  type StoredSpeakerAliases
+} from "@/lib/domain/speaker-aliases";
 import { isUnauthenticatedError, requireAuthContext, unauthorizedResponse } from "@/lib/server/auth/request-context";
 import {
   dateRangeFromScopeId,
@@ -43,7 +48,8 @@ const ContextQaBodySchema = z.object({
   audioInsights: z.array(AudioInsightSchema).default([]),
   semanticSegments: z.array(SemanticSegmentSchema).default([]),
   briefItems: z.array(BriefItemSchema).default([]),
-  relationshipSignals: z.array(z.unknown()).default([])
+  relationshipSignals: z.array(z.unknown()).default([]),
+  speakerAliasesByUploadId: z.unknown().optional()
 });
 
 export async function POST(request: Request) {
@@ -78,7 +84,8 @@ export async function POST(request: Request) {
     audioInsights,
     semanticSegments,
     briefItems,
-    relationshipSignals: rawRelationshipSignals
+    relationshipSignals: rawRelationshipSignals,
+    speakerAliasesByUploadId: rawSpeakerAliasesByUploadId
   } = parsedBody.data;
   const relationshipSignals = rawRelationshipSignals.flatMap((value) => {
     const parsed = RelationshipSignalCardSchema.safeParse(value);
@@ -117,6 +124,7 @@ export async function POST(request: Request) {
   }
 
   const qaInput: AnswerQuestionWithAIInput = {
+    userId: authContext.user.id,
     uploadId,
     question,
     scope,
@@ -131,6 +139,54 @@ export async function POST(request: Request) {
     ...(qaPromptInstruction ? { qaPromptInstruction } : {}),
     ...(conversation.length > 0 ? { conversation } : {})
   };
+  const hybridSource = { segments, audioInsights, semanticSegments, briefItems };
+  const sourceUploadIds = [
+    ...new Set(
+      [segments, audioInsights, semanticSegments, briefItems]
+        .flat()
+        .map((item) => item.uploadId)
+        .filter((id) => STORE_KEY_PATTERN.test(id))
+    )
+  ];
+  const browserAliases =
+    rawSpeakerAliasesByUploadId &&
+    typeof rawSpeakerAliasesByUploadId === "object" &&
+    !Array.isArray(rawSpeakerAliasesByUploadId)
+      ? rawSpeakerAliasesByUploadId as Record<string, unknown>
+      : {};
+  let hybridAliasedPayload = hybridSource;
+  try {
+    const aliasesByUploadId = Object.fromEntries(
+      await Promise.all(sourceUploadIds.map(async (sourceUploadId) => {
+        if (Object.prototype.hasOwnProperty.call(browserAliases, sourceUploadId)) {
+          return [
+            sourceUploadId,
+            sanitizeSpeakerAliases(browserAliases[sourceUploadId])
+          ] as const;
+        }
+        const stored = await authContext.store.read<StoredSpeakerAliases>(
+          "speaker-aliases",
+          sourceUploadId
+        );
+        return [sourceUploadId, sanitizeSpeakerAliases(stored?.aliases ?? {})] as const;
+      }))
+    );
+    hybridAliasedPayload = applySpeakerAliasesToPayload(
+      hybridSource,
+      aliasesByUploadId
+    );
+  } catch (error) {
+    // Alias projection is Hybrid-only. Lexical QA must remain available even
+    // if the optional projection cannot be loaded.
+    console.warn(
+      `[hybrid-qa] alias_projection=fallback ` +
+      `error_name=${error instanceof Error ? error.name : "unknown"}`
+    );
+  }
+  Object.defineProperty(qaInput, "hybridEvidenceInput", {
+    value: { ...hybridAliasedPayload, relationshipSignals },
+    enumerable: false
+  });
   let shadowSnapshot: { evidence: QaRetrievedEvidence[]; elapsedMs: number } | null = null;
 
   if (scope === "week" || scope === "all") {

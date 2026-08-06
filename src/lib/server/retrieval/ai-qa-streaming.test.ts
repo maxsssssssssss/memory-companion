@@ -7,6 +7,7 @@ const resolveOpenAIClientProviderMock = vi.hoisted(() => vi.fn(() => "openai-com
 const getOpenAIClientRuntimeConfigMock = vi.hoisted(() => vi.fn());
 const getQaModelPreferenceMock = vi.hoisted(() => vi.fn());
 const getQaPromptPreferenceMock = vi.hoisted(() => vi.fn());
+const retrieveProductionHybridEvidenceMock = vi.hoisted(() => vi.fn());
 
 vi.mock("@/lib/server/openai/client", () => ({
   createOpenAIClient: createOpenAIClientMock,
@@ -19,11 +20,17 @@ vi.mock("@/lib/server/settings/provider-config", () => ({
   getQaPromptPreference: getQaPromptPreferenceMock
 }));
 
+vi.mock("./hybrid/production-retrieval", () => ({
+  ProductionHybridRetrievalError: class ProductionHybridRetrievalError extends Error {},
+  retrieveProductionHybridEvidence: retrieveProductionHybridEvidenceMock
+}));
+
 import type { AudioInsight, BriefItem, TranscriptSegment } from "@/lib/domain/types";
 import { answerQuestionStream, type AnswerQuestionStreamInput } from "./ai-qa";
 import type { QaAnswerStreamEvent } from "./qa-streaming";
 
 const originalQaWireApi = process.env.OPENAI_QA_WIRE_API;
+const originalHybridRetrievalMode = process.env.QA_HYBRID_RETRIEVAL_MODE;
 
 function asyncStream<T>(items: T[], failure?: Error): AsyncIterable<T> {
   return {
@@ -134,6 +141,11 @@ describe("answerQuestionStream", () => {
   afterEach(() => {
     if (originalQaWireApi === undefined) delete process.env.OPENAI_QA_WIRE_API;
     else process.env.OPENAI_QA_WIRE_API = originalQaWireApi;
+    if (originalHybridRetrievalMode === undefined) {
+      delete process.env.QA_HYBRID_RETRIEVAL_MODE;
+    } else {
+      process.env.QA_HYBRID_RETRIEVAL_MODE = originalHybridRetrievalMode;
+    }
     vi.restoreAllMocks();
   });
 
@@ -194,6 +206,28 @@ describe("answerQuestionStream", () => {
       }
     });
     expect(traceObserver).toHaveBeenCalledOnce();
+  });
+
+  it("uses the shared Hybrid adapter for streaming phase31 QA", async () => {
+    process.env.QA_HYBRID_RETRIEVAL_MODE = "phase31";
+    retrieveProductionHybridEvidenceMock.mockImplementation(async ({ lexical }) => ({
+      evidence: lexical.evidence,
+      denseRetrievalMs: 9,
+      indexCoverage: 1
+    }));
+    const answer = validAnswer();
+    chatCreateMock.mockResolvedValue(asyncStream([
+      { choices: [{ delta: { content: answer } }] },
+      { choices: [{ delta: {}, finish_reason: "stop" }] }
+    ]));
+
+    const events = await collect(input({ userId: "user_1" }));
+
+    expect(retrieveProductionHybridEvidenceMock).toHaveBeenCalledOnce();
+    expect(events.at(-1)).toMatchObject({
+      type: "final",
+      answer: { citedSegmentIds: ["seg_1"] }
+    });
   });
 
   it("emits a grounded first sentence before later provider deltas and final JSON", async () => {

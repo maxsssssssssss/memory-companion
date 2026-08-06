@@ -9,6 +9,10 @@ import type {
   TranscriptSegment
 } from "@/lib/domain/types";
 import { applySpeakerAliasesToPayload, sanitizeSpeakerAliases, type StoredSpeakerAliases } from "@/lib/domain/speaker-aliases";
+import {
+  applyAudioInsightCorrections,
+  type StoredAudioInsightCorrections
+} from "@/lib/domain/audio-insight-corrections";
 import { isUnauthenticatedError, requireAuthContext, unauthorizedResponse } from "@/lib/server/auth/request-context";
 import {
   answerQuestionWithAI,
@@ -21,8 +25,16 @@ import {
   createTextQaBrowserStream,
   textQaNdjsonResponse
 } from "@/lib/server/retrieval/text-qa-stream";
+import { isUploadDeletionInProgress } from "@/lib/server/upload-deletion-barrier";
 
 const STORE_KEY_PATTERN = /^[A-Za-z0-9_-]+$/;
+
+class UploadDeletionInProgressError extends Error {
+  constructor() {
+    super("Upload deletion is in progress");
+    this.name = "UploadDeletionInProgressError";
+  }
+}
 
 export async function GET(_request: Request, { params }: { params: Promise<{ uploadId: string }> }) {
   const { uploadId } = await params;
@@ -81,9 +93,20 @@ export async function POST(request: Request, { params }: { params: Promise<{ upl
   if (upload.status !== "ready") {
     return NextResponse.json({ error: "upload_not_ready" }, { status: 409 });
   }
+  if (await isUploadDeletionInProgress(authContext.store, uploadId)) {
+    return NextResponse.json(
+      { error: "upload_deletion_in_progress" },
+      { status: 409 }
+    );
+  }
 
   const segments = (await authContext.store.read<TranscriptSegment[]>("segments", uploadId)) ?? [];
   const audioInsights = (await authContext.store.read<AudioInsight[]>("audio-insights", uploadId)) ?? [];
+  const storedAudioInsightCorrections =
+    await authContext.store.read<StoredAudioInsightCorrections>(
+      "audio-insight-corrections",
+      uploadId
+    );
   const semanticSegments = (await authContext.store.read<SemanticSegment[]>("semantic-segments", uploadId)) ?? [];
   const briefItems = (await authContext.store.read<BriefItem[]>("brief-items", uploadId)) ?? [];
   const relationshipSignals =
@@ -99,9 +122,22 @@ export async function POST(request: Request, { params }: { params: Promise<{ upl
     },
     speakerAliases
   );
+  const hybridAliasedPayload = applySpeakerAliasesToPayload(
+    {
+      segments,
+      audioInsights: applyAudioInsightCorrections(
+        audioInsights,
+        storedAudioInsightCorrections?.corrections ?? {}
+      ),
+      semanticSegments,
+      briefItems
+    },
+    speakerAliases
+  );
   const conversation = normalizeQaConversation(body.conversation);
   const qaPromptInstruction = qaPromptInstructionFromBody(body);
   const qaInput: AnswerQuestionWithAIInput = {
+    userId: authContext.user.id,
     uploadId,
     question: body.question.trim(),
     scope: "current",
@@ -114,7 +150,20 @@ export async function POST(request: Request, { params }: { params: Promise<{ upl
     ...(qaPromptInstruction ? { qaPromptInstruction } : {}),
     ...(conversation.length > 0 ? { conversation } : {})
   };
+  Object.defineProperty(qaInput, "hybridEvidenceInput", {
+    value: {
+      segments: hybridAliasedPayload.segments,
+      audioInsights: hybridAliasedPayload.audioInsights ?? [],
+      semanticSegments: hybridAliasedPayload.semanticSegments ?? [],
+      briefItems: hybridAliasedPayload.briefItems,
+      relationshipSignals
+    },
+    enumerable: false
+  });
   const persistAnswer = async (answer: QuestionAnswer) => {
+    if (await isUploadDeletionInProgress(authContext.store, uploadId)) {
+      throw new UploadDeletionInProgressError();
+    }
     const answers =
       (await authContext.store.read<QuestionAnswer[]>("answers-by-upload", uploadId)) ?? [];
 
@@ -124,6 +173,13 @@ export async function POST(request: Request, { params }: { params: Promise<{ upl
     } catch (error) {
       await authContext.store.delete("answers", answer.id).catch(() => undefined);
       throw error;
+    }
+    if (await isUploadDeletionInProgress(authContext.store, uploadId)) {
+      await Promise.all([
+        authContext.store.delete("answers", answer.id),
+        authContext.store.delete("answers-by-upload", uploadId)
+      ]);
+      throw new UploadDeletionInProgressError();
     }
   };
 
@@ -139,7 +195,17 @@ export async function POST(request: Request, { params }: { params: Promise<{ upl
   }
 
   const answer = await answerQuestionWithAI(qaInput);
-  await persistAnswer(answer);
+  try {
+    await persistAnswer(answer);
+  } catch (error) {
+    if (error instanceof UploadDeletionInProgressError) {
+      return NextResponse.json(
+        { error: "upload_deletion_in_progress" },
+        { status: 409 }
+      );
+    }
+    throw error;
+  }
 
   return NextResponse.json(answer);
 }

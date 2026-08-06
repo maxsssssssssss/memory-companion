@@ -3,6 +3,13 @@ import { NextResponse } from "next/server";
 import { sanitizeSpeakerAliases, type StoredSpeakerAliases } from "@/lib/domain/speaker-aliases";
 import type { AudioUpload } from "@/lib/domain/types";
 import { isUnauthenticatedError, requireAuthContext, unauthorizedResponse, type AuthContext } from "@/lib/server/auth/request-context";
+import {
+  resolveHybridIndexRetentionPolicy,
+  resolveQaHybridRetrievalMode
+} from "@/lib/server/retrieval/hybrid/runtime-config";
+import { resolvePipelineExecutionMode } from "@/lib/server/queue/config";
+import { enqueueEmbeddingIndexJob } from "@/lib/server/queue/producer";
+import { uploadCanonicalProjectionBlockReason } from "@/lib/server/upload-deletion-barrier";
 
 const STORE_KEY_PATTERN = /^[A-Za-z0-9_-]+$/;
 
@@ -57,11 +64,70 @@ export async function PUT(request: Request, { params }: { params: Promise<{ uplo
   }
 
   const aliases = sanitizeSpeakerAliases(body.aliases ?? {});
+  const [previousAliases, blockBeforeWrite] = await Promise.all([
+    result.authContext.store.read<StoredSpeakerAliases>("speaker-aliases", uploadId),
+    uploadCanonicalProjectionBlockReason(result.authContext.store, uploadId)
+  ]);
+  if (blockBeforeWrite) {
+    return NextResponse.json(
+      {
+        error: blockBeforeWrite === "retention"
+          ? "upload_cleanup_in_progress"
+          : "upload_deletion_in_progress"
+      },
+      { status: 409 }
+    );
+  }
 
   await result.authContext.store.write("speaker-aliases", uploadId, {
     aliases,
     updatedAt: new Date().toISOString()
   });
+
+  const [currentUpload, blockAfterWrite] = await Promise.all([
+    result.authContext.store.read<AudioUpload>("uploads", uploadId),
+    uploadCanonicalProjectionBlockReason(result.authContext.store, uploadId)
+  ]);
+  if (!currentUpload || blockAfterWrite) {
+    if (currentUpload && blockAfterWrite === "retention" && previousAliases) {
+      await result.authContext.store.write(
+        "speaker-aliases",
+        uploadId,
+        previousAliases
+      );
+    } else {
+      await result.authContext.store.delete("speaker-aliases", uploadId);
+    }
+    return NextResponse.json(
+      {
+        error: blockAfterWrite === "retention"
+          ? "upload_cleanup_in_progress"
+          : "upload_deletion_in_progress"
+      },
+      { status: 409 }
+    );
+  }
+
+  try {
+    if (
+      resolvePipelineExecutionMode() === "queue" &&
+      (
+        resolveQaHybridRetrievalMode() !== "off" ||
+        resolveHybridIndexRetentionPolicy() !== "off"
+      )
+    ) {
+      await enqueueEmbeddingIndexJob({
+        version: 1,
+        userRef: result.authContext.user.id,
+        reason: "speaker_aliases"
+      });
+    }
+  } catch (error) {
+    console.warn(
+      `[hybrid-index-worker] enqueue_failed reason=speaker_aliases ` +
+      `error_name=${error instanceof Error ? error.name : "unknown"}`
+    );
+  }
 
   return NextResponse.json({ aliases });
 }

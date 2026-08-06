@@ -27,7 +27,11 @@ export const QaExecutionDiagnosticsSchema = z.object({
   responseCharacters: NullableCharacterCountSchema,
   evidenceCount: z.number().int().nonnegative(),
   providerCallCount: z.number().int().nonnegative(),
-  fallbackReason: z.string().trim().min(1).max(128)
+  fallbackReason: z.string().trim().min(1).max(128),
+  retrievalMode: z.enum(["off", "shadow", "phase31"]).optional(),
+  denseRetrievalMs: NullableDurationMsSchema.optional(),
+  embeddingIndexCoverage: z.number().min(0).max(1).nullable().optional(),
+  retrievalFallbackReason: z.string().trim().min(1).max(128).nullable().optional()
 }).strict();
 
 export type QaExecutionDiagnostics = z.infer<typeof QaExecutionDiagnosticsSchema>;

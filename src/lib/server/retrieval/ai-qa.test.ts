@@ -7,6 +7,7 @@ const resolveOpenAIClientProviderMock = vi.hoisted(() => vi.fn());
 const getOpenAIClientRuntimeConfigMock = vi.hoisted(() => vi.fn());
 const getQaModelPreferenceMock = vi.hoisted(() => vi.fn());
 const getQaPromptPreferenceMock = vi.hoisted(() => vi.fn());
+const retrieveProductionHybridEvidenceMock = vi.hoisted(() => vi.fn());
 
 vi.mock("@/lib/server/openai/client", () => ({
   createOpenAIClient: createOpenAIClientMock,
@@ -19,6 +20,23 @@ vi.mock("@/lib/server/settings/provider-config", () => ({
   getQaPromptPreference: getQaPromptPreferenceMock
 }));
 
+vi.mock("./hybrid/production-retrieval", () => {
+  class ProductionHybridRetrievalError extends Error {
+    constructor(
+      readonly reason: string,
+      message: string,
+      readonly indexCoverage: number | null = null
+    ) {
+      super(message);
+      this.name = "ProductionHybridRetrievalError";
+    }
+  }
+  return {
+    ProductionHybridRetrievalError,
+    retrieveProductionHybridEvidence: retrieveProductionHybridEvidenceMock
+  };
+});
+
 import type { AudioInsight, BriefItem, RelationshipSignalCard, SemanticSegment, TranscriptSegment } from "@/lib/domain/types";
 import { answerQuestionWithAI, buildHumanizedQaSystemPrompt, retrieveQaEvidence } from "./ai-qa";
 import type { MemoryIndexQaContext } from "./memory-index-evidence";
@@ -26,6 +44,7 @@ import type { MemoryOwnerMetadata } from "@/lib/server/memory/owner-attribution/
 
 const originalQaWireApi = process.env.OPENAI_QA_WIRE_API;
 const originalOpenAiWireApi = process.env.OPENAI_WIRE_API;
+const originalHybridRetrievalMode = process.env.QA_HYBRID_RETRIEVAL_MODE;
 
 function rawSegment(overrides: Partial<TranscriptSegment>): TranscriptSegment {
   return {
@@ -253,6 +272,11 @@ describe("answerQuestionWithAI", () => {
       delete process.env.OPENAI_WIRE_API;
     } else {
       process.env.OPENAI_WIRE_API = originalOpenAiWireApi;
+    }
+    if (originalHybridRetrievalMode === undefined) {
+      delete process.env.QA_HYBRID_RETRIEVAL_MODE;
+    } else {
+      process.env.QA_HYBRID_RETRIEVAL_MODE = originalHybridRetrievalMode;
     }
   });
 
@@ -1796,5 +1820,93 @@ describe("answerQuestionWithAI", () => {
     expect(warning).toHaveBeenCalledWith(expect.stringMatching(/selected_model=gpt-5.5/));
     expect(warning).toHaveBeenCalledWith(expect.stringMatching(/fallback_reason=provider_error/));
     expect(warning).toHaveBeenCalledWith(expect.stringMatching(/elapsed_ms=\d+/));
+  });
+
+  it("runs a successful Hybrid shadow without changing the lexical answer or citations", async () => {
+    getOpenAIClientRuntimeConfigMock.mockResolvedValue({ openRouterApiKey: "custom_key" });
+    getQaModelPreferenceMock.mockResolvedValue("openai/gpt-5-mini");
+    createOpenAIClientMock.mockReturnValue({
+      chat: { completions: { create: chatCreateMock } }
+    });
+    chatCreateMock.mockResolvedValue({
+      choices: [{ message: { content: JSON.stringify({
+        mode: "memory_answer",
+        answer: "The launch decision is recorded here. [E1]",
+        citationIds: ["E1"]
+      }) } }]
+    });
+    retrieveProductionHybridEvidenceMock.mockResolvedValue({
+      evidence: [],
+      denseRetrievalMs: 12,
+      indexCoverage: 1
+    });
+    const input = {
+      userId: "user_1",
+      uploadId: "upload_hybrid_shadow",
+      question: "What was the launch decision?",
+      segments: [rawSegment({
+        id: "seg_hybrid_shadow",
+        text: "The team decided to launch on Friday."
+      })],
+      semanticSegments: [],
+      briefItems: []
+    };
+
+    process.env.QA_HYBRID_RETRIEVAL_MODE = "off";
+    const lexical = await answerQuestionWithAI(input);
+    const info = vi.spyOn(console, "info").mockImplementation(() => undefined);
+    process.env.QA_HYBRID_RETRIEVAL_MODE = "shadow";
+    const shadow = await answerQuestionWithAI(input);
+
+    expect({
+      answer: shadow.answer,
+      citedSegmentIds: shadow.citedSegmentIds,
+      citations: shadow.citations
+    }).toEqual({
+      answer: lexical.answer,
+      citedSegmentIds: lexical.citedSegmentIds,
+      citations: lexical.citations
+    });
+    await vi.waitFor(() => {
+      expect(info).toHaveBeenCalledWith(
+        expect.stringContaining("mode=shadow status=completed")
+      );
+    });
+  });
+
+  it("fails open to lexical evidence when phase31 retrieval is unavailable", async () => {
+    getOpenAIClientRuntimeConfigMock.mockResolvedValue({ openRouterApiKey: "custom_key" });
+    getQaModelPreferenceMock.mockResolvedValue("openai/gpt-5-mini");
+    createOpenAIClientMock.mockReturnValue({
+      chat: { completions: { create: chatCreateMock } }
+    });
+    chatCreateMock.mockResolvedValue({
+      choices: [{ message: { content: JSON.stringify({
+        mode: "memory_answer",
+        answer: "The launch decision is recorded here. [E1]",
+        citationIds: ["E1"]
+      }) } }]
+    });
+    retrieveProductionHybridEvidenceMock.mockRejectedValue(new Error("tunnel timeout"));
+    process.env.QA_HYBRID_RETRIEVAL_MODE = "phase31";
+    const diagnostics = vi.fn();
+    const answer = await answerQuestionWithAI({
+      userId: "user_1",
+      uploadId: "upload_hybrid_fail_open",
+      question: "What was the launch decision?",
+      segments: [rawSegment({
+        id: "seg_hybrid_fail_open",
+        text: "The team decided to launch on Friday."
+      })],
+      semanticSegments: [],
+      briefItems: [],
+      onDiagnostics: diagnostics
+    });
+
+    expect(answer.citedSegmentIds).toEqual(["seg_hybrid_fail_open"]);
+    expect(diagnostics).toHaveBeenCalledWith(expect.objectContaining({
+      retrievalMode: "phase31",
+      retrievalFallbackReason: "embedding_unavailable"
+    }));
   });
 });

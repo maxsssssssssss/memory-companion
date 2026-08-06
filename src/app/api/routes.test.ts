@@ -40,8 +40,17 @@ const answerQuestionWithAIMock = vi.hoisted(() => vi.fn());
 const normalizeQaConversationMock = vi.hoisted(() => vi.fn());
 const afterMock = vi.hoisted(() => vi.fn());
 const enqueuePipelineJobMock = vi.hoisted(() => vi.fn());
+const enqueueEmbeddingIndexJobMock = vi.hoisted(() => vi.fn());
+const prepareHybridIndexRetentionMock = vi.hoisted(() => vi.fn());
+const requiresHybridPermanentIndexDeletionMock = vi.hoisted(() => vi.fn());
+const requestHybridPermanentIndexDeletionMock = vi.hoisted(() => vi.fn());
+const deleteHybridIndexDeletionMock = vi.hoisted(() => vi.fn());
+const readHybridIndexDeletionMock = vi.hoisted(() => vi.fn());
+const readHybridIndexRetentionManifestMock = vi.hoisted(() => vi.fn());
 const originalEvaluationMode = process.env.EVALUATION_MODE;
 const originalPipelineExecutionMode = process.env.PIPELINE_EXECUTION_MODE;
+const originalHybridRetrievalMode = process.env.QA_HYBRID_RETRIEVAL_MODE;
+const originalHybridRetentionPolicy = process.env.HYBRID_INDEX_RETENTION_POLICY;
 const authContextMock = vi.hoisted(() => ({
   isUnauthenticatedError: vi.fn((error: unknown) => error instanceof Error && error.message === "unauthenticated"),
   requireAuthContext: vi.fn(),
@@ -98,7 +107,22 @@ vi.mock("@/lib/server/evaluation/provider-response-capture", () => ({
 }));
 
 vi.mock("@/lib/server/queue/producer", () => ({
-  enqueuePipelineJob: enqueuePipelineJobMock
+  enqueuePipelineJob: enqueuePipelineJobMock,
+  enqueueEmbeddingIndexJob: enqueueEmbeddingIndexJobMock
+}));
+
+vi.mock("@/lib/server/retrieval/hybrid/retention-runtime", () => ({
+  prepareHybridIndexRetention: prepareHybridIndexRetentionMock,
+  requiresHybridPermanentIndexDeletion:
+    requiresHybridPermanentIndexDeletionMock,
+  requestHybridPermanentIndexDeletion:
+    requestHybridPermanentIndexDeletionMock
+}));
+
+vi.mock("@/lib/server/retrieval/hybrid/retention-manifest", () => ({
+  deleteHybridIndexDeletion: deleteHybridIndexDeletionMock,
+  readHybridIndexDeletion: readHybridIndexDeletionMock,
+  readHybridIndexRetentionManifest: readHybridIndexRetentionManifestMock
 }));
 
 vi.mock("@/lib/server/memory", () => ({
@@ -195,6 +219,8 @@ describe("API routes", () => {
   beforeEach(() => {
     delete process.env.EVALUATION_MODE;
     delete process.env.PIPELINE_EXECUTION_MODE;
+    delete process.env.QA_HYBRID_RETRIEVAL_MODE;
+    delete process.env.HYBRID_INDEX_RETENTION_POLICY;
     vi.clearAllMocks();
     storeMock.list.mockResolvedValue([]);
     storeMock.listIds.mockResolvedValue([]);
@@ -204,6 +230,22 @@ describe("API routes", () => {
       jobId: buildPipelineJobId(payload),
       enqueued: true
     }));
+    enqueueEmbeddingIndexJobMock.mockResolvedValue({
+      jobId: "hybrid-index-test-0",
+      enqueued: true
+    });
+    prepareHybridIndexRetentionMock.mockResolvedValue({
+      status: "prepared",
+      matched: 1,
+      total: 1
+    });
+    requiresHybridPermanentIndexDeletionMock.mockResolvedValue(false);
+    requestHybridPermanentIndexDeletionMock.mockResolvedValue({
+      status: "completed"
+    });
+    deleteHybridIndexDeletionMock.mockResolvedValue(undefined);
+    readHybridIndexDeletionMock.mockResolvedValue(null);
+    readHybridIndexRetentionManifestMock.mockResolvedValue(null);
     retrieveQaEvidenceMock.mockReturnValue([
       {
         id: "brief_shadow_1",
@@ -283,6 +325,16 @@ describe("API routes", () => {
       delete process.env.PIPELINE_EXECUTION_MODE;
     } else {
       process.env.PIPELINE_EXECUTION_MODE = originalPipelineExecutionMode;
+    }
+    if (originalHybridRetrievalMode === undefined) {
+      delete process.env.QA_HYBRID_RETRIEVAL_MODE;
+    } else {
+      process.env.QA_HYBRID_RETRIEVAL_MODE = originalHybridRetrievalMode;
+    }
+    if (originalHybridRetentionPolicy === undefined) {
+      delete process.env.HYBRID_INDEX_RETENTION_POLICY;
+    } else {
+      process.env.HYBRID_INDEX_RETENTION_POLICY = originalHybridRetentionPolicy;
     }
     vi.useRealTimers();
     vi.restoreAllMocks();
@@ -1208,6 +1260,8 @@ describe("API routes", () => {
   });
 
   it("saves speaker aliases for the authenticated user's current upload", async () => {
+    process.env.PIPELINE_EXECUTION_MODE = "queue";
+    process.env.QA_HYBRID_RETRIEVAL_MODE = "shadow";
     storeMock.read.mockImplementation(async (collection: string) => {
       if (collection === "uploads") {
         return {
@@ -1245,12 +1299,70 @@ describe("API routes", () => {
       },
       updatedAt: expect.any(String)
     });
+    expect(enqueueEmbeddingIndexJobMock).toHaveBeenCalledWith({
+      version: 1,
+      userRef: "user_default",
+      reason: "speaker_aliases"
+    });
     await expect(response.json()).resolves.toEqual({
       aliases: {
         speaker_1: "张三",
         speaker_2: "我"
       }
     });
+  });
+
+  it("blocks speaker alias writes once permanent upload deletion has started", async () => {
+    storeMock.read.mockResolvedValue({
+      id: "upload_1",
+      originalName: "demo.m4a",
+      mimeType: "audio/mp4",
+      sizeBytes: 12,
+      recordingDate: "2026-06-03",
+      status: "ready"
+    });
+    readHybridIndexDeletionMock.mockResolvedValue({ status: "pending" });
+
+    const response = await putSpeakerAliases(
+      new Request("http://localhost/api/days/upload_1/speaker-aliases", {
+        method: "PUT",
+        body: JSON.stringify({ aliases: { speaker_1: "Alice" } })
+      }),
+      { params: Promise.resolve({ uploadId: "upload_1" }) }
+    );
+
+    expect(response.status).toBe(409);
+    await expect(response.json()).resolves.toEqual({
+      error: "upload_deletion_in_progress"
+    });
+    expect(storeMock.write).not.toHaveBeenCalled();
+    expect(enqueueEmbeddingIndexJobMock).not.toHaveBeenCalled();
+  });
+
+  it("blocks speaker alias writes while browser-cache retention is prepared", async () => {
+    storeMock.read.mockImplementation(async (collection: string) => {
+      if (collection === "uploads") {
+        return { id: "upload_1", status: "ready" };
+      }
+      return null;
+    });
+    readHybridIndexRetentionManifestMock.mockResolvedValue({
+      uploadId: "upload_1"
+    });
+
+    const response = await putSpeakerAliases(
+      new Request("http://localhost/api/days/upload_1/speaker-aliases", {
+        method: "PUT",
+        body: JSON.stringify({ aliases: { speaker_1: "Alice" } })
+      }),
+      { params: Promise.resolve({ uploadId: "upload_1" }) }
+    );
+
+    expect(response.status).toBe(409);
+    await expect(response.json()).resolves.toEqual({
+      error: "upload_cleanup_in_progress"
+    });
+    expect(storeMock.write).not.toHaveBeenCalled();
   });
 
   it("reads speaker aliases for the authenticated user's current upload", async () => {
@@ -1363,6 +1475,88 @@ describe("API routes", () => {
       },
       updatedAt: expect.any(String)
     });
+  });
+
+  it("removes a correction write when permanent deletion starts concurrently", async () => {
+    storeMock.read.mockImplementation(async (collection: string) => {
+      if (collection !== "uploads") return null;
+      return {
+        id: "upload_1",
+        originalName: "demo.m4a",
+        mimeType: "audio/mp4",
+        sizeBytes: 12,
+        recordingDate: "2026-06-03",
+        status: "ready"
+      };
+    });
+    readHybridIndexDeletionMock
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce({ status: "pending" });
+
+    const response = await putAudioInsightCorrections(
+      new Request("http://localhost/api/days/upload_1/audio-insight-corrections", {
+        method: "PUT",
+        body: JSON.stringify({ corrections: {} })
+      }),
+      { params: Promise.resolve({ uploadId: "upload_1" }) }
+    );
+
+    expect(response.status).toBe(409);
+    await expect(response.json()).resolves.toEqual({
+      error: "upload_deletion_in_progress"
+    });
+    expect(storeMock.write).toHaveBeenCalledWith(
+      "audio-insight-corrections",
+      "upload_1",
+      expect.objectContaining({ corrections: {} })
+    );
+    expect(storeMock.delete).toHaveBeenCalledWith(
+      "audio-insight-corrections",
+      "upload_1"
+    );
+    expect(enqueueEmbeddingIndexJobMock).not.toHaveBeenCalled();
+  });
+
+  it("restores prior corrections when browser cleanup starts during a write", async () => {
+    const previousCorrections = {
+      corrections: {},
+      updatedAt: "2026-08-06T00:00:00.000Z"
+    };
+    storeMock.read.mockImplementation(async (collection: string) => {
+      if (collection === "uploads") {
+        return { id: "upload_1", status: "ready" };
+      }
+      if (collection === "audio-insight-corrections") {
+        return previousCorrections;
+      }
+      return null;
+    });
+    readHybridIndexRetentionManifestMock
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce({ uploadId: "upload_1" });
+
+    const response = await putAudioInsightCorrections(
+      new Request("http://localhost/api/days/upload_1/audio-insight-corrections", {
+        method: "PUT",
+        body: JSON.stringify({ corrections: {} })
+      }),
+      { params: Promise.resolve({ uploadId: "upload_1" }) }
+    );
+
+    expect(response.status).toBe(409);
+    await expect(response.json()).resolves.toEqual({
+      error: "upload_cleanup_in_progress"
+    });
+    expect(storeMock.write).toHaveBeenLastCalledWith(
+      "audio-insight-corrections",
+      "upload_1",
+      previousCorrections
+    );
+    expect(storeMock.delete).not.toHaveBeenCalledWith(
+      "audio-insight-corrections",
+      "upload_1"
+    );
+    expect(enqueueEmbeddingIndexJobMock).not.toHaveBeenCalled();
   });
 
   it("reads audio insight corrections for the authenticated user's current upload", async () => {
@@ -1570,6 +1764,18 @@ describe("API routes", () => {
       if (collection === "audio-insights") {
         return [{ id: "insight_1", summary: "说话人语气坚定。" }];
       }
+      if (collection === "audio-insight-corrections") {
+        return {
+          corrections: {
+            insight_1: {
+              labelCorrections: [{ from: "tentative", to: "confirmed" }],
+              note: "User confirmed the label.",
+              updatedAt: "2026-06-03T00:00:00.000Z"
+            }
+          },
+          updatedAt: "2026-06-03T00:00:00.000Z"
+        };
+      }
       if (collection === "brief-items") {
         return [{ id: "brief_1" }];
       }
@@ -1593,6 +1799,7 @@ describe("API routes", () => {
 
     expect(response.status).toBe(200);
     expect(answerQuestionWithAIMock).toHaveBeenCalledWith({
+      userId: "user_default",
       uploadId: "upload_1",
       question: "What did I commit to?",
       scope: "current",
@@ -1603,6 +1810,10 @@ describe("API routes", () => {
       relationshipSignals: [relationshipSignalFixture({ uploadId: "upload_1", segmentId: "segment_1", date: "2026-06-03" })],
       settingsStore: storeMock
     });
+    const qaInput = answerQuestionWithAIMock.mock.calls.at(-1)?.[0];
+    expect(qaInput.hybridEvidenceInput.audioInsights[0].userCorrections)
+      .toEqual([expect.objectContaining({ note: "User confirmed the label." })]);
+    expect(Object.keys(qaInput)).not.toContain("hybridEvidenceInput");
     expect(storeMock.write).toHaveBeenNthCalledWith(1, "answers", "answer_1", {
       id: "answer_1",
       uploadId: "upload_1",
@@ -1782,6 +1993,7 @@ describe("API routes", () => {
 
     expect(response.status).toBe(200);
     expect(answerQuestionWithAIMock).toHaveBeenCalledWith({
+      userId: "user_default",
       uploadId: "day_2026-06-03",
       question: "这一天有什么重点？",
       scope: "current",
@@ -1795,7 +2007,10 @@ describe("API routes", () => {
       conversation
     });
     expect(storeMock.write).not.toHaveBeenCalled();
-    expect(storeMock.read).not.toHaveBeenCalled();
+    expect(storeMock.read).toHaveBeenCalledWith(
+      "speaker-aliases",
+      "upload_morning"
+    );
     await expect(response.json()).resolves.toEqual({
       id: "answer_day_context",
       uploadId: "day_2026-06-03",
@@ -1804,6 +2019,80 @@ describe("API routes", () => {
       citedSegmentIds: ["seg_context_1"],
       createdAt: "2026-06-03T10:00:00.000Z"
     });
+  });
+
+  it("keeps context lexical input raw while giving Hybrid an aliased projection", async () => {
+    storeMock.read.mockImplementation(async (collection, id) => {
+      if (collection === "speaker-aliases" && id === "upload_alias_context") {
+        return {
+          aliases: { speaker_A: "小林" },
+          updatedAt: "2026-06-03T09:00:00.000Z"
+        };
+      }
+      return undefined;
+    });
+    answerQuestionWithAIMock.mockResolvedValueOnce({
+      id: "answer_alias_context",
+      uploadId: "day_2026-06-03",
+      question: "是谁确认了安排？",
+      answer: "小林确认了安排。[E1]",
+      citedSegmentIds: ["seg_alias_context"],
+      createdAt: "2026-06-03T10:00:00.000Z"
+    });
+    const segment = {
+      id: "seg_alias_context",
+      uploadId: "upload_alias_context",
+      startSeconds: 10,
+      endSeconds: 20,
+      speaker: "speaker_A",
+      text: "speaker_A 确认了安排。",
+      confidence: 0.95,
+      sceneLabels: ["product_discussion"],
+      valueLabels: ["decision"]
+    };
+    const briefItem = {
+      id: "brief_alias_context",
+      uploadId: "upload_alias_context",
+      category: "decision",
+      title: "speaker_A 确认安排",
+      body: "speaker_A 确认了安排。",
+      priority: "high",
+      confidence: 0.9,
+      status: "confirmed",
+      sourceSegmentIds: [segment.id],
+      sourceTimeRange: { startSeconds: 10, endSeconds: 20 },
+      transcriptExcerpt: "speaker_A 确认了安排。",
+      people: ["speaker_A"],
+      topics: ["安排"]
+    };
+    const request = new Request("http://localhost/api/days/context/qa", {
+      method: "POST",
+      body: JSON.stringify({
+        uploadId: "day_2026-06-03",
+        question: "是谁确认了安排？",
+        segments: [segment],
+        audioInsights: [],
+        semanticSegments: [],
+        briefItems: [briefItem],
+        speakerAliasesByUploadId: {
+          upload_alias_context: { speaker_A: "小林" }
+        }
+      }),
+      headers: { "content-type": "application/json" }
+    });
+
+    const response = await postContextQa(request);
+
+    expect(response.status).toBe(200);
+    const qaInput = answerQuestionWithAIMock.mock.calls.at(-1)?.[0];
+    expect(qaInput?.briefItems[0]?.title).toBe("speaker_A 确认安排");
+    expect(qaInput?.hybridEvidenceInput?.briefItems[0]?.title).toBe("小林 确认安排");
+    expect(qaInput?.hybridEvidenceInput?.briefItems[0]?.people).toEqual(["小林"]);
+    expect(Object.keys(qaInput ?? {})).not.toContain("hybridEvidenceInput");
+    expect(storeMock.read).not.toHaveBeenCalledWith(
+      "speaker-aliases",
+      "upload_alias_context"
+    );
   });
 
   it("ignores malformed relationship signals in browser-provided context", async () => {
@@ -2074,6 +2363,7 @@ describe("API routes", () => {
 
     expect(response.status).toBe(200);
     expect(answerQuestionWithAIMock).toHaveBeenCalledWith({
+      userId: "user_default",
       uploadId: "week_20260601_20260607",
       question: "本周客户续费有什么进展？",
       scope: "week",
@@ -2180,6 +2470,7 @@ describe("API routes", () => {
 
     expect(response.status).toBe(200);
     expect(answerQuestionWithAIMock).toHaveBeenCalledWith({
+      userId: "user_default",
       uploadId: "week_20260525_20260531",
       question: "上周客户续费有什么进展？",
       scope: "week",
@@ -2298,6 +2589,7 @@ describe("API routes", () => {
 
     expect(response.status).toBe(200);
     expect(answerQuestionWithAIMock).toHaveBeenCalledWith({
+      userId: "user_default",
       uploadId: "all_memory",
       question: "过去客户续费有什么进展？",
       scope: "all",
@@ -2396,6 +2688,65 @@ describe("API routes", () => {
     expect(storeMock.write).not.toHaveBeenCalled();
   });
 
+  it("returns 409 before current-upload qa can run during permanent deletion", async () => {
+    storeMock.read.mockImplementation(async (collection: string) => {
+      if (collection === "uploads") {
+        return { id: "upload_1", status: "ready" };
+      }
+      return null;
+    });
+    readHybridIndexDeletionMock.mockResolvedValue({ status: "pending" });
+
+    const response = await postQa(
+      new Request("http://localhost/api/days/upload_1/qa", {
+        method: "POST",
+        body: JSON.stringify({ question: "What did I commit to?" }),
+        headers: { "content-type": "application/json" }
+      }),
+      { params: Promise.resolve({ uploadId: "upload_1" }) }
+    );
+
+    expect(response.status).toBe(409);
+    await expect(response.json()).resolves.toEqual({
+      error: "upload_deletion_in_progress"
+    });
+    expect(answerQuestionWithAIMock).not.toHaveBeenCalled();
+    expect(storeMock.write).not.toHaveBeenCalled();
+  });
+
+  it("removes a current-upload qa answer when deletion wins the persistence race", async () => {
+    storeMock.read.mockImplementation(async (collection: string) => {
+      if (collection === "uploads") {
+        return { id: "upload_1", status: "ready" };
+      }
+      if (collection === "answers-by-upload") return [];
+      return null;
+    });
+    readHybridIndexDeletionMock
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce({ status: "pending" });
+
+    const response = await postQa(
+      new Request("http://localhost/api/days/upload_1/qa", {
+        method: "POST",
+        body: JSON.stringify({ question: "What did I commit to?" }),
+        headers: { "content-type": "application/json" }
+      }),
+      { params: Promise.resolve({ uploadId: "upload_1" }) }
+    );
+
+    expect(response.status).toBe(409);
+    expect(answerQuestionWithAIMock).toHaveBeenCalledOnce();
+    expect(storeMock.write).toHaveBeenCalledWith(
+      "answers",
+      "answer_1",
+      expect.any(Object)
+    );
+    expect(storeMock.delete).toHaveBeenCalledWith("answers", "answer_1");
+    expect(storeMock.delete).toHaveBeenCalledWith("answers-by-upload", "upload_1");
+  });
+
   it("cleans up orphan answer if answers-by-upload write fails", async () => {
     storeMock.read.mockImplementation(async (collection: string) => {
       if (collection === "uploads") {
@@ -2491,6 +2842,8 @@ describe("API routes", () => {
   });
 
   it("deletes upload file and related records", async () => {
+    process.env.PIPELINE_EXECUTION_MODE = "queue";
+    process.env.QA_HYBRID_RETRIEVAL_MODE = "shadow";
     storeMock.read.mockImplementation(async (collection: string) => {
       if (collection === "uploads") {
         return {
@@ -2546,7 +2899,187 @@ describe("API routes", () => {
     );
     expect(storeMock.listIds).toHaveBeenCalledWith("analysis-chunks");
     expect(memoryRepositoryMock.deleteByUpload).toHaveBeenCalledWith("user_default", "upload_1");
+    expect(enqueueEmbeddingIndexJobMock).toHaveBeenCalledWith({
+      version: 1,
+      userRef: "user_default",
+      reason: "upload_deleted"
+    });
     await expect(response.json()).resolves.toEqual({ deleted: true });
+  });
+
+  it("keeps source data until browser-cache Hybrid retention is fully indexed", async () => {
+    process.env.PIPELINE_EXECUTION_MODE = "queue";
+    process.env.HYBRID_INDEX_RETENTION_POLICY = "browser_cache";
+    storeMock.read.mockImplementation(async (collection: string) =>
+      collection === "uploads"
+        ? {
+            id: "upload_1",
+            originalName: "demo.m4a",
+            mimeType: "audio/mp4",
+            sizeBytes: 12,
+            recordingDate: "2026-06-03",
+            status: "ready"
+          }
+        : null
+    );
+    prepareHybridIndexRetentionMock.mockResolvedValue({
+      status: "pending",
+      matched: 2,
+      total: 3
+    });
+
+    const response = await deleteUpload(new Request(
+      "http://localhost/api/uploads/upload_1",
+      { headers: { "x-daily-brief-cleanup-mode": "browser-cache" } }
+    ), { params: Promise.resolve({ uploadId: "upload_1" }) });
+
+    expect(response.status).toBe(409);
+    await expect(response.json()).resolves.toEqual({
+      error: "hybrid_index_pending",
+      retryable: true,
+      matched: 2,
+      total: 3
+    });
+    expect(enqueueEmbeddingIndexJobMock).toHaveBeenCalledWith({
+      version: 1,
+      userRef: "user_default",
+      reason: "browser_cleanup"
+    });
+    expect(storeMock.write).not.toHaveBeenCalledWith(
+      "deleted-uploads",
+      expect.anything(),
+      expect.anything()
+    );
+    expect(storeMock.delete).not.toHaveBeenCalledWith("uploads", "upload_1");
+  });
+
+  it("retains the prepared Hybrid snapshot during browser-cache cleanup", async () => {
+    process.env.PIPELINE_EXECUTION_MODE = "queue";
+    process.env.HYBRID_INDEX_RETENTION_POLICY = "browser_cache";
+    storeMock.read.mockImplementation(async (collection: string) =>
+      collection === "uploads"
+        ? {
+            id: "upload_1",
+            originalName: "demo.m4a",
+            mimeType: "audio/mp4",
+            sizeBytes: 12,
+            recordingDate: "2026-06-03",
+            status: "ready"
+          }
+        : null
+    );
+
+    const response = await deleteUpload(new Request(
+      "http://localhost/api/uploads/upload_1",
+      { headers: { "x-daily-brief-cleanup-mode": "browser-cache" } }
+    ), { params: Promise.resolve({ uploadId: "upload_1" }) });
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toEqual({
+      deleted: true,
+      hybridIndexRetained: true
+    });
+    expect(storeMock.delete).toHaveBeenCalledWith("uploads", "upload_1");
+    expect(deleteHybridIndexDeletionMock).not.toHaveBeenCalled();
+  });
+
+  it("does not remove source data while permanent Hybrid deletion is pending", async () => {
+    process.env.PIPELINE_EXECUTION_MODE = "queue";
+    requiresHybridPermanentIndexDeletionMock.mockResolvedValue(true);
+    requestHybridPermanentIndexDeletionMock.mockResolvedValue({ status: "pending" });
+    storeMock.read.mockImplementation(async (collection: string) =>
+      collection === "uploads"
+        ? {
+            id: "upload_1",
+            originalName: "demo.m4a",
+            mimeType: "audio/mp4",
+            sizeBytes: 12,
+            recordingDate: "2026-06-03",
+            status: "ready"
+          }
+        : null
+    );
+
+    const response = await deleteUpload(
+      new Request("http://localhost/api/uploads/upload_1"),
+      { params: Promise.resolve({ uploadId: "upload_1" }) }
+    );
+
+    expect(response.status).toBe(409);
+    await expect(response.json()).resolves.toEqual({
+      error: "hybrid_index_deletion_pending",
+      retryable: true
+    });
+    expect(enqueueEmbeddingIndexJobMock).toHaveBeenCalledWith({
+      version: 1,
+      userRef: "user_default",
+      reason: "permanent_delete"
+    });
+    expect(storeMock.write).not.toHaveBeenCalledWith(
+      "deleted-uploads",
+      expect.anything(),
+      expect.anything()
+    );
+    expect(storeMock.delete).not.toHaveBeenCalledWith("uploads", "upload_1");
+  });
+
+  it("finalizes a completed Hybrid deletion even when the retention policy is off", async () => {
+    process.env.PIPELINE_EXECUTION_MODE = "queue";
+    requiresHybridPermanentIndexDeletionMock.mockResolvedValue(true);
+    requestHybridPermanentIndexDeletionMock.mockResolvedValue({ status: "completed" });
+    storeMock.read.mockImplementation(async (collection: string) =>
+      collection === "uploads"
+        ? {
+            id: "upload_1",
+            originalName: "demo.m4a",
+            mimeType: "audio/mp4",
+            sizeBytes: 12,
+            recordingDate: "2026-06-03",
+            status: "ready"
+          }
+        : null
+    );
+
+    const response = await deleteUpload(
+      new Request("http://localhost/api/uploads/upload_1"),
+      { params: Promise.resolve({ uploadId: "upload_1" }) }
+    );
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toEqual({
+      deleted: true,
+      hybridIndexDeleted: true
+    });
+    expect(storeMock.delete).toHaveBeenCalledWith("uploads", "upload_1");
+    expect(deleteHybridIndexDeletionMock).toHaveBeenCalledWith(
+      storeMock,
+      "upload_1"
+    );
+  });
+
+  it("blocks permanent Hybrid cleanup before source deletion when Queue is unavailable", async () => {
+    requiresHybridPermanentIndexDeletionMock.mockResolvedValue(true);
+    storeMock.read.mockResolvedValue({
+      id: "upload_1",
+      originalName: "demo.m4a",
+      mimeType: "audio/mp4",
+      sizeBytes: 12,
+      recordingDate: "2026-06-03",
+      status: "ready"
+    });
+
+    const response = await deleteUpload(
+      new Request("http://localhost/api/uploads/upload_1"),
+      { params: Promise.resolve({ uploadId: "upload_1" }) }
+    );
+
+    expect(response.status).toBe(503);
+    await expect(response.json()).resolves.toEqual({
+      error: "hybrid_index_queue_required",
+      retryable: true
+    });
+    expect(requestHybridPermanentIndexDeletionMock).not.toHaveBeenCalled();
+    expect(storeMock.delete).not.toHaveBeenCalled();
   });
 
   it("does not clean a marked date-companion upload before its SQLite import exists", async () => {

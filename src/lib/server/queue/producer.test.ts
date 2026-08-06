@@ -4,12 +4,18 @@ import { describe, expect, it, vi } from "vitest";
 import { resolve } from "node:path";
 import type { PipelineQueueConfig } from "./config";
 import {
+  enqueueEmbeddingIndexJob,
   enqueuePipelineJob,
   PipelineQueueUnavailableError,
   type PipelineQueueAdapter,
   type RedisConnectionAdapter
 } from "./producer";
-import { buildPipelineJobId, type PipelineJobData } from "./types";
+import {
+  buildEmbeddingIndexQueueJobIds,
+  buildPipelineJobId,
+  type EmbeddingIndexQueuePayload,
+  type PipelineJobData
+} from "./types";
 
 const config: PipelineQueueConfig = {
   executionMode: "queue",
@@ -20,6 +26,7 @@ const config: PipelineQueueConfig = {
   backoffMs: 5_000,
   processingStaleMs: 60_000,
   recoveryIntervalMs: 60_000,
+  hybridIndexRecoveryIntervalMs: 900_000,
   failedHealthWindowMs: 60_000,
   retention: {
     completed: { age: 3_600, count: 10 },
@@ -221,5 +228,62 @@ describe("pipeline queue producer", () => {
 
     expect(queue.add).not.toHaveBeenCalled();
     expect(queue.getJob).toHaveBeenCalledOnce();
+  });
+});
+
+describe("embedding index queue producer", () => {
+  const indexData: EmbeddingIndexQueuePayload = {
+    version: 1,
+    userRef: "user_1",
+    reason: "manual"
+  };
+
+  function indexFixture(states: Array<"absent" | "waiting" | "active" | "completed">) {
+    const base = fixture();
+    const ids = buildEmbeddingIndexQueueJobIds(indexData);
+    const jobs = states.map((state, index) => state === "absent" ? null : ({
+      id: ids[index],
+      getState: vi.fn(async () => state),
+      remove: vi.fn(async () => undefined)
+    }));
+    vi.mocked(base.queue.getJob).mockImplementation(async (jobId) =>
+      jobs[ids.indexOf(jobId as typeof ids[number])] ?? null
+    );
+    return { ...base, ids, jobs };
+  }
+
+  it("adds the primary stable slot with three retry attempts", async () => {
+    const current = indexFixture(["absent", "absent"]);
+    await expect(enqueueEmbeddingIndexJob(indexData, {
+      config,
+      dependencies: dependenciesFor(current.redis, current.queue)
+    })).resolves.toEqual({ jobId: current.ids[0], enqueued: true });
+    expect(current.queue.add).toHaveBeenCalledWith(
+      "refresh-embedding-index",
+      indexData,
+      expect.objectContaining({ jobId: current.ids[0], attempts: 3 })
+    );
+  });
+
+  it("adds a stable follow-up when the primary refresh is already active", async () => {
+    const current = indexFixture(["active", "absent"]);
+    await expect(enqueueEmbeddingIndexJob(indexData, {
+      config,
+      dependencies: dependenciesFor(current.redis, current.queue)
+    })).resolves.toEqual({ jobId: current.ids[1], enqueued: true });
+    expect(current.queue.add).toHaveBeenCalledWith(
+      "refresh-embedding-index",
+      indexData,
+      expect.objectContaining({ jobId: current.ids[1] })
+    );
+  });
+
+  it("coalesces into an already waiting follow-up", async () => {
+    const current = indexFixture(["active", "waiting"]);
+    await expect(enqueueEmbeddingIndexJob(indexData, {
+      config,
+      dependencies: dependenciesFor(current.redis, current.queue)
+    })).resolves.toEqual({ jobId: current.ids[1], enqueued: false });
+    expect(current.queue.add).not.toHaveBeenCalled();
   });
 });

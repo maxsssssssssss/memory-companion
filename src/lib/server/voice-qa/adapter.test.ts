@@ -159,11 +159,22 @@ describe("createMemoryVoiceQaAnswerer", () => {
       recordingDate: "2026-07-20"
     });
     await store.write("audio-insights", "upload_1", [{
+      id: "insight_1",
       uploadId: "upload_1",
       speaker: { id: "speaker_0", role: "unknown", confidence: 0.9 },
       summary: "speaker_0 记住了安排",
       evidence: "speaker_0 做了确认"
     }]);
+    await store.write("audio-insight-corrections", "upload_1", {
+      corrections: {
+        insight_1: {
+          labelCorrections: [{ from: "unknown", to: "warm" }],
+          note: "User-confirmed correction",
+          updatedAt: "2026-07-20T00:00:00.000Z"
+        }
+      },
+      updatedAt: "2026-07-20T00:00:00.000Z"
+    });
     await store.write("speaker-aliases", "upload_1", {
       aliases: { speaker_0: "小林" },
       updatedAt: "2026-07-20T00:00:00.000Z"
@@ -189,6 +200,7 @@ describe("createMemoryVoiceQaAnswerer", () => {
     expect(currentQa).toHaveBeenCalledOnce();
     expect(answerer.answerMode).toBe("agent");
     const qaInput = currentQa.mock.calls[0][0];
+    expect(qaInput.userId).toBe("user_1");
     expect(qaInput.answerMode).toBe("agent");
     expect(qaInput.question).toBe("今天 有什么重要事情？");
     expect(qaInput.settingsStore).toBe(store);
@@ -199,6 +211,20 @@ describe("createMemoryVoiceQaAnswerer", () => {
       summary: "小林 记住了安排",
       evidence: "小林 做了确认"
     });
+    expect(qaInput.audioInsights?.[0]?.userCorrections).toBeUndefined();
+    expect(qaInput.hybridEvidenceInput?.audioInsights?.[0]).toMatchObject({
+      speaker: { id: "speaker_0", displayName: "小林" },
+      summary: "小林 记住了安排",
+      evidence: "小林 做了确认",
+      userCorrections: [{
+        labelCorrections: [{ from: "unknown", to: "warm" }],
+        note: "User-confirmed correction"
+      }]
+    });
+    expect(qaInput.hybridEvidenceInput?.segments).toEqual(qaInput.segments);
+    expect(qaInput.hybridEvidenceInput?.semanticSegments).toEqual(qaInput.semanticSegments);
+    expect(qaInput.hybridEvidenceInput?.briefItems).toEqual(qaInput.briefItems);
+    expect(qaInput.hybridEvidenceInput?.relationshipSignals).toEqual([]);
     await expect(store.read("answers", expected.id)).resolves.toEqual(expected);
     await expect(store.read("answers-by-upload", "upload_1")).resolves.toEqual([expected]);
   });
@@ -227,6 +253,7 @@ describe("createMemoryVoiceQaAnswerer", () => {
     })).resolves.toEqual(expected);
 
     expect(currentQa).toHaveBeenCalledWith(expect.objectContaining({
+      userId: "user_1",
       uploadId: "upload_1",
       scope: "current",
       segments: context.segments,
@@ -460,5 +487,39 @@ describe("createMemoryVoiceQaAnswerer", () => {
       sessionId: "session_1",
       transcript: "问题"
     })).rejects.toMatchObject({ code: "upload_not_ready" } satisfies Partial<VoiceQaAdapterError>);
+  });
+
+  it("rejects current-upload voice qa after upload deletion starts", async () => {
+    const store = await temporaryStore();
+    await store.write("uploads", "upload_1", {
+      id: "upload_1",
+      status: "ready",
+      recordingDate: "2026-07-20"
+    });
+    await store.write("deleted-uploads", "upload_1", {
+      uploadId: "upload_1",
+      deletedAt: "2026-07-20T00:00:00.000Z"
+    });
+    const currentQa = vi.fn<typeof answerQuestionWithAI>();
+    const answerer = createMemoryVoiceQaAnswerer({
+      userId: "user_1",
+      store,
+      scope: "current",
+      uploadId: "upload_1",
+      dependencies: { answerQuestionWithAI: currentQa }
+    });
+
+    await expect(answerer.answer({
+      sessionId: "session_1",
+      transcript: "Question",
+      userId: "user_1",
+      scope: "current",
+      uploadId: "upload_1",
+      mode: "VOICE"
+    })).rejects.toMatchObject({
+      code: "upload_deletion_in_progress"
+    } satisfies Partial<VoiceQaAdapterError>);
+    expect(currentQa).not.toHaveBeenCalled();
+    await expect(store.read("answers-by-upload", "upload_1")).resolves.toBeNull();
   });
 });

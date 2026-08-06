@@ -35,6 +35,7 @@ import type {
   QuestionAnswer,
   RelationshipSignalCard,
   SemanticSegment,
+  SpeakerAliasesByUploadId,
   TranscriptSegment
 } from "@/lib/domain/types";
 import type { QaBrowserStreamEvent } from "@/lib/qa-browser-stream";
@@ -133,6 +134,7 @@ export type CurrentInteractionQaInput = {
   semanticSegments: SemanticSegment[];
   briefItems: BriefItem[];
   relationshipSignals: RelationshipSignalCard[];
+  speakerAliasesByUploadId?: SpeakerAliasesByUploadId;
   signal?: AbortSignal;
 };
 
@@ -262,6 +264,43 @@ function waitForNextPoll(milliseconds: number, signal?: AbortSignal): Promise<vo
     };
     signal?.addEventListener("abort", onAbort, { once: true });
   });
+}
+
+const HYBRID_INDEX_MAINTENANCE_RETRY_TIMEOUT_MS = 2 * 60 * 1_000;
+
+function responseErrorCode(payload: unknown) {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) return null;
+  const error = (payload as { error?: unknown }).error;
+  return typeof error === "string" ? error : null;
+}
+
+function retryAfterMilliseconds(response: Response) {
+  const seconds = Number(response.headers.get("retry-after") ?? "2");
+  return Number.isFinite(seconds) && seconds > 0
+    ? Math.min(5_000, Math.max(250, Math.round(seconds * 1_000)))
+    : 2_000;
+}
+
+async function deleteWithHybridIndexRetry(input: {
+  request: () => Promise<Response>;
+  pendingError: "hybrid_index_pending" | "hybrid_index_deletion_pending";
+  signal?: AbortSignal;
+}) {
+  const deadline = Date.now() + HYBRID_INDEX_MAINTENANCE_RETRY_TIMEOUT_MS;
+  while (true) {
+    const response = await input.request();
+    if (response.ok) return response;
+    const payload = await responsePayload(response);
+    if (
+      response.status === 409 &&
+      responseErrorCode(payload) === input.pendingError &&
+      Date.now() < deadline
+    ) {
+      await waitForNextPoll(retryAfterMilliseconds(response), input.signal);
+      continue;
+    }
+    throw apiError(response, payload);
+  }
 }
 
 async function responsePayload(response: Response): Promise<unknown> {
@@ -397,15 +436,15 @@ export function createDateCompanionApi(fetcher: typeof fetch = fetch): DateCompa
 
     async cleanupUpload(uploadId, signal) {
       const realUploadId = assertRealUploadId(uploadId);
-      const response = await sameOrigin(`/api/uploads/${encodeURIComponent(realUploadId)}`, {
-        method: "DELETE",
-        headers: { "x-daily-brief-cleanup-mode": "browser-cache" },
+      const response = await deleteWithHybridIndexRetry({
+        request: () => sameOrigin(`/api/uploads/${encodeURIComponent(realUploadId)}`, {
+          method: "DELETE",
+          headers: { "x-daily-brief-cleanup-mode": "browser-cache" },
+          signal
+        }),
+        pendingError: "hybrid_index_pending",
         signal
       });
-      if (!response.ok) {
-        const payload = await responsePayload(response);
-        throw apiError(response, payload);
-      }
       await response.body?.cancel().catch(() => undefined);
     },
 
@@ -416,21 +455,21 @@ export function createDateCompanionApi(fetcher: typeof fetch = fetch): DateCompa
         "invalid_interaction_id"
       );
       const expectedVersion = assertExpectedVersion(precondition.expectedVersion);
-      const response = await sameOrigin(`/api/uploads/${encodeURIComponent(realUploadId)}`, {
-        method: "DELETE",
-        // The person page uses a second explicit confirmation before this call.
-        // Preserve the evaluation-retention contract instead of bypassing it.
-        headers: {
-          "x-evaluation-delete-confirmed": "true",
-          "x-date-companion-interaction-id": interactionId,
-          "if-match": `"${expectedVersion}"`
-        },
+      const response = await deleteWithHybridIndexRetry({
+        request: () => sameOrigin(`/api/uploads/${encodeURIComponent(realUploadId)}`, {
+          method: "DELETE",
+          // The person page uses a second explicit confirmation before this call.
+          // Preserve the evaluation-retention contract instead of bypassing it.
+          headers: {
+            "x-evaluation-delete-confirmed": "true",
+            "x-date-companion-interaction-id": interactionId,
+            "if-match": `"${expectedVersion}"`
+          },
+          signal
+        }),
+        pendingError: "hybrid_index_deletion_pending",
         signal
       });
-      if (!response.ok) {
-        const payload = await responsePayload(response);
-        throw apiError(response, payload);
-      }
       await response.body?.cancel().catch(() => undefined);
     },
 
@@ -521,9 +560,13 @@ export function createDateCompanionApi(fetcher: typeof fetch = fetch): DateCompa
     async deleteInteraction(interactionId, expectedVersion, signal) {
       const id = assertCompanionId(interactionId, "invalid_interaction_id");
       const version = assertExpectedVersion(expectedVersion);
-      const response = await sameOrigin(`/api/date-companion/interactions/${encodeURIComponent(id)}`, {
-        method: "DELETE",
-        headers: { "if-match": `"${version}"` },
+      const response = await deleteWithHybridIndexRetry({
+        request: () => sameOrigin(`/api/date-companion/interactions/${encodeURIComponent(id)}`, {
+          method: "DELETE",
+          headers: { "if-match": `"${version}"` },
+          signal
+        }),
+        pendingError: "hybrid_index_deletion_pending",
         signal
       });
       await parseJsonResponse(response, DcDeleteInteractionResponseSchema);
@@ -547,7 +590,10 @@ export function createDateCompanionApi(fetcher: typeof fetch = fetch): DateCompa
           audioInsights: input.audioInsights,
           semanticSegments: input.semanticSegments,
           briefItems: input.briefItems,
-          relationshipSignals: input.relationshipSignals
+          relationshipSignals: input.relationshipSignals,
+          ...(input.speakerAliasesByUploadId
+            ? { speakerAliasesByUploadId: input.speakerAliasesByUploadId }
+            : {})
         }),
         signal: input.signal
       });

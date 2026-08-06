@@ -269,7 +269,10 @@ describe("date-companion API", () => {
       audioInsights: [],
       semanticSegments: [],
       briefItems: [],
-      relationshipSignals: []
+      relationshipSignals: [],
+      speakerAliasesByUploadId: {
+        upload_1: { speaker_1: "小林" }
+      }
     })) {
       events.push(event);
     }
@@ -279,6 +282,9 @@ describe("date-companion API", () => {
     const body = JSON.parse(String(request.body));
     expect(new Headers(request.headers).get("Accept")).toBe("application/x-ndjson");
     expect(body).toMatchObject({ uploadId: "upload_1", scope: "current", promptPresetId: "date" });
+    expect(body.speakerAliasesByUploadId).toEqual({
+      upload_1: { speaker_1: "小林" }
+    });
     expect(body).not.toHaveProperty("model");
   });
 
@@ -311,6 +317,36 @@ describe("date-companion API", () => {
     expect(headers.get("x-date-companion-interaction-id")).toBe("interaction_1");
     expect(headers.get("if-match")).toBe('"3"');
     expect(headers.has("x-daily-brief-cleanup-mode")).toBe(false);
+  });
+
+  it("polls a pending permanent Hybrid deletion until the Worker completes it", async () => {
+    vi.useFakeTimers();
+    try {
+      const pending = new Response(JSON.stringify({
+        error: "hybrid_index_deletion_pending",
+        retryable: true
+      }), {
+        status: 409,
+        headers: {
+          "Content-Type": "application/json",
+          "Retry-After": "0.001"
+        }
+      });
+      const fetcher = vi.fn()
+        .mockResolvedValueOnce(pending)
+        .mockResolvedValueOnce(jsonResponse({ deleted: true }));
+      const api = createDateCompanionApi(fetcher as typeof fetch);
+
+      const deletion = api.deleteSourceUpload("upload_1", {
+        interactionId: "interaction_1",
+        expectedVersion: 3
+      });
+      await vi.runAllTimersAsync();
+      await expect(deletion).resolves.toBeUndefined();
+      expect(fetcher).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("uses the Stage 2 relationship contracts without sending user or provider fields", async () => {

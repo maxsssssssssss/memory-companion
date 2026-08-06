@@ -7,6 +7,15 @@ import type {
   SemanticSegment,
   TranscriptSegment
 } from "@/lib/domain/types";
+import {
+  applySpeakerAliasesToPayload,
+  sanitizeSpeakerAliases,
+  type StoredSpeakerAliases
+} from "@/lib/domain/speaker-aliases";
+import {
+  applyAudioInsightCorrections,
+  type StoredAudioInsightCorrections
+} from "@/lib/domain/audio-insight-corrections";
 import { observeMemoryShadowRetrieval, type MemoryShadowDateRange } from "@/lib/server/memory/shadow-retrieval";
 import {
   answerQuestionWithAI,
@@ -126,20 +135,53 @@ function decorateRelationshipSignals(upload: StoredUpload, relationshipSignals: 
 }
 
 async function readUploadEvidence(store: JsonStore, upload: StoredUpload) {
-  const [segments, audioInsights, semanticSegments, briefItems, relationshipSignals] = await Promise.all([
+  const [
+    segments,
+    audioInsights,
+    storedAudioInsightCorrections,
+    semanticSegments,
+    briefItems,
+    relationshipSignals,
+    storedSpeakerAliases
+  ] = await Promise.all([
     store.read<TranscriptSegment[]>("segments", upload.id),
     store.read<AudioInsight[]>("audio-insights", upload.id),
+    store.read<StoredAudioInsightCorrections>(
+      "audio-insight-corrections",
+      upload.id
+    ),
     store.read<SemanticSegment[]>("semantic-segments", upload.id),
     store.read<BriefItem[]>("brief-items", upload.id),
-    store.read<RelationshipSignalCard[]>("relationship-signals", upload.id)
+    store.read<RelationshipSignalCard[]>("relationship-signals", upload.id),
+    store.read<StoredSpeakerAliases>("speaker-aliases", upload.id)
   ]);
+
+  const aliased = applySpeakerAliasesToPayload(
+    {
+      segments: segments ?? [],
+      audioInsights: applyAudioInsightCorrections(
+        audioInsights ?? [],
+        storedAudioInsightCorrections?.corrections ?? {}
+      ),
+      semanticSegments: semanticSegments ?? [],
+      briefItems: briefItems ?? []
+    },
+    sanitizeSpeakerAliases(storedSpeakerAliases?.aliases ?? {})
+  );
 
   return {
     segments: decorateSegments(upload, segments ?? []),
     audioInsights: decorateAudioInsights(upload, audioInsights ?? []),
     semanticSegments: decorateSemanticSegments(upload, semanticSegments ?? []),
     briefItems: decorateBriefItems(upload, briefItems ?? []),
-    relationshipSignals: decorateRelationshipSignals(upload, relationshipSignals ?? [])
+    relationshipSignals: decorateRelationshipSignals(upload, relationshipSignals ?? []),
+    hybrid: {
+      segments: aliased.segments,
+      audioInsights: aliased.audioInsights ?? [],
+      semanticSegments: aliased.semanticSegments ?? [],
+      briefItems: aliased.briefItems,
+      relationshipSignals: relationshipSignals ?? []
+    }
   };
 }
 
@@ -175,6 +217,13 @@ export async function answerMemoryScopeQuestion(input: {
   const semanticSegments = scopedEvidence.flatMap((evidence) => evidence.semanticSegments);
   const briefItems = scopedEvidence.flatMap((evidence) => evidence.briefItems);
   const relationshipSignals = scopedEvidence.flatMap((evidence) => evidence.relationshipSignals);
+  const hybridEvidenceInput = {
+    segments: scopedEvidence.flatMap((evidence) => evidence.hybrid.segments),
+    audioInsights: scopedEvidence.flatMap((evidence) => evidence.hybrid.audioInsights),
+    semanticSegments: scopedEvidence.flatMap((evidence) => evidence.hybrid.semanticSegments),
+    briefItems: scopedEvidence.flatMap((evidence) => evidence.hybrid.briefItems),
+    relationshipSignals: scopedEvidence.flatMap((evidence) => evidence.hybrid.relationshipSignals)
+  };
 
   if (
     segments.length === 0 &&
@@ -225,6 +274,7 @@ export async function answerMemoryScopeQuestion(input: {
     current: { evidence: QaRetrievedEvidence[]; elapsedMs: number } | null;
   } = { current: null };
   const qaInput: AnswerQuestionWithAIInput = {
+    ...(input.userId ? { userId: input.userId } : {}),
     uploadId: input.scopeId,
     question: input.question,
     scope: input.qaScope,
@@ -243,6 +293,10 @@ export async function answerMemoryScopeQuestion(input: {
   // established QA request contract. Keep them non-enumerable so existing
   // callers, mocks, and serialized request views retain their original shape.
   Object.defineProperties(qaInput, {
+    hybridEvidenceInput: {
+      value: hybridEvidenceInput,
+      enumerable: false
+    },
     memoryRetrievalMs: {
       value: memoryRetrievalMs,
       enumerable: false

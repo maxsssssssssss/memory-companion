@@ -29,6 +29,7 @@ function config(dataDirectory: string): PipelineQueueConfig {
     backoffMs: 5_000,
     processingStaleMs: 60_000,
     recoveryIntervalMs: 60_000,
+    hybridIndexRecoveryIntervalMs: 900_000,
     failedHealthWindowMs: 60_000,
     retention: {
       completed: { age: 3_600, count: 10 },

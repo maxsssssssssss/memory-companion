@@ -13,6 +13,10 @@ import {
   sanitizeSpeakerAliases,
   type StoredSpeakerAliases
 } from "@/lib/domain/speaker-aliases";
+import {
+  applyAudioInsightCorrections,
+  type StoredAudioInsightCorrections
+} from "@/lib/domain/audio-insight-corrections";
 import { VoiceEvent, type ParsedVoiceServerEvent } from "@/lib/server/voice/events";
 import {
   answerMemoryScopeQuestion,
@@ -27,6 +31,7 @@ import {
   type QaScope
 } from "@/lib/server/retrieval/ai-qa";
 import { safeElapsedMs } from "@/lib/server/retrieval/qa-observability";
+import { isUploadDeletionInProgress } from "@/lib/server/upload-deletion-barrier";
 import type { JsonStore } from "@/lib/server/storage/json-store";
 import {
   createVoiceAnswerStrategy,
@@ -74,7 +79,8 @@ export type VoiceQaAdapterErrorCode =
   | "scope_mismatch"
   | "upload_mismatch"
   | "upload_not_found"
-  | "upload_not_ready";
+  | "upload_not_ready"
+  | "upload_deletion_in_progress";
 
 export class VoiceQaAdapterError extends Error {
   constructor(
@@ -176,6 +182,12 @@ function validateReferenceDate(value: Date | undefined) {
 }
 
 async function persistCurrentAnswer(store: JsonStore, uploadId: string, answer: QuestionAnswer) {
+  if (await isUploadDeletionInProgress(store, uploadId)) {
+    throw new VoiceQaAdapterError(
+      "upload_deletion_in_progress",
+      "Voice QA upload deletion is in progress"
+    );
+  }
   const answers = (await store.read<QuestionAnswer[]>("answers-by-upload", uploadId)) ?? [];
   await store.write("answers", answer.id, answer);
   try {
@@ -183,6 +195,16 @@ async function persistCurrentAnswer(store: JsonStore, uploadId: string, answer: 
   } catch (error) {
     await store.delete("answers", answer.id).catch(() => undefined);
     throw error;
+  }
+  if (await isUploadDeletionInProgress(store, uploadId)) {
+    await Promise.all([
+      store.delete("answers", answer.id),
+      store.delete("answers-by-upload", uploadId)
+    ]);
+    throw new VoiceQaAdapterError(
+      "upload_deletion_in_progress",
+      "Voice QA upload deletion started before answer persistence completed"
+    );
   }
 }
 
@@ -201,16 +223,35 @@ async function answerCurrentUpload(input: {
   if (upload.status !== "ready") {
     throw new VoiceQaAdapterError("upload_not_ready", "Voice QA upload is not ready");
   }
+  if (await isUploadDeletionInProgress(input.store, input.uploadId)) {
+    throw new VoiceQaAdapterError(
+      "upload_deletion_in_progress",
+      "Voice QA upload deletion is in progress"
+    );
+  }
 
-  const [segments, audioInsights, semanticSegments, briefItems, relationshipSignals, storedSpeakerAliases] =
+  const [
+    segments,
+    audioInsights,
+    storedAudioInsightCorrections,
+    semanticSegments,
+    briefItems,
+    relationshipSignals,
+    storedSpeakerAliases
+  ] =
     await Promise.all([
       input.store.read<TranscriptSegment[]>("segments", input.uploadId),
       input.store.read<AudioInsight[]>("audio-insights", input.uploadId),
+      input.store.read<StoredAudioInsightCorrections>(
+        "audio-insight-corrections",
+        input.uploadId
+      ),
       input.store.read<SemanticSegment[]>("semantic-segments", input.uploadId),
       input.store.read<BriefItem[]>("brief-items", input.uploadId),
       input.store.read<RelationshipSignalCard[]>("relationship-signals", input.uploadId),
       input.store.read<StoredSpeakerAliases>("speaker-aliases", input.uploadId)
     ]);
+  const speakerAliases = sanitizeSpeakerAliases(storedSpeakerAliases?.aliases ?? {});
   const aliasedPayload = applySpeakerAliasesToPayload(
     {
       segments: segments ?? [],
@@ -218,14 +259,26 @@ async function answerCurrentUpload(input: {
       semanticSegments: semanticSegments ?? [],
       briefItems: briefItems ?? []
     },
-    sanitizeSpeakerAliases(storedSpeakerAliases?.aliases ?? {})
+    speakerAliases
+  );
+  const hybridAliasedPayload = applySpeakerAliasesToPayload(
+    {
+      segments: segments ?? [],
+      audioInsights: applyAudioInsightCorrections(
+        audioInsights ?? [],
+        storedAudioInsightCorrections?.corrections ?? {}
+      ),
+      semanticSegments: semanticSegments ?? [],
+      briefItems: briefItems ?? []
+    },
+    speakerAliases
   );
   const memoryRetrievalMs = safeElapsedMs(retrievalStartedAt);
   const conversation = normalizeQaConversation(input.request.conversation);
   const qaPromptInstruction = input.request.mode === "VOICE"
     ? VOICE_QA_STYLE_INSTRUCTION
     : undefined;
-  const answer = await input.answer({
+  const qaInput: AnswerQuestionWithAIInput = {
     uploadId: input.uploadId,
     question: input.question,
     scope: "current",
@@ -241,7 +294,18 @@ async function answerCurrentUpload(input: {
       : {}),
     ...(qaPromptInstruction ? { qaPromptInstruction } : {}),
     ...(conversation.length > 0 ? { conversation } : {})
+  };
+  Object.defineProperty(qaInput, "hybridEvidenceInput", {
+    value: {
+      segments: hybridAliasedPayload.segments,
+      audioInsights: hybridAliasedPayload.audioInsights ?? [],
+      semanticSegments: hybridAliasedPayload.semanticSegments ?? [],
+      briefItems: hybridAliasedPayload.briefItems,
+      relationshipSignals: relationshipSignals ?? []
+    },
+    enumerable: false
   });
+  const answer = await input.answer(qaInput);
   await persistCurrentAnswer(input.store, input.uploadId, answer);
   return answer;
 }
@@ -314,14 +378,21 @@ export function createMemoryVoiceQaAnswerer(
     request: VoiceQARequest,
     qaInput: AnswerQuestionWithAIInput
   ) {
-    if (!request.onQaStreamEvent) return answerWithStrategy(qaInput);
+    const trustedQaInput: AnswerQuestionWithAIInput = {
+      ...qaInput,
+      userId,
+      ...(qaInput.hybridEvidenceInput
+        ? { hybridEvidenceInput: qaInput.hybridEvidenceInput }
+        : {})
+    };
+    if (!request.onQaStreamEvent) return answerWithStrategy(trustedQaInput);
 
     let finalEvent: Extract<
       import("@/lib/server/retrieval/qa-streaming").QaAnswerStreamEvent,
       { type: "final" }
     > | undefined;
     for await (const event of dependencies.answerQuestionStream({
-      ...qaInput,
+      ...trustedQaInput,
       answerMode: answerStrategy.mode
     })) {
       // Sentence Commit v2 emits only independently grounded sentence events.

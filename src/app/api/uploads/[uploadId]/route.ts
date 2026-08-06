@@ -22,6 +22,21 @@ import { cleanupGeneratedAudioChunks } from "@/lib/server/transcription/chunks/a
 import { JsonChunkCheckpointStore } from "@/lib/server/transcription/chunks/checkpoint-store";
 import { JsonAnalysisChunkCheckpointStore } from "@/lib/server/analysis-chunks/checkpoint";
 import { JsonSpeakerIdentityRepository } from "@/lib/server/speaker-identity/repository";
+import {
+  resolveHybridIndexRetentionPolicy,
+  resolveQaHybridRetrievalMode
+} from "@/lib/server/retrieval/hybrid/runtime-config";
+import {
+  prepareHybridIndexRetention,
+  requiresHybridPermanentIndexDeletion,
+  requestHybridPermanentIndexDeletion
+} from "@/lib/server/retrieval/hybrid/retention-runtime";
+import {
+  deleteHybridIndexDeletion,
+  readHybridIndexRetentionManifest
+} from "@/lib/server/retrieval/hybrid/retention-manifest";
+import { resolvePipelineExecutionMode } from "@/lib/server/queue/config";
+import { enqueueEmbeddingIndexJob } from "@/lib/server/queue/producer";
 
 type StoredUpload = AudioUpload & DateCompanionMarkedUpload & {
   filePath?: string;
@@ -131,6 +146,8 @@ export async function DELETE(
   const isBrowserCacheCleanup =
     request.headers.get("x-daily-brief-cleanup-mode") ===
     BROWSER_CACHE_CLEANUP_MODE;
+  const hybridRetentionPolicy = resolveHybridIndexRetentionPolicy();
+  const hybridRetrievalMode = resolveQaHybridRetrievalMode();
   const dateCompanionRepository = getDateCompanionRepository();
   const relationshipInteraction = dateCompanionRepository.getInteractionVersionByUpload(
     authContext.user.id,
@@ -198,7 +215,128 @@ export async function DELETE(
     }
   }
 
+  let hybridPermanentDeletionRequired = false;
+  if (!isBrowserCacheCleanup) {
+    try {
+      hybridPermanentDeletionRequired =
+        await requiresHybridPermanentIndexDeletion({
+          userId: authContext.user.id,
+          store: authContext.store,
+          uploadId,
+          hasLiveUpload: upload !== null,
+          retentionPolicyEnabled: hybridRetentionPolicy === "browser_cache",
+          retrievalEnabled: hybridRetrievalMode !== "off"
+        });
+    } catch (error) {
+      console.error(
+        `[hybrid-index-retention] deletion_state_failed ` +
+        `error_name=${error instanceof Error ? error.name : "unknown"}`
+      );
+      return NextResponse.json(
+        { error: "hybrid_index_deletion_unavailable", retryable: true },
+        { status: 503 }
+      );
+    }
+  }
+
+  if (
+    upload &&
+    isBrowserCacheCleanup &&
+    hybridRetentionPolicy === "browser_cache"
+  ) {
+    if (upload.status !== "ready") {
+      return NextResponse.json(
+        { error: "hybrid_index_pending", retryable: true },
+        { status: 409, headers: { "Retry-After": "2" } }
+      );
+    }
+    if (resolvePipelineExecutionMode() !== "queue") {
+      return NextResponse.json(
+        { error: "hybrid_index_queue_required", retryable: true },
+        { status: 503 }
+      );
+    }
+    try {
+      const readyUpload = upload as StoredUpload & { status: "ready" };
+      const retention = await prepareHybridIndexRetention({
+        userId: authContext.user.id,
+        store: authContext.store,
+        upload: readyUpload
+      });
+      if (retention.status === "pending") {
+        await enqueueEmbeddingIndexJob({
+          version: 1,
+          userRef: authContext.user.id,
+          reason: "browser_cleanup"
+        });
+        return NextResponse.json(
+          {
+            error: "hybrid_index_pending",
+            retryable: true,
+            matched: retention.matched,
+            total: retention.total
+          },
+          { status: 409, headers: { "Retry-After": "2" } }
+        );
+      }
+    } catch (error) {
+      console.error(
+        `[hybrid-index-retention] prepare_failed ` +
+        `error_name=${error instanceof Error ? error.name : "unknown"}`
+      );
+      return NextResponse.json(
+        { error: "hybrid_index_retention_unavailable", retryable: true },
+        { status: 503 }
+      );
+    }
+  }
+
+  if (hybridPermanentDeletionRequired) {
+    if (resolvePipelineExecutionMode() !== "queue") {
+      return NextResponse.json(
+        { error: "hybrid_index_queue_required", retryable: true },
+        { status: 503 }
+      );
+    }
+    try {
+      const deletion = await requestHybridPermanentIndexDeletion({
+        store: authContext.store,
+        uploadId,
+        upload: upload?.status === "ready"
+          ? upload as StoredUpload & { status: "ready" }
+          : null
+      });
+      if (deletion.status === "pending") {
+        await enqueueEmbeddingIndexJob({
+          version: 1,
+          userRef: authContext.user.id,
+          reason: "permanent_delete"
+        });
+        return NextResponse.json(
+          { error: "hybrid_index_deletion_pending", retryable: true },
+          { status: 409, headers: { "Retry-After": "2" } }
+        );
+      }
+    } catch (error) {
+      console.error(
+        `[hybrid-index-retention] deletion_prepare_failed ` +
+        `error_name=${error instanceof Error ? error.name : "unknown"}`
+      );
+      return NextResponse.json(
+        { error: "hybrid_index_deletion_unavailable", retryable: true },
+        { status: 503 }
+      );
+    }
+  }
+
   if (!upload) {
+    const retainedManifest = await readHybridIndexRetentionManifest(
+      authContext.store,
+      uploadId
+    );
+    const deletedUploadMarker = !isBrowserCacheCleanup
+      ? await authContext.store.read<unknown>("deleted-uploads", uploadId)
+      : null;
     try {
       if (isBrowserCacheCleanup && relationshipInteraction) {
         const markedServerCleaned = dateCompanionRepository.markUploadSourceState(
@@ -213,7 +351,10 @@ export async function DELETE(
         return NextResponse.json({
           deleted: true,
           uploadAlreadyDeleted: true,
-          relationshipSnapshotRetained: true
+          relationshipSnapshotRetained: true,
+          ...(retainedManifest
+            ? { hybridIndexRetained: true }
+            : { hybridIndexRetained: false, hybridIndexLegacyUnavailable: true })
         });
       }
 
@@ -233,10 +374,34 @@ export async function DELETE(
         if (!deletedRelationshipInteraction) {
           throw new Error("date_companion_interaction_delete_failed");
         }
+        if (hybridPermanentDeletionRequired) {
+          await deleteHybridIndexDeletion(authContext.store, uploadId);
+        }
         return NextResponse.json({
           deleted: true,
           uploadAlreadyDeleted: true,
-          relationshipInteractionDeleted: true
+          relationshipInteractionDeleted: true,
+          ...(hybridPermanentDeletionRequired
+            ? { hybridIndexDeleted: true }
+            : {})
+        });
+      }
+      if (
+        !isBrowserCacheCleanup &&
+        hybridPermanentDeletionRequired &&
+        (deletedUploadMarker || !relationshipInteraction)
+      ) {
+        await deleteHybridIndexDeletion(authContext.store, uploadId);
+        return NextResponse.json({
+          deleted: true,
+          uploadAlreadyDeleted: true,
+          hybridIndexDeleted: true
+        });
+      }
+      if (!isBrowserCacheCleanup && deletedUploadMarker && !relationshipInteraction) {
+        return NextResponse.json({
+          deleted: true,
+          uploadAlreadyDeleted: true
         });
       }
     } catch (error) {
@@ -372,9 +537,51 @@ export async function DELETE(
     );
   }
 
+  if (hybridPermanentDeletionRequired) {
+    try {
+      await deleteHybridIndexDeletion(authContext.store, uploadId);
+    } catch (error) {
+      console.error(
+        `[hybrid-index-retention] deletion_finalize_failed ` +
+        `error_name=${error instanceof Error ? error.name : "unknown"}`
+      );
+      return NextResponse.json(
+        { error: "hybrid_index_deletion_unavailable", retryable: true },
+        { status: 503 }
+      );
+    }
+  }
+
+  try {
+    if (
+      resolvePipelineExecutionMode() === "queue" &&
+      (
+        hybridRetrievalMode !== "off" ||
+        hybridRetentionPolicy !== "off"
+      )
+    ) {
+      await enqueueEmbeddingIndexJob({
+        version: 1,
+        userRef: authContext.user.id,
+        reason: isBrowserCacheCleanup ? "browser_cleanup" : "upload_deleted"
+      });
+    }
+  } catch (error) {
+    console.warn(
+      `[hybrid-index-worker] enqueue_failed reason=upload_deleted ` +
+      `error_name=${error instanceof Error ? error.name : "unknown"}`
+    );
+  }
+
   return NextResponse.json({
     deleted: true,
     ...(relationshipSnapshotRetained ? { relationshipSnapshotRetained: true } : {}),
-    ...(relationshipInteractionDeleted ? { relationshipInteractionDeleted: true } : {})
+    ...(relationshipInteractionDeleted ? { relationshipInteractionDeleted: true } : {}),
+    ...(isBrowserCacheCleanup && hybridRetentionPolicy === "browser_cache"
+      ? { hybridIndexRetained: true }
+      : {}),
+    ...(!isBrowserCacheCleanup && hybridPermanentDeletionRequired
+      ? { hybridIndexDeleted: true }
+      : {})
   });
 }

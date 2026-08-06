@@ -14,9 +14,12 @@ export type AcquireLocalWorkerLeaseOptions = {
   role: LocalWorkerRole;
 };
 
-export const defaultLocalWorkerLeasePath = resolve(
-  process.cwd(),
-  ".data/local-worker/worker-local.lock"
+export function localWorkerLeasePath(dataDirectory: string) {
+  return resolve(dataDirectory, "local-worker", "worker-local.lock");
+}
+
+export const defaultLocalWorkerLeasePath = localWorkerLeasePath(
+  resolve(process.cwd(), ".data")
 );
 
 function isProcessRunning(pid: number) {
@@ -38,7 +41,7 @@ function noOpLease(): LocalWorkerLease {
 export async function acquireLocalWorkerLease(
   options: AcquireLocalWorkerLeaseOptions
 ): Promise<LocalWorkerLease> {
-  const enabled = options.enabled ?? process.env.NODE_ENV !== "production";
+  const enabled = options.enabled ?? true;
   if (!enabled) {
     return noOpLease();
   }

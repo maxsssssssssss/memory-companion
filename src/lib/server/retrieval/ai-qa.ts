@@ -19,6 +19,7 @@ import type { JsonStore } from "@/lib/server/storage/json-store";
 import { meaningfulTextTokens, sharedTokenCount } from "@/lib/server/text-features";
 import { answerSameDayQuestion } from "./qa";
 import {
+  buildRelationshipSignalEvidenceCorpus,
   buildRelationshipSignalEvidence,
   isForbiddenRelationshipQaOutput,
   isRelationshipEvidenceQuestion
@@ -69,6 +70,10 @@ import {
   projectCompactEvidence
 } from "./evidence-compression/projection";
 import { observeCompactEvidenceShadow } from "./evidence-compression/shadow";
+import {
+  resolveQaHybridRetrievalMode,
+  type QaHybridRetrievalMode
+} from "./hybrid/runtime-config";
 
 export { analyzeQaQueryIntent } from "./lifecycle-retrieval";
 
@@ -82,6 +87,8 @@ export type QaConversationMessage = {
 export type QaEvaluationEvidenceView = "canonical" | "compact";
 
 export type AnswerQuestionWithAIInput = {
+  /** Trusted authenticated user id used only for a user-scoped Hybrid sidecar. */
+  userId?: string;
   uploadId: string;
   question: string;
   conversation?: QaConversationMessage[];
@@ -93,6 +100,14 @@ export type AnswerQuestionWithAIInput = {
   semanticSegments: SemanticSegment[];
   briefItems: BriefItem[];
   relationshipSignals?: RelationshipSignalCard[];
+  /** Internal alternate canonical projection used only by Hybrid retrieval. */
+  hybridEvidenceInput?: {
+    segments: TranscriptSegment[];
+    audioInsights?: AudioInsight[];
+    semanticSegments: SemanticSegment[];
+    briefItems: BriefItem[];
+    relationshipSignals?: RelationshipSignalCard[];
+  };
   memoryContext?: MemoryIndexQaContext;
   memoryIndexFallback?: boolean;
   /** Internal execution mode. The default keeps the production Agent QA prompt unchanged. */
@@ -528,6 +543,59 @@ function duplicateEvidenceRank(question: string, item: EvidenceItem) {
   return 0;
 }
 
+function canonicalQaEvidenceFromInput(
+  input: AnswerQuestionWithAIInput,
+  relationshipEvidence: QaRetrievedEvidence[]
+) {
+  return [
+    ...relationshipEvidence,
+    ...evidenceFromBriefItems(input.briefItems),
+    ...evidenceFromAudioInsights(input.audioInsights),
+    ...evidenceFromSemanticSegments(input.semanticSegments),
+    ...evidenceFromRawSegments(input.segments)
+  ];
+}
+
+/** Returns the canonical pre-ranking Evidence pool used by lexical and Hybrid QA. */
+export function buildCanonicalQaEvidence(
+  input: AnswerQuestionWithAIInput
+): QaRetrievedEvidence[] {
+  const evidenceInput = input.hybridEvidenceInput
+    ? { ...input, ...input.hybridEvidenceInput }
+    : input;
+  return canonicalQaEvidenceFromInput(
+    evidenceInput,
+    buildRelationshipSignalEvidence({
+      question: evidenceInput.question,
+      conversation: evidenceInput.conversation,
+      cards: evidenceInput.relationshipSignals,
+      segments: evidenceInput.segments
+    })
+  );
+}
+
+/** Builds a question-independent corpus so every valid relationship card is indexed. */
+export function buildCanonicalQaEvidenceCorpus(input: Pick<
+  AnswerQuestionWithAIInput,
+  "segments" | "audioInsights" | "semanticSegments" | "briefItems" | "relationshipSignals"
+>): QaRetrievedEvidence[] {
+  return canonicalQaEvidenceFromInput(
+    {
+      uploadId: "embedding-corpus",
+      question: "",
+      segments: input.segments,
+      audioInsights: input.audioInsights,
+      semanticSegments: input.semanticSegments,
+      briefItems: input.briefItems,
+      relationshipSignals: input.relationshipSignals
+    },
+    buildRelationshipSignalEvidenceCorpus({
+      cards: input.relationshipSignals,
+      segments: input.segments
+    })
+  );
+}
+
 export type QaEvidenceRetrievalResult = {
   evidence: QaRetrievedEvidence[];
   relationshipContextBuildingMs: number;
@@ -539,6 +607,12 @@ export type QaEvidenceRetrievalResult = {
       state: QaLifecycleEvidenceState;
       topicOverlap: number;
     }>;
+  };
+  hybridDiagnostics?: {
+    mode: QaHybridRetrievalMode;
+    denseRetrievalMs: number | null;
+    indexCoverage: number | null;
+    fallbackReason: string | null;
   };
 };
 
@@ -607,13 +681,7 @@ export function retrieveQaEvidenceWithDiagnostics(
   });
   const relationshipContextBuildingMs = safeElapsedMs(relationshipStartedAt, now());
   const rerankingStartedAt = now();
-  const evidence = [
-    ...relationshipEvidence,
-    ...evidenceFromBriefItems(input.briefItems),
-    ...evidenceFromAudioInsights(input.audioInsights),
-    ...evidenceFromSemanticSegments(input.semanticSegments),
-    ...evidenceFromRawSegments(input.segments)
-  ];
+  const evidence = canonicalQaEvidenceFromInput(input, relationshipEvidence);
   const maxEvidenceEndSeconds = evidence.reduce((maximum, item) => Math.max(maximum, item.endSeconds), 0);
   const bestBySourceSet = new Map<string, RankedEvidenceCandidate>();
 
@@ -681,6 +749,139 @@ export function retrieveQaEvidenceWithDiagnostics(
 
 export function retrieveQaEvidence(input: AnswerQuestionWithAIInput): QaRetrievedEvidence[] {
   return retrieveQaEvidenceWithDiagnostics(input).evidence;
+}
+
+async function retrieveQaEvidenceForAnswer(
+  input: AnswerQuestionWithAIInput
+): Promise<QaEvidenceRetrievalResult> {
+  const lexical = retrieveQaEvidenceWithDiagnostics(input);
+  let mode: QaHybridRetrievalMode;
+  try {
+    mode = resolveQaHybridRetrievalMode();
+  } catch (error) {
+    console.warn(
+      `[hybrid-qa] mode=off status=fallback fallback_reason=invalid_configuration ` +
+      `error_name=${error instanceof Error ? error.name : "unknown"}`
+    );
+    return {
+      ...lexical,
+      hybridDiagnostics: {
+        mode: "off",
+        denseRetrievalMs: null,
+        indexCoverage: null,
+        fallbackReason: "invalid_configuration"
+      }
+    };
+  }
+  if (mode === "off") {
+    return {
+      ...lexical,
+      hybridDiagnostics: {
+        mode,
+        denseRetrievalMs: null,
+        indexCoverage: null,
+        fallbackReason: null
+      }
+    };
+  }
+
+  const runHybrid = async () => {
+    const hybrid = await import("./hybrid/production-retrieval");
+    try {
+      return await hybrid.retrieveProductionHybridEvidence({ qaInput: input, lexical });
+    } catch (error) {
+      const reason = error instanceof hybrid.ProductionHybridRetrievalError
+        ? error.reason
+        : "embedding_unavailable";
+      const coverage = error instanceof hybrid.ProductionHybridRetrievalError
+        ? error.indexCoverage
+        : null;
+      throw Object.assign(
+        error instanceof Error ? error : new Error("Hybrid retrieval failed"),
+        { hybridReason: reason, hybridCoverage: coverage }
+      );
+    }
+  };
+
+  if (mode === "shadow") {
+    void runHybrid().then((result) => {
+      const lexicalIds = new Set(lexical.evidence.map((item) => item.id));
+      const overlap = result.evidence.filter((item) => lexicalIds.has(item.id)).length;
+      console.info(
+        `[hybrid-qa] mode=shadow status=completed candidates=${result.evidence.length} ` +
+        `overlap=${overlap} dense_ms=${result.denseRetrievalMs} ` +
+        `index_coverage=${result.indexCoverage.toFixed(4)}`
+      );
+    }).catch((error: unknown) => {
+      const detail = error as Error & {
+        hybridReason?: string;
+        hybridCoverage?: number | null;
+      };
+      console.warn(
+        `[hybrid-qa] mode=shadow status=fallback ` +
+        `fallback_reason=${detail.hybridReason ?? "embedding_unavailable"} ` +
+        `index_coverage=${detail.hybridCoverage ?? "unknown"} ` +
+        `error_name=${detail.name || "unknown"}`
+      );
+    });
+    return {
+      ...lexical,
+      hybridDiagnostics: {
+        mode,
+        denseRetrievalMs: null,
+        indexCoverage: null,
+        fallbackReason: null
+      }
+    };
+  }
+
+  const hybridStartedAt = performance.now();
+  try {
+    const result = await runHybrid();
+    return {
+      ...lexical,
+      evidence: result.evidence,
+      rerankingMs: lexical.rerankingMs + safeElapsedMs(hybridStartedAt),
+      hybridDiagnostics: {
+        mode,
+        denseRetrievalMs: result.denseRetrievalMs,
+        indexCoverage: result.indexCoverage,
+        fallbackReason: null
+      }
+    };
+  } catch (error) {
+    const detail = error as Error & {
+      hybridReason?: string;
+      hybridCoverage?: number | null;
+    };
+    const fallbackReason = detail.hybridReason ?? "embedding_unavailable";
+    console.warn(
+      `[hybrid-qa] mode=phase31 status=fallback fallback_reason=${fallbackReason} ` +
+      `index_coverage=${detail.hybridCoverage ?? "unknown"} ` +
+      `error_name=${detail.name || "unknown"}`
+    );
+    return {
+      ...lexical,
+      hybridDiagnostics: {
+        mode,
+        denseRetrievalMs: safeElapsedMs(hybridStartedAt),
+        indexCoverage: detail.hybridCoverage ?? null,
+        fallbackReason
+      }
+    };
+  }
+}
+
+function qaHybridDiagnosticFields(retrieval: QaEvidenceRetrievalResult) {
+  const diagnostics = retrieval.hybridDiagnostics;
+  return diagnostics
+    ? {
+        retrievalMode: diagnostics.mode,
+        denseRetrievalMs: diagnostics.denseRetrievalMs,
+        embeddingIndexCoverage: diagnostics.indexCoverage,
+        retrievalFallbackReason: diagnostics.fallbackReason
+      }
+    : {};
 }
 
 function evidencePrompt(evidence: EvidenceItem[]) {
@@ -1429,7 +1630,7 @@ export async function answerQuestionWithAI(input: AnswerQuestionWithAIInput): Pr
   const totalStartedAt = performance.now();
   const scope = input.scope ?? "current";
   const answerMode = input.answerMode ?? "agent";
-  const retrieval = retrieveQaEvidenceWithDiagnostics(input);
+  const retrieval = await retrieveQaEvidenceForAnswer(input);
   const evidence = retrieval.evidence;
   if (input.evaluationEvidenceView === undefined) {
     observeCompactEvidenceShadow({
@@ -1490,7 +1691,8 @@ export async function answerQuestionWithAI(input: AnswerQuestionWithAIInput): Pr
       responseCharacters,
       evidenceCount: evidence.length,
       providerCallCount,
-      fallbackReason
+      fallbackReason,
+      ...qaHybridDiagnosticFields(retrieval)
     };
     notifyQaExecutionDiagnostics(input.onDiagnostics, diagnostics);
   };
@@ -1606,7 +1808,7 @@ export async function* answerQuestionStream(
   let emittedSentenceCount = 0;
 
   try {
-    const retrieval = retrieveQaEvidenceWithDiagnostics(input);
+    const retrieval = await retrieveQaEvidenceForAnswer(input);
     const evidence = retrieval.evidence;
     if (input.evaluationEvidenceView === undefined) {
       observeCompactEvidenceShadow({
@@ -1771,7 +1973,8 @@ export async function* answerQuestionStream(
       responseCharacters: accumulatedText.length,
       evidenceCount: evidence.length,
       providerCallCount: 1,
-      fallbackReason: finalized.fallbackReason
+      fallbackReason: finalized.fallbackReason,
+      ...qaHybridDiagnosticFields(retrieval)
     });
   } catch (streamError) {
     sentenceCommitManager?.cancel(

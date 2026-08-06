@@ -1755,6 +1755,24 @@ export class DateCompanionRepository {
     return row ? { interactionId: row.id, version: row.version } : null;
   }
 
+  listInteractionSourceMetadata(userId: string) {
+    const rows = this.database.prepare(`
+      SELECT id, source_upload_id, source_state
+      FROM dc_interactions
+      WHERE user_id = ?
+      ORDER BY id ASC
+    `).all(userId) as Array<{
+      id: string;
+      source_upload_id: string;
+      source_state: "available" | "server_cleaned" | "explicitly_deleted";
+    }>;
+    return rows.map((row) => ({
+      interactionId: row.id,
+      sourceUploadId: row.source_upload_id,
+      sourceState: row.source_state
+    }));
+  }
+
   markUploadSourceState(
     userId: string,
     sourceUploadId: string,

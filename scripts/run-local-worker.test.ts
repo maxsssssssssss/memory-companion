@@ -11,6 +11,7 @@ import {
   parseLocalWorkerArgs,
   renderLocalAudioTunnelEnv,
   resolveCloudflaredCommand,
+  resolveLocalWorkerLeasePath,
   writeLocalAudioTunnelEnv
 } from "./run-local-worker";
 
@@ -80,6 +81,17 @@ describe("local Queue Worker tunnel supervisor", () => {
     expect(
       buildCloudflaredArgs({ help: false, port: 3200, protocol: "quic" })
     ).toContain("http://127.0.0.1:3200");
+  });
+
+  it("uses the configured APP_DATA_DIR for the singleton Worker lease", async () => {
+    const root = await mkdtemp(join(tmpdir(), "daily-brief-local-worker-data-"));
+    temporaryRoots.push(root);
+    expect(resolveLocalWorkerLeasePath({
+      PIPELINE_EXECUTION_MODE: "queue",
+      APP_DATA_DIR: root,
+      APP_STORAGE_MODE: "server",
+      REDIS_URL: "redis://127.0.0.1:6381"
+    })).toBe(join(root, "local-worker", "worker-local.lock"));
   });
 
 });

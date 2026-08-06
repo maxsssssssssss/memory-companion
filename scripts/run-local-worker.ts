@@ -5,7 +5,11 @@ import { mkdir, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { loadRuntimeEnv } from "../src/lib/server/env/runtime-env";
-import { acquireLocalWorkerLease } from "../src/lib/server/queue/local-worker-lease";
+import { getPipelineQueueConfig } from "../src/lib/server/queue/config";
+import {
+  acquireLocalWorkerLease,
+  localWorkerLeasePath
+} from "../src/lib/server/queue/local-worker-lease";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const managedBlockStart = "# >>> daily-brief local audio tunnel (generated)";
@@ -22,6 +26,12 @@ export type LocalWorkerOptions = {
   port: number;
   protocol: "auto" | "http2" | "quic";
 };
+
+export function resolveLocalWorkerLeasePath(
+  env: Record<string, string | undefined> = process.env
+) {
+  return localWorkerLeasePath(getPipelineQueueConfig(env).dataDirectory);
+}
 
 class ShutdownRequestedError extends Error {
   constructor(readonly signalName: "SIGINT" | "SIGTERM") {
@@ -314,8 +324,13 @@ Keep this process running while uploading from localhost. Ctrl+C stops both.`);
 }
 
 export async function runLocalWorker(options: LocalWorkerOptions) {
+  loadRuntimeEnv();
   const localWebUrl = `http://127.0.0.1:${options.port}`;
-  const lock = await acquireLocalWorkerLease({ enabled: true, role: "supervisor" });
+  const lock = await acquireLocalWorkerLease({
+    enabled: true,
+    filePath: resolveLocalWorkerLeasePath(),
+    role: "supervisor"
+  });
   const shutdown = shutdownController();
   let tunnel: ChildProcess | undefined;
   let workerRuntime:
@@ -324,7 +339,6 @@ export async function runLocalWorker(options: LocalWorkerOptions) {
 
   try {
     await rm(localAudioTunnelEnvPath, { force: true });
-    loadRuntimeEnv();
     delete process.env.SPEAKER_ASR_AUDIO_BASE_URL;
     delete process.env.SPEAKER_ASR_AUDIO_URL_TEMPLATE;
 

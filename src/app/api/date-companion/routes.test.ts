@@ -8,6 +8,11 @@ const state = vi.hoisted(() => ({
   repository: null as unknown,
   store: null as unknown
 }));
+const requiresHybridPermanentIndexDeletionMock = vi.hoisted(() => vi.fn());
+const requestHybridPermanentIndexDeletionMock = vi.hoisted(() => vi.fn());
+const readHybridIndexDeletionMock = vi.hoisted(() => vi.fn());
+const deleteHybridIndexDeletionMock = vi.hoisted(() => vi.fn());
+const enqueueEmbeddingIndexJobMock = vi.hoisted(() => vi.fn());
 
 vi.mock("@/lib/server/auth/request-context", () => ({
   requireAuthContext: vi.fn(async (request: Request) => {
@@ -30,6 +35,22 @@ vi.mock("@/lib/server/date-companion", async (importOriginal) => ({
   getDateCompanionRepository: () => state.repository
 }));
 
+vi.mock("@/lib/server/retrieval/hybrid/retention-runtime", () => ({
+  requiresHybridPermanentIndexDeletion:
+    requiresHybridPermanentIndexDeletionMock,
+  requestHybridPermanentIndexDeletion:
+    requestHybridPermanentIndexDeletionMock
+}));
+
+vi.mock("@/lib/server/retrieval/hybrid/retention-manifest", () => ({
+  readHybridIndexDeletion: readHybridIndexDeletionMock,
+  deleteHybridIndexDeletion: deleteHybridIndexDeletionMock
+}));
+
+vi.mock("@/lib/server/queue/producer", () => ({
+  enqueueEmbeddingIndexJob: enqueueEmbeddingIndexJobMock
+}));
+
 import { openDateCompanionDatabase } from "@/lib/server/date-companion/db";
 import { DateCompanionRepository } from "@/lib/server/date-companion/repository";
 import { JsonStore } from "@/lib/server/storage/json-store";
@@ -50,16 +71,30 @@ describe("Date Companion API isolation", () => {
   let repository: DateCompanionRepository;
 
   beforeEach(() => {
+    delete process.env.PIPELINE_EXECUTION_MODE;
     database = openDateCompanionDatabase({ filePath: ":memory:" });
     repository = new DateCompanionRepository(database);
     state.repository = repository;
     state.store = {
+      read: vi.fn(async () => null),
+      write: vi.fn(async () => undefined),
       delete: vi.fn(async () => undefined),
       list: vi.fn(async () => [])
     };
+    requiresHybridPermanentIndexDeletionMock.mockResolvedValue(false);
+    requestHybridPermanentIndexDeletionMock.mockResolvedValue({
+      status: "completed"
+    });
+    readHybridIndexDeletionMock.mockResolvedValue({ status: "completed" });
+    deleteHybridIndexDeletionMock.mockResolvedValue(undefined);
+    enqueueEmbeddingIndexJobMock.mockResolvedValue({
+      jobId: "hybrid-index-test-0",
+      enqueued: true
+    });
   });
 
   afterEach(async () => {
+    delete process.env.PIPELINE_EXECUTION_MODE;
     database.close();
     await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
   });
@@ -516,5 +551,150 @@ describe("Date Companion API isolation", () => {
     } finally {
       consoleError.mockRestore();
     }
+  });
+
+  it("waits for local Hybrid vector deletion before removing a retained interaction", async () => {
+    process.env.PIPELINE_EXECUTION_MODE = "queue";
+    const relationship = repository.createOrGetRelationship(
+      "user_hybrid_delete",
+      "Ta"
+    ).relationship;
+    const imported = repository.importInteraction({
+      userId: "user_hybrid_delete",
+      relationshipId: relationship.id,
+      sourceUploadId: "upload_hybrid_delete",
+      recordingDate: "2026-08-06",
+      originalName: "cleanup.wav",
+      participants: [],
+      recapCandidates: []
+    });
+    requiresHybridPermanentIndexDeletionMock.mockResolvedValue(true);
+    requestHybridPermanentIndexDeletionMock.mockResolvedValueOnce({
+      status: "pending"
+    });
+    const request = () => deleteInteraction(new Request(
+      `http://localhost/api/date-companion/interactions/${imported.interactionId}`,
+      {
+        method: "DELETE",
+        headers: {
+          "x-test-user": "user_hybrid_delete",
+          "if-match": "0"
+        }
+      }
+    ), { params: Promise.resolve({ interactionId: imported.interactionId }) });
+
+    const pending = (await request())!;
+    expect(pending.status).toBe(409);
+    await expect(pending.json()).resolves.toEqual({
+      error: "hybrid_index_deletion_pending",
+      deleted: false,
+      retryable: true
+    });
+    expect(repository.getRelationshipView(
+      "user_hybrid_delete",
+      relationship.id
+    ).interactions).toHaveLength(1);
+    expect(enqueueEmbeddingIndexJobMock).toHaveBeenCalledWith({
+      version: 1,
+      userRef: "user_hybrid_delete",
+      reason: "permanent_delete"
+    });
+
+    requestHybridPermanentIndexDeletionMock.mockResolvedValue({
+      status: "completed"
+    });
+    const completed = (await request())!;
+    expect(completed.status).toBe(200);
+    await expect(completed.json()).resolves.toEqual({ deleted: true });
+    expect(deleteHybridIndexDeletionMock).toHaveBeenCalledWith(
+      state.store,
+      "upload_hybrid_delete"
+    );
+    expect(repository.getRelationshipView(
+      "user_hybrid_delete",
+      relationship.id
+    ).interactions).toEqual([]);
+    (state.store as { read: ReturnType<typeof vi.fn> }).read.mockImplementation(
+      async (collection: string) =>
+        collection === "deleted-date-companion-interactions"
+          ? { interactionId: imported.interactionId }
+          : null
+    );
+    const replay = (await request())!;
+    expect(replay.status).toBe(200);
+    await expect(replay.json()).resolves.toEqual({ deleted: true });
+  });
+
+  it("resumes an interaction deletion after the repository commit wins the tombstone race", async () => {
+    process.env.PIPELINE_EXECUTION_MODE = "queue";
+    const relationship = repository.createOrGetRelationship(
+      "user_delete_resume",
+      "Ta"
+    ).relationship;
+    const imported = repository.importInteraction({
+      userId: "user_delete_resume",
+      relationshipId: relationship.id,
+      sourceUploadId: "upload_delete_resume",
+      recordingDate: "2026-08-06",
+      originalName: "resume.wav",
+      participants: [],
+      recapCandidates: []
+    });
+    requiresHybridPermanentIndexDeletionMock.mockResolvedValue(true);
+    requestHybridPermanentIndexDeletionMock.mockResolvedValue({
+      status: "completed"
+    });
+    const store = state.store as {
+      read: ReturnType<typeof vi.fn>;
+      write: ReturnType<typeof vi.fn>;
+    };
+    store.write
+      .mockResolvedValueOnce(undefined)
+      .mockRejectedValueOnce(new Error("completed tombstone unavailable"));
+    const request = () => deleteInteraction(new Request(
+      `http://localhost/api/date-companion/interactions/${imported.interactionId}`,
+      {
+        method: "DELETE",
+        headers: {
+          "x-test-user": "user_delete_resume",
+          "if-match": "0"
+        }
+      }
+    ), { params: Promise.resolve({ interactionId: imported.interactionId }) });
+
+    await expect(request()).rejects.toThrow("completed tombstone unavailable");
+    expect(repository.getRelationshipView(
+      "user_delete_resume",
+      relationship.id
+    ).interactions).toEqual([]);
+    const pending = store.write.mock.calls.find(
+      ([collection, id, value]) =>
+        collection === "deleted-date-companion-interactions" &&
+        id === imported.interactionId &&
+        value?.status === "pending"
+    )?.[2];
+    expect(pending).toMatchObject({
+      sourceUploadId: "upload_delete_resume",
+      expectedVersion: 0,
+      hybridDeletionRequired: true
+    });
+
+    store.read.mockImplementation(async (collection: string) =>
+      collection === "deleted-date-companion-interactions" ? pending : null
+    );
+    store.write.mockResolvedValue(undefined);
+    const resumed = (await request())!;
+
+    expect(resumed.status).toBe(200);
+    await expect(resumed.json()).resolves.toEqual({ deleted: true });
+    expect(deleteHybridIndexDeletionMock).toHaveBeenCalledWith(
+      state.store,
+      "upload_delete_resume"
+    );
+    expect(store.write).toHaveBeenLastCalledWith(
+      "deleted-date-companion-interactions",
+      imported.interactionId,
+      expect.objectContaining({ status: "completed" })
+    );
   });
 });

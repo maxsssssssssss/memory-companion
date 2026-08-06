@@ -1,10 +1,19 @@
 import { loadRuntimeEnv } from "@/lib/server/env/runtime-env";
-import { acquireLocalWorkerLease } from "@/lib/server/queue/local-worker-lease";
+import { getPipelineQueueConfig } from "@/lib/server/queue/config";
+import {
+  acquireLocalWorkerLease,
+  localWorkerLeasePath
+} from "@/lib/server/queue/local-worker-lease";
 
 loadRuntimeEnv();
 
 async function main() {
-  const lease = await acquireLocalWorkerLease({ role: "worker" });
+  const queueConfig = getPipelineQueueConfig();
+  const lease = await acquireLocalWorkerLease({
+    enabled: true,
+    filePath: localWorkerLeasePath(queueConfig.dataDirectory),
+    role: "worker"
+  });
   try {
     const [
       { startPipelineWorker },

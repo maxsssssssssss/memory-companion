@@ -3,6 +3,13 @@ import { NextResponse } from "next/server";
 import { sanitizeAudioInsightCorrections, type StoredAudioInsightCorrections } from "@/lib/domain/audio-insight-corrections";
 import type { AudioUpload } from "@/lib/domain/types";
 import { isUnauthenticatedError, requireAuthContext, unauthorizedResponse, type AuthContext } from "@/lib/server/auth/request-context";
+import { resolvePipelineExecutionMode } from "@/lib/server/queue/config";
+import { enqueueEmbeddingIndexJob } from "@/lib/server/queue/producer";
+import {
+  resolveHybridIndexRetentionPolicy,
+  resolveQaHybridRetrievalMode
+} from "@/lib/server/retrieval/hybrid/runtime-config";
+import { uploadCanonicalProjectionBlockReason } from "@/lib/server/upload-deletion-barrier";
 
 const STORE_KEY_PATTERN = /^[A-Za-z0-9_-]+$/;
 
@@ -58,11 +65,73 @@ export async function PUT(request: Request, { params }: { params: Promise<{ uplo
 
   const corrections = sanitizeAudioInsightCorrections(body.corrections ?? {});
   const updatedAt = new Date().toISOString();
+  const [previousCorrections, blockBeforeWrite] = await Promise.all([
+    result.authContext.store.read<StoredAudioInsightCorrections>(
+      "audio-insight-corrections",
+      uploadId
+    ),
+    uploadCanonicalProjectionBlockReason(result.authContext.store, uploadId)
+  ]);
+  if (blockBeforeWrite) {
+    return NextResponse.json(
+      {
+        error: blockBeforeWrite === "retention"
+          ? "upload_cleanup_in_progress"
+          : "upload_deletion_in_progress"
+      },
+      { status: 409 }
+    );
+  }
 
   await result.authContext.store.write("audio-insight-corrections", uploadId, {
     corrections,
     updatedAt
   });
+
+  const [currentUpload, blockAfterWrite] = await Promise.all([
+    result.authContext.store.read<AudioUpload>("uploads", uploadId),
+    uploadCanonicalProjectionBlockReason(result.authContext.store, uploadId)
+  ]);
+  if (!currentUpload || blockAfterWrite) {
+    if (currentUpload && blockAfterWrite === "retention" && previousCorrections) {
+      await result.authContext.store.write(
+        "audio-insight-corrections",
+        uploadId,
+        previousCorrections
+      );
+    } else {
+      await result.authContext.store.delete("audio-insight-corrections", uploadId);
+    }
+    return NextResponse.json(
+      {
+        error: blockAfterWrite === "retention"
+          ? "upload_cleanup_in_progress"
+          : "upload_deletion_in_progress"
+      },
+      { status: 409 }
+    );
+  }
+
+  try {
+    if (
+      resolvePipelineExecutionMode() === "queue" &&
+      (
+        resolveQaHybridRetrievalMode() !== "off" ||
+        resolveHybridIndexRetentionPolicy() !== "off"
+      )
+    ) {
+      await enqueueEmbeddingIndexJob({
+        version: 1,
+        userRef: result.authContext.user.id,
+        reason: "audio_insight_corrections"
+      });
+    }
+  } catch (error) {
+    console.warn(
+      `[hybrid-index-worker] enqueue_failed reason=audio_insight_corrections ` +
+      `error_name=${error instanceof Error ? error.name : "unknown"}`
+    );
+  }
 
   return NextResponse.json({ corrections, updatedAt });
 }

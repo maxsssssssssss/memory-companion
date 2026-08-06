@@ -335,7 +335,12 @@ function publicFailure(error: unknown) {
   }
   if (error instanceof VoiceQaAdapterError) {
     if (error.code === "upload_not_found") return { status: 404, error: error.code };
-    if (error.code === "upload_not_ready") return { status: 409, error: error.code };
+    if (
+      error.code === "upload_not_ready" ||
+      error.code === "upload_deletion_in_progress"
+    ) {
+      return { status: 409, error: error.code };
+    }
     return { status: 400, error: error.code };
   }
   return { status: 503, error: "voice_session_failed" };

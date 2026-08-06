@@ -37,6 +37,73 @@ afterEach(async () => {
 });
 
 describe("memory scope QA shadow isolation", () => {
+  it("keeps lexical evidence unchanged while giving Hybrid the indexed speaker-alias projection", async () => {
+    tempDir = await mkdtemp(join(tmpdir(), "memory-scope-hybrid-alias-"));
+    const store = new JsonStore(tempDir);
+    await store.write("uploads", "upload_1", {
+      id: "upload_1",
+      recordingDate: "2026-07-08",
+      status: "ready"
+    });
+    await store.write("segments", "upload_1", [
+      { id: "segment_1", uploadId: "upload_1", text: "speaker_1 confirmed it." }
+    ]);
+    await store.write("audio-insights", "upload_1", [{
+      id: "insight_1",
+      uploadId: "upload_1",
+      speaker: { id: "speaker_1" },
+      summary: "speaker_1 confirmed it.",
+      evidence: "speaker_1 said yes."
+    }]);
+    await store.write("speaker-aliases", "upload_1", {
+      aliases: { speaker_1: "张三" },
+      updatedAt: "2026-07-08T00:00:00.000Z"
+    });
+    await store.write("audio-insight-corrections", "upload_1", {
+      corrections: {
+        insight_1: {
+          labelCorrections: [{ from: "tentative", to: "confirmed" }],
+          note: "User confirmed this label.",
+          updatedAt: "2026-07-08T00:00:00.000Z"
+        }
+      },
+      updatedAt: "2026-07-08T00:00:00.000Z"
+    });
+    retrieveMemoryIndexEvidenceMock.mockReturnValue({
+      scope: "all",
+      memories: [],
+      evidence: [],
+      sourceIds: [],
+      distinctDates: [],
+      count: 0,
+      retrievalTimeMs: 1
+    });
+    answerQuestionWithAIMock.mockResolvedValue({
+      id: "answer_alias",
+      uploadId: "all_memory",
+      question: "Who confirmed it?",
+      answer: "Confirmed. [E1]",
+      citedSegmentIds: ["segment_1"],
+      createdAt: "2026-07-08T00:00:00.000Z"
+    });
+
+    await answerMemoryScopeQuestion({
+      scopeId: "all_memory",
+      question: "Who confirmed it?",
+      qaScope: "all",
+      userId: "user_1",
+      store
+    });
+
+    const qaInput = answerQuestionWithAIMock.mock.calls[0][0];
+    expect(qaInput.audioInsights?.[0]?.summary).toContain("speaker_1");
+    expect(qaInput.hybridEvidenceInput?.audioInsights?.[0]?.summary).toContain("张三");
+    expect(qaInput.hybridEvidenceInput?.audioInsights?.[0]?.summary)
+      .not.toContain("[2026-07-08]");
+    expect(qaInput.hybridEvidenceInput?.audioInsights?.[0]?.userCorrections)
+      .toEqual([expect.objectContaining({ note: "User confirmed this label." })]);
+  });
+
   it("passes SQLite memory context into all-scope QA", async () => {
     tempDir = await mkdtemp(join(tmpdir(), "memory-scope-context-"));
     const store = new JsonStore(tempDir);
@@ -85,7 +152,7 @@ describe("memory scope QA shadow isolation", () => {
       expect.objectContaining({ userId: "user_1", scope: "all", query: "过去有哪些未解决的问题？" })
     );
     expect(answerQuestionWithAIMock).toHaveBeenCalledWith(
-      expect.objectContaining({ memoryContext })
+      expect.objectContaining({ userId: "user_1", memoryContext })
     );
     expect(answerQuestionWithAIMock.mock.calls[0][0]).not.toHaveProperty("memoryIndexFallback");
   });

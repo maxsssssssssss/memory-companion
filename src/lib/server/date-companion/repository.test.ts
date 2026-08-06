@@ -132,6 +132,16 @@ describe("DateCompanionRepository", () => {
     return { relationship, imported, recapItem: detail.recapItems[0] };
   }
 
+  it("lists only content-free interaction source metadata for Hybrid verification", () => {
+    const { imported } = importDraft("user_metadata", "upload_metadata");
+    expect(repository.listInteractionSourceMetadata("user_metadata")).toEqual([{
+      interactionId: imported.interactionId,
+      sourceUploadId: "upload_metadata",
+      sourceState: "available"
+    }]);
+    expect(repository.listInteractionSourceMetadata("another_user")).toEqual([]);
+  });
+
   it("stores participant audio inside the user-scoped interaction and cascades it on delete", () => {
     const { imported } = importDraft();
     repository.saveParticipantAudioSamples({

@@ -4,7 +4,10 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { acquireLocalWorkerLease } from "./local-worker-lease";
+import {
+  acquireLocalWorkerLease,
+  localWorkerLeasePath
+} from "./local-worker-lease";
 
 const temporaryRoots: string[] = [];
 
@@ -15,6 +18,19 @@ afterEach(async () => {
 });
 
 describe("local Pipeline Worker lease", () => {
+  it("resolves the singleton lock inside APP_DATA_DIR", async () => {
+    const root = await mkdtemp(join(tmpdir(), "daily-brief-local-worker-lease-"));
+    temporaryRoots.push(root);
+    const filePath = localWorkerLeasePath(root);
+    expect(filePath).toBe(join(root, "local-worker", "worker-local.lock"));
+
+    const first = await acquireLocalWorkerLease({ filePath, role: "worker" });
+    await expect(
+      acquireLocalWorkerLease({ filePath, role: "worker" })
+    ).rejects.toThrow("another local Pipeline Worker");
+    await first.release();
+  });
+
   it("prevents a supervisor and plain Worker from running together", async () => {
     const root = await mkdtemp(join(tmpdir(), "daily-brief-local-worker-lease-"));
     temporaryRoots.push(root);
@@ -46,7 +62,7 @@ describe("local Pipeline Worker lease", () => {
     await expect(readFile(filePath, "utf8")).rejects.toMatchObject({ code: "ENOENT" });
   });
 
-  it("is disabled for production callers", async () => {
+  it("can be explicitly disabled", async () => {
     const root = await mkdtemp(join(tmpdir(), "daily-brief-local-worker-lease-"));
     temporaryRoots.push(root);
     const filePath = join(root, "worker-local.lock");

@@ -1358,6 +1358,7 @@ export class DateCompanionSessionController {
         semanticSegments: payload.semanticSegments,
         briefItems: payload.briefItems,
         relationshipSignals: payload.relationshipSignals,
+        speakerAliasesByUploadId: payload.speakerAliasesByUploadId,
         signal: controller.signal
       })) {
         if (version !== this.qaRequestVersion || this.activeUploadId !== uploadId) return null;
