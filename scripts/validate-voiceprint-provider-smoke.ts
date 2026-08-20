@@ -17,6 +17,7 @@ import ffmpegPath from "ffmpeg-static";
 import type { TranscriptChunk } from "@/lib/domain/chunks";
 import { loadRuntimeEnv } from "@/lib/server/env/runtime-env";
 import {
+  acquireCanonicalSpeakerResult,
   buildStandaloneDiarizationSentences,
   DiarizationEvaluationInputError,
   evaluateCombinedDiarizationQualityGate,
@@ -25,10 +26,13 @@ import {
   summarizeDiarizationResponseShape,
   type CombinedDiarizationQualityGate,
   type DiarizationResponseShapeSummary,
-  type StandaloneDiarizationSentence
+  type StandaloneDiarizationSentence,
+  type VoiceprintDiarizationAcquisition,
+  type VoiceprintSmokeDiarizationSource
 } from "@/lib/server/evaluation/voiceprint-diarization";
 import {
   HttpVoiceprintProvider,
+  VOICEPRINT_PROVIDER_KNOWN_USER_LABEL,
   VoiceprintProviderError,
   createConfiguredVoiceprintProvider,
   type VoiceprintProvider,
@@ -47,6 +51,7 @@ import {
 } from "@/lib/server/speaker-identity/repository";
 import { resolveSpeakerIdentities } from "@/lib/server/speaker-identity/resolver";
 import { VoiceprintService } from "@/lib/server/speaker-identity/voiceprint-service";
+import { buildIdentitySmokeReport } from "@/lib/server/speaker-identity/identity-smoke-report";
 import type { VoiceprintIdentityHint } from "@/lib/server/speaker-identity/types";
 import { JsonStore } from "@/lib/server/storage/json-store";
 
@@ -59,6 +64,11 @@ const ASR_POLL_INTERVAL_MS = 2_000;
 const RESPONSE_LIMIT_BYTES = 512 * 1024;
 const SAFE_PROVIDER_LABEL = /^[\p{L}\p{N}_-]{1,128}$/u;
 const DIARIZATION_ONLY_FLAG = "--diarization-only";
+const PROVIDER_CONTRACT_ONLY_FLAG = "--provider-contract-only";
+const SMALL_SAMPLE_FLAG = "--small-sample";
+const FULL_SAMPLE_DURATION_SECONDS = 300;
+const SMALL_SAMPLE_DURATION_SECONDS = 98;
+const SMALL_SAMPLE_UTTERANCE_COUNT = 5;
 
 type SyntheticVoice = "B" | "C";
 type SampleId = "recording-a" | "recording-b";
@@ -113,7 +123,8 @@ type AsrResult = {
   labels: string[];
   payloadFields: string[];
   voiceLabels: Partial<Record<SyntheticVoice, string>>;
-  speakerResultSource: "combined_asr" | "standalone_diarization";
+  speakerResultSource: VoiceprintSmokeDiarizationSource;
+  speakerResultAvailable: true;
   qualityGate: CombinedDiarizationQualityGate;
   asrReadyMs: number | null;
   speakerWaitMs: number | null;
@@ -365,7 +376,21 @@ async function detectFixtureUtteranceTimings(
   }));
 }
 
-async function generateSamples(tempRoot: string): Promise<Record<SampleId, Sample>> {
+type SampleSet = Partial<Record<SampleId, Sample>>;
+
+function requiredSample(samples: SampleSet, sampleId: SampleId) {
+  const sample = samples[sampleId];
+  if (!sample) {
+    throw new SmokeFailure("audio_sample_missing", { sampleId });
+  }
+  return sample;
+}
+
+async function generateSamples(
+  tempRoot: string,
+  requestedSampleIds: readonly SampleId[],
+  sampleDurationSeconds: number
+): Promise<SampleSet> {
   if (!ffmpegPath) throw new SmokeFailure("ffmpeg_unavailable");
   const fixtureAudioPath = resolve(
     "test-data",
@@ -402,14 +427,19 @@ async function generateSamples(tempRoot: string): Promise<Record<SampleId, Sampl
       startSeconds: 300
     }
   ];
-  const samples = {} as Record<SampleId, Sample>;
-  for (const sectionSample of sectionSamples) {
-    const utterances = (fixture.utterances ?? [])
+  const samples: SampleSet = {};
+  for (const sectionSample of sectionSamples.filter((item) =>
+    requestedSampleIds.includes(item.sampleId)
+  )) {
+    const sectionUtterances = (fixture.utterances ?? [])
       .filter((item) => item.section === sectionSample.section)
       .map((item): SyntheticUtterance => ({
         voice: item.speaker === "A" ? "C" : "B",
         text: item.text?.trim() ?? ""
       }));
+    const utterances = sampleDurationSeconds === SMALL_SAMPLE_DURATION_SECONDS
+      ? sectionUtterances.slice(0, SMALL_SAMPLE_UTTERANCE_COUNT)
+      : sectionUtterances;
     if (
       utterances.length < 2 ||
       utterances.some((item) => !item.text) ||
@@ -422,7 +452,7 @@ async function generateSamples(tempRoot: string): Promise<Record<SampleId, Sampl
     await runProcess(ffmpegPath, [
       "-hide_banner", "-loglevel", "error", "-y",
       "-ss", String(sectionSample.startSeconds),
-      "-t", "300",
+      "-t", String(sampleDurationSeconds),
       "-i", fixtureAudioPath,
       "-ar", "16000", "-ac", "1", "-c:a", "pcm_s16le",
       samplePath
@@ -454,7 +484,7 @@ function parseRange(value: string | undefined, size: number) {
   return { start, end: Math.min(end, size - 1) };
 }
 
-async function startAudioServer(samples: Record<SampleId, Sample>) {
+async function startAudioServer(samples: SampleSet) {
   const healthPath = `/health-${randomBytes(16).toString("hex")}`;
   const routes = new Map<string, string>();
   for (const sample of Object.values(samples)) {
@@ -682,13 +712,15 @@ function appendResponseShape(
 
 function assertProviderCode(
   payload: { code?: number },
-  prefix: "asr" | "standalone_diarization"
+  prefix: "asr" | "standalone_diarization",
+  safeDetails?: Record<string, unknown>
 ) {
   if (payload.code === 0 || payload.code === 2) return;
   throw new SmokeFailure(
     `${prefix}_provider_code_${
       typeof payload.code === "number" ? payload.code : "unknown"
-    }`
+    }`,
+    safeDetails
   );
 }
 
@@ -725,7 +757,16 @@ async function runStandaloneDiarization(input: {
   statuses.push(submit.httpStatus);
   appendProviderCode(providerCodes, submit.payload);
   appendResponseShape(responseShapes, submit.payload);
-  assertProviderCode(submit.payload, "standalone_diarization");
+  assertProviderCode(submit.payload, "standalone_diarization", {
+    standaloneDiarization: {
+      elapsedMs: Date.now() - startedAt,
+      polls,
+      httpStatuses: [...new Set(statuses)],
+      providerCodes,
+      responseShapes,
+      terminalReason: "provider_code_error"
+    }
+  });
   let payload = submit.payload;
 
   while (
@@ -757,7 +798,16 @@ async function runStandaloneDiarization(input: {
     polls += 1;
     appendProviderCode(providerCodes, payload);
     appendResponseShape(responseShapes, payload);
-    assertProviderCode(payload, "standalone_diarization");
+    assertProviderCode(payload, "standalone_diarization", {
+      standaloneDiarization: {
+        elapsedMs: Date.now() - startedAt,
+        polls,
+        httpStatuses: [...new Set(statuses)],
+        providerCodes,
+        responseShapes,
+        terminalReason: "provider_code_error"
+      }
+    });
   }
 
   return {
@@ -781,7 +831,6 @@ async function runAsr(input: {
   audioUrl: string;
   userId: string;
   speakerCount: number;
-  combinedOnly?: boolean;
   requiredSpeakerLabel?: string;
 }) {
   const reqId = `vp_asr_${randomUUID().replaceAll("-", "")}`;
@@ -821,19 +870,9 @@ async function runAsr(input: {
   let firstAsrReadyAt: number | undefined;
   let jointTerminalReason = "speaker_result";
 
-  const combinedGate = () => evaluateCombinedDiarizationQualityGate(payload, {
-    expectedSpeakerCount: input.speakerCount,
-    ...(input.requiredSpeakerLabel
-      ? { requiredSpeakerLabel: input.requiredSpeakerLabel }
-      : {})
-  });
   while (
     payload.code !== 0 ||
-    (
-      input.combinedOnly
-        ? !combinedGate().passed
-        : parseCombinedAsrSpeakerLabels(payload).labels.length === 0
-    )
+    parseCombinedAsrSpeakerLabels(payload).labels.length === 0
   ) {
     const hasAsrSentences = Boolean(
       payload.data?.asr_result?.sentences?.length
@@ -893,58 +932,61 @@ async function runAsr(input: {
     terminalReason: jointTerminalReason
   } satisfies DiarizationStageAudit;
 
-  let speakerResult = payload.data?.speaker_result ?? [];
-  let labels = parseCombinedAsrSpeakerLabels(payload).labels;
-  let speakerResultSource: AsrResult["speakerResultSource"] = "combined_asr";
   let standaloneDiarization: DiarizationStageAudit | undefined;
   let standaloneHttpStatuses: number[] = [];
   let standalonePolls = 0;
   let finalResponseFields = summarizeDiarizationResponseShape(payload).dataFields;
-
-  if (input.combinedOnly) {
-    const qualityGate = combinedGate();
-    if (!qualityGate.passed) {
-      throw new SmokeFailure(`diarization_gate_${qualityGate.reason}`, {
-        jointAsr,
-        qualityGate
-      });
-    }
+  let acquisition: VoiceprintDiarizationAcquisition;
+  try {
+    acquisition = await acquireCanonicalSpeakerResult({
+      combinedPayload: payload,
+      requestFallback: async () => {
+        const sentences = buildStandaloneDiarizationSentences(payload);
+        const standalone = await runStandaloneDiarization({
+          baseUrl: input.baseUrl,
+          audioUrl: input.audioUrl,
+          userId: input.userId,
+          recordId,
+          speakerCount: input.speakerCount,
+          sentences
+        });
+        standaloneDiarization = standalone.audit;
+        standaloneHttpStatuses = standalone.audit.httpStatuses;
+        standalonePolls = standalone.audit.polls;
+        finalResponseFields = summarizeDiarizationResponseShape(
+          standalone.payload
+        ).dataFields;
+        return standalone.payload;
+      }
+    });
+  } catch (error) {
+    const safeDetails = error instanceof SmokeFailure
+      ? error.safeDetails
+      : undefined;
+    const failureReason =
+      error instanceof SmokeFailure &&
+      error.category === "standalone_diarization_poll_timeout"
+        ? "diarization_gate_missing_speaker_result"
+        : safeFailure(error);
+    throw new SmokeFailure(failureReason, {
+      jointAsr,
+      diarization_source: "fallback_diarization_api",
+      speaker_result_available: false,
+      voiceprint_stage: "blocked",
+      ...(safeDetails ?? {})
+    });
   }
 
-  if (labels.length === 0) {
-    const sentences = buildStandaloneDiarizationSentences(payload);
-    try {
-      const standalone = await runStandaloneDiarization({
-        baseUrl: input.baseUrl,
-        audioUrl: input.audioUrl,
-        userId: input.userId,
-        recordId,
-        speakerCount: input.speakerCount,
-        sentences
-      });
-      speakerResult = standalone.result;
-      labels = standalone.labels;
-      speakerResultSource = "standalone_diarization";
-      standaloneDiarization = standalone.audit;
-      standaloneHttpStatuses = standalone.audit.httpStatuses;
-      standalonePolls = standalone.audit.polls;
-      finalResponseFields = summarizeDiarizationResponseShape(
-        standalone.payload
-      ).dataFields;
-    } catch (error) {
-      const safeDetails = error instanceof SmokeFailure
-        ? error.safeDetails
-        : undefined;
-      throw new SmokeFailure(safeFailure(error), {
-        jointAsr,
-        ...(safeDetails ?? {})
-      });
-    }
+  if (!acquisition.speakerResultAvailable) {
+    throw new SmokeFailure("diarization_gate_missing_speaker_result", {
+      jointAsr,
+      ...(standaloneDiarization ? { standaloneDiarization } : {}),
+      diarization_source: acquisition.diarizationSource,
+      speaker_result_available: false,
+      voiceprint_stage: "blocked"
+    });
   }
-
-  if (labels.length === 0) {
-    throw new SmokeFailure("asr_missing_speaker_labels", { jointAsr });
-  }
+  const speakerResult = acquisition.canonical.speaker_result;
   const qualityGate = evaluateCombinedDiarizationQualityGate(
     { data: { speaker_result: speakerResult } },
     {
@@ -954,6 +996,17 @@ async function runAsr(input: {
         : {})
     }
   );
+  if (!qualityGate.passed) {
+    throw new SmokeFailure(`diarization_gate_${qualityGate.reason}`, {
+      jointAsr,
+      ...(standaloneDiarization ? { standaloneDiarization } : {}),
+      qualityGate,
+      diarization_source: acquisition.diarizationSource,
+      speaker_result_available: true,
+      voiceprint_stage: "blocked"
+    });
+  }
+  const labels = qualityGate.labels;
   const completedAt = Date.now();
   return {
     recordId,
@@ -963,7 +1016,8 @@ async function runAsr(input: {
     labels,
     payloadFields: finalResponseFields,
     voiceLabels: mapProviderLabels(input.sampleId, speakerResult),
-    speakerResultSource,
+    speakerResultSource: acquisition.diarizationSource,
+    speakerResultAvailable: true,
     qualityGate,
     asrReadyMs: firstAsrReadyAt ? firstAsrReadyAt - startedAt : null,
     speakerWaitMs: firstAsrReadyAt ? completedAt - firstAsrReadyAt : null,
@@ -1067,7 +1121,9 @@ async function resolveRealLabels(input: {
       source: item.identity.source,
       matched: item.matched,
       reason: item.reason,
-      confidence: item.identity.confidence
+      providerLabel: item.identity.evidence?.providerLabel ?? null,
+      identityEvidenceType: item.identity.evidence?.type ?? null,
+      localConfidence: item.identity.confidence
     })),
     audit: {
       matched: resolved.audit.matched,
@@ -1124,9 +1180,10 @@ async function resolveAmbiguous(rootDir: string, label: string) {
     matched: assignment.matched,
     reason: assignment.reason,
     pass:
-      hints.length === 0 &&
+      hints.length === 1 &&
       assignment.identity.identityType === "unknown_person" &&
-      assignment.matched === false
+      assignment.matched === false &&
+      assignment.reason === "ambiguous_match"
   };
 }
 
@@ -1159,6 +1216,7 @@ async function failureCase(
     baseUrl: "https://voiceprint.invalid",
     fetcher,
     timeoutMs: 1_000,
+    trainTimeoutMs: 1_000,
     maxRetries: 1,
     retryDelayMs: 0
   });
@@ -1204,16 +1262,21 @@ function reportMarkdown(report: Record<string, unknown>, reportJsonSha256: strin
   const cleanup = report.cleanup as Record<string, unknown>;
   const outcome = report.outcome as Record<string, unknown>;
   const diarizationOnly = report.mode === "speaker_labels_only";
+  const providerContractOnly = report.mode === "provider_contract_single_sample";
   return [
     diarizationOnly
       ? "# Voiceprint Speaker Label Diagnostic Report"
-      : "# Voiceprint Cross Record Smoke Report",
+      : providerContractOnly
+        ? "# Voiceprint Single Sample Provider Contract Report"
+        : "# Voiceprint Cross Record Smoke Report",
     "",
     "## Test environment",
     "",
     diarizationOnly
       ? "- Scope: company ASR/diarization speaker-label acquisition only."
-      : "- Scope: real company Voiceprint Provider + Speaker Identity Resolver only.",
+      : providerContractOnly
+        ? "- Scope: one five-minute sample through ASR/diarization, voiceprint/train, and voiceprint/save only."
+        : "- Scope: real company Voiceprint Provider + Speaker Identity Resolver only.",
     "- Input: privacy-safe retained Microsoft Yaoyao/Kangkang synthetic speech.",
     "- Provider raw responses, transcript text, audio URLs, audio bytes, embeddings, and voice features were not persisted.",
     diarizationOnly
@@ -1221,15 +1284,23 @@ function reportMarkdown(report: Record<string, unknown>, reportJsonSha256: strin
       : "- The Provider documents no cleanup endpoint; successful train/save calls may leave isolated synthetic test state.",
     ...(!diarizationOnly
       ? [
-          "- The documented `voiceprint/train` contract has no speaker-label field. The selected Recording A `speaker_1` ranges were trained under an isolated synthetic training-user scope; the Alice save and both recordings used a separate shared contact-user scope to avoid treating one identity as both known_user and known_contact.",
-          "- Cross-record success requires Recording B to return the saved alias directly; Recording A manual mapping is not supplied to the B resolver."
+          "- The documented `voiceprint/train` contract has no speaker-label field. The selected Recording A `speaker_1` ranges were trained under an isolated synthetic training-user scope; the Alice save and contact verification use a separate shared contact-user scope to avoid treating one identity as both known_user and known_contact.",
+          "- Recording B is submitted once in the training-user scope for known_user verification and once in the contact-user scope for saved-contact verification.",
+          "- Cross-record success requires Recording B to return the enrolled user label or saved alias directly; Recording A manual mapping is not supplied to either B resolver."
+        ]
+      : []),
+    ...(providerContractOnly
+      ? [
+          "- This mode proves the synchronous Provider Train/Save contract only; it does not claim cross-record known-user or unknown-person verification."
         ]
       : []),
     "",
     "## Speaker label result",
     "",
     `- Diagnostic completed: ${outcome.diarizationDiagnosticCompleted ?? false}.`,
-    `- Speaker result source: ${remote.asrRecordingA?.speakerResultSource ?? "none"}.`,
+    `- Diarization source: ${report.diarization_source ?? "none"}.`,
+    `- Speaker result available: ${report.speaker_result_available ?? false}.`,
+    `- Voiceprint stage: ${report.voiceprint_stage ?? "blocked"}.`,
     `- Unique label count: ${remote.asrRecordingA?.labelCount ?? 0}.`,
     `- ASR ready latency: ${remote.asrRecordingA?.asrReadyMs ?? "-"} ms.`,
     `- Speaker wait latency: ${remote.asrRecordingA?.speakerWaitMs ?? "-"} ms.`,
@@ -1242,21 +1313,23 @@ function reportMarkdown(report: Record<string, unknown>, reportJsonSha256: strin
     `| ASR + diarization A | ${remote.asrRecordingA?.status ?? "not_tested"} | ${remote.asrRecordingA?.elapsedMs ?? "-"} ms |`,
     `| voiceprint/train | ${remote.train?.status ?? "not_tested"} | ${remote.train?.elapsedMs ?? "-"} ms |`,
     `| voiceprint/save | ${remote.save?.status ?? "not_tested"} | ${remote.save?.elapsedMs ?? "-"} ms |`,
+    `| known_user verify | ${remote.knownUserVerification?.status ?? "not_tested"} | ${remote.knownUserVerification?.elapsedMs ?? "-"} ms |`,
     `| ASR + diarization B | ${remote.asrRecordingB?.status ?? "not_tested"} | ${remote.asrRecordingB?.elapsedMs ?? "-"} ms |`,
     "",
     "## Resolver cases",
     "",
-    `- Case 1 known contact: ${cases.knownContact?.status ?? "not_tested"}.`,
-    `- Case 2 unknown voice: ${cases.unknownVoice?.status ?? "not_tested"}.`,
-    `- Case 3 ambiguous identity: ${cases.ambiguousIdentity?.status ?? "not_tested"}.`,
-    `- Case 4 failure boundary: ${cases.providerFailures?.status ?? "not_tested"}.`,
+    `- Case 1 known user: ${cases.knownUser?.status ?? "not_tested"}.`,
+    `- Case 2 known contact: ${cases.knownContact?.status ?? "not_tested"}.`,
+    `- Case 3 unknown voice: ${cases.unknownVoice?.status ?? "not_tested"}.`,
+    `- Case 4 ambiguous identity: ${cases.ambiguousIdentity?.status ?? "not_tested"}.`,
+    `- Case 5 failure boundary: ${cases.providerFailures?.status ?? "not_tested"}.`,
     "",
     "## Cleanup and artifacts",
     "",
     `- Temporary audio removed: ${cleanup.audioRemoved}.`,
     `- Local audio server stopped: ${cleanup.serverStopped}.`,
     `- Quick tunnel stopped: ${cleanup.tunnelStopped}.`,
-    "- Report files: 2.",
+    "- Report files: 3.",
     `- report.json SHA-256: \`${reportJsonSha256}\`.`,
     "",
     "## Limits",
@@ -1265,7 +1338,11 @@ function reportMarkdown(report: Record<string, unknown>, reportJsonSha256: strin
     "- The real smoke sends each train/save mutation at most once with retry disabled. Separate local tests cover application idempotency; the supplied Provider document does not prove remote req_id deduplication after an ambiguous timeout.",
     "- Diarization labels are local speaker labels; the documented response exposes no embedding, confidence, or stable identity ID.",
     "- A contact resolves only when the later Provider label exactly and uniquely matches the saved alias; otherwise the resolver keeps unknown_person.",
-    "- Resolver confidence is a local exact-alias confidence, not a Provider acoustic confidence; the documented Provider response exposes no confidence value.",
+    "- Identity evidence source is the exact, unique 8790 `speaker_result` label.",
+    "- Provider acoustic similarity score: not provided.",
+    "- Provider acoustic confidence: not provided.",
+    "- Independent voiceprint/embedding ID: not provided.",
+    "- Threshold-based Voiceprint identity confidence is not supported and is not synthesized locally.",
     ""
   ].join("\n");
 }
@@ -1276,6 +1353,16 @@ async function main() {
     throw new Error(`Real Voiceprint smoke requires --remote and ${REMOTE_GATE}=1`);
   }
   const diarizationOnly = process.argv.includes(DIARIZATION_ONLY_FLAG);
+  const providerContractOnly = process.argv.includes(PROVIDER_CONTRACT_ONLY_FLAG);
+  const smallSample = process.argv.includes(SMALL_SAMPLE_FLAG);
+  const sampleDurationSeconds = smallSample
+    ? SMALL_SAMPLE_DURATION_SECONDS
+    : FULL_SAMPLE_DURATION_SECONDS;
+  if (diarizationOnly && providerContractOnly) {
+    throw new Error(
+      `${DIARIZATION_ONLY_FLAG} and ${PROVIDER_CONTRACT_ONLY_FLAG} cannot be combined`
+    );
+  }
 
   const runId = `run-${new Date().toISOString().replace(/[:.]/gu, "").replace("T", "-").replace("Z", "")}`;
   const reportDir = join(REPORT_ROOT, runId);
@@ -1285,10 +1372,25 @@ async function main() {
   await mkdir(tempRoot, { recursive: true });
 
   const report: Record<string, unknown> = {
-    version: 3,
+    version: 5,
     generatedAt: new Date().toISOString(),
     runId,
-    mode: diarizationOnly ? "speaker_labels_only" : "full_voiceprint_smoke",
+    mode: diarizationOnly
+      ? "speaker_labels_only"
+      : providerContractOnly
+        ? "provider_contract_single_sample"
+        : "full_voiceprint_smoke",
+    diarization_source: null,
+    speaker_result_available: false,
+    voiceprint_stage: "blocked",
+    identityCapabilities: {
+      supported: ["provider_label_based_identity_resolution"],
+      identityEvidenceSource: "provider_speaker_result",
+      acousticSimilarityScore: "not_provided",
+      acousticConfidence: "not_provided",
+      independentVoiceprintId: "not_provided",
+      thresholdBasedIdentityConfidence: "not_supported"
+    },
     safety: {
       evaluationOnly: true,
       syntheticVoicesOnly: true,
@@ -1307,7 +1409,16 @@ async function main() {
       audioDelivery: "ephemeral_https_quick_tunnel",
       tunnelProtocol: "quic",
       remoteMutationMaxRetries: 0,
-      combinedAsrOnlyForCrossRecord: !diarizationOnly,
+      voiceprintTrainRequestMode: "synchronous_http",
+      voiceprintTrainTimeoutMs: Number(
+        process.env.VOICEPRINT_TRAIN_TIMEOUT_MS?.trim() || "240000"
+      ),
+      providerContractOnly,
+      smallSample,
+      sampleCount: providerContractOnly ? 1 : 2,
+      sampleDurationSeconds,
+      combinedAsrOnlyForCrossRecord: false,
+      standaloneDiarizationFallbackEnabled: true,
       minimumCrossRecordDurationMs: 60_000,
       sameContactUserScopeAcrossRecordings: true,
       trainingScopeSeparatedFromContactScope: !diarizationOnly,
@@ -1327,8 +1438,12 @@ async function main() {
     },
     limitations: [
       "No Provider cleanup endpoint is documented.",
+      "Train is synchronous; each run reports its measured latency and the 240000 ms deadline is based on the observed 196.6-second completion.",
       "Remote req_id deduplication after an ambiguous timeout is not proven.",
-      "Exact later speaker-label matching is the only current Provider-to-resolver identity bridge."
+      "Exact later speaker-label matching is the only current Provider-to-resolver identity bridge.",
+      ...(providerContractOnly
+        ? ["Single-sample Provider contract mode does not verify identity across recordings."]
+        : [])
     ]
   };
   const remote = report.remote as Record<string, SafeStep>;
@@ -1368,7 +1483,15 @@ async function main() {
       throw new SmokeFailure("speaker_asr_base_url_invalid");
     }
 
-    const samples = await generateSamples(tempRoot);
+    const requestedSampleIds: SampleId[] = providerContractOnly
+      ? ["recording-a"]
+      : ["recording-a", "recording-b"];
+    const samples = await generateSamples(
+      tempRoot,
+      requestedSampleIds,
+      sampleDurationSeconds
+    );
+    const recordingASample = requiredSample(samples, "recording-a");
     report.samples = Object.fromEntries(Object.values(samples).map((sample) => [
       sample.id,
       {
@@ -1378,16 +1501,19 @@ async function main() {
         voices: [...new Set(dialogues[sample.id].map((item) => item.voice))]
       }
     ]));
-    for (const sampleId of ["recording-a", "recording-b"] as const) {
-      if (samples[sampleId].durationMs < 60_000) {
+    for (const sampleId of requestedSampleIds) {
+      const sample = requiredSample(samples, sampleId);
+      if (sample.durationMs < 60_000) {
         throw new SmokeFailure("diarization_sample_too_short", {
           sampleId,
           minimumDurationMs: 60_000,
-          actualDurationMs: samples[sampleId].durationMs
+          actualDurationMs: sample.durationMs
         });
       }
     }
-    console.info("[voiceprint-smoke] synthetic_audio_ready samples=2");
+    console.info(
+      `[voiceprint-smoke] synthetic_audio_ready samples=${requestedSampleIds.length}`
+    );
 
     const audioServer = await startAudioServer(samples);
     server = audioServer.server;
@@ -1401,7 +1527,8 @@ async function main() {
 
     const routeEntries = [...audioServer.routes.entries()];
     const audioUrl = (sampleId: SampleId) => {
-      const route = routeEntries.find(([, path]) => path === samples[sampleId].path)?.[0];
+      const sample = requiredSample(samples, sampleId);
+      const route = routeEntries.find(([, path]) => path === sample.path)?.[0];
       if (!route) throw new SmokeFailure("audio_route_missing");
       return `${tunnelResult.publicBase}${route}`;
     };
@@ -1442,7 +1569,6 @@ async function main() {
         audioUrl: audioUrl("recording-a"),
         userId: contactUserId,
         speakerCount: 2,
-        combinedOnly: !diarizationOnly,
         ...(!diarizationOnly ? { requiredSpeakerLabel: "speaker_1" } : {})
       });
       remote.asrRecordingA = {
@@ -1465,10 +1591,11 @@ async function main() {
         separatedSpeakers: asrA.qualityGate.passed,
         expectedVoiceMappingEstablished: Boolean(asrA.voiceLabels.B && asrA.voiceLabels.C)
       };
+      report.diarization_source = asrA.speakerResultSource;
+      report.speaker_result_available = asrA.speakerResultAvailable;
       if (
         !diarizationOnly &&
         (
-          asrA.speakerResultSource !== "combined_asr" ||
           !asrA.qualityGate.passed ||
           !asrA.voiceLabels.B ||
           !asrA.voiceLabels.C ||
@@ -1493,14 +1620,28 @@ async function main() {
           selectedSyntheticVoice: selectedContactVoice,
           untrainedSyntheticVoice: untrainedVoice
         };
+        report.voiceprint_stage = "executed";
       }
     } catch (error) {
+      const diagnostics =
+        error instanceof SmokeFailure && error.safeDetails
+          ? error.safeDetails
+          : undefined;
+      if (diagnostics) {
+        report.diarization_source =
+          diagnostics.diarization_source ?? report.diarization_source;
+        report.speaker_result_available =
+          diagnostics.speaker_result_available ??
+          report.speaker_result_available;
+        report.voiceprint_stage =
+          diagnostics.voiceprint_stage ?? report.voiceprint_stage;
+      }
       remote.asrRecordingA = {
         status: "failed",
         elapsedMs: Date.now() - asrAStartedAt,
         failureReason: safeFailure(error),
-        ...(error instanceof SmokeFailure && error.safeDetails
-          ? { diagnostics: error.safeDetails }
+        ...(diagnostics
+          ? { diagnostics }
           : {})
       };
       remoteFailed = true;
@@ -1525,7 +1666,7 @@ async function main() {
         requestId: trainRequestId,
         audio: [{
           url: audioUrl("recording-a"),
-          rule: trainingRule(samples["recording-a"], selectedContactVoice)
+          rule: trainingRule(recordingASample, selectedContactVoice)
         }],
         displayName: "Synthetic Training User"
       };
@@ -1668,8 +1809,123 @@ async function main() {
     }
     console.info(`[voiceprint-smoke] save=${remote.save.status}`);
 
+    let knownUserVerificationFailed = false;
+    if (
+      !providerContractOnly &&
+      !remoteFailed &&
+      !diarizationOnly &&
+      repository &&
+      selectedContactVoice &&
+      untrainedVoice
+    ) {
+      const startedAt = Date.now();
+      try {
+        const knownUserAsrB = await runAsr({
+          baseUrl: asrBaseUrl,
+          sampleId: "recording-b",
+          audioUrl: audioUrl("recording-b"),
+          userId: trainingUserId,
+          speakerCount: 2
+        });
+        if (!knownUserAsrB.qualityGate.passed) {
+          throw new SmokeFailure("known_user_recording_b_diarization_gate_failed");
+        }
+        const resolved = await resolveRealLabels({
+          repository,
+          uploadId: "recording_b_known_user",
+          labels: knownUserAsrB.labels
+        });
+        const expectedKnownUserLabel =
+          knownUserAsrB.voiceLabels[selectedContactVoice];
+        const expectedUnknownLabel =
+          knownUserAsrB.voiceLabels[untrainedVoice];
+        const knownUserAssignment = resolved.assignments.find(
+          (item) => item.inputSpeakerLabel === safeLabel(expectedKnownUserLabel)
+        );
+        const unknownAssignment = resolved.assignments.find(
+          (item) => item.inputSpeakerLabel === safeLabel(expectedUnknownLabel)
+        );
+        const passed =
+          expectedKnownUserLabel === VOICEPRINT_PROVIDER_KNOWN_USER_LABEL &&
+          Boolean(expectedUnknownLabel) &&
+          expectedUnknownLabel !== VOICEPRINT_PROVIDER_KNOWN_USER_LABEL &&
+          knownUserAssignment?.identityType === "known_user" &&
+          knownUserAssignment.source === "provider_speaker_result" &&
+          knownUserAssignment.reason === "provider_label_match" &&
+          knownUserAssignment.matched === true &&
+          unknownAssignment?.identityType === "unknown_person" &&
+          unknownAssignment.matched === false &&
+          resolved.assignments.filter(
+            (item) => item.identityType === "known_user"
+          ).length === 1;
+        remote.knownUserVerification = {
+          status: passed ? "success" : "failed",
+          elapsedMs: Date.now() - startedAt,
+          speakerResultSource: knownUserAsrB.speakerResultSource,
+          labelCount: knownUserAsrB.labels.length,
+          qualityGate: knownUserAsrB.qualityGate,
+          providerIdentityIdAvailable: false,
+          providerConfidenceAvailable: false
+        };
+        cases.knownUser = {
+          status: passed ? "success" : "failed",
+          providerLabelObserved:
+            expectedKnownUserLabel === VOICEPRINT_PROVIDER_KNOWN_USER_LABEL,
+          finalIdentityType:
+            knownUserAssignment?.identityType ?? "unknown_person",
+          resolvedIdentity: passed ? "user_A" : "unknown_person",
+          source: knownUserAssignment?.source ?? null,
+          reason: knownUserAssignment?.reason ?? "no_match",
+          matched: knownUserAssignment?.matched ?? false,
+          identityEvidenceSource: "provider_speaker_result",
+          providerLabel: safeLabel(expectedKnownUserLabel),
+          providerScore: null,
+          acousticConfidence: null,
+          providerConfidenceAvailable: false,
+          providerIdentityIdAvailable: false,
+          unknownFallbackObserved:
+            unknownAssignment?.identityType === "unknown_person" &&
+            unknownAssignment.matched === false,
+          resolver: resolved
+        };
+        if (!passed) knownUserVerificationFailed = true;
+      } catch (error) {
+        remote.knownUserVerification = {
+          status: "failed",
+          elapsedMs: Date.now() - startedAt,
+          failureReason: safeFailure(error)
+        };
+        cases.knownUser = {
+          status: "failed",
+          resolvedIdentity: "unknown_person",
+          failureReason: "recording_b_asr_or_resolution_failed"
+        };
+        knownUserVerificationFailed = true;
+      }
+    } else {
+      const failureReason = providerContractOnly
+        ? "provider_contract_single_sample"
+        : diarizationOnly
+          ? "diarization_only_diagnostic"
+          : "prior_remote_failure";
+      remote.knownUserVerification = { status: "skipped", failureReason };
+      cases.knownUser = {
+        status: "skipped",
+        resolvedIdentity: "unknown_person",
+        failureReason
+      };
+    }
+    console.info(
+      `[voiceprint-smoke] known_user_verification=${remote.knownUserVerification.status}`
+    );
+
     let asrB: AsrResult | undefined;
-    if (!remoteFailed && !diarizationOnly && repository) {
+    if (
+      !providerContractOnly &&
+      !remoteFailed &&
+      !diarizationOnly &&
+      repository
+    ) {
       const startedAt = Date.now();
       try {
         asrB = await runAsr({
@@ -1677,8 +1933,7 @@ async function main() {
           sampleId: "recording-b",
           audioUrl: audioUrl("recording-b"),
           userId: contactUserId,
-          speakerCount: 2,
-          combinedOnly: true
+          speakerCount: 2
         });
         remote.asrRecordingB = {
           status: "success",
@@ -1694,6 +1949,9 @@ async function main() {
           qualityGate: asrB.qualityGate,
           responseFields: asrB.payloadFields,
           jointAsr: asrB.jointAsr,
+          ...(asrB.standaloneDiarization
+            ? { standaloneDiarization: asrB.standaloneDiarization }
+            : {}),
           expectedVoiceMappingEstablished: Boolean(
             selectedContactVoice &&
             untrainedVoice &&
@@ -1702,7 +1960,6 @@ async function main() {
           )
         };
         if (
-          asrB.speakerResultSource !== "combined_asr" ||
           !asrB.qualityGate.passed ||
           !selectedContactVoice ||
           !untrainedVoice
@@ -1727,8 +1984,8 @@ async function main() {
           resolved.hintCount === 1 &&
           contactAssignment?.identityType === "known_contact" &&
           contactAssignment.contactName === "Alice" &&
-          contactAssignment.source === "voiceprint" &&
-          contactAssignment.reason === "voiceprint_match" &&
+          contactAssignment.source === "provider_speaker_result" &&
+          contactAssignment.reason === "provider_label_match" &&
           contactAssignment.matched === true &&
           resolved.assignments.filter(
             (item) => item.identityType === "known_contact"
@@ -1751,7 +2008,10 @@ async function main() {
           source: contactAssignment?.source ?? null,
           reason: contactAssignment?.reason ?? "no_match",
           matched: contactAssignment?.matched ?? false,
-          resolverConfidence: contactAssignment?.confidence ?? 0,
+          identityEvidenceSource: "provider_speaker_result",
+          providerLabel: safeLabel(expectedContactLabel),
+          providerScore: null,
+          acousticConfidence: null,
           providerConfidenceAvailable: false,
           manualMappingInputUsed: false,
           matcherUsed: false,
@@ -1763,7 +2023,11 @@ async function main() {
           finalIdentityType: unknownAssignment?.identityType ?? "unknown_person",
           source: unknownAssignment?.source ?? null,
           reason: unknownAssignment?.reason ?? "no_match",
-          matched: unknownAssignment?.matched ?? false
+          matched: unknownAssignment?.matched ?? false,
+          identityEvidenceSource: "provider_speaker_result",
+          providerLabel: safeLabel(expectedUnknownLabel),
+          providerScore: null,
+          acousticConfidence: null
         };
         if (!contactPassed || !unknownPassed) {
           remoteFailed = true;
@@ -1785,37 +2049,59 @@ async function main() {
         remoteFailed = true;
       }
     } else {
-      const failureReason = diarizationOnly
-        ? "diarization_only_diagnostic"
-        : "prior_remote_failure";
+      const failureReason = providerContractOnly
+        ? "provider_contract_single_sample"
+        : diarizationOnly
+          ? "diarization_only_diagnostic"
+          : "prior_remote_failure";
       remote.asrRecordingB = { status: "skipped", failureReason };
       cases.knownContact = { status: "skipped", failureReason };
       cases.unknownVoice = { status: "skipped", failureReason };
     }
     console.info(`[voiceprint-smoke] asr_recording_b=${remote.asrRecordingB.status}`);
+    if (knownUserVerificationFailed) remoteFailed = true;
 
-    const ambiguousLabel = asrB?.labels[0] ?? "speaker_1";
-    cases.ambiguousIdentity = await resolveAmbiguous(
-      join(tempRoot, "ambiguous-identity-store"),
-      ambiguousLabel
-    );
-    cases.ambiguousIdentity.status = cases.ambiguousIdentity.pass ? "success" : "failed";
+    if (providerContractOnly) {
+      cases.ambiguousIdentity = {
+        status: "skipped",
+        failureReason: "provider_contract_single_sample"
+      };
+    } else {
+      const ambiguousLabel = asrB?.labels[0] ?? "speaker_1";
+      cases.ambiguousIdentity = await resolveAmbiguous(
+        join(tempRoot, "ambiguous-identity-store"),
+        ambiguousLabel
+      );
+      cases.ambiguousIdentity.status = cases.ambiguousIdentity.pass
+        ? "success"
+        : "failed";
+    }
   } catch (error) {
     report.fatalFailure = safeFailure(error);
     console.info(`[voiceprint-smoke] fatal_failure=${safeFailure(error)}`);
   } finally {
-    const timeoutFailure = await failureCase("timeout");
-    const networkFailure = await failureCase("network_error");
-    const malformedFailure = await failureCase("malformed_response");
-    failureInjection.timeout = timeoutFailure;
-    failureInjection.networkError = networkFailure;
-    failureInjection.malformedResponse = malformedFailure;
-    cases.providerFailures = {
-      status: [timeoutFailure, networkFailure, malformedFailure].every(
-        (item) => item.status === "success"
-      ) ? "success" : "failed",
-      realProviderMutationUsed: false
-    };
+    if (providerContractOnly) {
+      failureInjection.status = "skipped";
+      failureInjection.failureReason = "provider_contract_single_sample";
+      cases.providerFailures = {
+        status: "skipped",
+        failureReason: "provider_contract_single_sample",
+        realProviderMutationUsed: false
+      };
+    } else {
+      const timeoutFailure = await failureCase("timeout");
+      const networkFailure = await failureCase("network_error");
+      const malformedFailure = await failureCase("malformed_response");
+      failureInjection.timeout = timeoutFailure;
+      failureInjection.networkError = networkFailure;
+      failureInjection.malformedResponse = malformedFailure;
+      cases.providerFailures = {
+        status: [timeoutFailure, networkFailure, malformedFailure].every(
+          (item) => item.status === "success"
+        ) ? "success" : "failed",
+        realProviderMutationUsed: false
+      };
+    }
 
     await cleanupResources();
     process.removeListener("SIGINT", terminate);
@@ -1845,12 +2131,19 @@ async function main() {
       asrRecordingA?.expectedVoiceMappingEstablished === true,
     recordingBQualityGatePassed,
     voiceprintMutationProviderCalls,
+    providerContractCompleted:
+      providerContractOnly &&
+      diarizationDiagnosticCompleted &&
+      remote.train?.status === "success" &&
+      remote.save?.status === "success" &&
+      voiceprintMutationProviderCalls === 2,
     realProviderFlowCompleted:
       remote.train?.status === "success" &&
       remote.save?.status === "success" &&
       remote.asrRecordingB?.status === "success" &&
       recordingBQualityGatePassed &&
       cases.knownContact?.status === "success" &&
+      cases.knownUser?.status === "success" &&
       cases.unknownVoice?.status === "success" &&
       voiceprintMutationProviderCalls === 2,
     resolverCasesPassed: caseValues.filter((item) => item.status === "success").length,
@@ -1861,12 +2154,17 @@ async function main() {
   const jsonHash = sha256(json);
   await writeFile(join(reportDir, "report.json"), json, { encoding: "utf8", mode: 0o600, flag: "wx" });
   await writeFile(
+    join(reportDir, "identity-smoke-report.json"),
+    `${JSON.stringify(buildIdentitySmokeReport(report), null, 2)}\n`,
+    { encoding: "utf8", mode: 0o600, flag: "wx" }
+  );
+  await writeFile(
     join(reportDir, "report.md"),
     `${reportMarkdown(report, jsonHash)}\n`,
     { encoding: "utf8", mode: 0o600, flag: "wx" }
   );
   console.info(
-    `[voiceprint-smoke] report_written files=2 report_json_sha256=${jsonHash}`
+    `[voiceprint-smoke] report_written files=3 report_json_sha256=${jsonHash}`
   );
 }
 

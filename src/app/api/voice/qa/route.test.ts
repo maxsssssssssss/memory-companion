@@ -338,6 +338,14 @@ describe("POST /api/voice/qa", () => {
       status: "completed",
       errors: []
     });
+    const traceId = (events[0] as { traceId: string }).traceId;
+    await vi.waitFor(() => {
+      expect(storeRecords.get(`voice-session-traces/${traceId}`)).toMatchObject({
+        timestamps: expect.objectContaining({
+          transport_complete_written: expect.any(String)
+        })
+      });
+    });
     expect(runBrowserVoiceQaSessionMock).toHaveBeenCalledWith(expect.objectContaining({
       onStreamingEvent: expect.any(Function),
       signal: expect.any(AbortSignal)
@@ -398,6 +406,42 @@ describe("POST /api/voice/qa", () => {
       type: "complete",
       status: "completed",
       errors: []
+    });
+  });
+
+  it("terminates a Provider-backed TTS failure with one completed-with-errors event", async () => {
+    const base = successfulSession().response;
+    runBrowserVoiceQaSessionMock.mockResolvedValue(successfulSession({
+      response: {
+        ...base,
+        audio: undefined,
+        streamedAudio: undefined,
+        errors: ["tts_failed"],
+        errorCodes: ["VOICE_TTS_FAILED"]
+      }
+    }));
+
+    const response = await POST(request(
+      voiceForm({ scope: "all" }),
+      { accept: "application/x-ndjson" }
+    ));
+    const events = await ndjsonEvents(response);
+
+    expect(events.map((event) => event.type)).toEqual([
+      "meta",
+      "answer",
+      "complete"
+    ]);
+    expect(events.filter((event) => event.type === "complete")).toEqual([{
+      type: "complete",
+      status: "completed_with_errors",
+      errors: ["tts_failed"]
+    }]);
+    expect(events.at(-2)).toMatchObject({
+      type: "answer",
+      text: base.text,
+      errors: ["tts_failed"],
+      errorCodes: ["VOICE_TTS_FAILED"]
     });
   });
 

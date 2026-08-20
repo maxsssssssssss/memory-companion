@@ -23,6 +23,7 @@ export function toVoiceIdentityHint(
     globalSpeakerId: identity.globalSpeakerId,
     ...(identity.displayName ? { contactName: identity.displayName } : {}),
     confidence: identity.confidence,
-    source: identity.source
+    source: identity.source,
+    ...(identity.evidence ? { evidence: { ...identity.evidence } } : {})
   };
 }

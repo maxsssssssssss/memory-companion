@@ -71,6 +71,79 @@ function repository(memories: MemoryItem[], ownerAttributions: MemoryOwnerMetada
 }
 
 describe("memory index QA evidence adapter", () => {
+  it("retrieves an eligible published Reflection memory in current, week, and all scopes", () => {
+    const selected = memory({
+      id: "reflection_current",
+      type: "preference",
+      importanceScore: 0.5,
+      date: "2026-08-13"
+    });
+    const sourceResolver = ({ memory: item }: { memory: MemoryItem }) => ({
+        eligible: true,
+        attribution: {
+          memoryId: item.id,
+          origin: "user_reflection" as const,
+          statement: "你在 2026-08-13 的复盘中提到……",
+          date: "2026-08-13",
+          contentKind: "user_confirmed_derived_content" as const,
+          reflectionId: "reflection_1",
+          sourceSegmentIds: ["reflection_current_segment"]
+        }
+      });
+    for (const scope of ["current", "week", "all"] as const) {
+      const result = retrieveMemoryIndexEvidence({
+        userId: "user_1",
+        scope,
+        query: "What did I prefer?",
+        ...(scope === "current"
+          ? { dateRange: { startDate: "2026-08-13", endDate: "2026-08-13" } }
+          : scope === "week"
+            ? { dateRange: { startDate: "2026-08-10", endDate: "2026-08-16" } }
+            : {}),
+        repository: repository([selected]),
+        sourceResolver
+      });
+
+      expect(result.memories.map((item) => item.id), scope).toEqual([selected.id]);
+      expect(result.sourceAttributions, scope).toEqual([
+        expect.objectContaining({
+          memoryId: selected.id,
+          origin: "user_reflection",
+          contentKind: "user_confirmed_derived_content"
+        })
+      ]);
+      expect(result.sourceIds, scope).toContain("reflection_current_segment");
+    }
+  });
+
+  it("fails closed when a Reflection memory cannot resolve to canonical provenance", () => {
+    const selected = memory({
+      id: "reflection_unpublished",
+      type: "preference",
+      importanceScore: 0.9
+    });
+    const result = retrieveMemoryIndexEvidence({
+      userId: "user_1",
+      scope: "all",
+      query: "What do I prefer?",
+      repository: repository([selected]),
+      sourceResolver: ({ memory: item }) => ({
+        eligible: false,
+        attribution: {
+          memoryId: item.id,
+          origin: "unknown",
+          statement: "来源尚未完全确认",
+          date: item.date,
+          contentKind: "memory_navigation",
+          sourceSegmentIds: item.evidence.map((evidence) => evidence.sourceId)
+        }
+      })
+    });
+
+    expect(result).toMatchObject({ memories: [], evidence: [], count: 0 });
+    expect(result.sourceAttributions).toEqual([]);
+  });
+
   it("does not load historical memory for current scope", () => {
     const memoryRepository = repository([memory({ id: "commitment_1", type: "commitment", importanceScore: 0.9 })]);
 

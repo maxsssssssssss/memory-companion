@@ -3,10 +3,13 @@ import { fixtureTranscriptionProvider } from "./fixture-provider";
 import { openaiTranscriptionProvider } from "./openai-provider";
 import { speakerAsrTranscriptionProvider } from "./speaker-asr-provider";
 
+export type AudioAccessPolicy = "legacy_bearer" | "daily_reflection_capability";
+
 export type TranscriptionInput = {
   uploadId: string;
   filePath: string;
   mimeType: string;
+  audioAccessPolicy?: AudioAccessPolicy;
 };
 
 export type TranscriptionProvider = {

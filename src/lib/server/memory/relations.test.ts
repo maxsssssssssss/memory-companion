@@ -269,4 +269,54 @@ describe("memory relations", () => {
       expect.objectContaining({ sourceMemoryId: updatedPlan.id, targetMemoryId: completion.id })
     ]);
   });
+
+  it("keeps an unfinished checklist open when its summary mentions another completed subtask", () => {
+    const unfinished = memory({
+      id: "alice_checklist_open",
+      type: "commitment",
+      date: "2026-07-23",
+      title: "检索问题清单还剩最后三题待完成",
+      summary: "已完成简历项目经历批注，但检索问题清单仍未全部完成，还差最后三题。"
+    });
+    const delivered = memory({
+      id: "alice_checklist_delivered",
+      type: "commitment",
+      date: "2026-07-29",
+      title: "Alice 已按时交付检索问题清单",
+      summary: "此前承诺的检索问题清单已经按时完成，并确认已经全部交付。"
+    });
+
+    expect(detectMemoryRelations([unfinished, delivered])).toEqual([
+      expect.objectContaining({
+        sourceMemoryId: unfinished.id,
+        targetMemoryId: delivered.id,
+        relationType: "resolved_by"
+      })
+    ]);
+  });
+
+  it("resolves a replacement activity after a cancelled plan is updated", () => {
+    const changedPlan = memory({
+      id: "museum_cancelled_pottery_planned",
+      type: "event",
+      date: "2026-07-23",
+      title: "取消周末博物馆参观，改报名7月28日陶艺体验",
+      summary: "已决定取消原参观计划，并改为报名7月28日的陶艺体验。"
+    });
+    const completed = memory({
+      id: "pottery_completed",
+      type: "event",
+      date: "2026-07-28",
+      title: "陶艺体验已按最终选择完成，博物馆计划保持取消",
+      summary: "今天按最终选择完成了陶艺体验，博物馆计划维持取消。"
+    });
+
+    expect(detectMemoryRelations([changedPlan, completed])).toEqual([
+      expect.objectContaining({
+        sourceMemoryId: changedPlan.id,
+        targetMemoryId: completed.id,
+        relationType: "resolved_by"
+      })
+    ]);
+  });
 });

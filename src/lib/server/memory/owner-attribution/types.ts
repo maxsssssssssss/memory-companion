@@ -95,6 +95,7 @@ export const MemoryOwnerObservationReasonSchema = z.enum([
   "trusted_speaker_identity",
   "third_person_reference",
   "identity_missing",
+  "identity_not_provider_verified",
   "identity_below_threshold"
 ]);
 
@@ -182,6 +183,7 @@ export type ResolveMemoryOwnerAttributionInput = {
   memoryId: string;
   memoryType: MemoryItemType;
   evidenceSegments: TranscriptSegment[];
+  allowManualMappingIdentity?: boolean;
 };
 
 export type ResolveMemoryOwnerAttributionsInput = {

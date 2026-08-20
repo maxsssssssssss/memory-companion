@@ -9,6 +9,7 @@ import {
   requireAuthContext,
   unauthorizedResponse
 } from "@/lib/server/auth/request-context";
+import { isDailyReflectionUpload } from "@/lib/server/daily-reflection/upload-record";
 import {
   VoiceprintProviderError,
   VoiceprintWorkflowError,
@@ -89,7 +90,7 @@ export async function POST(request: Request) {
       authContext.store.read<StoredUpload>("uploads", uploadId)
     )
   );
-  if (uploads.some((upload) => upload === null)) {
+  if (uploads.some((upload) => upload === null || isDailyReflectionUpload(upload))) {
     return NextResponse.json({ error: "upload_not_found" }, { status: 404 });
   }
   const hasOutOfRangeRule = parsed.data.audio.some((audio, index) => {

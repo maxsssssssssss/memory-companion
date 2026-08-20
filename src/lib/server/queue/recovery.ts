@@ -13,6 +13,7 @@ import type { EnqueuePipelineJobResult } from "./producer";
 type StoredUpload = AudioUpload & {
   filePath?: string;
   evaluationRetention?: boolean;
+  toyIngestionAttemptVersion?: number;
   errorCode?: string;
   errorMessage?: string;
 };
@@ -46,6 +47,7 @@ export type PipelineRecoveryReport = {
   existing: number;
   readyReconciled: number;
   missingAudioFailed: number;
+  queueUnavailableRecovered: number;
   freshActiveSkipped: number;
   terminalSkipped: number;
   missingUploadsSkipped: number;
@@ -178,6 +180,7 @@ export async function recoverPipelineJobs(
     existing: 0,
     readyReconciled: 0,
     missingAudioFailed: 0,
+    queueUnavailableRecovered: 0,
     freshActiveSkipped: 0,
     terminalSkipped: 0,
     missingUploadsSkipped: 0
@@ -203,6 +206,17 @@ export async function recoverPipelineJobs(
         continue;
       }
 
+      // Toy receipts persist a canonical execution mode. A later process-level
+      // switch to queue mode must not turn an accepted inline Toy job into a
+      // second queue execution alongside its receipt-owned inline lease.
+      if (
+        Number.isSafeInteger(upload.toyIngestionAttemptVersion)
+        && job.executionMode !== "queue"
+      ) {
+        report.terminalSkipped += 1;
+        continue;
+      }
+
       if (upload.status === "ready") {
         await finalizeReadyUpload(store, upload, resolved.remove);
         if (await reconcileReady(store, job, now)) {
@@ -213,7 +227,9 @@ export async function recoverPipelineJobs(
         continue;
       }
 
-      if (job.status === "ready" || job.status === "failed") {
+      const recoverableQueueFailure =
+        job.status === "failed" && job.errorCode === "queue_unavailable";
+      if (job.status === "ready" || (job.status === "failed" && !recoverableQueueFailure)) {
         report.terminalSkipped += 1;
         continue;
       }
@@ -226,6 +242,7 @@ export async function recoverPipelineJobs(
 
       const shouldEnqueue =
         job.status === "waiting" ||
+        recoverableQueueFailure ||
         (ACTIVE_STATUSES.has(job.status) && isStale(job, nowMs, staleAfterMs));
       if (!shouldEnqueue) {
         if (ACTIVE_STATUSES.has(job.status)) {
@@ -250,6 +267,22 @@ export async function recoverPipelineJobs(
         errorMessage: undefined,
         finishedAt: undefined
       });
+      if (
+        recoverableQueueFailure
+        && upload.status === "failed"
+        && upload.errorCode === "queue_unavailable"
+      ) {
+        const {
+          errorCode: _errorCode,
+          errorMessage: _errorMessage,
+          ...uploadWithoutQueueFailure
+        } = upload;
+        await store.write("uploads", upload.id, {
+          ...uploadWithoutQueueFailure,
+          status: "uploaded"
+        });
+        report.queueUnavailableRecovered += 1;
+      }
       const enqueueResult = await options.enqueue(payload, {
         reviveTerminal: true
       });

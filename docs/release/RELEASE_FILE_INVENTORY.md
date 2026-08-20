@@ -9,6 +9,7 @@ release 包含可复现的源码、测试、fixture 与说明文档，同时排�
 | 范围 | 内容 |
 | --- | --- |
 | 应用源码 | `src/`、`scripts/`、`tests/`、`e2e/` |
+| 运行时静态资产 | `public/voice-pcm-worklet.js`，浏览器 Realtime Voice 的 AudioWorklet 入口 |
 | 项目配置 | `package.json`、`package-lock.json`、Next.js/Vitest/PM2/Docker 配置 |
 | 安全配置模板 | `.env.example`，所有凭据值必须为空 |
 | 文档 | `README.md`、`docs/`，包括架构图和部署说明 |

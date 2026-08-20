@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
+  buildVoiceprintTrainingCandidateAudioUrl,
   buildVoiceprintTrainingAudioUrl,
   createVoiceprintProviderRequestId
 } from "./voiceprint-api-support";
@@ -31,6 +32,18 @@ describe("voiceprint API support", () => {
     expect(anotherUser).not.toBe(first);
     expect(first).not.toContain("user_1");
     expect(first).not.toContain("request_1");
+  });
+
+  it("builds a Provider URL for a compact training candidate", () => {
+    vi.stubEnv("SPEAKER_ASR_AUDIO_BASE_URL", "https://audio.example.test/");
+    vi.stubEnv("SPEAKER_ASR_AUDIO_ACCESS_TOKEN", "secret token");
+
+    expect(buildVoiceprintTrainingCandidateAudioUrl({
+      userId: "user_1",
+      candidateId: "candidate_1"
+    })).toBe(
+      "https://audio.example.test/api/internal/voiceprint-candidates/user_1/candidate_1?token=secret%20token"
+    );
   });
 
   it("builds a provider URL only from trusted server configuration", () => {

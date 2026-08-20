@@ -135,6 +135,35 @@ describe("pipeline queue worker processor", () => {
     });
   });
 
+  it("rejects a daily reflection marker without invoking or mutating the standard pipeline", async () => {
+    const { store, upload, job } = await setup({});
+    const dailyReflectionUpload = {
+      ...upload,
+      ingestionContext: "daily_reflection" as const,
+      reflectionId: "reflection_1"
+    };
+    await store.write("uploads", upload.id, dailyReflectionUpload);
+    const runProcessUpload = vi.fn();
+    const processor = createPipelineJobProcessor({
+      getStore: () => store,
+      runProcessUpload: runProcessUpload as never,
+      now: () => now
+    });
+
+    await expect(
+      processor({ data: { version: 1, uploadId: upload.id, userRef: "user_1" } })
+    ).resolves.toEqual({
+      status: "cancelled",
+      uploadId: upload.id,
+      reason: "daily_reflection_upload"
+    });
+
+    expect(runProcessUpload).not.toHaveBeenCalled();
+    await expect(store.read("uploads", upload.id)).resolves.toEqual(dailyReflectionUpload);
+    await expect(store.read("jobs", job.id)).resolves.toEqual(job);
+    await expect(store.read("jobs-by-upload", upload.id)).resolves.toEqual(job);
+  });
+
   it("throws when processUpload resolves with a failed job so BullMQ can retry", async () => {
     const { store, upload, job } = await setup({});
     const failedJob: ProcessingJob = {

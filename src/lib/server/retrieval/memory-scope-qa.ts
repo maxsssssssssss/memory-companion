@@ -12,6 +12,7 @@ import {
   answerQuestionWithAI,
   retrieveQaEvidence,
   type AnswerQuestionWithAIInput,
+  type QaExecutionMilestoneObserver,
   type QaRetrievedEvidence,
   type QaConversationMessage,
   type QaScope
@@ -24,6 +25,10 @@ import {
   retrieveMemoryIndexEvidence,
   type MemoryIndexQaContext
 } from "@/lib/server/retrieval/memory-index-evidence";
+import {
+  resolveRetrievalUpload,
+  type RetrievalUploadResolution
+} from "@/lib/server/retrieval/source-awareness";
 import { appStore } from "@/lib/server/storage/json-store";
 import type { JsonStore } from "@/lib/server/storage/json-store";
 
@@ -125,7 +130,20 @@ function decorateRelationshipSignals(upload: StoredUpload, relationshipSignals: 
   }));
 }
 
-async function readUploadEvidence(store: JsonStore, upload: StoredUpload) {
+async function readUploadEvidence(
+  store: JsonStore,
+  upload: StoredUpload,
+  source: RetrievalUploadResolution
+) {
+  if (source.attribution.origin === "user_reflection") {
+    return {
+      segments: decorateSegments(upload, source.canonicalSegments ?? []),
+      audioInsights: [],
+      semanticSegments: [],
+      briefItems: [],
+      relationshipSignals: []
+    };
+  }
   const [segments, audioInsights, semanticSegments, briefItems, relationshipSignals] = await Promise.all([
     store.read<TranscriptSegment[]>("segments", upload.id),
     store.read<AudioInsight[]>("audio-insights", upload.id),
@@ -154,22 +172,33 @@ export async function answerMemoryScopeQuestion(input: {
   qaPromptInstruction?: string;
   onRetrievedMemoryIds?: (memoryIds: string[]) => unknown;
   onDiagnostics?: QaExecutionDiagnosticsObserver;
+  onExecutionMilestone?: QaExecutionMilestoneObserver;
+  withholdUncertainProvisionalSentences?: boolean;
+  shadowReviewContext?: AnswerQuestionWithAIInput["shadowReviewContext"];
   answerQuestion?: typeof answerQuestionWithAI;
   includeUpload?: (upload: StoredUpload) => boolean;
+  resolveUploadSource?: typeof resolveRetrievalUpload;
 }): Promise<QuestionAnswer | null> {
   const memoryRetrievalStartedAt = performance.now();
   const store = input.store ?? appStore;
   const uploads = await store.list<StoredUpload>("uploads");
-  const scopedUploads = uploads
+  const candidateUploads = uploads
     .map(({ value }) => value)
     .filter((upload) => upload.status === "ready" && (input.includeUpload ? input.includeUpload(upload) : true))
     .sort((left, right) => left.recordingDate.localeCompare(right.recordingDate) || left.id.localeCompare(right.id));
+  const sourceResolver = input.resolveUploadSource ?? resolveRetrievalUpload;
+  const scopedUploads = candidateUploads.flatMap((upload) => {
+    const source = sourceResolver({ userId: input.userId, upload });
+    return source.visible ? [{ upload, source }] : [];
+  });
 
   if (scopedUploads.length === 0) {
     return null;
   }
 
-  const scopedEvidence = await Promise.all(scopedUploads.map((upload) => readUploadEvidence(store, upload)));
+  const scopedEvidence = await Promise.all(scopedUploads.map(({ upload, source }) =>
+    readUploadEvidence(store, upload, source)
+  ));
   const segments = scopedEvidence.flatMap((evidence) => evidence.segments);
   const audioInsights = scopedEvidence.flatMap((evidence) => evidence.audioInsights);
   const semanticSegments = scopedEvidence.flatMap((evidence) => evidence.semanticSegments);
@@ -225,6 +254,7 @@ export async function answerMemoryScopeQuestion(input: {
     current: { evidence: QaRetrievedEvidence[]; elapsedMs: number } | null;
   } = { current: null };
   const qaInput: AnswerQuestionWithAIInput = {
+    ...(input.userId ? { userId: input.userId } : {}),
     uploadId: input.scopeId,
     question: input.question,
     scope: input.qaScope,
@@ -233,6 +263,9 @@ export async function answerMemoryScopeQuestion(input: {
     semanticSegments,
     briefItems,
     relationshipSignals,
+    ...(input.shadowReviewContext
+      ? { shadowReviewContext: input.shadowReviewContext }
+      : {}),
     ...(memoryContext && memoryContext.count > 0 ? { memoryContext } : {}),
     ...(memoryIndexFallback ? { memoryIndexFallback: true } : {}),
     settingsStore: store,
@@ -250,6 +283,18 @@ export async function answerMemoryScopeQuestion(input: {
     ...(input.onDiagnostics ? {
       onDiagnostics: {
         value: input.onDiagnostics,
+        enumerable: false
+      }
+    } : {}),
+    ...(input.onExecutionMilestone ? {
+      onExecutionMilestone: {
+        value: input.onExecutionMilestone,
+        enumerable: false
+      }
+    } : {}),
+    ...(input.withholdUncertainProvisionalSentences ? {
+      withholdUncertainProvisionalSentences: {
+        value: true,
         enumerable: false
       }
     } : {}),

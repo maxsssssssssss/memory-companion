@@ -2,17 +2,21 @@ import { createHash } from "node:crypto";
 import { z } from "zod";
 
 import type { TranscriptChunk } from "@/lib/domain/chunks";
+import {
+  isChunkLocalSpeakerLabel,
+  normalizeSpeakerIdentityLabel
+} from "@/lib/domain/speaker-identity";
 import type { JsonStore } from "@/lib/server/storage/json-store";
 import type {
   SpeakerIdentityDirectMapping,
   SpeakerIdentityType,
   VoiceprintIdentityHint
 } from "./types";
+import { VOICEPRINT_PROVIDER_KNOWN_USER_LABEL } from "./voiceprint-client";
 
 const PROFILE_COLLECTION = "speaker-identity-profiles";
 const MANUAL_MAPPING_COLLECTION = "speaker-identity-manual-mappings";
 const RecordIdSchema = z.string().trim().min(1).max(512);
-const EXACT_PROVIDER_IDENTITY_CONFIDENCE = 0.9;
 
 const VoiceIdentityProviderReferenceSchema = z.object({
   provider: z.literal("company_voiceprint"),
@@ -115,6 +119,31 @@ function mappingDocumentId(input: { uploadId: string; chunkId: string; localSpea
 
 function providerSpeakerLabel(profile: SpeakerIdentityProfile) {
   return profile.providerReference?.speakerLabel ?? profile.voiceprintSpeakerId;
+}
+
+function providerSpeakerLabels(profile: SpeakerIdentityProfile) {
+  const labels = new Set<string>();
+  const storedLabel = providerSpeakerLabel(profile);
+  if (storedLabel) {
+    const normalized = normalizeSpeakerIdentityLabel(storedLabel);
+    if (normalized && !isChunkLocalSpeakerLabel(normalized)) {
+      labels.add(normalized);
+    }
+  }
+  if (
+    profile.identityType === "known_user" &&
+    profile.userId &&
+    (
+      profile.providerReference?.operationType === "train" ||
+      (
+        !profile.providerReference &&
+        profile.voiceprintSpeakerId === profile.userId
+      )
+    )
+  ) {
+    labels.add(VOICEPRINT_PROVIDER_KNOWN_USER_LABEL);
+  }
+  return [...labels].filter(Boolean);
 }
 
 export class JsonSpeakerIdentityRepository implements SpeakerIdentityRepository {
@@ -228,10 +257,11 @@ export class JsonSpeakerIdentityRepository implements SpeakerIdentityRepository 
       );
     const profilesByProviderId = new Map<string, SpeakerIdentityProfile[]>();
     for (const profile of profiles) {
-      const providerId = providerSpeakerLabel(profile)!.normalize("NFKC").trim();
-      const matches = profilesByProviderId.get(providerId) ?? [];
-      matches.push(profile);
-      profilesByProviderId.set(providerId, matches);
+      for (const providerId of providerSpeakerLabels(profile)) {
+        const matches = profilesByProviderId.get(providerId) ?? [];
+        matches.push(profile);
+        profilesByProviderId.set(providerId, matches);
+      }
     }
 
     return chunks.flatMap((chunk) => {
@@ -239,17 +269,39 @@ export class JsonSpeakerIdentityRepository implements SpeakerIdentityRepository 
         chunk.segments.flatMap((segment) => segment.speaker?.trim() ? [segment.speaker.trim()] : [])
       );
       return [...localSpeakers].flatMap((localSpeaker): VoiceprintIdentityHint[] => {
-        const matches = profilesByProviderId.get(localSpeaker.normalize("NFKC").trim()) ?? [];
+        const providerLabel = normalizeSpeakerIdentityLabel(localSpeaker);
+        if (!providerLabel || isChunkLocalSpeakerLabel(providerLabel)) return [];
+        const matches = profilesByProviderId.get(providerLabel) ?? [];
+        if (matches.length > 1) {
+          return [{
+            identityStatus: "conflict",
+            chunkId: chunk.id,
+            localSpeaker,
+            conflictingGlobalSpeakerIds: matches
+              .map((profile) => profile.globalSpeakerId)
+              .sort((left, right) => left.localeCompare(right, "en")),
+            evidence: {
+              type: "provider_label",
+              provider: "company_voiceprint",
+              providerLabel
+            }
+          }];
+        }
         if (matches.length !== 1) return [];
         const [profile] = matches;
         if (profile.identityType === "unknown_person") return [];
         return [{
+          identityStatus: "verified",
           chunkId: chunk.id,
           localSpeaker,
           globalSpeakerId: profile.globalSpeakerId,
           ...(profile.displayName ? { displayName: profile.displayName } : {}),
           identityType: profile.identityType,
-          confidence: EXACT_PROVIDER_IDENTITY_CONFIDENCE
+          evidence: {
+            type: "provider_label",
+            provider: "company_voiceprint",
+            providerLabel
+          }
         }];
       });
     });

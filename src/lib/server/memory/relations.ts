@@ -9,11 +9,15 @@ import { memoryTextSimilarity } from "./deduplication";
 import { MemoryRelationWriteSchema, type MemoryItem, type MemoryRelationWrite } from "./types";
 
 const COMPLETION_PATTERN =
-  /已确认|确认了|已经.{0,8}(?:完成|解决|决定|达成|落实|参观|提交|购买|预约)|已完成|完成了|完成检查|已解决|解决了|已决定|决定了|已达成|落实了|兑现了|\b(?:confirmed|completed|resolved|decided|finished|agreed|done)\b/i;
+  /已确认|确认了|已(?:经)?.{0,8}(?:完成|解决|决定|达成|落实|参观|提交|交付|购买|预约)|完成了|交付了|完成检查|解决了|决定了|落实了|兑现了|\b(?:confirmed|completed|resolved|decided|finished|agreed|done)\b/i;
 const UPDATE_PATTERN =
-  /调整|改到|改为|改期|延期|重新安排|更新|后续|查到|确认(?:时间|方式|日期)|reschedul|postponed|updated|follow[- ]?up/i;
+  /调整|改到|改为|改报|改期|延期|重新安排|更新|后续|查到|确认(?:时间|方式|日期)|reschedul|postponed|updated|follow[- ]?up/i;
+const REPLACEMENT_PATTERN =
+  /(?:取消|不再).{0,24}(?:改到|改为|改报|改期|重新安排)|(?:改到|改为|改报|改期|重新安排).{0,24}(?:替代|取代)/i;
 const PLAN_PATTERN =
   /计划|安排|准备|打算|待确认|仍需|还要|承诺|答应|预约|需要确认|plan|schedule|promise|unresolved|still needs/i;
+const UNRESOLVED_STATE_PATTERN =
+  /未完成|没完成|尚未完成|仍未.{0,8}(?:完成|解决|确认|提交|交付)|还没.{0,8}(?:完成|解决|确认|提交|交付)|还剩.{0,12}(?:待完成|未完成|要完成|需完成)?|待完成|待提交|待交付|仍需|还需|still (?:open|incomplete|unfinished)|not (?:done|completed|finished)/i;
 const CONTRADICTION_PATTERN =
   /已取消|取消了|决定取消|确定取消|(?:计划|安排|承诺).{0,12}(?:不再|无法|未能|没有兑现)|cancelled|canceled|(?:plan|schedule|commitment).{0,16}(?:will not|won't|cannot|failed)|did not happen/i;
 
@@ -62,8 +66,22 @@ function chronologicalPair(left: MemoryItem, right: MemoryItem) {
 }
 
 function lifecycleStage(memory: MemoryItem): LifecycleStage {
-  const text = `${memory.title} ${memory.summary}`;
+  const title = memory.title.normalize("NFKC");
+  const text = `${title} ${memory.summary.normalize("NFKC")}`;
+  // Prefer an explicit unresolved state in the title over incidental
+  // completion language about a different subtask in the summary.
+  if (UNRESOLVED_STATE_PATTERN.test(title)) return "plan";
+  if (REPLACEMENT_PATTERN.test(title)) return "update";
+  if (CONTRADICTION_PATTERN.test(title)) return "contradiction";
+  if (COMPLETION_PATTERN.test(title)) return "completion";
+  if (UPDATE_PATTERN.test(title)) return "update";
+  if (PLAN_PATTERN.test(title)) return "plan";
+
+  if (REPLACEMENT_PATTERN.test(text)) return "update";
   if (CONTRADICTION_PATTERN.test(text)) return "contradiction";
+  // When a single extracted memory contains both completed and outstanding
+  // details, keep it open until the outstanding state is explicitly closed.
+  if (UNRESOLVED_STATE_PATTERN.test(text)) return "plan";
   if (COMPLETION_PATTERN.test(text)) return "completion";
   if (UPDATE_PATTERN.test(text)) return "update";
   if (PLAN_PATTERN.test(text) || memory.type === "commitment" || memory.type === "question") return "plan";

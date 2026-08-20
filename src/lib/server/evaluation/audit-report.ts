@@ -24,7 +24,7 @@ export type EvaluationMemoryIndexStageAudit =
     }
   | {
       status: "skipped";
-      reason: "missing_user_id";
+      reason: "missing_user_id" | "date_companion_confirmation_required";
     }
   | {
       status: "failed";

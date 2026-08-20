@@ -1,4 +1,5 @@
 import type Database from "better-sqlite3";
+import { deletePersonEvidenceByUpload } from "@/lib/server/person/repository";
 import { consolidateMemories } from "./deduplication";
 import { calculateImportance, combineImportanceReasons } from "./importance";
 import { detectMemoryRelations } from "./relations";
@@ -472,6 +473,61 @@ export function createMemoryRepository(database: Database.Database): MemoryRepos
     });
   }
 
+  function hiddenDailyReflectionUploadIds(userId: string) {
+    return new Set((database.prepare(`
+      SELECT upload_id
+      FROM memory_daily_reflection_publications
+      WHERE user_id = ? AND status <> 'published'
+    `).all(userId) as Array<{ upload_id: string }>).map((row) => row.upload_id));
+  }
+
+  function hiddenDailyReflectionMemoryIds(userId: string) {
+    return new Set((database.prepare(`
+      SELECT DISTINCT evidence.memory_id
+      FROM memory_evidence evidence
+      INNER JOIN memory_daily_reflection_publications publication
+        ON publication.user_id = ?
+        AND publication.upload_id = evidence.upload_id
+        AND publication.status <> 'published'
+    `).all(userId) as Array<{ memory_id: string }>).map((row) => row.memory_id));
+  }
+
+  function buildVisibilityAwareManagedIndex(
+    userId: string,
+    memories: MemoryItem[],
+    ownerObservations: PersistedMemoryOwnerObservation[]
+  ) {
+    const hiddenUploads = hiddenDailyReflectionUploadIds(userId);
+    const hiddenMemories = memories.filter((memory) =>
+      memory.evidence.some((evidence) => hiddenUploads.has(evidence.uploadId))
+    );
+    const hiddenMemoryIds = new Set(hiddenMemories.map((memory) => memory.id));
+    const visibleMemories = memories.filter((memory) => !hiddenMemoryIds.has(memory.id));
+    const visibleOwnerObservations = ownerObservations.filter(
+      (observation) => !hiddenMemoryIds.has(observation.memoryId)
+    );
+    const hiddenOwnerObservations = ownerObservations.filter(
+      (observation) => hiddenMemoryIds.has(observation.memoryId)
+    );
+    const visible = buildManagedIndex(visibleMemories, visibleOwnerObservations);
+    let hiddenDuplicateEvidenceRemoved = 0;
+    const isolatedHiddenMemories = hiddenMemories.map((memory) =>
+      recalculateMemory(memory, {
+        resetResolved: true,
+        onEvidenceDedup: (removed) => {
+          hiddenDuplicateEvidenceRemoved += removed;
+        }
+      })
+    );
+    return {
+      memories: [...visible.memories, ...isolatedHiddenMemories],
+      relations: visible.relations,
+      ownerObservations: [...visible.ownerObservations, ...hiddenOwnerObservations],
+      duplicateEvidenceRemoved:
+        visible.duplicateEvidenceRemoved + hiddenDuplicateEvidenceRemoved
+    };
+  }
+
   function loadUserMemories(userId: string) {
     return memoriesFromRows(selectUserItems.all(userId) as MemoryItemRow[]);
   }
@@ -487,6 +543,48 @@ export function createMemoryRepository(database: Database.Database): MemoryRepos
     relations: MemoryRelation[],
     ownerObservations: PersistedMemoryOwnerObservation[] = []
   ) {
+    const retainedProvenance = database.prepare(`
+      SELECT p.memory_evidence_id, p.user_id, p.upload_id, p.source_segment_id,
+             p.start_seconds, p.end_seconds, p.speaker_id, p.source_kind,
+             p.origin, p.content_digest, p.captured_at
+      FROM memory_evidence_provenance p
+      INNER JOIN memory_evidence e ON e.id = p.memory_evidence_id
+      INNER JOIN memory_items m ON m.id = e.memory_id
+      WHERE m.user_id = ?
+      ORDER BY p.memory_evidence_id
+    `).all(userId) as Array<{
+      memory_evidence_id: string;
+      user_id: string;
+      upload_id: string;
+      source_segment_id: string;
+      start_seconds: number;
+      end_seconds: number;
+      speaker_id: string | null;
+      source_kind: string;
+      origin: string;
+      content_digest: string;
+      captured_at: string;
+    }>;
+    const retainedDailyReflectionProvenance = database.prepare(`
+      SELECT memory_evidence_id, user_id, publication_id, reflection_id,
+             confirmation_id, candidate_id, upload_id, source_segment_id,
+             source_origin, content_digest, created_at
+      FROM memory_daily_reflection_evidence_provenance
+      WHERE user_id = ?
+      ORDER BY memory_evidence_id
+    `).all(userId) as Array<{
+      memory_evidence_id: string;
+      user_id: string;
+      publication_id: string;
+      reflection_id: string;
+      confirmation_id: string;
+      candidate_id: string;
+      upload_id: string;
+      source_segment_id: string;
+      source_origin: string;
+      content_digest: string;
+      created_at: string;
+    }>;
     deleteUserItems.run(userId);
     for (const memory of memories) {
       insertItem.run({
@@ -537,6 +635,95 @@ export function createMemoryRepository(database: Database.Database): MemoryRepos
     for (const relation of relations) {
       insertRelation.run(relation);
     }
+    const restoreProvenance = database.prepare(`
+      INSERT INTO memory_evidence_provenance (
+        memory_evidence_id, user_id, upload_id, source_segment_id,
+        start_seconds, end_seconds, speaker_id, source_kind, origin,
+        content_digest, captured_at
+      ) SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+      WHERE EXISTS (SELECT 1 FROM memory_evidence WHERE id = ?)
+      ON CONFLICT(memory_evidence_id) DO NOTHING
+    `);
+    for (const provenance of retainedProvenance) {
+      restoreProvenance.run(
+        provenance.memory_evidence_id,
+        provenance.user_id,
+        provenance.upload_id,
+        provenance.source_segment_id,
+        provenance.start_seconds,
+        provenance.end_seconds,
+        provenance.speaker_id,
+        provenance.source_kind,
+        provenance.origin,
+        provenance.content_digest,
+        provenance.captured_at,
+        provenance.memory_evidence_id
+      );
+    }
+    const restoreDailyReflectionProvenance = database.prepare(`
+      INSERT INTO memory_daily_reflection_evidence_provenance (
+        memory_evidence_id, user_id, publication_id, reflection_id,
+        confirmation_id, candidate_id, upload_id, source_segment_id,
+        source_origin, content_digest, created_at
+      ) SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+      WHERE EXISTS (SELECT 1 FROM memory_evidence WHERE id = ?)
+      ON CONFLICT(memory_evidence_id) DO NOTHING
+    `);
+    for (const provenance of retainedDailyReflectionProvenance) {
+      restoreDailyReflectionProvenance.run(
+        provenance.memory_evidence_id,
+        provenance.user_id,
+        provenance.publication_id,
+        provenance.reflection_id,
+        provenance.confirmation_id,
+        provenance.candidate_id,
+        provenance.upload_id,
+        provenance.source_segment_id,
+        provenance.source_origin,
+        provenance.content_digest,
+        provenance.created_at,
+        provenance.memory_evidence_id
+      );
+    }
+    const activeReflectionCandidates = database.prepare(`
+      SELECT user_id, publication_id, candidate_id
+      FROM memory_daily_reflection_candidate_current_memories
+      WHERE user_id = ? AND status = 'active'
+      ORDER BY publication_id, candidate_id
+    `).all(userId) as Array<{
+      user_id: string;
+      publication_id: string;
+      candidate_id: string;
+    }>;
+    const candidateMemoryIds = database.prepare(`
+      SELECT DISTINCT evidence.memory_id
+      FROM memory_daily_reflection_evidence_provenance provenance
+      INNER JOIN memory_evidence evidence ON evidence.id = provenance.memory_evidence_id
+      WHERE provenance.user_id = ? AND provenance.publication_id = ?
+        AND provenance.candidate_id = ?
+      ORDER BY evidence.memory_id
+    `);
+    const updateCandidateMemory = database.prepare(`
+      UPDATE memory_daily_reflection_candidate_current_memories
+      SET current_memory_id = ?
+      WHERE user_id = ? AND publication_id = ? AND candidate_id = ?
+        AND status = 'active'
+    `);
+    for (const candidate of activeReflectionCandidates) {
+      const memoryIds = candidateMemoryIds.all(
+        candidate.user_id,
+        candidate.publication_id,
+        candidate.candidate_id
+      ) as Array<{ memory_id: string }>;
+      if (memoryIds.length === 1) {
+        updateCandidateMemory.run(
+          memoryIds[0]!.memory_id,
+          candidate.user_id,
+          candidate.publication_id,
+          candidate.candidate_id
+        );
+      }
+    }
   }
 
   const replaceUploadMemories = database.transaction((input: ReplaceUploadMemoriesInput): MemoryIndexUpdateResult => {
@@ -576,7 +763,8 @@ export function createMemoryRepository(database: Database.Database): MemoryRepos
       (observation) => observation.uploadId !== uploadId && remainingIds.has(observation.memoryId)
     );
     const beforeConsolidation = remaining.length + incoming.length;
-    const managed = buildManagedIndex(
+    const managed = buildVisibilityAwareManagedIndex(
+      userId,
       [...remaining, ...incoming],
       [...remainingOwnerObservations, ...incomingOwnerObservations]
     );
@@ -600,6 +788,15 @@ export function createMemoryRepository(database: Database.Database): MemoryRepos
     const userId = assertIdentifier(query.userId, "user id");
     const conditions = ["memory_items.user_id = ?"];
     const parameters: Array<string | number> = [userId];
+    conditions.push(`NOT EXISTS (
+      SELECT 1
+      FROM memory_evidence hidden_evidence
+      INNER JOIN memory_daily_reflection_publications reflection_publication
+        ON reflection_publication.user_id = memory_items.user_id
+        AND reflection_publication.upload_id = hidden_evidence.upload_id
+        AND reflection_publication.status <> 'published'
+      WHERE hidden_evidence.memory_id = memory_items.id
+    )`);
 
     if (query.startDate || query.endDate) {
       const scopedConditions = ["scoped_evidence.memory_id = memory_items.id"];
@@ -637,12 +834,12 @@ export function createMemoryRepository(database: Database.Database): MemoryRepos
       ORDER BY memory_items.importance_score DESC, memory_items.last_seen_date DESC, memory_items.updated_at DESC
       LIMIT ?
     `).all(...parameters) as MemoryItemRow[];
-    const evidenceFilter = query.startDate || query.endDate || query.uploadId
-      ? (evidence: MemoryEvidence) =>
-          (!query.startDate || evidence.date >= query.startDate) &&
-          (!query.endDate || evidence.date <= query.endDate) &&
-          (!query.uploadId || evidence.uploadId === query.uploadId)
-      : undefined;
+    const hiddenReflectionUploads = hiddenDailyReflectionUploadIds(userId);
+    const evidenceFilter = (evidence: MemoryEvidence) =>
+      !hiddenReflectionUploads.has(evidence.uploadId) &&
+      (!query.startDate || evidence.date >= query.startDate) &&
+      (!query.endDate || evidence.date <= query.endDate) &&
+      (!query.uploadId || evidence.uploadId === query.uploadId);
     return memoriesFromRows(rows, evidenceFilter);
   }
 
@@ -650,6 +847,33 @@ export function createMemoryRepository(database: Database.Database): MemoryRepos
     const userId = assertIdentifier(userIdInput, "user id");
     const uploadId = assertIdentifier(uploadIdInput, "upload id");
     database.transaction(() => {
+      const deletedAt = new Date().toISOString();
+      database.prepare(`
+        INSERT INTO memory_upload_tombstones (user_id, upload_id, reason, deleted_at)
+        VALUES (?, ?, 'upload_deleted', ?)
+        ON CONFLICT(user_id, upload_id) DO UPDATE SET
+          reason = excluded.reason,
+          deleted_at = excluded.deleted_at
+      `).run(userId, uploadId, deletedAt);
+      database.prepare(`
+        UPDATE memory_daily_reflection_publications
+        SET status = 'deleted', updated_at = ?, deleted_at = ?
+        WHERE user_id = ? AND upload_id = ? AND status <> 'deleted'
+      `).run(deletedAt, deletedAt, userId, uploadId);
+      for (const table of [
+        "memory_daily_reflection_candidate_person_sources",
+        "memory_daily_reflection_candidate_current_memories",
+        "memory_daily_reflection_candidate_payloads",
+        "memory_daily_reflection_candidate_revocations"
+      ]) {
+        database.prepare(`
+          DELETE FROM ${table}
+          WHERE user_id = ? AND publication_id IN (
+            SELECT id FROM memory_daily_reflection_publications
+            WHERE user_id = ? AND upload_id = ?
+          )
+        `).run(userId, userId, uploadId);
+      }
       const existing = loadUserMemories(userId);
       const remaining = existing
         .map((memory) => ({
@@ -662,12 +886,28 @@ export function createMemoryRepository(database: Database.Database): MemoryRepos
       const ownerObservations = loadUserOwnerObservations(userId).filter(
         (observation) => observation.uploadId !== uploadId && remainingIds.has(observation.memoryId)
       );
-      const managed = buildManagedIndex(remaining, ownerObservations);
+      const managed = buildVisibilityAwareManagedIndex(userId, remaining, ownerObservations);
       writeUserIndex(userId, managed.memories, managed.relations, managed.ownerObservations);
       if (managed.duplicateEvidenceRemoved > 0) {
         console.warn(
           `[memory-evidence-dedup] removed=${managed.duplicateEvidenceRemoved} user_id=${userId} operation=delete_upload`
         );
+      }
+      deletePersonEvidenceByUpload(database, { accountId: userId, uploadId });
+      const retained = database.prepare(`
+        SELECT dc_interaction_id FROM dc_retained_uploads
+        WHERE user_id = ? AND upload_id = ?
+      `).get(userId, uploadId) as { dc_interaction_id: string } | undefined;
+      if (retained) {
+        database.prepare(`
+          DELETE FROM dc_memory_bridge_receipts
+          WHERE account_id = ? AND dc_interaction_id = ?
+        `).run(userId, retained.dc_interaction_id);
+        database.prepare(`
+          UPDATE dc_retained_uploads
+          SET status = 'purged', updated_at = ?
+          WHERE user_id = ? AND upload_id = ?
+        `).run(new Date().toISOString(), userId, uploadId);
       }
     })();
   }
@@ -702,6 +942,24 @@ export function createMemoryRepository(database: Database.Database): MemoryRepos
       INNER JOIN memory_items source ON source.id = memory_relations.source_memory_id
       INNER JOIN memory_items target ON target.id = memory_relations.target_memory_id
       WHERE source.user_id = ? AND target.user_id = ?
+        AND NOT EXISTS (
+          SELECT 1
+          FROM memory_evidence source_evidence
+          INNER JOIN memory_daily_reflection_publications source_publication
+            ON source_publication.user_id = source.user_id
+            AND source_publication.upload_id = source_evidence.upload_id
+            AND source_publication.status <> 'published'
+          WHERE source_evidence.memory_id = source.id
+        )
+        AND NOT EXISTS (
+          SELECT 1
+          FROM memory_evidence target_evidence
+          INNER JOIN memory_daily_reflection_publications target_publication
+            ON target_publication.user_id = target.user_id
+            AND target_publication.upload_id = target_evidence.upload_id
+            AND target_publication.status <> 'published'
+          WHERE target_evidence.memory_id = target.id
+        )
       ORDER BY memory_relations.created_at, memory_relations.id
     `).all(userId, userId) as MemoryRelationRow[];
     return rows.map(relationFromRow);
@@ -715,7 +973,14 @@ export function createMemoryRepository(database: Database.Database): MemoryRepos
       .flatMap((relation) => {
         const relatedId = relation.sourceMemoryId === memoryId ? relation.targetMemoryId : relation.sourceMemoryId;
         const row = selectItemById.get(userId, relatedId) as MemoryItemRow | undefined;
-        return row ? [{ relation, memory: memoriesFromRows([row])[0] }] : [];
+        const hiddenReflectionUploads = hiddenDailyReflectionUploadIds(userId);
+        return row ? [{
+          relation,
+          memory: memoriesFromRows(
+            [row],
+            (evidence) => !hiddenReflectionUploads.has(evidence.uploadId)
+          )[0]
+        }] : [];
       });
   }
 
@@ -724,9 +989,11 @@ export function createMemoryRepository(database: Database.Database): MemoryRepos
     const requestedIds = memoryIds
       ? new Set(memoryIds.map((memoryId) => assertIdentifier(memoryId, "memory id")))
       : undefined;
+    const hiddenMemoryIds = hiddenDailyReflectionMemoryIds(userId);
     const grouped = observationsByMemoryId(
       loadUserOwnerObservations(userId).filter(
-        (observation) => !requestedIds || requestedIds.has(observation.memoryId)
+        (observation) => !hiddenMemoryIds.has(observation.memoryId)
+          && (!requestedIds || requestedIds.has(observation.memoryId))
       )
     );
     return [...grouped.entries()].flatMap(([memoryId, observations]) => {
@@ -747,7 +1014,11 @@ export function createMemoryRepository(database: Database.Database): MemoryRepos
   const rebuildUserMemories = database.transaction((userIdInput: string): MemoryIndexUpdateResult => {
     const userId = assertIdentifier(userIdInput, "user id");
     const existing = loadUserMemories(userId);
-    const managed = buildManagedIndex(existing, loadUserOwnerObservations(userId));
+    const managed = buildVisibilityAwareManagedIndex(
+      userId,
+      existing,
+      loadUserOwnerObservations(userId)
+    );
     writeUserIndex(userId, managed.memories, managed.relations, managed.ownerObservations);
     if (managed.duplicateEvidenceRemoved > 0) {
       console.warn(

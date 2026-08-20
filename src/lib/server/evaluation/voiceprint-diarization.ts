@@ -1,5 +1,26 @@
 export type DiarizationResultSource = "combined_asr" | "standalone_diarization";
 
+export type VoiceprintSmokeDiarizationSource =
+  | "combined_asr"
+  | "fallback_diarization_api";
+
+export type CanonicalSpeakerResultItem = {
+  speaker: string;
+  text: string;
+};
+
+export type CanonicalSpeakerResult = {
+  speaker_result: CanonicalSpeakerResultItem[];
+};
+
+export type VoiceprintDiarizationAcquisition = {
+  diarizationSource: VoiceprintSmokeDiarizationSource;
+  speakerResultAvailable: boolean;
+  voiceprintStage: "executed" | "blocked";
+  failureReason?: "diarization_gate_missing_speaker_result";
+  canonical: CanonicalSpeakerResult;
+};
+
 export type DiarizationTimestampPoint = {
   start: number;
   end: number;
@@ -81,6 +102,72 @@ function normalizeSpeakerLabel(value: unknown) {
   if (typeof value !== "string") return undefined;
   const normalized = value.normalize("NFKC").trim();
   return normalized || undefined;
+}
+
+function canonicalizeSpeakerResults(
+  payload: unknown,
+  resultField: "speaker_result" | "result"
+): CanonicalSpeakerResult {
+  const data = asRecord(asRecord(payload)?.data);
+  const rawResults = Array.isArray(data?.[resultField])
+    ? data[resultField]
+    : [];
+  const speakerResult: CanonicalSpeakerResultItem[] = [];
+
+  for (const rawResult of rawResults) {
+    const result = asRecord(rawResult);
+    const speaker = normalizeSpeakerLabel(result?.speaker);
+    if (!speaker) continue;
+    speakerResult.push({
+      speaker,
+      text: typeof result?.text === "string" ? result.text.trim() : ""
+    });
+  }
+
+  return { speaker_result: speakerResult };
+}
+
+/**
+ * Selects the first documented diarization result and converts both Provider
+ * response shapes to the same `{ speaker_result: [{ speaker, text }] }`
+ * contract. The Provider does not return per-speaker time boundaries, so this
+ * adapter deliberately does not invent `start` or `end` values.
+ */
+export async function acquireCanonicalSpeakerResult(input: {
+  combinedPayload: unknown;
+  requestFallback: () => Promise<unknown>;
+}): Promise<VoiceprintDiarizationAcquisition> {
+  const combined = canonicalizeSpeakerResults(
+    input.combinedPayload,
+    "speaker_result"
+  );
+  if (combined.speaker_result.length > 0) {
+    return {
+      diarizationSource: "combined_asr",
+      speakerResultAvailable: true,
+      voiceprintStage: "executed",
+      canonical: combined
+    };
+  }
+
+  const fallbackPayload = await input.requestFallback();
+  const fallback = canonicalizeSpeakerResults(fallbackPayload, "result");
+  if (fallback.speaker_result.length > 0) {
+    return {
+      diarizationSource: "fallback_diarization_api",
+      speakerResultAvailable: true,
+      voiceprintStage: "executed",
+      canonical: fallback
+    };
+  }
+
+  return {
+    diarizationSource: "fallback_diarization_api",
+    speakerResultAvailable: false,
+    voiceprintStage: "blocked",
+    failureReason: "diarization_gate_missing_speaker_result",
+    canonical: fallback
+  };
 }
 
 function parseLabels(

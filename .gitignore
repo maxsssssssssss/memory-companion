@@ -40,7 +40,8 @@ redis-data/
 docker-data/
 
 # Local test and sample audio
-fixtures/audio/
+fixtures/audio/**
+!fixtures/audio/README.md
 sample*.mp3
 *.wav
 *.mp3
@@ -51,6 +52,8 @@ sample*.mp3
 *.aac
 
 # Local development tool state
+__pycache__/
+*.py[cod]
 .codex/
 .claude/
 .agents/

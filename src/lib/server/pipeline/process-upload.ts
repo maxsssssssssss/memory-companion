@@ -11,6 +11,10 @@ import {
   type TranscriptSegment
 } from "@/lib/domain/types";
 import {
+  isDateCompanionMarkedUpload,
+  type DateCompanionMarkedUpload
+} from "@/lib/domain/date-companion-upload";
+import {
   ProactiveInsightCacheDocumentSchema,
   proactiveInsightCacheIdForUpload,
   type ProactiveInsight,
@@ -30,6 +34,10 @@ import { resolveAnalysisTranscriptChunks } from "@/lib/server/analysis-chunks/tr
 import { JsonAnalysisChunkCheckpointStore } from "@/lib/server/analysis-chunks/checkpoint";
 import { getEmotionSignalProvider, type EmotionSignalProvider } from "@/lib/server/emotion-signals/provider";
 import {
+  deleteDateCompanionAudioStaging,
+  stageDateCompanionParticipantAudio
+} from "@/lib/server/date-companion/audio-staging";
+import {
   buildEvaluationAuditReport,
   type EvaluationMemoryIndexStageAudit
 } from "@/lib/server/evaluation/audit-report";
@@ -41,7 +49,11 @@ import {
   extractUploadMemoriesWithAudit,
   getMemoryDatabase,
   getMemoryRepository,
+  generateMemoryOwnerReviewCandidates,
+  isMemoryOwnerReviewEnabled,
+  deleteMemoryOwnerReviewCandidatesForUpload,
   type MemoryExtractionAudit,
+  type MemoryOwnerReviewDraft,
   type MemoryItem,
   type MemoryRelation,
   type MemoryRepository
@@ -64,15 +76,24 @@ import {
 } from "@/lib/server/relationship-signals/lifecycle/resolver";
 import type { JsonStore } from "@/lib/server/storage/json-store";
 import { appStore } from "@/lib/server/storage/json-store";
+import { getUserUploadsRootDir } from "@/lib/server/auth/session";
+import { isDailyReflectionUpload } from "@/lib/server/daily-reflection/upload-record";
 import { type TranscriptionProvider } from "@/lib/server/transcription/provider";
 import { JsonChunkCheckpointStore } from "@/lib/server/transcription/chunks/checkpoint-store";
 import { JsonSpeakerIdentityRepository } from "@/lib/server/speaker-identity/repository";
+import type { IdentityResolverAudit } from "@/lib/server/speaker-identity/identity-resolver";
+import {
+  deleteVoiceprintTrainingCandidatesForUpload,
+  generateVoiceprintTrainingCandidates,
+  isVoiceprintSelfEnrollmentEnabled,
+  type VoiceprintCandidateResolution
+} from "@/lib/server/speaker-identity/voiceprint-training-candidates";
 import {
   transcribeConfiguredAudio,
   type UploadTranscriptionProcessor
 } from "@/lib/server/transcription/chunks/process-audio";
 
-type StoredUpload = AudioUpload & {
+type StoredUpload = AudioUpload & DateCompanionMarkedUpload & {
   filePath?: string;
   errorCode?: string;
   errorMessage?: string;
@@ -107,6 +128,10 @@ export type ProcessUploadDependencies = {
   relationshipSignalProvider?: RelationshipSignalProvider;
   memoryRelevanceJudge?: MemoryRelevanceJudge;
   proactiveInsightProvider?: ProactiveInsightProvider;
+  voiceprintCandidateGenerator?: typeof generateVoiceprintTrainingCandidates;
+  memoryOwnerReviewCandidateGenerator?: typeof generateMemoryOwnerReviewCandidates;
+  memoryOwnerReviewCandidateCleaner?: typeof deleteMemoryOwnerReviewCandidatesForUpload;
+  dateCompanionAudioStager?: typeof stageDateCompanionParticipantAudio;
   now?: () => string;
   evaluationRawResponseCapture?: boolean;
 };
@@ -125,6 +150,15 @@ export class UploadProcessingCancelledError extends Error {
   constructor(uploadId: string) {
     super(`Upload processing cancelled: ${uploadId}`);
     this.name = "UploadProcessingCancelledError";
+  }
+}
+
+export class DailyReflectionStandardPipelineRejectedError extends Error {
+  readonly code = "daily_reflection_standard_pipeline_rejected";
+
+  constructor(uploadId: string) {
+    super(`Daily Reflection upload cannot enter the standard pipeline: ${uploadId}`);
+    this.name = "DailyReflectionStandardPipelineRejectedError";
   }
 }
 
@@ -153,6 +187,9 @@ async function assertUploadWritable(store: JsonStore, uploadId: string): Promise
   const upload = await store.read<StoredUpload>("uploads", uploadId);
   if (!upload) {
     throw new UploadProcessingCancelledError(uploadId);
+  }
+  if (isDailyReflectionUpload(upload)) {
+    throw new DailyReflectionStandardPipelineRejectedError(uploadId);
   }
 
   return upload;
@@ -187,6 +224,16 @@ async function cleanupProcessingArtifacts(
     new JsonChunkCheckpointStore(store).deleteUpload(uploadId),
     new JsonAnalysisChunkCheckpointStore(store).deleteUpload(userId, uploadId),
     new JsonSpeakerIdentityRepository(store).deleteUploadMappings(uploadId),
+    deleteVoiceprintTrainingCandidatesForUpload({
+      store,
+      uploadId,
+      uploadsRootDir: getUserUploadsRootDir(userId)
+    }),
+    deleteMemoryOwnerReviewCandidatesForUpload({
+      store,
+      uploadId,
+      uploadsRootDir: getUserUploadsRootDir(userId)
+    }),
     store.delete("segments", uploadId),
     store.delete("audio-insights", uploadId),
     store.delete("semantic-segments", uploadId),
@@ -195,7 +242,8 @@ async function cleanupProcessingArtifacts(
     store.delete("relationship-lifecycle", uploadId),
     store.delete("memory-owner-audits", uploadId),
     store.delete("speaker-identities", uploadId),
-    store.delete("proactive-insights", proactiveInsightCacheIdForUpload(uploadId))
+    store.delete("proactive-insights", proactiveInsightCacheIdForUpload(uploadId)),
+    deleteDateCompanionAudioStaging(store, uploadId)
   ]);
   deleteMemories?.();
 }
@@ -452,6 +500,10 @@ async function generateRelationshipSignals(input: {
   }
 }
 
+type MemoryIndexStageWithOwnerReview = EvaluationMemoryIndexStageAudit & {
+  ownerReviewDrafts?: MemoryOwnerReviewDraft[];
+};
+
 function updateMemoryIndex(input: {
   userId?: string;
   upload: StoredUpload;
@@ -463,9 +515,23 @@ function updateMemoryIndex(input: {
     edges: import("@/lib/server/relationship-signals/lifecycle/types").RelationshipLifecycleEdge[];
     candidateIdsByCardId?: Record<string, string[]>;
   };
+  identityStructuralGate?: {
+    status: "healthy" | "degraded" | "blocked";
+    reasons: string[];
+  };
   repository?: Pick<MemoryRepository, "replaceUploadMemories">;
   now?: string;
-}): EvaluationMemoryIndexStageAudit {
+}): MemoryIndexStageWithOwnerReview {
+  if (isDateCompanionMarkedUpload(input.upload)) {
+    console.info(
+      `[memory-index] skipped upload_id=${input.upload.id} reason=date_companion_confirmation_required`
+    );
+    return {
+      status: "skipped",
+      reason: "date_companion_confirmation_required"
+    };
+  }
+
   if (!input.userId) {
     return { status: "skipped", reason: "missing_user_id" };
   }
@@ -480,6 +546,9 @@ function updateMemoryIndex(input: {
       semanticSegments: input.semanticSegments,
       relationshipSignals: input.relationshipSignals,
       ...(input.relationshipLifecycle ? { relationshipLifecycle: input.relationshipLifecycle } : {}),
+      ...(input.identityStructuralGate ? {
+        identityStructuralGate: input.identityStructuralGate
+      } : {}),
       ...(input.now ? { now: input.now } : {})
     });
     const repository = input.repository ?? getMemoryRepository();
@@ -502,7 +571,8 @@ function updateMemoryIndex(input: {
     return {
       status: "completed",
       update: result,
-      admission: extraction.audit
+      admission: extraction.audit,
+      ownerReviewDrafts: extraction.ownerReviewDrafts
     };
   } catch (error) {
     const message = error instanceof Error ? error.message : "unknown_error";
@@ -749,10 +819,31 @@ export async function processUpload(input: ProcessUploadInput): Promise<ProcessU
   const pipelineStartedAt = Date.now();
   let activeStage = "initializing";
   let job: ProcessingJob | null = null;
+  let memoryOwnerReviewCleanupSucceeded = true;
 
   try {
     console.info(`[pipeline] start upload_id=${upload.id}`);
     job = await createUploadJob(store, upload.id);
+    if (input.userId) {
+      const reviewCleaner =
+        input.dependencies?.memoryOwnerReviewCandidateCleaner ??
+        deleteMemoryOwnerReviewCandidatesForUpload;
+      try {
+        const deleted = await reviewCleaner({
+          store,
+          uploadId: upload.id,
+          uploadsRootDir: getUserUploadsRootDir(input.userId)
+        });
+        console.info(
+          `[memory-owner-review] cleanup_completed upload_id=${upload.id} deleted=${deleted}`
+        );
+      } catch (error) {
+        memoryOwnerReviewCleanupSucceeded = false;
+        console.warn(
+          `[memory-owner-review] cleanup_failure upload_id=${upload.id} error_name=${safeErrorName(error)}`
+        );
+      }
+    }
     job = await updateUploadJob(store, job, {
       status: "transcribing",
       progress: 25,
@@ -769,7 +860,8 @@ export async function processUpload(input: ProcessUploadInput): Promise<ProcessU
     const transcriptionInput = {
       uploadId: upload.id,
       filePath: uploadFilePath,
-      mimeType: upload.mimeType
+      mimeType: upload.mimeType,
+      audioAccessPolicy: "legacy_bearer" as const
     };
     let segments = await readResumableTranscriptSegments(store, upload.id, job.executionMode);
     if (segments) {
@@ -818,6 +910,47 @@ export async function processUpload(input: ProcessUploadInput): Promise<ProcessU
     } catch (error) {
       console.warn(
         `[analysis-chunks] checkpoint read failed upload_id=${upload.id} error_name=${safeErrorName(error)}`
+      );
+    }
+    const voiceprintCandidateGenerator =
+      input.dependencies?.voiceprintCandidateGenerator ??
+      (
+        input.userId && isVoiceprintSelfEnrollmentEnabled()
+          ? generateVoiceprintTrainingCandidates
+          : undefined
+      );
+    if (
+      voiceprintCandidateGenerator &&
+      input.userId &&
+      checkpointTranscriptChunks.length > 0
+    ) {
+      try {
+        const rawIdentityAudit = await store.read<{
+          resolutionStates?: VoiceprintCandidateResolution[];
+        }>("speaker-identities", upload.id);
+        const candidates = await voiceprintCandidateGenerator({
+          store,
+          uploadId: upload.id,
+          sourceFilePath: uploadFilePath,
+          uploadsRootDir: getUserUploadsRootDir(input.userId),
+          chunks: checkpointTranscriptChunks,
+          resolvedSegments: segments,
+          resolutions: Array.isArray(rawIdentityAudit?.resolutionStates)
+            ? rawIdentityAudit.resolutionStates
+            : [],
+          now
+        });
+        console.info(
+          `[voiceprint-candidates] completed upload_id=${upload.id} candidates=${candidates.length}`
+        );
+      } catch (error) {
+        console.warn(
+          `[voiceprint-candidates] noncritical_failure upload_id=${upload.id} error_name=${safeErrorName(error)}`
+        );
+      }
+    } else if (voiceprintCandidateGenerator && input.userId) {
+      console.info(
+        `[voiceprint-candidates] skipped upload_id=${upload.id} reason=missing_chunk_checkpoints`
       );
     }
     const transcriptChunks = resolveAnalysisTranscriptChunks({
@@ -1049,6 +1182,10 @@ export async function processUpload(input: ProcessUploadInput): Promise<ProcessU
     activeStage = "memory-index";
     const memoryIndexStartedAt = Date.now();
     console.info("[memory-index] start");
+    const identityAudit = await store.read<IdentityResolverAudit>(
+      "speaker-identities",
+      upload.id
+    );
     const memoryIndexStage = updateMemoryIndex({
       userId: input.userId,
       upload,
@@ -1060,6 +1197,12 @@ export async function processUpload(input: ProcessUploadInput): Promise<ProcessU
         edges: relationshipLifecycle.edges,
         candidateIdsByCardId: relationshipSignalResult.candidateIdsByCardId
       },
+      ...(identityAudit?.structuralGate ? {
+        identityStructuralGate: {
+          status: identityAudit.structuralGate.status,
+          reasons: identityAudit.structuralGate.reasons
+        }
+      } : {}),
       repository: input.memoryRepository,
       now: now()
     });
@@ -1071,6 +1214,30 @@ export async function processUpload(input: ProcessUploadInput): Promise<ProcessU
         upload.id,
         admissionAudit.ownerAttribution
       );
+      if (
+        input.userId &&
+        memoryOwnerReviewCleanupSucceeded &&
+        isMemoryOwnerReviewEnabled() &&
+        (memoryIndexStage.ownerReviewDrafts?.length ?? 0) > 0
+      ) {
+        const reviewGenerator =
+          input.dependencies?.memoryOwnerReviewCandidateGenerator ??
+          generateMemoryOwnerReviewCandidates;
+        try {
+          await reviewGenerator({
+            store,
+            uploadId: upload.id,
+            sourceFilePath: upload.filePath ?? uploadFilePath,
+            uploadsRootDir: getUserUploadsRootDir(input.userId),
+            drafts: memoryIndexStage.ownerReviewDrafts ?? [],
+            now
+          });
+        } catch (error) {
+          console.warn(
+            `[memory-owner-review] noncritical_failure upload_id=${upload.id} error_name=${safeErrorName(error)}`
+          );
+        }
+      }
     }
     console.info(`[memory-index] completed elapsed_ms=${Date.now() - memoryIndexStartedAt}`);
 
@@ -1114,6 +1281,29 @@ export async function processUpload(input: ProcessUploadInput): Promise<ProcessU
     }
 
     const currentUpload = await assertUploadWritable(store, upload.id);
+    if (isDateCompanionMarkedUpload(currentUpload)) {
+      activeStage = "date-companion-audio-staging";
+      if (!input.userId) {
+        throw new Error("Date companion audio staging requires an authenticated user");
+      }
+      const staging = await (
+        input.dependencies?.dateCompanionAudioStager ??
+        stageDateCompanionParticipantAudio
+      )({
+        store,
+        uploadId: upload.id,
+        userId: input.userId,
+        sourceFilePath: requireUploadFilePath(currentUpload),
+        segments,
+        now
+      });
+      // Close the delete race: if cleanup happened while ffmpeg was running,
+      // cancellation cleanup removes the just-written staging document too.
+      await assertUploadWritable(store, upload.id);
+      console.info(
+        `[date-companion-audio] staged upload_id=${upload.id} status=${staging.status} samples=${staging.status === "ready" ? staging.samples.length : 0}`
+      );
+    }
     if (evaluationRetention) {
       const retainedUpload = await store.read<StoredUpload>("uploads", upload.id);
       if (!retainedUpload || retainedUpload.evaluationRetention !== true) {

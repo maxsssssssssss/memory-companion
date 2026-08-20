@@ -100,6 +100,22 @@ function queueWith(
 }
 
 describe("VoiceAudioQueue", () => {
+  it("starts the first ordered PCM chunk immediately with production defaults", async () => {
+    const context = new FakeAudioContext();
+    const onPlaybackStarted = vi.fn();
+    const queue = new VoiceAudioQueue({
+      contextFactory: () => context,
+      onPlaybackStarted
+    });
+    await queue.prepare();
+
+    await queue.enqueue({ sequence: 0, pcm16le: pcm16(1_000) });
+
+    expect(context.sources).toHaveLength(1);
+    expect(context.sources[0]?.startAt).toBeCloseTo(0.01);
+    expect(onPlaybackStarted).toHaveBeenCalledOnce();
+  });
+
   it("buffers out-of-order chunks, schedules them by sequence, and ignores duplicates", async () => {
     const context = new FakeAudioContext();
     const queue = queueWith(context);
@@ -298,6 +314,52 @@ describe("VoiceAudioQueue", () => {
     await expect(completion).resolves.toEqual({ status: "completed" });
     expect(queue.snapshot().state).toBe("completed");
     expect(context.close).toHaveBeenCalledOnce();
+  });
+
+  it("reports Provider-item playback from the AudioContext clock without counting gaps", async () => {
+    const context = new FakeAudioContext();
+    const queue = queueWith(context);
+    const hundredMs = pcm16(...Array.from({ length: 2_400 }, () => 1_000));
+    await queue.prepare();
+    await queue.enqueue({
+      sequence: 0,
+      pcm16le: hundredMs,
+      playbackItemId: "reply-1"
+    });
+    await queue.enqueue({
+      sequence: 1,
+      pcm16le: hundredMs,
+      playbackItemId: "reply-1"
+    });
+    await queue.enqueue({
+      sequence: 2,
+      pcm16le: hundredMs,
+      playbackItemId: "reply-2"
+    });
+
+    context.currentTime = 0.05;
+    expect(queue.playbackPosition()).toEqual({
+      playbackItemId: "reply-1",
+      audioEndMs: 50
+    });
+    context.currentTime = 0.15;
+    expect(queue.playbackPosition()).toEqual({
+      playbackItemId: "reply-1",
+      audioEndMs: 150
+    });
+    context.currentTime = 0.25;
+    expect(queue.playbackPosition()).toEqual({
+      playbackItemId: "reply-2",
+      audioEndMs: 50
+    });
+
+    // Advancing the wall/fake clock beyond buffered PCM clamps at the actual
+    // item duration instead of pretending an underrun was played audio.
+    context.currentTime = 5;
+    expect(queue.playbackPosition()).toEqual({
+      playbackItemId: "reply-2",
+      audioEndMs: 100
+    });
   });
 
   it("rejects invalid sequence numbers without touching playback", async () => {

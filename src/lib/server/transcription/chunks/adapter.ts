@@ -1,8 +1,10 @@
 import type { AudioChunk, TranscriptChunk } from "@/lib/domain/chunks";
+import type { AudioAccessPolicy } from "../provider";
 
 export type ChunkTranscriptionAdapterInput = {
   chunk: AudioChunk;
   userId?: string;
+  audioAccessPolicy?: AudioAccessPolicy;
   signal: AbortSignal;
 };
 

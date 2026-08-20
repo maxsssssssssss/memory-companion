@@ -160,6 +160,51 @@ describe("POST /api/voice/trace", () => {
     });
   });
 
+  it("keeps the browser observation time while a streaming checkpoint finishes persisting", async () => {
+    let trace = createVoiceSessionTraceModel({
+      sessionId: TRACE_ID,
+      scope: "all",
+      now: () => at(0)
+    });
+    for (const [event, offset] of [
+      ["speech_ended", 100],
+      ["voice_question_received", 150],
+      ["first_sentence_committed", 200],
+      ["first_safe_sentence", 210],
+      ["tts_stream_started", 220]
+    ] as const) {
+      trace = updateVoiceSessionTrace(trace, { event, now: () => at(offset) });
+    }
+    const repository = new JsonVoiceSessionTraceRepository(store);
+    await repository.write(trace);
+
+    vi.setSystemTime(at(300));
+    const pendingPlayback = POST(request({
+      traceId: TRACE_ID,
+      event: "playback_started"
+    }));
+    await vi.advanceTimersByTimeAsync(25);
+
+    trace = updateVoiceSessionTrace(trace, {
+      event: "first_audio_chunk_received",
+      now: () => at(250)
+    });
+    await repository.write(trace);
+    await vi.advanceTimersByTimeAsync(25);
+
+    const response = await pendingPlayback;
+    expect(response.status).toBe(200);
+    await expect(repository.read(TRACE_ID)).resolves.toMatchObject({
+      timestamps: {
+        first_audio_chunk_received: at(250).toISOString(),
+        playback_started: at(300).toISOString()
+      },
+      latencySegments: {
+        browser_buffer_ms: 50
+      }
+    });
+  });
+
   it("rejects streaming playback before a server audio chunk exists", async () => {
     await seedTrace();
     const response = await POST(request({ traceId: TRACE_ID, event: "playback_started" }));

@@ -26,18 +26,28 @@ async function addPipelineState(input: {
   uploadStatus?: AudioUpload["status"];
   updatedAt?: string;
   withAudio?: boolean;
+  errorCode?: string;
+  toyIngestionAttemptVersion?: number;
+  executionMode?: ProcessingJob["executionMode"];
 }) {
   const filePath = join(tempDirs[0], `${input.uploadId}.m4a`);
   if (input.withAudio ?? true) {
     await writeFile(filePath, "audio");
   }
-  const upload: AudioUpload & { filePath?: string } = {
+  const upload: AudioUpload & {
+    filePath?: string;
+    toyIngestionAttemptVersion?: number;
+  } = {
     id: input.uploadId,
     originalName: `${input.uploadId}.m4a`,
     mimeType: "audio/mp4",
     sizeBytes: 5,
     recordingDate: "2026-07-17",
     status: input.uploadStatus ?? "uploaded",
+    ...(input.toyIngestionAttemptVersion
+      ? { toyIngestionAttemptVersion: input.toyIngestionAttemptVersion }
+      : {}),
+    ...(input.errorCode ? { errorCode: input.errorCode, errorMessage: "queue unavailable" } : {}),
     ...((input.withAudio ?? true) ? { filePath } : {})
   };
   const job: ProcessingJob = {
@@ -45,7 +55,9 @@ async function addPipelineState(input: {
     uploadId: input.uploadId,
     status: input.jobStatus,
     progress: input.jobStatus === "ready" ? 100 : 25,
-    updatedAt: input.updatedAt ?? now
+    updatedAt: input.updatedAt ?? now,
+    ...(input.executionMode ? { executionMode: input.executionMode } : {}),
+    ...(input.errorCode ? { errorCode: input.errorCode, errorMessage: "queue unavailable" } : {})
   };
   await input.store.write("uploads", input.uploadId, upload);
   await input.store.write("jobs", job.id, job);
@@ -61,6 +73,20 @@ describe("pipeline startup recovery", () => {
     await rootStore.write("users", "user_1", { id: "user_1" });
 
     await addPipelineState({ store: userStore, uploadId: "waiting", jobStatus: "waiting" });
+    await addPipelineState({
+      store: userStore,
+      uploadId: "queue_unavailable",
+      jobStatus: "failed",
+      uploadStatus: "failed",
+      errorCode: "queue_unavailable"
+    });
+    await addPipelineState({
+      store: userStore,
+      uploadId: "provider_failed",
+      jobStatus: "failed",
+      uploadStatus: "failed",
+      errorCode: "queue_attempts_exhausted"
+    });
     await addPipelineState({
       store: userStore,
       uploadId: "stale_processing",
@@ -106,6 +132,7 @@ describe("pipeline startup recovery", () => {
     );
 
     expect(enqueue.mock.calls.map(([payload]) => payload.uploadId).sort()).toEqual([
+      "queue_unavailable",
       "stale_extracting",
       "stale_processing",
       "stale_transcribing",
@@ -116,12 +143,14 @@ describe("pipeline startup recovery", () => {
     )).toBe(true);
     expect(report).toMatchObject({
       usersScanned: 1,
-      jobsScanned: 6,
-      enqueued: 3,
+      jobsScanned: 8,
+      enqueued: 4,
       existing: 1,
       readyReconciled: 1,
       freshActiveSkipped: 1,
-      missingAudioFailed: 0
+      missingAudioFailed: 0,
+      queueUnavailableRecovered: 1,
+      terminalSkipped: 1
     });
     expect(await userStore.read<ProcessingJob>("jobs-by-upload", "ready_upload")).toMatchObject({
       status: "ready",
@@ -135,6 +164,16 @@ describe("pipeline startup recovery", () => {
       queueJobId: expect.stringMatching(/^pipeline-[a-f0-9]{64}$/),
       queuedAt: now
     });
+    const recoveredQueueUnavailableJob = await userStore.read<ProcessingJob>(
+      "jobs-by-upload",
+      "queue_unavailable"
+    );
+    expect(recoveredQueueUnavailableJob).toMatchObject({ status: "waiting" });
+    expect(recoveredQueueUnavailableJob).not.toHaveProperty("errorCode");
+    expect(await userStore.read("uploads", "queue_unavailable")).toMatchObject({
+      status: "uploaded"
+    });
+    expect(enqueue.mock.calls.some(([payload]) => payload.uploadId === "provider_failed")).toBe(false);
     expect(enqueue.mock.calls.every(([, options]) => options.reviveTerminal)).toBe(true);
   });
 
@@ -170,6 +209,61 @@ describe("pipeline startup recovery", () => {
     expect(await userStore.read("uploads", "missing_audio")).toMatchObject({
       status: "failed",
       errorCode: "audio_missing"
+    });
+  });
+
+  it("never converts canonical inline Toy jobs to queue work after configuration drift", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pipeline-recovery-toy-mode-"));
+    tempDirs.push(root);
+    const rootStore = new JsonStore(join(root, "root"));
+    const userStore = new JsonStore(join(root, "users", "user_1"));
+    await rootStore.write("users", "user_1", { id: "user_1" });
+    await addPipelineState({
+      store: userStore,
+      uploadId: "toy_inline_waiting",
+      jobStatus: "waiting",
+      toyIngestionAttemptVersion: 1,
+      executionMode: "inline"
+    });
+    await addPipelineState({
+      store: userStore,
+      uploadId: "toy_inline_stale",
+      jobStatus: "transcribing",
+      updatedAt: stale,
+      toyIngestionAttemptVersion: 1,
+      executionMode: "inline"
+    });
+    await addPipelineState({
+      store: userStore,
+      uploadId: "toy_queue_waiting",
+      jobStatus: "waiting",
+      toyIngestionAttemptVersion: 1,
+      executionMode: "queue"
+    });
+    const enqueue = vi.fn<PipelineRecoveryEnqueue>(async (payload) => ({
+      jobId: `queue_${payload.uploadId}`,
+      enqueued: true
+    }));
+
+    const report = await recoverPipelineJobs(
+      { enqueue, staleAfterMs: 60_000 },
+      { rootStore, getStore: () => userStore, now: () => now }
+    );
+
+    expect(enqueue).toHaveBeenCalledOnce();
+    expect(enqueue.mock.calls[0]?.[0].uploadId).toBe("toy_queue_waiting");
+    expect(await userStore.read<ProcessingJob>("jobs-by-upload", "toy_inline_waiting")).toMatchObject({
+      status: "waiting",
+      executionMode: "inline"
+    });
+    expect(await userStore.read<ProcessingJob>("jobs-by-upload", "toy_inline_stale")).toMatchObject({
+      status: "transcribing",
+      executionMode: "inline"
+    });
+    expect(report).toMatchObject({
+      jobsScanned: 3,
+      enqueued: 1,
+      terminalSkipped: 2
     });
   });
 });

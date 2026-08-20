@@ -2,6 +2,7 @@ import { stat } from "fs/promises";
 import { NextResponse } from "next/server";
 import type { AudioUpload } from "@/lib/domain/types";
 import { isUnauthenticatedError, requireAuthContext, unauthorizedResponse } from "@/lib/server/auth/request-context";
+import { isDailyReflectionUploadRecord } from "@/lib/server/daily-reflection/upload-record";
 
 type StoredUpload = AudioUpload & {
   createdAt?: string;
@@ -63,7 +64,10 @@ export async function GET(request: Request) {
   const uploads = await authContext.store.list<StoredUpload>("uploads");
   const uploadCandidates = await Promise.all(
     uploads
-      .filter(({ value }) => value.recordingDate === recordingDate)
+      .filter(({ value }) =>
+        value.recordingDate === recordingDate
+        && !isDailyReflectionUploadRecord(value)
+      )
       .map(async (upload) => ({
         ...upload,
         sortTime: await uploadSortTime(upload.value)

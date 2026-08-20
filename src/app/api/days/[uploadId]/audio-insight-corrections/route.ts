@@ -3,6 +3,7 @@ import { NextResponse } from "next/server";
 import { sanitizeAudioInsightCorrections, type StoredAudioInsightCorrections } from "@/lib/domain/audio-insight-corrections";
 import type { AudioUpload } from "@/lib/domain/types";
 import { isUnauthenticatedError, requireAuthContext, unauthorizedResponse, type AuthContext } from "@/lib/server/auth/request-context";
+import { isDailyReflectionUploadRecord } from "@/lib/server/daily-reflection";
 
 const STORE_KEY_PATTERN = /^[A-Za-z0-9_-]+$/;
 
@@ -15,7 +16,7 @@ async function requireUploadScopedStore(request: Request, uploadId: string): Pro
     const authContext = await requireAuthContext(request);
     const upload = await authContext.store.read<AudioUpload>("uploads", uploadId);
 
-    if (!upload) {
+    if (!upload || isDailyReflectionUploadRecord(upload)) {
       return { response: NextResponse.json({ error: "upload_not_found" }, { status: 404 }) };
     }
 

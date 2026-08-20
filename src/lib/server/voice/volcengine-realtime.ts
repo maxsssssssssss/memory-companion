@@ -12,12 +12,18 @@ import {
 import { logVoiceDebug } from "./debug";
 import type { VolcengineRealtimeConfig } from "./provider";
 import type {
+  VoiceExternalRagItem,
   VoiceProvider,
   VoiceSessionConfig,
   VoiceSessionInfo,
   VoiceUnsubscribe
 } from "./types";
 import { VoiceProviderError } from "./types";
+
+const MAX_EXTERNAL_RAG_CHARACTERS = 4_000;
+const MIN_VAD_END_SMOOTH_WINDOW_MS = 500;
+const MAX_VAD_END_SMOOTH_WINDOW_MS = 50_000;
+const MAX_DIALOG_CONTEXT_ITEMS = 40;
 
 const OPEN = 1;
 const CLOSING = 2;
@@ -115,6 +121,30 @@ export function buildVolcengineStartSessionPayload(
     throw new VoiceProviderError("invalid_configuration", "Volcengine TTS speaker must not exceed 256 characters");
   }
   const audioConfig = boundedAudioConfiguration(config.audioOutput);
+  const vad = config.vad;
+  if (
+    vad?.endSmoothWindowMs !== undefined &&
+    (
+      !Number.isInteger(vad.endSmoothWindowMs) ||
+      vad.endSmoothWindowMs < MIN_VAD_END_SMOOTH_WINDOW_MS ||
+      vad.endSmoothWindowMs > MAX_VAD_END_SMOOTH_WINDOW_MS
+    )
+  ) {
+    throw new VoiceProviderError(
+      "invalid_configuration",
+      "Voice VAD end smoothing must be between 500 and 50000ms"
+    );
+  }
+  const dialogContext = config.dialog?.context;
+  if (dialogContext && (
+    dialogContext.length > MAX_DIALOG_CONTEXT_ITEMS ||
+    dialogContext.length % 2 !== 0
+  )) {
+    throw new VoiceProviderError(
+      "invalid_configuration",
+      "Voice dialog context must contain at most 20 complete QA pairs"
+    );
+  }
   const tts = speaker || audioConfig
     ? {
         ...(speaker ? { speaker } : {}),
@@ -123,9 +153,40 @@ export function buildVolcengineStartSessionPayload(
     : undefined;
 
   return {
+    ...(vad ? {
+      asr: {
+        extra: {
+          ...(vad.endSmoothWindowMs !== undefined
+            ? { end_smooth_window_ms: vad.endSmoothWindowMs }
+            : {}),
+          ...(vad.enableCustomVad !== undefined
+            ? { enable_custom_vad: vad.enableCustomVad }
+            : {})
+        }
+      }
+    } : {}),
     dialog: {
+      ...(config.dialog?.botName ? { bot_name: config.dialog.botName } : {}),
+      ...(config.dialog?.systemRole ? { system_role: config.dialog.systemRole } : {}),
+      ...(config.dialog?.speakingStyle
+        ? { speaking_style: config.dialog.speakingStyle }
+        : {}),
+      ...(config.dialog?.dialogId ? { dialog_id: config.dialog.dialogId } : {}),
+      ...(dialogContext ? {
+        dialog_context: dialogContext.map((item) => ({
+          role: item.role,
+          text: item.text,
+          ...(item.timestamp !== undefined ? { timestamp: item.timestamp } : {})
+        }))
+      } : {}),
       extra: {
         ...(inputMode === "server_vad" ? {} : { input_mod: inputMode }),
+        ...(config.dialog?.enableConversationTruncate !== undefined
+          ? {
+              enable_conversation_truncate:
+                config.dialog.enableConversationTruncate
+            }
+          : {}),
         model
       }
     },
@@ -219,10 +280,20 @@ function logProviderEventShape(event: ParsedVoiceServerEvent) {
     event.eventId === VoiceEvent.TTSResponse ||
     event.eventId === VoiceEvent.TTSEnded
   ) {
+    const payload = payloadRecord(event.payload);
+    const rawTtsType = payload?.tts_type;
+    const ttsType = rawTtsType === "chat_tts_text" || rawTtsType === "default"
+      ? rawTtsType
+      : rawTtsType === undefined
+        ? "absent"
+        : "other";
     logVoiceDebug("tts_event", {
       event_id: event.eventId,
+      provider_response_category: ttsType,
       audio_present: Boolean(event.audio),
-      audio_bytes: event.audio?.byteLength ?? 0
+      audio_bytes: event.audio?.byteLength ?? 0,
+      question_id_present: typeof payload?.question_id === "string",
+      reply_id_present: typeof payload?.reply_id === "string"
     });
   }
 }
@@ -422,6 +493,95 @@ export class VolcengineRealtimeVoiceProvider implements VoiceProvider {
       start: false,
       end: true
     });
+  }
+
+  async interruptResponse() {
+    const sessionId = this.requireSession();
+    const frame = encodeJsonEvent(
+      VoiceEvent.ClientInterrupt,
+      {},
+      { sessionId }
+    );
+    const debugFields = {
+      message_type: "ClientInterrupt",
+      encoded_frame_size: frame.byteLength
+    } as const;
+    logVoiceDebug("client_interrupt_frame_encoded", debugFields);
+    try {
+      await this.sendFrame(frame);
+      logVoiceDebug("client_interrupt_send_settled", {
+        ...debugFields,
+        send_success: true
+      });
+    } catch (error) {
+      logVoiceDebug("client_interrupt_send_settled", {
+        ...debugFields,
+        send_success: false
+      });
+      throw error;
+    }
+  }
+
+  async cancelSessionTurn() {
+    await this.interruptResponse();
+  }
+
+  async sendExternalRag(items: readonly VoiceExternalRagItem[]) {
+    const sessionId = this.requireSession();
+    const normalized = items.flatMap((item) => {
+      const title = item.title.trim();
+      const content = item.content.trim();
+      return title && content ? [{ title, content }] : [];
+    });
+    if (normalized.length === 0) {
+      throw new VoiceProviderError(
+        "invalid_request",
+        "Voice external RAG must contain at least one non-empty item"
+      );
+    }
+    const externalRag = JSON.stringify(normalized);
+    if (externalRag.length > MAX_EXTERNAL_RAG_CHARACTERS) {
+      throw new VoiceProviderError(
+        "invalid_request",
+        `Voice external RAG must not exceed ${MAX_EXTERNAL_RAG_CHARACTERS} characters`
+      );
+    }
+    await this.sendFrame(encodeJsonEvent(
+      VoiceEvent.ChatRAGText,
+      { external_rag: externalRag },
+      { sessionId }
+    ));
+    logVoiceDebug("chat_rag_text_send_settled", {
+      item_count: normalized.length,
+      external_rag_characters: externalRag.length,
+      send_success: true
+    });
+  }
+
+  async truncateConversation(itemId: string, audioEndMs: number) {
+    const sessionId = this.requireSession();
+    const normalizedItemId = itemId.trim();
+    if (!normalizedItemId) {
+      throw new VoiceProviderError(
+        "invalid_request",
+        "Voice conversation item id must not be empty"
+      );
+    }
+    if (!Number.isInteger(audioEndMs) || audioEndMs < 0) {
+      throw new VoiceProviderError(
+        "invalid_request",
+        "Voice conversation playback duration must be a non-negative integer"
+      );
+    }
+    await this.sendAndWait(
+      VoiceEvent.ConversationTruncated,
+      encodeJsonEvent(
+        VoiceEvent.ConversationTruncate,
+        { item_id: normalizedItemId, audio_end_ms: audioEndMs },
+        { sessionId }
+      ),
+      sessionId
+    );
   }
 
   async finishSession() {

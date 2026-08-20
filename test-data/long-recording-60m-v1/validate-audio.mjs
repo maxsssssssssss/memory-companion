@@ -340,7 +340,8 @@ async function main() {
   const transcriptPath = resolveDatasetFile(manifest.transcriptFile, "transcriptFile");
   const transcriptExists = await fs.access(transcriptPath).then(() => true).catch(() => false);
   if (transcriptExists) {
-    assert(await fs.readFile(transcriptPath, "utf8") === transcript, "dialogue.txt differs from dialogue.json");
+    const checkedOutTranscript = (await fs.readFile(transcriptPath, "utf8")).replaceAll("\r\n", "\n");
+    assert(checkedOutTranscript === transcript, "dialogue.txt differs from dialogue.json");
   }
   const audioPath = resolveDatasetFile(manifest.audioFile, "audioFile");
   const metadataPath = resolveDatasetFile(manifest.generationMetadataFile, "generationMetadataFile");

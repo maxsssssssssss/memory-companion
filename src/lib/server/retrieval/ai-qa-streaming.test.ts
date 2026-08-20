@@ -146,8 +146,12 @@ describe("answerQuestionStream", () => {
       { choices: [{ delta: {}, finish_reason: "stop" }] }
     ]));
     const traceObserver = vi.fn();
+    const milestoneObserver = vi.fn();
 
-    const events = await collect(input({ onStreamTrace: traceObserver }));
+    const events = await collect(input({
+      onStreamTrace: traceObserver,
+      onExecutionMilestone: milestoneObserver
+    }));
     const types = events.map((event) => event.type);
     const tokens = events.filter((event) => event.type === "token");
     const sentence = events.find((event) => event.type === "sentence_completed");
@@ -194,6 +198,39 @@ describe("answerQuestionStream", () => {
       }
     });
     expect(traceObserver).toHaveBeenCalledOnce();
+    expect(milestoneObserver.mock.calls.map(([milestone]) => milestone)).toEqual([
+      "retrieval_complete",
+      "llm_started",
+      "llm_first_token"
+    ]);
+  });
+
+  it("passes AbortSignal to the Provider stream and never starts sync fallback after cancel", async () => {
+    const controller = new AbortController();
+    chatCreateMock.mockImplementation((_body, requestOptions) => ({
+      async *[Symbol.asyncIterator]() {
+        expect(requestOptions?.signal).toBe(controller.signal);
+        yield {
+          choices: [{ delta: { content: '{"mode":"memory_answer","answer":"今天' } }]
+        };
+        await new Promise<never>((_resolve, reject) => {
+          const rejectAbort = () => reject(
+            controller.signal.reason instanceof Error
+              ? controller.signal.reason
+              : new DOMException("aborted", "AbortError")
+          );
+          if (controller.signal.aborted) rejectAbort();
+          else controller.signal.addEventListener("abort", rejectAbort, { once: true });
+        });
+      }
+    }));
+
+    const collecting = collect(input({ signal: controller.signal }));
+    await vi.waitFor(() => expect(chatCreateMock).toHaveBeenCalledOnce());
+    controller.abort(new DOMException("cancelled", "AbortError"));
+
+    await expect(collecting).rejects.toMatchObject({ name: "AbortError" });
+    expect(chatCreateMock).toHaveBeenCalledOnce();
   });
 
   it("emits a grounded first sentence before later provider deltas and final JSON", async () => {
@@ -559,7 +596,7 @@ describe("answerQuestionStream", () => {
     });
   });
 
-  it("labels deterministic citation fallback separately from a validated provider answer", async () => {
+  it("labels a short citation-validation fallback separately from a validated provider answer", async () => {
     const unsupportedCitationAnswer = JSON.stringify({
       mode: "memory_answer",
       answer: "今天确认了周日下午的安排。",
@@ -575,6 +612,11 @@ describe("answerQuestionStream", () => {
     expect(events.at(-1)).toMatchObject({
       type: "final",
       source: "provider_stream_validation_fallback",
+      answer: {
+        answer: "没有找到足够证据确认这个信息。",
+        citedSegmentIds: [],
+        citations: []
+      },
       trace: {
         status: "completed_with_fallback",
         fallbackReason: "missing_citations",
@@ -606,6 +648,70 @@ describe("answerQuestionStream", () => {
         timestamps: { first_sentence_completed: null },
         latencies: { firstSentenceMs: null }
       }
+    });
+  });
+
+  it("keeps Voice uncertainty sentences quarantined until the full answer is validated", async () => {
+    const uncertaintyAnswer = JSON.stringify({
+      mode: "memory_answer",
+      answer: "目前还不能确认周日下午的安排。[E1]",
+      citationIds: ["E1"]
+    });
+    chatCreateMock.mockResolvedValue(asyncStream([
+      { choices: [{ delta: { content: uncertaintyAnswer } }] },
+      { choices: [{ delta: {}, finish_reason: "stop" }] }
+    ]));
+
+    const events = await collect(input({
+      withholdUncertainProvisionalSentences: true
+    }));
+
+    expect(events.filter((event) => event.type === "sentence_completed")).toEqual([]);
+    expect(events.at(-1)).toMatchObject({
+      type: "final",
+      source: "provider_stream",
+      answer: { citedSegmentIds: ["seg_1"] },
+      trace: {
+        sentenceCount: 0,
+        sentenceCommit: {
+          sentenceUnits: 1,
+          committedUnits: 1
+        }
+      }
+    });
+  });
+
+  it("bounds Voice provisional speech while preserving the full canonical answer", async () => {
+    const fourSentenceAnswer = JSON.stringify({
+      mode: "memory_answer",
+      answer:
+        "第一句确认了周日下午安排。[E1]" +
+        "第二句确认了周日下午安排。[E1]" +
+        "第三句确认了周日下午安排。[E1]" +
+        "第四句确认了周日下午安排。[E1]",
+      citationIds: ["E1"]
+    });
+    chatCreateMock.mockResolvedValue(asyncStream([
+      { choices: [{ delta: { content: fourSentenceAnswer } }] },
+      { choices: [{ delta: {}, finish_reason: "stop" }] }
+    ]));
+
+    const events = await collect(input({
+      withholdUncertainProvisionalSentences: true
+    }));
+    const sentenceEvents = events.filter((event) => event.type === "sentence_completed");
+
+    expect(sentenceEvents).toHaveLength(3);
+    expect(sentenceEvents.map((event) => event.sentence)).not.toContain(
+      "第四句确认了周日下午安排。"
+    );
+    expect(events.at(-1)).toMatchObject({
+      type: "final",
+      answer: {
+        answer: expect.stringContaining("第四句确认了周日下午安排。"),
+        citedSegmentIds: ["seg_1"]
+      },
+      trace: { sentenceCount: 3 }
     });
   });
 

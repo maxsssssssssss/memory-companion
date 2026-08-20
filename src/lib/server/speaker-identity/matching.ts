@@ -37,7 +37,7 @@ export function buildSpeakerIdentityCandidates(input: {
       }
 
       return [...bySpeaker.entries()]
-        .sort(([left], [right]) => left.localeCompare(right))
+        .sort(([left], [right]) => left.localeCompare(right, "en"))
         .map(([localSpeaker, segments]): SpeakerIdentityCandidate => {
           const key = speakerIdentityCandidateKey(chunk.id, localSpeaker);
           return {

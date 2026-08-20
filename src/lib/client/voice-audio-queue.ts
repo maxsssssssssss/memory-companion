@@ -2,8 +2,12 @@ export const VOICE_STREAM_SAMPLE_RATE = 24_000;
 export const VOICE_STREAM_CHANNELS = 1;
 export const VOICE_STREAM_BYTES_PER_SAMPLE = 2;
 
-const DEFAULT_INITIAL_BUFFER_MS = 160;
-const DEFAULT_SCHEDULE_LEAD_MS = 20;
+// Voice QA already receives ordered PCM over a bounded, backpressured stream.
+// Start the first valid PCM chunk immediately: Provider chunks can be smaller
+// than an 80 ms prime, which otherwise waits for the next network chunk and
+// adds hundreds of milliseconds before audible playback.
+const DEFAULT_INITIAL_BUFFER_MS = 0;
+const DEFAULT_SCHEDULE_LEAD_MS = 10;
 const DEFAULT_MAX_BUFFERED_MS = 5_000;
 
 export type VoiceAudioQueueState =
@@ -66,6 +70,12 @@ export type VoiceAudioContextLike = {
 export type VoiceAudioChunk = {
   sequence: number;
   pcm16le: Uint8Array | ArrayBuffer;
+  /**
+   * Optional Provider conversation item associated with this PCM chunk.
+   * It is transport metadata only and is used to truncate the exact item on
+   * barge-in; it is never rendered or treated as answer evidence.
+   */
+  playbackItemId?: string;
 };
 
 export type VoiceAudioEnqueueResult = "accepted" | "duplicate" | "empty";
@@ -109,6 +119,20 @@ type ActiveSource = {
   source: VoiceAudioBufferSourceLike;
   rawByteLength: number;
   generation: number;
+  playbackItemId?: string;
+  itemOffsetSeconds: number;
+  startAt: number;
+  durationSeconds: number;
+};
+
+type PendingAudioChunk = {
+  bytes: Uint8Array;
+  playbackItemId?: string;
+};
+
+export type VoiceAudioPlaybackPosition = {
+  playbackItemId: string;
+  audioEndMs: number;
 };
 
 function boundedMilliseconds(
@@ -170,7 +194,7 @@ export class VoiceAudioQueue {
   private readonly onStateChange?: VoiceAudioQueueOptions["onStateChange"];
   private readonly onPlaybackStarted?: VoiceAudioQueueOptions["onPlaybackStarted"];
   private readonly onError?: VoiceAudioQueueOptions["onError"];
-  private readonly pending = new Map<number, Uint8Array>();
+  private readonly pending = new Map<number, PendingAudioChunk>();
   private readonly reservedSequences = new Set<number>();
   private readonly capacityWaiters: CapacityWaiter[] = [];
   private readonly activeSources = new Set<ActiveSource>();
@@ -191,6 +215,8 @@ export class VoiceAudioQueue {
   private finalSequence?: number;
   private terminal?: VoiceAudioQueueCompletion;
   private generation = 0;
+  private readonly scheduledItemSeconds = new Map<string, number>();
+  private lastPlaybackPosition?: VoiceAudioPlaybackPosition;
 
   constructor(options: VoiceAudioQueueOptions = {}) {
     this.contextFactory = options.contextFactory ?? defaultAudioContextFactory;
@@ -281,8 +307,18 @@ export class VoiceAudioQueue {
     }
 
     const bytes = copyAudioBytes(chunk.pcm16le);
+    const playbackItemId = chunk.playbackItemId?.trim();
+    if (chunk.playbackItemId !== undefined && !playbackItemId) {
+      throw new VoiceAudioQueueError(
+        "invalid_audio_chunk",
+        "Voice audio playback item ID must not be empty"
+      );
+    }
     if (bytes.byteLength === 0) {
-      this.pending.set(chunk.sequence, bytes);
+      this.pending.set(chunk.sequence, {
+        bytes,
+        ...(playbackItemId ? { playbackItemId } : {})
+      });
       this.drainPending();
       return "empty";
     }
@@ -299,7 +335,10 @@ export class VoiceAudioQueue {
       if (chunk.sequence < this.nextSequenceValue || this.pending.has(chunk.sequence)) {
         return "duplicate";
       }
-      this.pending.set(chunk.sequence, bytes);
+      this.pending.set(chunk.sequence, {
+        bytes,
+        ...(playbackItemId ? { playbackItemId } : {})
+      });
       this.outstandingBytes += bytes.byteLength;
       this.drainPending();
       return "accepted";
@@ -360,6 +399,8 @@ export class VoiceAudioQueue {
     this.reservedBytes = 0;
     this.outstandingBytes = 0;
     this.carryByte = undefined;
+    this.scheduledItemSeconds.clear();
+    this.lastPlaybackPosition = undefined;
     const sources = [...this.activeSources];
     this.activeSources.clear();
     for (const { source } of sources) {
@@ -391,6 +432,41 @@ export class VoiceAudioQueue {
       bufferedMs: Math.round(bufferedBytes / this.bytesPerSecond * 1_000),
       transportPaused: this.transportPaused,
       playbackStarted: this.playbackStarted
+    };
+  }
+
+  /**
+   * Returns the exact Provider item and PCM duration already reached by the
+   * AudioContext clock. Buffering gaps, page suspension, and future scheduled
+   * audio do not advance this value.
+   */
+  playbackPosition(): VoiceAudioPlaybackPosition | undefined {
+    const context = this.context;
+    if (!context) return this.lastPlaybackPosition
+      ? { ...this.lastPlaybackPosition }
+      : undefined;
+    const currentTime = context.currentTime;
+    const candidates = [...this.activeSources]
+      .filter((active) =>
+        Boolean(active.playbackItemId) && active.startAt <= currentTime
+      )
+      .sort((left, right) => right.startAt - left.startAt);
+    const active = candidates[0];
+    if (!active?.playbackItemId) {
+      return this.lastPlaybackPosition
+        ? { ...this.lastPlaybackPosition }
+        : undefined;
+    }
+    const playedSeconds = Math.min(
+      active.durationSeconds,
+      Math.max(0, currentTime - active.startAt)
+    );
+    return {
+      playbackItemId: active.playbackItemId,
+      audioEndMs: Math.max(
+        0,
+        Math.round((active.itemOffsetSeconds + playedSeconds) * 1_000)
+      )
     };
   }
 
@@ -488,11 +564,14 @@ export class VoiceAudioQueue {
 
     let scheduled = false;
     while (this.pending.has(this.nextSequenceValue)) {
-      const bytes = this.pending.get(this.nextSequenceValue)!;
+      const chunk = this.pending.get(this.nextSequenceValue)!;
       this.pending.delete(this.nextSequenceValue);
       this.nextSequenceValue += 1;
-      if (bytes.byteLength > 0) {
-        scheduled = this.scheduleBytes(bytes) || scheduled;
+      if (chunk.bytes.byteLength > 0) {
+        scheduled = this.scheduleBytes(
+          chunk.bytes,
+          chunk.playbackItemId
+        ) || scheduled;
       }
       this.pumpCapacityWaiters();
     }
@@ -509,13 +588,13 @@ export class VoiceAudioQueue {
     let byteLength = this.carryByte === undefined ? 0 : 1;
     let sequence = this.nextSequenceValue;
     while (this.pending.has(sequence)) {
-      byteLength += this.pending.get(sequence)!.byteLength;
+      byteLength += this.pending.get(sequence)!.bytes.byteLength;
       sequence += 1;
     }
     return byteLength / this.bytesPerSecond * 1_000;
   }
 
-  private scheduleBytes(bytes: Uint8Array) {
+  private scheduleBytes(bytes: Uint8Array, playbackItemId?: string) {
     const carryLength = this.carryByte === undefined ? 0 : 1;
     const combined = new Uint8Array(carryLength + bytes.byteLength);
     if (this.carryByte !== undefined) combined[0] = this.carryByte;
@@ -545,17 +624,30 @@ export class VoiceAudioQueue {
       source.buffer = buffer;
       source.connect(context.destination);
       const generation = this.generation;
-      const active: ActiveSource = {
-        source,
-        rawByteLength: playableByteLength,
-        generation
-      };
-      this.activeSources.add(active);
-      source.onended = () => this.handleSourceEnded(active);
       const startAt = Math.max(
         context.currentTime + this.scheduleLeadSeconds,
         this.scheduledUntil
       );
+      const itemOffsetSeconds = playbackItemId
+        ? this.scheduledItemSeconds.get(playbackItemId) ?? 0
+        : 0;
+      const active: ActiveSource = {
+        source,
+        rawByteLength: playableByteLength,
+        generation,
+        ...(playbackItemId ? { playbackItemId } : {}),
+        itemOffsetSeconds,
+        startAt,
+        durationSeconds: buffer.duration
+      };
+      if (playbackItemId) {
+        this.scheduledItemSeconds.set(
+          playbackItemId,
+          itemOffsetSeconds + buffer.duration
+        );
+      }
+      this.activeSources.add(active);
+      source.onended = () => this.handleSourceEnded(active);
       source.start(startAt);
       this.scheduledUntil = startAt + buffer.duration;
       if (!this.playbackStarted) {
@@ -588,6 +680,17 @@ export class VoiceAudioQueue {
       return;
     }
     this.outstandingBytes = Math.max(0, this.outstandingBytes - active.rawByteLength);
+    if (active.playbackItemId) {
+      this.lastPlaybackPosition = {
+        playbackItemId: active.playbackItemId,
+        audioEndMs: Math.max(
+          0,
+          Math.round(
+            (active.itemOffsetSeconds + active.durationSeconds) * 1_000
+          )
+        )
+      };
+    }
     this.pumpCapacityWaiters();
     if (this.activeSources.size > 0) return;
     if (this.inputEnded) {

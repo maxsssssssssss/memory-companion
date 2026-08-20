@@ -148,6 +148,21 @@ describe("Voice QA normalization and response projection", () => {
     expect(projected).toBe("今天 第一件事 第二件事 已完成");
     expect(original).toEqual(originalSnapshot);
   });
+
+  it("projects the canonical uncertainty fallback as one short safe spoken sentence", () => {
+    const fallback = questionAnswer({
+      answer: "没有找到足够证据确认这个信息。",
+      citedSegmentIds: [],
+      citations: []
+    });
+
+    const spoken = projectVoiceQaAnswer(fallback, "VOICE");
+
+    expect(spoken).toBe(fallback.answer);
+    expect(spoken.length).toBeLessThan(32);
+    expect(spoken).not.toMatch(/\[E\d+\]|Memory|原始上下文/iu);
+    expect(fallback.citations).toEqual([]);
+  });
 });
 
 describe("createMemoryVoiceQaAnswerer", () => {
@@ -170,6 +185,12 @@ describe("createMemoryVoiceQaAnswerer", () => {
     });
     const expected = questionAnswer();
     const currentQa = vi.fn<typeof answerQuestionWithAI>().mockResolvedValue(expected);
+    const onQaMilestone = vi.fn();
+    const shadowReviewContext = {
+      voiceSessionId: "voice_session_1",
+      traceId: "11111111-1111-4111-8111-111111111111"
+    };
+    const abortController = new AbortController();
     const answerer = createMemoryVoiceQaAnswerer({
       userId: "user_1",
       store,
@@ -183,17 +204,30 @@ describe("createMemoryVoiceQaAnswerer", () => {
       transcript: "  今天\n有什么重要事情？ ",
       userId: "user_1",
       scope: "current",
-      mode: "VOICE"
+      mode: "VOICE",
+      signal: abortController.signal,
+      onQaMilestone,
+      shadowReviewContext
     })).resolves.toEqual(expected);
 
     expect(currentQa).toHaveBeenCalledOnce();
     expect(answerer.answerMode).toBe("agent");
     const qaInput = currentQa.mock.calls[0][0];
     expect(qaInput.answerMode).toBe("agent");
+    expect(qaInput.userId).toBe("user_1");
     expect(qaInput.question).toBe("今天 有什么重要事情？");
     expect(qaInput.settingsStore).toBe(store);
     expect(qaInput.qaPromptInstruction).toContain("一到三句");
+    expect(qaInput.qaPromptInstruction).toContain("6 到 12 个汉字");
+    expect(qaInput.qaPromptInstruction).toContain("每一个句子");
+    expect(qaInput.qaPromptInstruction).toContain("要求一句话时只输出一句");
     expect(qaInput.qaPromptInstruction).toContain("[E#]");
+    expect(qaInput.onExecutionMilestone).toBe(onQaMilestone);
+    expect(qaInput.signal).toBe(abortController.signal);
+    expect(qaInput.withholdUncertainProvisionalSentences).toBe(true);
+    expect(qaInput.shadowReviewContext).toBe(shadowReviewContext);
+    expect(qaInput.llmProviderId).toBe("qwen-vllm");
+    expect(qaInput.allowQwenInProduction).toBe(true);
     expect(qaInput.audioInsights?.[0]).toMatchObject({
       speaker: { id: "speaker_0", displayName: "小林" },
       summary: "小林 记住了安排",
@@ -227,6 +261,7 @@ describe("createMemoryVoiceQaAnswerer", () => {
     })).resolves.toEqual(expected);
 
     expect(currentQa).toHaveBeenCalledWith(expect.objectContaining({
+      userId: "user_1",
       uploadId: "upload_1",
       scope: "current",
       segments: context.segments,
@@ -376,24 +411,35 @@ describe("createMemoryVoiceQaAnswerer", () => {
       scope: "all",
       dependencies: { answerMemoryScopeQuestion: memoryQa }
     });
+    const weekShadowReviewContext = {
+      voiceSessionId: "week_voice_session",
+      traceId: "11111111-1111-4111-8111-111111111111"
+    };
+    const allShadowReviewContext = {
+      voiceSessionId: "all_voice_session",
+      traceId: "22222222-2222-4222-8222-222222222222"
+    };
 
     await expect(week.answer({
       sessionId: "session_1",
       transcript: "本周有什么安排？",
       userId: "user_1",
-      scope: "week"
+      scope: "week",
+      shadowReviewContext: weekShadowReviewContext
     })).resolves.toEqual(weekAnswer);
     await expect(all.answer({
       sessionId: "session_2",
       transcript: "我一直在关注什么？",
       userId: "user_1",
-      scope: "all"
+      scope: "all",
+      shadowReviewContext: allShadowReviewContext
     })).resolves.toEqual(allAnswer);
 
     expect(memoryQa.mock.calls[0][0]).toMatchObject({
       qaScope: "week",
       userId: "user_1",
-      store
+      store,
+      shadowReviewContext: weekShadowReviewContext
     });
     expect(memoryQa.mock.calls[0][0].scopeId).toMatch(/^week_/u);
     expect(memoryQa.mock.calls[0][0].includeUpload).toEqual(expect.any(Function));
@@ -401,8 +447,55 @@ describe("createMemoryVoiceQaAnswerer", () => {
       scopeId: "all_memory",
       qaScope: "all",
       userId: "user_1",
-      store
+      store,
+      shadowReviewContext: allShadowReviewContext
     });
+  });
+
+  it("preserves non-enumerable Memory QA milestones at the canonical provider boundary", async () => {
+    const store = await temporaryStore();
+    const expected = questionAnswer({ id: "all_answer", uploadId: "all_memory" });
+    const canonicalQa = vi.fn<typeof answerQuestionWithAI>().mockResolvedValue(expected);
+    const memoryQa = vi.fn<typeof answerMemoryScopeQuestion>(async (input) => {
+      const qaInput = {
+        uploadId: input.scopeId,
+        question: input.question,
+        scope: input.qaScope,
+        segments: [],
+        audioInsights: [],
+        semanticSegments: [],
+        briefItems: [],
+        relationshipSignals: [],
+        settingsStore: input.store
+      } satisfies Parameters<typeof answerQuestionWithAI>[0];
+      Object.defineProperty(qaInput, "onExecutionMilestone", {
+        value: input.onExecutionMilestone,
+        enumerable: false
+      });
+      return await input.answerQuestion!(qaInput);
+    });
+    const onQaMilestone = vi.fn();
+    const answerer = createMemoryVoiceQaAnswerer({
+      userId: "user_1",
+      store,
+      scope: "all",
+      dependencies: {
+        answerMemoryScopeQuestion: memoryQa,
+        answerQuestionWithAI: canonicalQa
+      }
+    });
+
+    await answerer.answer({
+      sessionId: "session_1",
+      transcript: "Alice 鐨勬渶鏂扮姸鎬佹槸浠€涔堬紵",
+      userId: "user_1",
+      scope: "all",
+      mode: "VOICE",
+      onQaMilestone
+    });
+
+    expect(canonicalQa).toHaveBeenCalledOnce();
+    expect(canonicalQa.mock.calls[0][0].onExecutionMilestone).toBe(onQaMilestone);
   });
 
   it("forwards retrieved Memory IDs through the internal session observer", async () => {

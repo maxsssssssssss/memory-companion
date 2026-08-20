@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import type { AudioUpload } from "@/lib/domain/types";
 import { isUnauthenticatedError, requireAuthContext, unauthorizedResponse } from "@/lib/server/auth/request-context";
+import { isDailyReflectionUpload } from "@/lib/server/daily-reflection/upload-record";
 
 const DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
 
@@ -34,6 +35,7 @@ export async function GET(request: Request) {
   const readyUploadsWithEvidence = await Promise.all(
     uploads
       .map(({ value }) => value)
+      .filter((upload) => !isDailyReflectionUpload(upload))
       .filter((upload) => upload.status === "ready")
       .map(async (upload) => {
         const [segments, semanticSegments, briefItems] = await Promise.all([

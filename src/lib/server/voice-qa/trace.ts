@@ -9,17 +9,31 @@ export const VOICE_SESSION_TRACE_EVENTS = [
   "speech_ended",
   "asr_first_partial",
   "asr_final_received",
+  "voice_question_received",
+  "retrieval_complete",
+  "llm_first_token",
+  "qa_provider_stream_complete",
   "qa_started",
   "qa_completed",
   "tts_started",
   "first_sentence_committed",
+  "sentence_commit",
   "first_safe_sentence",
   "tts_stream_started",
+  "tts_request_start",
   "first_audio_chunk_received",
+  "tts_first_audio_chunk",
   "playback_started",
+  "browser_playback_start",
+  "tts_stream_complete",
   "stream_completed",
+  "tts_partial_audio_failure",
+  "fallback_audio_complete",
+  "voice_response_complete",
+  "transport_complete_written",
   "audio_play_started",
-  "session_completed"
+  "session_completed",
+  "complete"
 ] as const;
 
 export type VoiceSessionTraceEvent = (typeof VOICE_SESSION_TRACE_EVENTS)[number];
@@ -69,17 +83,31 @@ const VoiceSessionTraceTimestampsSchema = z.object({
   speech_ended: z.string().datetime().optional(),
   asr_first_partial: z.string().datetime().optional(),
   asr_final_received: z.string().datetime().optional(),
+  voice_question_received: z.string().datetime().optional(),
+  retrieval_complete: z.string().datetime().optional(),
+  llm_first_token: z.string().datetime().optional(),
+  qa_provider_stream_complete: z.string().datetime().optional(),
   qa_started: z.string().datetime().optional(),
   qa_completed: z.string().datetime().optional(),
   tts_started: z.string().datetime().optional(),
   first_sentence_committed: z.string().datetime().optional(),
+  sentence_commit: z.string().datetime().optional(),
   first_safe_sentence: z.string().datetime().optional(),
   tts_stream_started: z.string().datetime().optional(),
+  tts_request_start: z.string().datetime().optional(),
   first_audio_chunk_received: z.string().datetime().optional(),
+  tts_first_audio_chunk: z.string().datetime().optional(),
   playback_started: z.string().datetime().optional(),
+  browser_playback_start: z.string().datetime().optional(),
+  tts_stream_complete: z.string().datetime().optional(),
   stream_completed: z.string().datetime().optional(),
+  tts_partial_audio_failure: z.string().datetime().optional(),
+  fallback_audio_complete: z.string().datetime().optional(),
+  voice_response_complete: z.string().datetime().optional(),
+  transport_complete_written: z.string().datetime().optional(),
   audio_play_started: z.string().datetime().optional(),
-  session_completed: z.string().datetime().optional()
+  session_completed: z.string().datetime().optional(),
+  complete: z.string().datetime().optional()
 }).strict();
 
 const VoiceSessionTraceLatenciesSchema = z.object({
@@ -97,6 +125,18 @@ const VoiceStreamingTraceLatenciesSchema = z.object({
   speechToFirstAudioPlayMs: z.number().int().nonnegative().nullable(),
   streamDurationMs: z.number().int().nonnegative().nullable()
 }).strict();
+
+export const VoiceLatencySegmentsSchema = z.object({
+  retrieval_ms: z.number().int().nonnegative().nullable(),
+  llm_ttft_ms: z.number().int().nonnegative().nullable(),
+  sentence_commit_wait_ms: z.number().int().nonnegative().nullable(),
+  tts_request_latency_ms: z.number().int().nonnegative().nullable(),
+  tts_first_audio_ms: z.number().int().nonnegative().nullable(),
+  browser_buffer_ms: z.number().int().nonnegative().nullable(),
+  first_audio_total_ms: z.number().int().nonnegative().nullable()
+}).strict();
+
+export type VoiceLatencySegments = z.infer<typeof VoiceLatencySegmentsSchema>;
 
 const VoiceSessionTraceFailureSchema = z.object({
   stage: VoiceSessionTraceFailureStageSchema,
@@ -124,6 +164,7 @@ export const VoiceSessionTraceSchema = z.object({
   timestamps: VoiceSessionTraceTimestampsSchema,
   latencies: VoiceSessionTraceLatenciesSchema,
   streamingLatencies: VoiceStreamingTraceLatenciesSchema.optional(),
+  latencySegments: VoiceLatencySegmentsSchema.optional(),
   qaBreakdown: VoiceQaLatencyBreakdownSchema.optional(),
   failures: z.array(VoiceSessionTraceFailureSchema).max(8),
   createdAt: z.string().datetime(),
@@ -234,6 +275,60 @@ export function calculateVoiceStreamingTraceLatencies(
   });
 }
 
+export function calculateVoiceLatencySegments(
+  timestamps: VoiceSessionTrace["timestamps"]
+) {
+  return VoiceLatencySegmentsSchema.parse({
+    retrieval_ms: durationMs(
+      timestamps,
+      "voice_question_received",
+      "retrieval_complete"
+    ),
+    llm_ttft_ms: durationMs(
+      timestamps,
+      "retrieval_complete",
+      "llm_first_token"
+    ),
+    sentence_commit_wait_ms: durationMs(
+      timestamps,
+      "llm_first_token",
+      "sentence_commit"
+    ),
+    tts_request_latency_ms: durationMs(
+      timestamps,
+      "sentence_commit",
+      "tts_request_start"
+    ),
+    tts_first_audio_ms: durationMs(
+      timestamps,
+      "tts_request_start",
+      "tts_first_audio_chunk"
+    ),
+    browser_buffer_ms: durationMs(
+      timestamps,
+      "tts_first_audio_chunk",
+      "browser_playback_start"
+    ),
+    first_audio_total_ms: durationMs(
+      timestamps,
+      "voice_question_received",
+      "browser_playback_start"
+    )
+  });
+}
+
+function hasLatencySegmentTimestamp(timestamps: VoiceSessionTrace["timestamps"]) {
+  return Boolean(
+    timestamps.voice_question_received ||
+    timestamps.retrieval_complete ||
+    timestamps.llm_first_token ||
+    timestamps.sentence_commit ||
+    timestamps.tts_request_start ||
+    timestamps.tts_first_audio_chunk ||
+    timestamps.browser_playback_start
+  );
+}
+
 function hasStreamingTraceTimestamp(timestamps: VoiceSessionTrace["timestamps"]) {
   return Boolean(
     timestamps.first_sentence_committed ||
@@ -241,6 +336,7 @@ function hasStreamingTraceTimestamp(timestamps: VoiceSessionTrace["timestamps"])
     timestamps.tts_stream_started ||
     timestamps.first_audio_chunk_received ||
     timestamps.playback_started ||
+    timestamps.tts_stream_complete ||
     timestamps.stream_completed
   );
 }
@@ -289,6 +385,16 @@ export type UpdateVoiceSessionTraceInput = {
   now?: TraceClock;
 };
 
+const VOICE_TRACE_EVENT_ALIASES: Partial<
+  Record<VoiceSessionTraceEvent, VoiceSessionTraceEvent>
+> = {
+  first_sentence_committed: "sentence_commit",
+  first_audio_chunk_received: "tts_first_audio_chunk",
+  playback_started: "browser_playback_start",
+  tts_stream_complete: "stream_completed",
+  session_completed: "complete"
+};
+
 export function updateVoiceSessionTrace(
   trace: VoiceSessionTrace,
   input: UpdateVoiceSessionTraceInput
@@ -303,6 +409,11 @@ export function updateVoiceSessionTrace(
   let changed = false;
   if (input.event && timestamps[input.event] === undefined) {
     timestamps[input.event] = timestamp;
+    changed = true;
+  }
+  const alias = input.event ? VOICE_TRACE_EVENT_ALIASES[input.event] : undefined;
+  if (alias && timestamps[alias] === undefined) {
+    timestamps[alias] = timestamp;
     changed = true;
   }
 
@@ -342,6 +453,9 @@ export function updateVoiceSessionTrace(
     latencies: calculateVoiceSessionTraceLatencies(timestamps),
     ...(hasStreamingTraceTimestamp(timestamps)
       ? { streamingLatencies: calculateVoiceStreamingTraceLatencies(timestamps) }
+      : {}),
+    ...(hasLatencySegmentTimestamp(timestamps)
+      ? { latencySegments: calculateVoiceLatencySegments(timestamps) }
       : {}),
     ...(qaBreakdown ? { qaBreakdown } : {}),
     failures,
@@ -424,6 +538,9 @@ export function mergeVoiceSessionTrace(
     ...(hasStreamingTraceTimestamp(timestamps)
       ? { streamingLatencies: calculateVoiceStreamingTraceLatencies(timestamps) }
       : {}),
+    ...(hasLatencySegmentTimestamp(timestamps)
+      ? { latencySegments: calculateVoiceLatencySegments(timestamps) }
+      : {}),
     ...(qaBreakdown ? { qaBreakdown } : {}),
     failures,
     updatedAt: laterIsoTimestamp(current.updatedAt, incoming.updatedAt)
@@ -443,6 +560,15 @@ export function voiceTraceLogPayload(trace: VoiceSessionTrace) {
       trace.streamingLatencies?.speechToFirstSentenceCommittedMs ?? null,
     tts_to_first_audio_chunk_ms:
       trace.streamingLatencies?.ttsToFirstAudioChunkMs ?? null,
+    retrieval_ms: trace.latencySegments?.retrieval_ms ?? null,
+    llm_ttft_ms: trace.latencySegments?.llm_ttft_ms ?? null,
+    sentence_commit_wait_ms:
+      trace.latencySegments?.sentence_commit_wait_ms ?? null,
+    tts_request_latency_ms:
+      trace.latencySegments?.tts_request_latency_ms ?? null,
+    tts_first_audio_ms: trace.latencySegments?.tts_first_audio_ms ?? null,
+    browser_buffer_ms: trace.latencySegments?.browser_buffer_ms ?? null,
+    first_audio_total_ms: trace.latencySegments?.first_audio_total_ms ?? null,
     status: trace.status
   };
 }

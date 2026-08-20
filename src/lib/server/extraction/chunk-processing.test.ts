@@ -305,12 +305,16 @@ describe("Daily Brief chunk processing", () => {
     tempDir = await mkdtemp(join(tmpdir(), "daily-brief-checkpoint-heartbeat-"));
     const input = longInput();
     const checkpointStore = new JsonAnalysisChunkCheckpointStore(new JsonStore(tempDir));
+    let releaseProvider!: () => void;
+    const providerRelease = new Promise<void>((resolve) => {
+      releaseProvider = resolve;
+    });
     const processing = processDailyBriefChunks({
       uploadId: "upload_brief",
       ...input,
       concurrency: 2,
       executeChunk: async (chunk) => {
-        await new Promise((resolve) => setTimeout(resolve, 80));
+        await providerRelease;
         return { items: [itemForChunk(chunk)], resultSource: "provider_success" as const };
       },
       fallbackChunk: async (_chunk, error) => { throw error; },
@@ -322,20 +326,39 @@ describe("Daily Brief chunk processing", () => {
         staleAfterMs: 60
       }
     });
-    await new Promise((resolve) => setTimeout(resolve, 50));
+    try {
+      const deadline = Date.now() + 2_000;
+      const readActive = async () => (
+        await checkpointStore.list({
+          userId: "user_1",
+          uploadId: "upload_brief",
+          kind: "daily_brief"
+        })
+      ).filter((checkpoint) => checkpoint.status === "processing");
+      let active = await readActive();
+      while (
+        (
+          active.length === 0
+          || active.some((checkpoint) => (
+            checkpoint.startedAt === undefined
+            || Date.parse(checkpoint.updatedAt) <= Date.parse(checkpoint.startedAt)
+          ))
+        )
+        && Date.now() < deadline
+      ) {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+        active = await readActive();
+      }
 
-    const active = (await checkpointStore.list({
-      userId: "user_1",
-      uploadId: "upload_brief",
-      kind: "daily_brief"
-    })).filter((checkpoint) => checkpoint.status === "processing");
-
-    expect(active.length).toBeGreaterThan(0);
-    expect(active.every((checkpoint) => (
-      checkpoint.startedAt !== undefined
-      && Date.parse(checkpoint.updatedAt) > Date.parse(checkpoint.startedAt)
-    ))).toBe(true);
-    await processing;
+      expect(active.length).toBeGreaterThan(0);
+      expect(active.every((checkpoint) => (
+        checkpoint.startedAt !== undefined
+        && Date.parse(checkpoint.updatedAt) > Date.parse(checkpoint.startedAt)
+      ))).toBe(true);
+    } finally {
+      releaseProvider();
+      await processing;
+    }
   });
 
   it("treats cached non-verbatim evidence as corrupt and recomputes only that chunk", async () => {

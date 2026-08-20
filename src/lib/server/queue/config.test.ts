@@ -1,6 +1,7 @@
 // @vitest-environment node
 
 import { describe, expect, it } from "vitest";
+import { resolve } from "node:path";
 import {
   getPipelineQueueConfig,
   resolvePipelineExecutionMode,
@@ -11,13 +12,52 @@ describe("pipeline queue configuration", () => {
   it("defaults to inline and the documented safe local values", () => {
     expect(getPipelineQueueConfig({})).toEqual({
       executionMode: "inline",
-      redisUrl: "redis://127.0.0.1:6379",
+      redisUrl: "redis://127.0.0.1:6380",
       queueName: "daily-brief-pipeline",
       workerConcurrency: 1,
       attempts: 3,
       backoffMs: 5_000,
-      processingStaleMs: 7_200_000
+      processingStaleMs: 7_200_000,
+      recoveryIntervalMs: 60_000,
+      failedHealthWindowMs: 3_600_000,
+      retention: {
+        completed: { age: 86_400, count: 1_000 },
+        failed: { age: 604_800, count: 1_000 }
+      },
+      dataDirectory: resolve(".data"),
+      storageMode: "local"
     });
+  });
+
+  it("requires explicit shared server storage and one Worker in queue mode", () => {
+    const dataDirectory = resolve("queue-data");
+    expect(getPipelineQueueConfig({
+      PIPELINE_EXECUTION_MODE: "queue",
+      APP_DATA_DIR: dataDirectory,
+      APP_STORAGE_MODE: "server",
+      PIPELINE_WORKER_CONCURRENCY: "1"
+    })).toMatchObject({
+      executionMode: "queue",
+      dataDirectory,
+      storageMode: "server",
+      workerConcurrency: 1
+    });
+
+    expect(() => getPipelineQueueConfig({
+      PIPELINE_EXECUTION_MODE: "queue",
+      APP_STORAGE_MODE: "server"
+    })).toThrow("absolute path");
+    expect(() => getPipelineQueueConfig({
+      PIPELINE_EXECUTION_MODE: "queue",
+      APP_DATA_DIR: dataDirectory,
+      APP_STORAGE_MODE: "local"
+    })).toThrow("APP_STORAGE_MODE=server");
+    expect(() => getPipelineQueueConfig({
+      PIPELINE_EXECUTION_MODE: "queue",
+      APP_DATA_DIR: dataDirectory,
+      APP_STORAGE_MODE: "server",
+      PIPELINE_WORKER_CONCURRENCY: "2"
+    })).toThrow("PIPELINE_WORKER_CONCURRENCY=1");
   });
 
   it("rejects unknown modes instead of silently falling back inline", () => {

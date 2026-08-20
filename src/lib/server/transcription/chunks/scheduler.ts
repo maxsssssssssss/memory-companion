@@ -8,6 +8,7 @@ import {
 import { ChunkTranscriptionError, type ChunkTranscriptionAdapter } from "./adapter";
 import type { ChunkCheckpointStore } from "./checkpoint-store";
 import { mapWithConcurrency } from "@/lib/server/chunks/bounded-scheduler";
+import type { AudioAccessPolicy } from "../provider";
 
 const DEFAULT_CONCURRENCY = 3;
 const DEFAULT_MAX_RETRIES = 1;
@@ -70,6 +71,7 @@ async function transcribeWithTimeout(input: {
   adapter: ChunkTranscriptionAdapter;
   chunk: AudioChunk;
   userId?: string;
+  audioAccessPolicy?: AudioAccessPolicy;
   timeoutMs: number;
 }) {
   const controller = new AbortController();
@@ -83,7 +85,12 @@ async function transcribeWithTimeout(input: {
 
   try {
     return await Promise.race([
-      input.adapter.transcribeChunk({ chunk: input.chunk, userId: input.userId, signal: controller.signal }),
+      input.adapter.transcribeChunk({
+        chunk: input.chunk,
+        userId: input.userId,
+        audioAccessPolicy: input.audioAccessPolicy,
+        signal: controller.signal
+      }),
       timeout
     ]);
   } finally {
@@ -112,6 +119,7 @@ export async function processAudioChunks(input: {
   adapter: ChunkTranscriptionAdapter;
   checkpoints: ChunkCheckpointStore;
   userId?: string;
+  audioAccessPolicy?: AudioAccessPolicy;
   options?: ChunkSchedulerOptions;
 }): Promise<ChunkSchedulerResult> {
   const options = input.options ?? {};
@@ -159,6 +167,7 @@ export async function processAudioChunks(input: {
           adapter: input.adapter,
           chunk,
           userId: input.userId,
+          audioAccessPolicy: input.audioAccessPolicy,
           timeoutMs: config.attemptTimeoutMs
         });
         const finishedAt = now();

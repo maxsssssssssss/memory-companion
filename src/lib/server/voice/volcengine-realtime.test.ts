@@ -194,6 +194,13 @@ describe("VolcengineRealtimeVoiceProvider", () => {
     }));
     await expect(starting).resolves.toEqual({ sessionId: "session-id", dialogId: "dialog-id" });
 
+    await provider.cancelSessionTurn();
+    expect(decodeClientFrame(socket.sent.at(-1)!)).toEqual({
+      eventId: VoiceEvent.ClientInterrupt,
+      sessionId: "session-id",
+      payload: {}
+    });
+
     await provider.sendText("你好，介绍一下今天的情况");
     expect(socket.sent.slice(-2).map(decodeClientFrame)).toEqual([
       {
@@ -282,6 +289,55 @@ describe("VolcengineRealtimeVoiceProvider", () => {
       reason: "invalid_state"
     });
     expect(socket.sent).toHaveLength(sentBefore);
+    await provider.close();
+  });
+
+  it("sends external RAG and truncates interrupted playback with documented events", async () => {
+    const socket = new FakeSocket();
+    const ids = ["connect-id", "session-id"];
+    const provider = new VolcengineRealtimeVoiceProvider(config, {
+      socketFactory: () => socket as unknown as VoiceWebSocketLike,
+      idFactory: () => ids.shift() ?? "unexpected-id"
+    });
+    await connectProvider(provider, socket);
+    const starting = provider.startSession({
+      inputMode: "server_vad",
+      dialog: { enableConversationTruncate: true }
+    });
+    await nextTurn();
+    socket.message(serverEventFrame({
+      eventId: VoiceEvent.SessionStarted,
+      sessionId: "session-id"
+    }));
+    await starting;
+
+    await provider.sendExternalRag([
+      { title: "E1", content: "预约已经付款确认。" },
+      { title: "E2", content: "排练只是计划，还没有完成。" }
+    ]);
+    expect(decodeClientFrame(socket.sent.at(-1)!)).toEqual({
+      eventId: VoiceEvent.ChatRAGText,
+      sessionId: "session-id",
+      payload: {
+        external_rag: JSON.stringify([
+          { title: "E1", content: "预约已经付款确认。" },
+          { title: "E2", content: "排练只是计划，还没有完成。" }
+        ])
+      }
+    });
+
+    const truncating = provider.truncateConversation("reply-1", 640);
+    await nextTurn();
+    expect(decodeClientFrame(socket.sent.at(-1)!)).toEqual({
+      eventId: VoiceEvent.ConversationTruncate,
+      sessionId: "session-id",
+      payload: { item_id: "reply-1", audio_end_ms: 640 }
+    });
+    socket.message(serverEventFrame({
+      eventId: VoiceEvent.ConversationTruncated,
+      sessionId: "session-id"
+    }));
+    await truncating;
     await provider.close();
   });
 
@@ -697,6 +753,58 @@ describe("buildVolcengineStartSessionPayload", () => {
     expect(buildVolcengineStartSessionPayload({ inputMode: "server_vad" })).toEqual({
       dialog: { extra: { model: "1.2.1.1" } }
     });
+  });
+
+  it("builds bounded server VAD and ephemeral dialog configuration", () => {
+    expect(buildVolcengineStartSessionPayload({
+      inputMode: "server_vad",
+      vad: {
+        endSmoothWindowMs: 700,
+        enableCustomVad: true
+      },
+      dialog: {
+        botName: "Daily Brief",
+        systemRole: "只负责实时语音交互。",
+        speakingStyle: "简洁自然。",
+        dialogId: "dialog-1",
+        enableConversationTruncate: true,
+        context: [
+          { role: "user", text: "上一问", timestamp: 1 },
+          { role: "assistant", text: "已验证回答", timestamp: 2 }
+        ]
+      }
+    })).toEqual({
+      asr: {
+        extra: {
+          end_smooth_window_ms: 700,
+          enable_custom_vad: true
+        }
+      },
+      dialog: {
+        bot_name: "Daily Brief",
+        system_role: "只负责实时语音交互。",
+        speaking_style: "简洁自然。",
+        dialog_id: "dialog-1",
+        dialog_context: [
+          { role: "user", text: "上一问", timestamp: 1 },
+          { role: "assistant", text: "已验证回答", timestamp: 2 }
+        ],
+        extra: {
+          enable_conversation_truncate: true,
+          model: "1.2.1.1"
+        }
+      }
+    });
+    expect(() => buildVolcengineStartSessionPayload({
+      inputMode: "server_vad",
+      vad: { endSmoothWindowMs: 499 }
+    })).toThrow(/500/u);
+    expect(() => buildVolcengineStartSessionPayload({
+      inputMode: "server_vad",
+      dialog: {
+        context: [{ role: "user", text: "incomplete" }]
+      }
+    })).toThrow(/complete QA pairs/u);
   });
 
   it("rejects PCM settings outside the documented 24 kHz mono contract", () => {

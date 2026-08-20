@@ -26,6 +26,10 @@ import {
   type AnswerQuestionWithAIInput,
   type QaScope
 } from "@/lib/server/retrieval/ai-qa";
+import {
+  resolveVoiceQaLlmProviderId,
+  type QaLlmProviderId
+} from "@/lib/server/retrieval/qa-llm-provider";
 import { safeElapsedMs } from "@/lib/server/retrieval/qa-observability";
 import type { JsonStore } from "@/lib/server/storage/json-store";
 import {
@@ -44,6 +48,9 @@ const STORE_KEY_PATTERN = /^[A-Za-z0-9_-]+$/;
 const ALL_MEMORY_SCOPE_ID = "all_memory";
 const VOICE_QA_STYLE_INSTRUCTION = [
   "这是语音回答模式。先直接回答问题，优先使用一到三句简短、自然、适合朗读的话。",
+  "第一句必须尽快形成可独立朗读的短句：只表达一个核心结论，中文正文必须控制在 6 到 12 个汉字（标点和引用编号不计），以句号、问号或感叹号结束，并紧接支持该句的 [E#]；不要用冒号、逗号长铺垫或依赖后文才能成立的半句。",
+  "每一个句子都必须在本句标点后立即附上至少一个支持该句的 [E#]，不能只在回答末尾集中引用。",
+  "严格遵守用户要求的句数：要求一句话时只输出一句；要求多句或多个要点时输出二到三句。如需更多细节，从第二句继续展开；不要为了凑长度扩写第一句。",
   "保留事实边界和必要的不确定性，不使用 Markdown 标题或列表。",
   "输出仍需遵守现有 QA citation 契约并保留 [E#]；语音投影层会在朗读前移除引用编号。"
 ].join("\n");
@@ -64,6 +71,7 @@ export type CreateMemoryVoiceQaAnswererOptions = {
   referenceDate?: Date;
   context?: VoiceQaContext;
   answerMode?: VoiceAnswerMode;
+  llmProviderId?: QaLlmProviderId;
   dependencies?: Partial<MemoryVoiceQaAnswererDependencies>;
 };
 
@@ -84,6 +92,16 @@ export class VoiceQaAdapterError extends Error {
     super(message);
     this.name = "VoiceQaAdapterError";
   }
+}
+
+function voiceQaAbortError(signal: AbortSignal | undefined) {
+  return signal?.reason instanceof Error
+    ? signal.reason
+    : new DOMException("Voice QA request aborted", "AbortError");
+}
+
+function throwIfVoiceQaAborted(signal: AbortSignal | undefined) {
+  if (signal?.aborted) throw voiceQaAbortError(signal);
 }
 
 function record(value: unknown): Record<string, unknown> | undefined {
@@ -188,13 +206,16 @@ async function persistCurrentAnswer(store: JsonStore, uploadId: string, answer: 
 
 async function answerCurrentUpload(input: {
   request: VoiceQARequest;
+  userId: string;
   question: string;
   uploadId: string;
   store: JsonStore;
   answer: (input: AnswerQuestionWithAIInput) => Promise<QuestionAnswer>;
 }) {
+  throwIfVoiceQaAborted(input.request.signal);
   const retrievalStartedAt = performance.now();
   const upload = await input.store.read<AudioUpload>("uploads", input.uploadId);
+  throwIfVoiceQaAborted(input.request.signal);
   if (!upload) {
     throw new VoiceQaAdapterError("upload_not_found", "Voice QA upload was not found");
   }
@@ -209,8 +230,9 @@ async function answerCurrentUpload(input: {
       input.store.read<SemanticSegment[]>("semantic-segments", input.uploadId),
       input.store.read<BriefItem[]>("brief-items", input.uploadId),
       input.store.read<RelationshipSignalCard[]>("relationship-signals", input.uploadId),
-      input.store.read<StoredSpeakerAliases>("speaker-aliases", input.uploadId)
+     input.store.read<StoredSpeakerAliases>("speaker-aliases", input.uploadId)
     ]);
+  throwIfVoiceQaAborted(input.request.signal);
   const aliasedPayload = applySpeakerAliasesToPayload(
     {
       segments: segments ?? [],
@@ -226,6 +248,7 @@ async function answerCurrentUpload(input: {
     ? VOICE_QA_STYLE_INSTRUCTION
     : undefined;
   const answer = await input.answer({
+    userId: input.userId,
     uploadId: input.uploadId,
     question: input.question,
     scope: "current",
@@ -236,30 +259,44 @@ async function answerCurrentUpload(input: {
     relationshipSignals: relationshipSignals ?? [],
     settingsStore: input.store,
     memoryRetrievalMs,
+    ...(input.request.shadowReviewContext
+      ? { shadowReviewContext: input.request.shadowReviewContext }
+      : {}),
     ...(input.request.onQaDiagnostics
       ? { onDiagnostics: input.request.onQaDiagnostics }
+      : {}),
+    ...(input.request.onQaMilestone
+      ? { onExecutionMilestone: input.request.onQaMilestone }
+      : {}),
+    ...(input.request.mode === "VOICE"
+      ? { withholdUncertainProvisionalSentences: true }
       : {}),
     ...(qaPromptInstruction ? { qaPromptInstruction } : {}),
     ...(conversation.length > 0 ? { conversation } : {})
   });
+  throwIfVoiceQaAborted(input.request.signal);
   await persistCurrentAnswer(input.store, input.uploadId, answer);
+  throwIfVoiceQaAborted(input.request.signal);
   return answer;
 }
 
 async function answerProvidedContext(input: {
   request: VoiceQARequest;
+  userId: string;
   question: string;
   scope: MemoryVoiceQaScope;
   context: VoiceQaContext;
   store: JsonStore;
   answer: (input: AnswerQuestionWithAIInput) => Promise<QuestionAnswer>;
 }) {
+  throwIfVoiceQaAborted(input.request.signal);
   const conversation = normalizeQaConversation(input.request.conversation);
   const qaPromptInstruction = input.request.mode === "VOICE"
     ? VOICE_QA_STYLE_INSTRUCTION
     : undefined;
 
-  return input.answer({
+  const answer = await input.answer({
+    userId: input.userId,
     uploadId: input.context.contextId,
     question: input.question,
     scope: input.scope,
@@ -270,12 +307,23 @@ async function answerProvidedContext(input: {
     relationshipSignals: input.context.relationshipSignals,
     settingsStore: input.store,
     memoryRetrievalMs: null,
+    ...(input.request.shadowReviewContext
+      ? { shadowReviewContext: input.request.shadowReviewContext }
+      : {}),
     ...(input.request.onQaDiagnostics
       ? { onDiagnostics: input.request.onQaDiagnostics }
+      : {}),
+    ...(input.request.onQaMilestone
+      ? { onExecutionMilestone: input.request.onQaMilestone }
+      : {}),
+    ...(input.request.mode === "VOICE"
+      ? { withholdUncertainProvisionalSentences: true }
       : {}),
     ...(qaPromptInstruction ? { qaPromptInstruction } : {}),
     ...(conversation.length > 0 ? { conversation } : {})
   });
+  throwIfVoiceQaAborted(input.request.signal);
+  return answer;
 }
 
 /**
@@ -303,6 +351,8 @@ export function createMemoryVoiceQaAnswerer(
     answerMemoryScopeQuestion:
       options.dependencies?.answerMemoryScopeQuestion ?? answerMemoryScopeQuestion
   };
+  const llmProviderId =
+    options.llmProviderId ?? resolveVoiceQaLlmProviderId();
   const answerStrategy = createVoiceAnswerStrategy({
     ...(options.answerMode ? { mode: options.answerMode } : {}),
     answerQuestionWithAI: dependencies.answerQuestionWithAI
@@ -314,16 +364,63 @@ export function createMemoryVoiceQaAnswerer(
     request: VoiceQARequest,
     qaInput: AnswerQuestionWithAIInput
   ) {
-    if (!request.onQaStreamEvent) return answerWithStrategy(qaInput);
+    throwIfVoiceQaAborted(request.signal);
+    const inheritedEvidenceObserver = qaInput.onRetrievedEvidence;
+    const realtimeEvidenceObserver = request.onRetrievedEvidence;
+    const trustedQaInput: AnswerQuestionWithAIInput = {
+      ...qaInput,
+      userId,
+      llmProviderId,
+      allowQwenInProduction: llmProviderId === "qwen-vllm",
+      ...(request.signal ? { signal: request.signal } : {}),
+      ...(qaInput.onExecutionMilestone
+        ? { onExecutionMilestone: qaInput.onExecutionMilestone }
+        : {}),
+      ...(qaInput.onDiagnostics ? { onDiagnostics: qaInput.onDiagnostics } : {}),
+      ...(qaInput.memoryRetrievalMs !== undefined
+        ? { memoryRetrievalMs: qaInput.memoryRetrievalMs }
+        : {}),
+      ...(qaInput.withholdUncertainProvisionalSentences
+        ? { withholdUncertainProvisionalSentences: true }
+        : {}),
+      ...(
+        inheritedEvidenceObserver || realtimeEvidenceObserver
+          ? {
+              onRetrievedEvidence: (evidence, retrievalMs) => {
+                const inherited = inheritedEvidenceObserver?.(evidence, retrievalMs);
+                const realtime = realtimeEvidenceObserver?.(evidence, retrievalMs);
+                if (
+                  (inherited &&
+                    typeof (inherited as PromiseLike<unknown>).then === "function") ||
+                  (realtime &&
+                    typeof (realtime as PromiseLike<unknown>).then === "function")
+                ) {
+                  return Promise.all([
+                    Promise.resolve(inherited),
+                    Promise.resolve(realtime)
+                  ]);
+                }
+                return undefined;
+              }
+            }
+          : {}
+      )
+    };
+    if (!request.onQaStreamEvent) {
+      const answer = await answerWithStrategy(trustedQaInput);
+      throwIfVoiceQaAborted(request.signal);
+      return answer;
+    }
 
     let finalEvent: Extract<
       import("@/lib/server/retrieval/qa-streaming").QaAnswerStreamEvent,
       { type: "final" }
     > | undefined;
     for await (const event of dependencies.answerQuestionStream({
-      ...qaInput,
+      ...trustedQaInput,
       answerMode: answerStrategy.mode
     })) {
+      throwIfVoiceQaAborted(request.signal);
       // Sentence Commit v2 emits only independently grounded sentence events.
       // Forward them immediately so Voice can begin bounded TTS while the
       // provider is still generating later sentences. Raw token events remain
@@ -333,6 +430,7 @@ export function createMemoryVoiceQaAnswerer(
       }
       if (event.type === "final") finalEvent = event;
     }
+    throwIfVoiceQaAborted(request.signal);
     if (!finalEvent) {
       throw new VoiceQaAdapterError(
         "invalid_request",
@@ -341,12 +439,14 @@ export function createMemoryVoiceQaAnswerer(
     }
 
     await request.onQaStreamEvent(finalEvent);
+    throwIfVoiceQaAborted(request.signal);
     return finalEvent.answer;
   }
 
   return {
     answerMode: answerStrategy.mode,
     async answer(request) {
+      throwIfVoiceQaAborted(request.signal);
       if (!request.sessionId?.trim()) {
         throw new VoiceQaAdapterError("invalid_request", "Voice QA session id is required");
       }
@@ -384,6 +484,7 @@ export function createMemoryVoiceQaAnswerer(
           }
           return answerProvidedContext({
             request,
+            userId,
             question,
             scope: options.scope,
             context: options.context,
@@ -393,6 +494,7 @@ export function createMemoryVoiceQaAnswerer(
         }
         return answerCurrentUpload({
           request,
+          userId,
           question,
           uploadId,
           store: options.store,
@@ -406,6 +508,7 @@ export function createMemoryVoiceQaAnswerer(
       if (options.context) {
         return answerProvidedContext({
           request,
+          userId,
           question,
           scope: options.scope,
           context: options.context,
@@ -419,7 +522,7 @@ export function createMemoryVoiceQaAnswerer(
         : undefined;
       if (options.scope === "week") {
         const weekRange = currentWeekRange(referenceDate);
-        return dependencies.answerMemoryScopeQuestion({
+        const answer = await dependencies.answerMemoryScopeQuestion({
           scopeId: weekRange.scopeId,
           question,
           qaScope: "week",
@@ -427,7 +530,14 @@ export function createMemoryVoiceQaAnswerer(
           shadowDateRange: { startDate: weekRange.startKey, endDate: weekRange.endKey },
           store: options.store,
           answerQuestion: (qaInput) => answerWithOptionalStream(request, qaInput),
+          ...(request.shadowReviewContext
+            ? { shadowReviewContext: request.shadowReviewContext }
+            : {}),
           ...(request.onQaDiagnostics ? { onDiagnostics: request.onQaDiagnostics } : {}),
+          ...(request.onQaMilestone ? { onExecutionMilestone: request.onQaMilestone } : {}),
+          ...(request.mode === "VOICE"
+            ? { withholdUncertainProvisionalSentences: true }
+            : {}),
           ...(qaPromptInstruction ? { qaPromptInstruction } : {}),
           ...(request.onRetrievedMemoryIds
             ? { onRetrievedMemoryIds: request.onRetrievedMemoryIds }
@@ -435,22 +545,33 @@ export function createMemoryVoiceQaAnswerer(
           includeUpload: (upload) => isUploadInRange(upload, weekRange.start, weekRange.end),
           ...(conversation.length > 0 ? { conversation } : {})
         });
+        throwIfVoiceQaAborted(request.signal);
+        return answer;
       }
 
-      return dependencies.answerMemoryScopeQuestion({
+      const answer = await dependencies.answerMemoryScopeQuestion({
         scopeId: ALL_MEMORY_SCOPE_ID,
         question,
         qaScope: "all",
         userId,
         store: options.store,
         answerQuestion: (qaInput) => answerWithOptionalStream(request, qaInput),
+        ...(request.shadowReviewContext
+          ? { shadowReviewContext: request.shadowReviewContext }
+          : {}),
         ...(request.onQaDiagnostics ? { onDiagnostics: request.onQaDiagnostics } : {}),
+        ...(request.onQaMilestone ? { onExecutionMilestone: request.onQaMilestone } : {}),
+        ...(request.mode === "VOICE"
+          ? { withholdUncertainProvisionalSentences: true }
+          : {}),
         ...(qaPromptInstruction ? { qaPromptInstruction } : {}),
         ...(request.onRetrievedMemoryIds
           ? { onRetrievedMemoryIds: request.onRetrievedMemoryIds }
           : {}),
         ...(conversation.length > 0 ? { conversation } : {})
       });
+      throwIfVoiceQaAborted(request.signal);
+      return answer;
     }
   };
 }

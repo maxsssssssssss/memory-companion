@@ -15,6 +15,22 @@ export type VoiceSessionConfig = {
   inputMode?: "text" | "server_vad" | "push_to_talk" | "audio_file" | "keep_alive";
   speaker?: string;
   audioOutput?: VoiceAudioOutputConfig;
+  vad?: {
+    endSmoothWindowMs?: number;
+    enableCustomVad?: boolean;
+  };
+  dialog?: {
+    botName?: string;
+    systemRole?: string;
+    speakingStyle?: string;
+    dialogId?: string;
+    enableConversationTruncate?: boolean;
+    context?: Array<{
+      role: "user" | "assistant";
+      text: string;
+      timestamp?: number;
+    }>;
+  };
 };
 
 export type VoiceSessionInfo = {
@@ -24,12 +40,22 @@ export type VoiceSessionInfo = {
 
 export type VoiceUnsubscribe = () => void;
 
+export type VoiceExternalRagItem = {
+  title: string;
+  content: string;
+};
+
 export interface VoiceProvider {
   connect(): Promise<void>;
   startSession(config?: VoiceSessionConfig): Promise<VoiceSessionInfo>;
   reconnect?(): Promise<VoiceSessionInfo>;
   sendAudio(chunk: Buffer): Promise<void>;
   finishAudioInput(): Promise<void>;
+  /** Cancels the active Provider-side response/TTS turn without closing the session. */
+  cancelSessionTurn?(): Promise<void>;
+  interruptResponse?(): Promise<void>;
+  sendExternalRag?(items: readonly VoiceExternalRagItem[]): Promise<void>;
+  truncateConversation?(itemId: string, audioEndMs: number): Promise<void>;
   sendText(text: string): Promise<void>;
   finishSession(): Promise<void>;
   onTranscript(callback: (text: string) => void): VoiceUnsubscribe;

@@ -10,9 +10,7 @@ import type { TranscriptSegment } from "@/lib/domain/types";
 import { getOpenRouterErrorMessage } from "@/lib/openrouter/errors";
 import { classifySegment } from "@/lib/processing/classifier";
 import type { TranscriptionProvider } from "./provider";
-import { createOpenAIClient } from "@/lib/server/openai/client";
 import { getOpenAIClientRuntimeConfig } from "@/lib/server/settings/provider-config";
-import type OpenAI from "openai";
 import {
   cleanupGeneratedAudioChunks,
   planAudioChunks,
@@ -23,14 +21,13 @@ import {
   mergeTranscriptChunks,
   type TranscriptMergeResult
 } from "./chunks/transcript-merge";
+import {
+  OpenAICompatibleTranscriptionError,
+  requestOpenAICompatibleTranscription,
+  safeOpenAITranscriptionErrorLog,
+  type OpenAICompatibleTranscriptionResponse
+} from "./openai-compatible-transcription";
 
-type DiarizedSegment = {
-  start: number;
-  end: number;
-  text: string;
-  speaker?: string;
-};
-type OpenAITranscriptionRequest = Parameters<OpenAI["audio"]["transcriptions"]["create"]>[0];
 type OpenRouterTranscriptionResponse = {
   text?: string;
   usage?: {
@@ -48,6 +45,12 @@ type OpenRouterTranscriptionResponse = {
 };
 
 const OPENAI_BASE_URL_ENV = "OPENAI_BASE_URL";
+const OPENAI_TRANSCRIBE_API_KEY_ENV = "OPENAI_TRANSCRIBE_API_KEY";
+const OPENAI_TRANSCRIBE_BASE_URL_ENV = "OPENAI_TRANSCRIBE_BASE_URL";
+const OPENAI_TRANSCRIBE_LANGUAGE_ENV = "OPENAI_TRANSCRIBE_LANGUAGE";
+const OPENAI_AUTH_HEADER_MODE_ENV = "OPENAI_AUTH_HEADER_MODE";
+const OPENAI_REQUEST_TIMEOUT_MS_ENV = "OPENAI_REQUEST_TIMEOUT_MS";
+const OPENAI_MAX_RETRIES_ENV = "OPENAI_MAX_RETRIES";
 const OPENROUTER_API_KEY_ENV = "OPENROUTER_API_KEY";
 const OPENROUTER_BASE_URL_ENV = "OPENROUTER_BASE_URL";
 const OPENROUTER_HTTP_REFERER_ENV = "OPENROUTER_HTTP_REFERER";
@@ -57,6 +60,8 @@ const DEFAULT_OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1";
 const DEFAULT_OPENROUTER_TRANSCRIBE_CHUNK_SECONDS = 60;
 const MAX_OPENROUTER_TRANSCRIBE_CHUNK_SECONDS = 60;
 const MIN_OPENROUTER_TRANSCRIBE_CHUNK_SECONDS = 30;
+const DEFAULT_OPENAI_REQUEST_TIMEOUT_MS = 10 * 60 * 1000;
+const DEFAULT_OPENAI_MAX_RETRIES = 2;
 const TARGET_TRANSCRIPT_CHUNK_LENGTH = 180;
 const ESTIMATED_TRANSCRIPT_CHARS_PER_SECOND = 4;
 const mimeTypeToOpenRouterFormat: Record<string, string> = {
@@ -99,6 +104,26 @@ function readNumberEnv(variableName: string, defaultValue: number) {
   return parsed;
 }
 
+function readNonNegativeNumberEnv(variableName: string, defaultValue: number) {
+  const rawValue = readStringEnv(variableName);
+  if (!rawValue) {
+    return defaultValue;
+  }
+
+  const parsed = Number.parseInt(rawValue, 10);
+  return Number.isInteger(parsed) && parsed >= 0 ? parsed : defaultValue;
+}
+
+function readPositiveNumberEnv(variableName: string, defaultValue: number) {
+  const rawValue = readStringEnv(variableName);
+  if (!rawValue) {
+    return defaultValue;
+  }
+
+  const parsed = Number.parseInt(rawValue, 10);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : defaultValue;
+}
+
 function getOpenRouterChunkSeconds() {
   return Math.min(
     MAX_OPENROUTER_TRANSCRIBE_CHUNK_SECONDS,
@@ -110,9 +135,15 @@ function isOpenRouterBaseURL(baseUrl: string | undefined) {
   return Boolean(baseUrl?.includes("openrouter.ai"));
 }
 
-function isFourOTranscribeModel(model: string) {
+function getOpenAIResponseFormat(model: string) {
   const normalized = model.trim().toLowerCase();
-  return normalized.includes("gpt-4o-transcribe");
+  if (normalized === "gpt-4o-transcribe-diarize" || normalized.endsWith("/gpt-4o-transcribe-diarize")) {
+    return "diarized_json" as const;
+  }
+  if (normalized === "gpt-4o-transcribe" || normalized.endsWith("/gpt-4o-transcribe")) {
+    return "json" as const;
+  }
+  return undefined;
 }
 
 function getTranscriptionModel() {
@@ -134,8 +165,42 @@ async function resolveOpenAICompatibleRouting() {
   return {
     apiKey: usesOpenRouterKey ? openRouterApiKey : openAiApiKey ?? openRouterApiKey,
     baseUrl: selectedBaseUrl,
+    openAiApiKey,
+    openAiBaseUrl,
     usesOpenRouter: usesOpenRouterKey || isOpenRouterBaseURL(selectedBaseUrl)
   };
+}
+
+function transcriptionConfigError(requiredEnvironmentVariables: string[]) {
+  return new OpenAICompatibleTranscriptionError("provider_config_error", {
+    method: "POST",
+    path: "/v1/audio/transcriptions",
+    attempts: 0,
+    requiredEnvironmentVariables
+  });
+}
+
+function getDirectTranscriptionCredentials(openAiApiKey: string | undefined, genericOpenAiBaseUrl: string | undefined) {
+  const baseUrl = readStringEnv(OPENAI_TRANSCRIBE_BASE_URL_ENV);
+  const dedicatedApiKey = readStringEnv(OPENAI_TRANSCRIBE_API_KEY_ENV);
+
+  if (genericOpenAiBaseUrl && (!baseUrl || !dedicatedApiKey)) {
+    throw transcriptionConfigError([
+      ...(!baseUrl ? [OPENAI_TRANSCRIBE_BASE_URL_ENV] : []),
+      ...(!dedicatedApiKey ? [OPENAI_TRANSCRIBE_API_KEY_ENV] : [])
+    ]);
+  }
+
+  if (baseUrl && !dedicatedApiKey) {
+    throw transcriptionConfigError([OPENAI_TRANSCRIBE_API_KEY_ENV]);
+  }
+
+  const apiKey = dedicatedApiKey ?? openAiApiKey;
+  if (!apiKey) {
+    throw transcriptionConfigError([OPENAI_TRANSCRIBE_API_KEY_ENV, "OPENAI_API_KEY"]);
+  }
+
+  return { apiKey, baseUrl };
 }
 
 function getOpenRouterAudioFormat(mimeType: string, filePath: string) {
@@ -217,24 +282,6 @@ function buildSegmentsFromText(
       valueLabels: []
     });
   });
-}
-
-function getTranscriptionRequestPayload(model: string, filePath: string) {
-  if (isFourOTranscribeModel(model)) {
-    return {
-      file: fs.createReadStream(filePath),
-      model,
-      response_format: "json",
-      chunking_strategy: "auto"
-    } as unknown as OpenAITranscriptionRequest;
-  }
-
-  return {
-    file: fs.createReadStream(filePath),
-    model,
-    response_format: "diarized_json",
-    chunking_strategy: "auto"
-  } as unknown as OpenAITranscriptionRequest;
 }
 
 function getOpenRouterTranscriptionUrl(baseUrl: string | undefined) {
@@ -421,17 +468,36 @@ export async function transcribeOpenRouterToMergeResult(
 export const openaiTranscriptionProvider: TranscriptionProvider = {
   async transcribe(input) {
     const model = getTranscriptionModel();
-    if ((await resolveOpenAICompatibleRouting()).usesOpenRouter) {
+    const routing = await resolveOpenAICompatibleRouting();
+    if (routing.usesOpenRouter) {
       return (await transcribeOpenRouterToMergeResult(input, model)).segments;
     }
 
-    const client = createOpenAIClient(await getOpenAIClientRuntimeConfig());
-    // Current OpenAI SDK types lag diarized_json support, so keep this cast scoped to the API request.
-    const request = getTranscriptionRequestPayload(model, input.filePath);
+    let response: OpenAICompatibleTranscriptionResponse;
+    try {
+      const credentials = getDirectTranscriptionCredentials(routing.openAiApiKey, routing.openAiBaseUrl);
+      const responseFormat = getOpenAIResponseFormat(model);
+      response = await requestOpenAICompatibleTranscription({
+        filePath: input.filePath,
+        mimeType: input.mimeType,
+        apiKey: credentials.apiKey,
+        model,
+        baseUrl: credentials.baseUrl,
+        language: readStringEnv(OPENAI_TRANSCRIBE_LANGUAGE_ENV),
+        responseFormat,
+        chunkingStrategy: responseFormat === "diarized_json" ? "auto" : undefined,
+        authHeaderMode: readStringEnv(OPENAI_AUTH_HEADER_MODE_ENV)?.toLowerCase() === "raw" ? "raw" : "bearer",
+        timeoutMs: readPositiveNumberEnv(OPENAI_REQUEST_TIMEOUT_MS_ENV, DEFAULT_OPENAI_REQUEST_TIMEOUT_MS),
+        maxRetries: readNonNegativeNumberEnv(OPENAI_MAX_RETRIES_ENV, DEFAULT_OPENAI_MAX_RETRIES)
+      });
+    } catch (error) {
+      if (error instanceof OpenAICompatibleTranscriptionError) {
+        console.error(safeOpenAITranscriptionErrorLog(error));
+      }
+      throw error;
+    }
 
-    const response = await client.audio.transcriptions.create(request);
-
-    const segments = ((response as { segments?: DiarizedSegment[] }).segments ?? []).map((segment, index): TranscriptSegment =>
+    const segments = (response.segments ?? []).map((segment, index): TranscriptSegment =>
       classifySegment({
         id: `${input.uploadId}_seg_${index + 1}`,
         uploadId: input.uploadId,
@@ -446,8 +512,7 @@ export const openaiTranscriptionProvider: TranscriptionProvider = {
     );
 
     if (segments.length === 0) {
-      const text = (response as { text?: string }).text ?? "";
-      return buildSegmentsFromText(input, text);
+      return buildSegmentsFromText(input, response.text);
     }
 
     return segments;

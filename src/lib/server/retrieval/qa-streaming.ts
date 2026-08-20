@@ -13,7 +13,9 @@ export const QaStreamingFallbackReasonSchema = z.enum([
   "provider_stream_error",
   "provider_error",
   "provider_error_after_partial_stream",
+  "insufficient_evidence",
   "empty_answer",
+  "answer_too_long",
   "forbidden_relationship_output",
   "unsupported_answer",
   "missing_citations",
@@ -34,6 +36,16 @@ export const QaSentenceCommitDiagnosticsSchema = z.object({
 }).strict();
 
 export type QaSentenceCommitDiagnostics = z.infer<typeof QaSentenceCommitDiagnosticsSchema>;
+
+export const QaStreamingProviderMetricsSchema = z.object({
+  providerId: z.enum(["gpt-5.5", "qwen-vllm"]),
+  model: z.string().trim().min(1).max(256),
+  reasoningEnabled: z.boolean().nullable(),
+  outputTokenCount: z.number().int().nonnegative().nullable(),
+  totalTokenCount: z.number().int().nonnegative().nullable()
+}).strict();
+
+export type QaStreamingProviderMetrics = z.infer<typeof QaStreamingProviderMetricsSchema>;
 
 export const QaStreamingTraceSchema = z.object({
   version: z.literal(1),
@@ -61,7 +73,8 @@ export const QaStreamingTraceSchema = z.object({
   sentenceCount: z.number().int().nonnegative(),
   providerCallCount: z.number().int().nonnegative(),
   fallbackReason: QaStreamingFallbackReasonSchema.nullable(),
-  sentenceCommit: QaSentenceCommitDiagnosticsSchema.optional()
+  sentenceCommit: QaSentenceCommitDiagnosticsSchema.optional(),
+  providerMetrics: QaStreamingProviderMetricsSchema.optional()
 }).strict();
 
 export type QaStreamingTrace = z.infer<typeof QaStreamingTraceSchema>;
@@ -132,6 +145,7 @@ export type QaStreamingTraceRecorder = {
     providerCallCount: number;
     fallbackReason?: QaStreamingFallbackReason | null;
     sentenceCommit?: QaSentenceCommitDiagnostics;
+    providerMetrics?: QaStreamingProviderMetrics;
   }): QaStreamingTrace;
 };
 
@@ -231,7 +245,8 @@ export function createQaStreamingTraceRecorder(options: {
         sentenceCount: input.sentenceCount,
         providerCallCount: input.providerCallCount,
         fallbackReason: input.fallbackReason ?? null,
-        ...(input.sentenceCommit ? { sentenceCommit: input.sentenceCommit } : {})
+        ...(input.sentenceCommit ? { sentenceCommit: input.sentenceCommit } : {}),
+        ...(input.providerMetrics ? { providerMetrics: input.providerMetrics } : {})
       });
       return completedTrace;
     }
@@ -291,7 +306,12 @@ export function notifyQaStreamingTrace(
     missing_sentence_support: trace.sentenceCommit?.missingSentenceSupport ?? null,
     citation_metadata_mismatch: trace.sentenceCommit?.citationMetadataMismatch ?? null,
     response_not_fully_committable:
-      trace.sentenceCommit?.responseNotFullyCommittable ?? null
+      trace.sentenceCommit?.responseNotFullyCommittable ?? null,
+    provider_id: trace.providerMetrics?.providerId ?? null,
+    model: trace.providerMetrics?.model ?? null,
+    reasoning_enabled: trace.providerMetrics?.reasoningEnabled ?? null,
+    output_token_count: trace.providerMetrics?.outputTokenCount ?? null,
+    total_token_count: trace.providerMetrics?.totalTokenCount ?? null
   };
   try {
     logger.info(`QA_STREAM_TRACE: ${JSON.stringify(payload)}`);

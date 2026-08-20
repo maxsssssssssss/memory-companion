@@ -15,6 +15,7 @@ import {
 import { VoicePlayer } from "./voice-player";
 import { VoiceQAButton } from "./voice-qa-button";
 import { BrowserVoiceRecorder, type VoiceRecorderPort } from "./voice-recorder";
+import { BrowserRealtimeVoiceQa } from "./browser-realtime-voice-qa";
 import { VoiceSessionStatus, type BrowserVoiceQaState } from "./voice-session-status";
 
 type VoiceQaScope = "current" | "week" | "all";
@@ -56,7 +57,7 @@ type BrowserVoiceAudioQueueFactory = (
   options: VoiceAudioQueueOptions
 ) => BrowserVoiceAudioQueue;
 
-type BrowserVoiceQaProps = {
+export type BrowserVoiceQaProps = {
   answerMode?: BrowserVoiceAnswerMode;
   variant?: "card" | "composer";
   scope?: VoiceQaScope;
@@ -73,10 +74,12 @@ type BrowserVoiceQaProps = {
   recorderFactory?: () => VoiceRecorderPort;
   audioQueueFactory?: BrowserVoiceAudioQueueFactory;
   fetcher?: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
+  /** Development opt-in. Existing push-to-talk remains the fail-safe default. */
+  realtimeEnabled?: boolean;
 };
 
 const DEFAULT_MAX_RECORDING_MS = 60_000;
-const TRACE_TELEMETRY_MAX_ATTEMPTS = 3;
+const TRACE_TELEMETRY_MAX_ATTEMPTS = 6;
 const TRACE_TELEMETRY_RETRY_DELAY_MS = 150;
 const defaultVoiceQaFetcher = (input: RequestInfo | URL, init?: RequestInit) => fetch(input, init);
 const defaultAudioQueueFactory: BrowserVoiceAudioQueueFactory = (options) => (
@@ -152,7 +155,7 @@ function traceOutcomeForStream(status: BrowserVoiceStreamStatus): BrowserVoiceTr
   return "failed";
 }
 
-export function BrowserVoiceQa({
+function PushToTalkBrowserVoiceQa({
   answerMode = "agent",
   variant = "card",
   scope = "all",
@@ -247,7 +250,15 @@ export function BrowserVoiceQa({
               keepalive: true
             });
             if (response.ok) return;
-            const retryable = response.status === 408 || response.status === 429 || response.status >= 500;
+            // The first PCM chunk and its trace checkpoint are dispatched
+            // concurrently so persistence never blocks playback. A transient
+            // 409 means browser telemetry narrowly reached the trace endpoint
+            // before that checkpoint; retry it without delaying audio.
+            const retryable =
+              response.status === 408 ||
+              response.status === 429 ||
+              response.status >= 500 ||
+              (event === "playback_started" && response.status === 409);
             if (!retryable) return;
           } catch {
             // A transient network failure is retried below. Trace delivery must
@@ -742,4 +753,23 @@ export function BrowserVoiceQa({
       ) : null}
     </section>
   );
+}
+
+export function BrowserVoiceQa(props: BrowserVoiceQaProps) {
+  const configuredRealtime = props.realtimeEnabled ??
+    process.env.NEXT_PUBLIC_VOICE_REALTIME_ENABLED === "true";
+  const [realtimeUnavailable, setRealtimeUnavailable] = useState(false);
+  if (
+    configuredRealtime &&
+    !realtimeUnavailable &&
+    (props.answerMode ?? "agent") === "agent"
+  ) {
+    return (
+      <BrowserRealtimeVoiceQa
+        {...props}
+        onRealtimeUnavailable={() => setRealtimeUnavailable(true)}
+      />
+    );
+  }
+  return <PushToTalkBrowserVoiceQa {...props} />;
 }

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  acquireCanonicalSpeakerResult,
   buildStandaloneDiarizationSentences,
   DiarizationEvaluationInputError,
   evaluateCombinedDiarizationQualityGate,
@@ -9,6 +10,94 @@ import {
 } from "./voiceprint-diarization";
 
 describe("voiceprint diarization evaluation helpers", () => {
+  it("uses combined ASR speaker_result without calling fallback", async () => {
+    let fallbackCalls = 0;
+    const acquired = await acquireCanonicalSpeakerResult({
+      combinedPayload: {
+        data: {
+          speaker_result: [
+            { speaker: " speaker_0 ", text: " first speaker " },
+            { speaker: "speaker_1", text: "second speaker" }
+          ]
+        }
+      },
+      requestFallback: async () => {
+        fallbackCalls += 1;
+        return { data: { result: [] } };
+      }
+    });
+
+    expect(fallbackCalls).toBe(0);
+    expect(acquired).toEqual({
+      diarizationSource: "combined_asr",
+      speakerResultAvailable: true,
+      voiceprintStage: "executed",
+      canonical: {
+        speaker_result: [
+          { speaker: "speaker_0", text: "first speaker" },
+          { speaker: "speaker_1", text: "second speaker" }
+        ]
+      }
+    });
+  });
+
+  it("falls back to standalone diarization and canonicalizes data.result", async () => {
+    let fallbackCalls = 0;
+    const acquired = await acquireCanonicalSpeakerResult({
+      combinedPayload: {
+        data: {
+          asr_result: {
+            sentences: [{ text: "private transcript" }]
+          }
+        }
+      },
+      requestFallback: async () => {
+        fallbackCalls += 1;
+        return {
+          data: {
+            result: [
+              { speaker: "speaker_0", text: "first speaker" },
+              { speaker: "speaker_1", text: "second speaker" }
+            ]
+          }
+        };
+      }
+    });
+
+    expect(fallbackCalls).toBe(1);
+    expect(acquired).toEqual({
+      diarizationSource: "fallback_diarization_api",
+      speakerResultAvailable: true,
+      voiceprintStage: "executed",
+      canonical: {
+        speaker_result: [
+          { speaker: "speaker_0", text: "first speaker" },
+          { speaker: "speaker_1", text: "second speaker" }
+        ]
+      }
+    });
+  });
+
+  it("blocks Voiceprint when combined and fallback have no speaker_result", async () => {
+    let fallbackCalls = 0;
+    const acquired = await acquireCanonicalSpeakerResult({
+      combinedPayload: { data: { asr_result: { sentences: [] } } },
+      requestFallback: async () => {
+        fallbackCalls += 1;
+        return { data: { result: [] } };
+      }
+    });
+
+    expect(fallbackCalls).toBe(1);
+    expect(acquired).toEqual({
+      diarizationSource: "fallback_diarization_api",
+      speakerResultAvailable: false,
+      voiceprintStage: "blocked",
+      failureReason: "diarization_gate_missing_speaker_result",
+      canonical: { speaker_result: [] }
+    });
+  });
+
   it("parses and deduplicates combined ASR speaker labels", () => {
     expect(parseCombinedAsrSpeakerLabels({
       data: {

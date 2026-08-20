@@ -27,6 +27,13 @@ export type StreamingVoiceExpectedOutcome =
   | "safe_fallback"
   | "aborted";
 export type StreamingVoiceObservedOutcome = StreamingVoiceExpectedOutcome | "unexpected";
+export type StreamingVoiceFailureClass =
+  | "preflight_rejected"
+  | "local_runtime_unavailable"
+  | "authentication_failed"
+  | "voice_request_failed"
+  | "terminal_state_timeout"
+  | "unexpected_failure";
 
 export const STREAMING_VOICE_EXPECTED_OUTCOMES = {
   single: "streaming_success",
@@ -46,7 +53,7 @@ export type StreamingVoiceE2eOptions = {
   audio: Record<EvaluationScenario, string>;
 };
 
-type QaStreamLog = {
+export type QaStreamLog = {
   observed: boolean;
   status?: string;
   firstTokenMs?: number | null;
@@ -56,6 +63,11 @@ type QaStreamLog = {
   sentenceCount?: number;
   providerCallCount?: number;
   fallbackReasonPresent?: boolean;
+  providerId?: "gpt-5.5" | "qwen-vllm";
+  model?: string;
+  reasoningEnabled?: boolean | null;
+  outputTokenCount?: number | null;
+  totalTokenCount?: number | null;
 };
 
 type BrowserTelemetry = {
@@ -79,7 +91,12 @@ export type StreamingVoiceOutcomeSnapshot = {
     timestamps: {
       playback_started?: string;
       audio_play_started?: string;
+      qa_provider_stream_complete?: string;
+      tts_stream_complete?: string;
       stream_completed?: string;
+      tts_partial_audio_failure?: string;
+      fallback_audio_complete?: string;
+      transport_complete_written?: string;
       session_completed?: string;
     };
   } | null;
@@ -91,6 +108,30 @@ export type StreamingVoiceOutcomeSnapshot = {
   };
   cancelled?: boolean;
   voiceSessionState?: VoiceSessionState | null;
+};
+
+export type VoiceFastModelMetric = {
+  scenario: Exclude<EvaluationScenario, "cancel">;
+  model: string;
+  provider: string;
+  reasoning_enabled: boolean | null;
+  TTFT: number | null;
+  first_sentence_ms: number | null;
+  tts_start_ms: number | null;
+  first_audio_ms: number | null;
+  complete_ms: number | null;
+  total_generation_ms: number | null;
+  token_count: number | null;
+  stream_chunk_count: number | null;
+  retrieval_ms: number | null;
+  llm_ttft_ms: number | null;
+  sentence_commit_wait_ms: number | null;
+  tts_request_latency_ms: number | null;
+  tts_first_audio_ms: number | null;
+  browser_buffer_ms: number | null;
+  first_audio_total_ms: number | null;
+  citation_count: number;
+  citation_valid: boolean;
 };
 
 export type SanitizedStreamSummary = {
@@ -144,16 +185,29 @@ const REQUIRED_PROVIDER_ENV = [
 const TRACE_EVENTS = [
   "speech_ended",
   "asr_final_received",
+  "voice_question_received",
+  "retrieval_complete",
+  "llm_first_token",
+  "qa_provider_stream_complete",
   "qa_started",
   "qa_completed",
   "first_sentence_committed",
+  "sentence_commit",
   "first_safe_sentence",
   "tts_stream_started",
+  "tts_request_start",
   "first_audio_chunk_received",
+  "tts_first_audio_chunk",
   "playback_started",
+  "browser_playback_start",
   "audio_play_started",
+  "tts_stream_complete",
   "stream_completed",
-  "session_completed"
+  "tts_partial_audio_failure",
+  "fallback_audio_complete",
+  "transport_complete_written",
+  "session_completed",
+  "complete"
 ] as const;
 const CITATION_MARKER_PATTERN = /(?:\[(?:E|S)\d+\]|【(?:E|S)\d+】)/iu;
 const UNCERTAINTY_PATTERN = /(?:目前|暂时|尚未|未确认|不确定|没有(?:找到|足够)?证据|无法确认|不能确认|还不能确认|当前未知)/u;
@@ -295,6 +349,25 @@ function sha256(value: string | Uint8Array) {
   return createHash("sha256").update(value).digest("hex");
 }
 
+export function classifyStreamingVoiceFailure(error: unknown): StreamingVoiceFailureClass {
+  const message = error instanceof Error ? error.message : "";
+  if (
+    /RUN_STREAMING_VOICE_REMOTE_VERIFY|EVALUATION_MODE=true|Missing required environment|VOICE_PROVIDER must/u
+      .test(message)
+  ) {
+    return "preflight_rejected";
+  }
+  if (/local_next_server_start_timeout|EADDRINUSE|port/iu.test(message)) {
+    return "local_runtime_unavailable";
+  }
+  if (/test_account_login_failed|authenticated_test_user_id_missing/u.test(message)) {
+    return "authentication_failed";
+  }
+  if (/voice_qa_http_/u.test(message)) return "voice_request_failed";
+  if (/timeout/iu.test(message)) return "terminal_state_timeout";
+  return "unexpected_failure";
+}
+
 function sentenceCount(text: string) {
   return text.split(/[。！？!?]+/u).map((value) => value.trim()).filter(Boolean).length;
 }
@@ -411,6 +484,7 @@ export function summarizeVoiceTrace(trace: VoiceSessionTrace) {
     timestamps,
     latencies: trace.latencies,
     streamingLatencies: trace.streamingLatencies ?? null,
+    latencySegments: trace.latencySegments ?? null,
     failureCount: trace.failures.length
   };
 }
@@ -441,7 +515,9 @@ export function classifyStreamingVoiceOutcome(
     !qaStreamTrace.fallbackReasonPresent &&
     trace?.status === "completed" &&
     Boolean(trace.timestamps.playback_started) &&
-    Boolean(trace.timestamps.stream_completed) &&
+    Boolean(trace.timestamps.tts_stream_complete ?? trace.timestamps.stream_completed) &&
+    !trace.timestamps.tts_partial_audio_failure &&
+    Boolean(trace.timestamps.transport_complete_written) &&
     input.browserOutcome === "completed"
   ) {
     return "streaming_success";
@@ -449,14 +525,26 @@ export function classifyStreamingVoiceOutcome(
   if (
     response?.status === "completed" &&
     response.answerPresent &&
-    response.audioChunkCount === 0 &&
     response.chunkOrderingValid &&
-    response.fallbackAudioPresent &&
+    (
+      (
+        response.audioChunkCount > 0 &&
+        !response.fallbackAudioPresent &&
+        Boolean(trace?.timestamps.tts_stream_complete ?? trace?.timestamps.stream_completed)
+      ) ||
+      (
+        response.audioChunkCount === 0 &&
+        response.fallbackAudioPresent &&
+        Boolean(trace?.timestamps.fallback_audio_complete)
+      )
+    ) &&
     qaStreamTrace?.observed === true &&
     qaStreamTrace.status === "completed_with_fallback" &&
     qaStreamTrace.fallbackReasonPresent === true &&
     trace?.status === "completed" &&
-    Boolean(trace.timestamps.audio_play_started) &&
+    Boolean(trace.timestamps.playback_started ?? trace.timestamps.audio_play_started) &&
+    !trace.timestamps.tts_partial_audio_failure &&
+    Boolean(trace.timestamps.transport_complete_written) &&
     input.browserOutcome === "completed"
   ) {
     return "safe_fallback";
@@ -481,6 +569,11 @@ export function parseQaStreamTraceLine(line: string): QaStreamLog | null {
     const numberOrNull = (key: string) => typeof value[key] === "number" || value[key] === null
       ? value[key] as number | null
       : undefined;
+    const model = typeof value.model === "string" &&
+      value.model.length <= 160 &&
+      /^[A-Za-z0-9._:/+-]+$/u.test(value.model)
+      ? value.model
+      : undefined;
     return {
       observed: true,
       ...(typeof value.status === "string" ? { status: value.status } : {}),
@@ -490,7 +583,20 @@ export function parseQaStreamTraceLine(line: string): QaStreamLog | null {
       ...(typeof value.token_chunk_count === "number" ? { tokenChunkCount: value.token_chunk_count } : {}),
       ...(typeof value.sentence_count === "number" ? { sentenceCount: value.sentence_count } : {}),
       ...(typeof value.provider_call_count === "number" ? { providerCallCount: value.provider_call_count } : {}),
-      fallbackReasonPresent: value.fallback_reason !== null && value.fallback_reason !== undefined
+      fallbackReasonPresent: value.fallback_reason !== null && value.fallback_reason !== undefined,
+      ...(value.provider_id === "gpt-5.5" || value.provider_id === "qwen-vllm"
+        ? { providerId: value.provider_id }
+        : {}),
+      ...(model ? { model } : {}),
+      ...(typeof value.reasoning_enabled === "boolean" || value.reasoning_enabled === null
+        ? { reasoningEnabled: value.reasoning_enabled as boolean | null }
+        : {}),
+      ...(numberOrNull("output_token_count") !== undefined
+        ? { outputTokenCount: numberOrNull("output_token_count") }
+        : {}),
+      ...(numberOrNull("total_token_count") !== undefined
+        ? { totalTokenCount: numberOrNull("total_token_count") }
+        : {})
     };
   } catch {
     return null;
@@ -520,13 +626,18 @@ async function assertPortAvailable(port: number) {
   });
 }
 
-function startNext(port: number, dataDir: string, observer: ServerObserver) {
+function startNext(
+  port: number,
+  dataDir: string,
+  observer: ServerObserver,
+  environment: NodeJS.ProcessEnv
+) {
   const child = spawn(
     process.execPath,
     ["node_modules/next/dist/bin/next", "dev", "-p", String(port)],
     {
       cwd: process.cwd(),
-      env: { ...process.env, APP_DATA_DIR: dataDir },
+      env: { ...environment, APP_DATA_DIR: dataDir },
       windowsHide: true,
       stdio: ["ignore", "pipe", "pipe"]
     }
@@ -736,6 +847,27 @@ async function launchScenarioPage(input: {
   });
   const context = await browser.newContext();
   await context.grantPermissions(["microphone"], { origin: input.baseUrl });
+  await context.addInitScript(() => {
+    const captureWindow = globalThis as typeof globalThis & {
+      __voiceQaCapturedResponses?: string[];
+    };
+    captureWindow.__voiceQaCapturedResponses = [];
+    const originalFetch = globalThis.fetch.bind(globalThis);
+    globalThis.fetch = async (...args: Parameters<typeof fetch>) => {
+      const response = await originalFetch(...args);
+      try {
+        const requestUrl = args[0] instanceof Request ? args[0].url : String(args[0]);
+        if (new URL(requestUrl, globalThis.location.href).pathname === "/api/voice/qa") {
+          void response.clone().text().then((raw) => {
+            captureWindow.__voiceQaCapturedResponses?.push(raw);
+          }).catch(() => undefined);
+        }
+      } catch {
+        // Response capture is benchmark-only and must never affect the application fetch.
+      }
+      return response;
+    };
+  });
   if (input.legacy) {
     await context.addInitScript(() => {
       Object.defineProperty(globalThis, "AudioContext", { value: undefined, configurable: true });
@@ -749,6 +881,25 @@ async function launchScenarioPage(input: {
   await page.waitForFunction(() => document.querySelectorAll("button.nav-btn").length === 3);
   const panel = await openVoicePanel(page, input.scope, input.answerMode);
   return { browser, page, telemetry, userId, ...panel };
+}
+
+async function capturedVoiceQaResponse(page: Page, timeoutMs: number) {
+  await page.waitForFunction(
+    () => {
+      const captureWindow = globalThis as typeof globalThis & {
+        __voiceQaCapturedResponses?: string[];
+      };
+      return (captureWindow.__voiceQaCapturedResponses?.length ?? 0) > 0;
+    },
+    undefined,
+    { timeout: timeoutMs }
+  );
+  return page.evaluate(() => {
+    const captureWindow = globalThis as typeof globalThis & {
+      __voiceQaCapturedResponses?: string[];
+    };
+    return captureWindow.__voiceQaCapturedResponses?.pop() ?? "";
+  });
 }
 
 async function runCompletedScenario(input: {
@@ -777,15 +928,16 @@ async function runCompletedScenario(input: {
     await runtime.button.click();
     await runtime.panel.locator(".voice-qa-button-listening").waitFor({ state: "visible" });
     await runtime.page.waitForTimeout(input.audioDurationMs + 250);
-    const responsePromise = runtime.page.waitForResponse(voiceQaResponse, { timeout: input.options.timeoutMs });
-    await runtime.button.click();
-    const response = await responsePromise;
+    const [response] = await Promise.all([
+      runtime.page.waitForResponse(voiceQaResponse, { timeout: input.options.timeoutMs }),
+      runtime.button.click({ force: true })
+    ]);
     if (!response.ok()) throw new Error(`voice_qa_http_${response.status()}`);
     await runtime.panel.locator(".voice-qa-button-idle").waitFor({
       state: "visible",
       timeout: input.options.timeoutMs
     });
-    const raw = (await response.body()).toString("utf8");
+    const raw = await capturedVoiceQaResponse(runtime.page, input.options.timeoutMs);
     const responseSummary = input.legacy
       ? summarizeLegacyVoiceResponse(raw)
       : summarizeVoiceNdjson(raw);
@@ -833,11 +985,12 @@ async function runCancellationScenario(input: {
     await runtime.button.click();
     await runtime.panel.locator(".voice-qa-button-listening").waitFor({ state: "visible" });
     await runtime.page.waitForTimeout(input.audioDurationMs + 250);
-    const responsePromise = runtime.page.waitForResponse(voiceQaResponse, {
-      timeout: input.options.timeoutMs
-    });
-    await runtime.button.click();
-    await responsePromise;
+    await Promise.all([
+      runtime.page.waitForResponse(voiceQaResponse, {
+        timeout: input.options.timeoutMs
+      }),
+      runtime.button.click({ force: true })
+    ]);
     const cancel = runtime.panel.locator("button.voice-qa-button");
     await cancel.waitFor({ state: "visible", timeout: input.options.timeoutMs });
     // Give the component one bounded turn to consume the leading NDJSON meta
@@ -962,7 +1115,10 @@ function buildAssertions(input: {
       .every((value) => stream(value).audioChunkCount > 0 && stream(value).chunkOrderingValid),
     streamingPlaybackStarted: expectedStreaming
       .every((value) => Boolean(value.trace.timestamps.playback_started)),
-    safeFallbackPlaybackStarted: Boolean(input.uncertainty.trace.timestamps.audio_play_started),
+    safeFallbackPlaybackStarted: Boolean(
+      input.uncertainty.trace.timestamps.playback_started ??
+      input.uncertainty.trace.timestamps.audio_play_started
+    ),
     legacyPlaybackStarted: Boolean(input.legacy.trace.timestamps.audio_play_started),
     legacyResponseAvailable: legacy.answerPresent && legacy.audioPresent,
     userCancellation: input.cancel.cancelled,
@@ -970,6 +1126,58 @@ function buildAssertions(input: {
     evidenceCitationsPresent: [input.single, input.multi, input.uncertainty]
       .every((value) => stream(value).citationCount > 0),
     expectedOutcomesMatched: Object.values(outcomes).every((outcome) => outcome.outcomeMatched)
+  };
+}
+
+function timestampDurationMs(start: string | undefined, end: string | undefined) {
+  if (!start || !end) return null;
+  const duration = Date.parse(end) - Date.parse(start);
+  return Number.isFinite(duration) && duration >= 0 ? duration : null;
+}
+
+export function observedVoiceModelIdentity(qa: QaStreamLog) {
+  return {
+    provider: qa.providerId ?? "unknown",
+    model: qa.model ?? "unknown",
+    reasoningEnabled: qa.reasoningEnabled ?? null
+  };
+}
+
+function voiceFastModelMetric(
+  scenario: Exclude<EvaluationScenario, "cancel">,
+  value: Awaited<ReturnType<typeof runCompletedScenario>>
+): VoiceFastModelMetric {
+  const response = value.response as SanitizedStreamSummary | SanitizedLegacySummary;
+  const timestamps = value.trace.timestamps;
+  const qa = value.qaStreamTrace;
+  const identity = observedVoiceModelIdentity(qa);
+  const playback = timestamps.playback_started ?? timestamps.audio_play_started;
+  return {
+    scenario,
+    model: identity.model,
+    provider: identity.provider,
+    reasoning_enabled: identity.reasoningEnabled,
+    TTFT: qa.firstTokenMs ?? null,
+    first_sentence_ms: qa.firstSentenceMs ??
+      timestampDurationMs(timestamps.qa_started, timestamps.first_sentence_committed),
+    tts_start_ms: timestampDurationMs(timestamps.qa_started, timestamps.tts_stream_started),
+    first_audio_ms: timestampDurationMs(timestamps.qa_started, playback),
+    complete_ms: timestampDurationMs(timestamps.qa_started, timestamps.session_completed),
+    total_generation_ms: qa.totalStreamMs ?? null,
+    token_count: qa.outputTokenCount ?? null,
+    stream_chunk_count: qa.tokenChunkCount ?? null,
+    retrieval_ms: value.trace.latencySegments?.retrieval_ms ?? null,
+    llm_ttft_ms: value.trace.latencySegments?.llm_ttft_ms ?? null,
+    sentence_commit_wait_ms:
+      value.trace.latencySegments?.sentence_commit_wait_ms ?? null,
+    tts_request_latency_ms:
+      value.trace.latencySegments?.tts_request_latency_ms ?? null,
+    tts_first_audio_ms: value.trace.latencySegments?.tts_first_audio_ms ?? null,
+    browser_buffer_ms: value.trace.latencySegments?.browser_buffer_ms ?? null,
+    first_audio_total_ms:
+      value.trace.latencySegments?.first_audio_total_ms ?? null,
+    citation_count: response.citationCount,
+    citation_valid: response.citationCount > 0 && response.citationMarkersRemoved
   };
 }
 
@@ -988,7 +1196,10 @@ export async function runStreamingVoiceE2e(
   )) as Record<EvaluationScenario, Awaited<ReturnType<typeof inspectAudio>>>;
 
   const observer = new ServerObserver();
-  const server = startNext(options.port, options.dataDir, observer);
+  const server = startNext(options.port, options.dataDir, observer, {
+    ...environment,
+    QA_PROVIDER_USAGE_METRICS: "1"
+  });
   const baseUrl = `http://127.0.0.1:${options.port}`;
   const email = environment.LONG_RECORDING_EVAL_EMAIL!;
   const password = environment.LONG_RECORDING_EVAL_PASSWORD!;
@@ -1039,6 +1250,11 @@ export async function runStreamingVoiceE2e(
       { single, multi, uncertainty, legacy, cancel },
       outcomes
     );
+    const benchmarkMetrics = [
+      voiceFastModelMetric("single_sentence", single),
+      voiceFastModelMetric("multi_sentence", multi),
+      voiceFastModelMetric("uncertainty", uncertainty)
+    ];
     const pass = Object.values(assertions).every(Boolean);
     const streamingFirstPlay = single.trace.streamingLatencies?.speechToFirstAudioPlayMs ?? null;
     const legacyFirstPlay = legacy.trace.latencies.totalResponseLatencyMs;
@@ -1057,6 +1273,7 @@ export async function runStreamingVoiceE2e(
         durationMs: value.durationMs
       }])),
       scenarios: { single, multi, uncertainty, legacy, cancel },
+      benchmarkMetrics,
       outcomes,
       comparison: {
         streamingSpeechEndToPlaybackMs: streamingFirstPlay,
@@ -1080,7 +1297,7 @@ export async function runStreamingVoiceE2e(
     await writeFile(options.reportPath, `${JSON.stringify(report, null, 2)}\n`, { encoding: "utf8", flag: "wx" });
     process.stdout.write(`${JSON.stringify({
       pass,
-      reportPath: options.reportPath,
+      reportFileNameSha256: sha256(basename(options.reportPath)),
       streamingSpeechEndToPlaybackMs: streamingFirstPlay,
       legacySpeechEndToPlaybackMs: legacyFirstPlay
     }, null, 2)}\n`);
@@ -1100,8 +1317,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1]
       await runStreamingVoiceE2e(process.argv.slice(2));
     } catch (error) {
       console.error(
-        `[streaming-voice-e2e] failed error_name=${error instanceof Error ? error.name : "unknown"} ` +
-        `error_message=${JSON.stringify(error instanceof Error ? error.message : "unknown")}`
+        `[streaming-voice-e2e] failed failure_class=${classifyStreamingVoiceFailure(error)}`
       );
       process.exitCode = 1;
     }

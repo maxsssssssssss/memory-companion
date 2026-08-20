@@ -189,3 +189,21 @@ export function buildRelationshipSignalEvidence(input: {
     .sort((left, right) => right.priority - left.priority || left.startSeconds - right.startSeconds || left.id.localeCompare(right.id))
     .slice(0, MAX_RELATIONSHIP_SIGNAL_EVIDENCE);
 }
+
+/**
+ * Materializes every individually valid relationship card for offline
+ * embedding. Query-time QA still applies the normal intent gate and Top-4
+ * selection through buildRelationshipSignalEvidence.
+ */
+export function buildRelationshipSignalEvidenceCorpus(input: {
+  cards?: RelationshipSignalCard[];
+  segments: TranscriptSegment[];
+}): RelationshipSignalEvidenceItem[] {
+  return (input.cards ?? []).flatMap((card) =>
+    buildRelationshipSignalEvidence({
+      question: "relationship signal",
+      cards: [card],
+      segments: input.segments
+    })
+  );
+}

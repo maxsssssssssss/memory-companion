@@ -3,6 +3,11 @@ import type {
   QaAnswerMode,
   QaExecutionDiagnostics
 } from "@/lib/server/retrieval/qa-observability";
+import type {
+  QaExecutionMilestone,
+  QaRetrievedEvidence,
+  VoiceQaShadowReviewContext
+} from "@/lib/server/retrieval/ai-qa";
 import type { QaAnswerStreamEvent } from "@/lib/server/retrieval/qa-streaming";
 
 export type VoiceQaSessionState =
@@ -22,15 +27,31 @@ export type VoiceQaConversationMessage = {
 export type VoiceQARequest = {
   sessionId: string;
   transcript: string;
+  /** Internal turn cancellation; never accepted from the public Voice form. */
+  signal?: AbortSignal;
   userId?: string;
   scope?: "current" | "week" | "all";
   uploadId?: string;
   conversation?: VoiceQaConversationMessage[];
   mode?: VoiceQaResponseMode;
+  /** Internal trace identifier; it is not accepted from the public Voice form. */
+  traceId?: string;
+  /**
+   * Internal mutable review state shared by every QA path for the same Voice
+   * turn. It must never affect the public answer, citation, or TTS contracts.
+   */
+  shadowReviewContext?: VoiceQaShadowReviewContext;
   /** Internal observer; it never changes retrieval ranking or the public QA shape. */
   onRetrievedMemoryIds?: (memoryIds: string[]) => void;
   /** Internal, content-free execution diagnostics for observability only. */
   onQaDiagnostics?: (diagnostics: QaExecutionDiagnostics) => void;
+  /** Internal, content-free real-time QA milestones for Voice latency tracing. */
+  onQaMilestone?: (milestone: QaExecutionMilestone) => void;
+  /** Internal canonical Evidence observer used by the realtime RAG shadow only. */
+  onRetrievedEvidence?: (
+    evidence: QaRetrievedEvidence[],
+    retrievalMs: number
+  ) => unknown;
   /**
    * Internal safe-stream observer. Raw token events are never forwarded; the
    * adapter releases each independently grounded sentence as soon as Sentence

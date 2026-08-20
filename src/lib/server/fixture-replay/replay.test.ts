@@ -46,11 +46,18 @@ describe("memory fixture replay", () => {
     expect(first.report.must.filter((assertion) => !assertion.pass)).toEqual([]);
     expect(first.report.mustNotViolations).toEqual([]);
     expect(first.report.pass).toBe(true);
+    expect(new Set(
+      first.report.dayByDay.flatMap((day) => day.addedMemoryIds)
+    ).size).toBeGreaterThan(0);
+    expect(first.report.memoryEvidence.length).toBeGreaterThan(0);
     expect(second.report.deterministicDigest).toBe(first.report.deterministicDigest);
     expect(stored.deterministicDigest).toBe(second.report.deterministicDigest);
     expect(second.report.scopeChecks.current.isolated).toBe(true);
     expect(second.report.scopeChecks.week.range).toEqual({ start: "2026-07-06", end: "2026-07-12" });
-    expect(second.report.scopeChecks.all.dates).toEqual(expect.arrayContaining(["2026-06-29", "2026-07-12"]));
+    expect(second.report.scopeChecks.all.dates).toEqual(
+      expect.arrayContaining(["2026-06-29", "2026-07-09", "2026-07-12"])
+    );
+    expect(second.report.scopeChecks.all.dates).not.toContain("2026-07-11");
     expect(second.report.memoryEvidence.every((evidence) => evidence.sourceId.startsWith("fixture_") || evidence.sourceId.includes("fixture_"))).toBe(true);
   }, 30_000);
 });

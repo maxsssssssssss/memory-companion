@@ -5,8 +5,10 @@ import { describe, expect, it } from "vitest";
 import {
   assertEvaluationReportPath,
   assertStreamingVoiceRemoteEnvironment,
+  classifyStreamingVoiceFailure,
   classifyStreamingVoiceOutcome,
   matchesStreamingVoiceExpectedOutcome,
+  observedVoiceModelIdentity,
   parseQaStreamTraceLine,
   parseStreamingVoiceE2eArgs,
   summarizeLegacyVoiceResponse,
@@ -18,6 +20,21 @@ const BASE_ENV = {
 };
 
 describe("streaming voice E2E evaluation harness", () => {
+  it("classifies failures without returning error bodies, paths, or secrets", () => {
+    const classified = classifyStreamingVoiceFailure(
+      new Error(`${["C:", "private", "token.txt"].join("\\")} contains secret-value`)
+    );
+    expect(classified).toBe("unexpected_failure");
+    expect(classified).not.toContain("private");
+    expect(classified).not.toContain("secret-value");
+    expect(classifyStreamingVoiceFailure(
+      new Error("RUN_STREAMING_VOICE_REMOTE_VERIFY=1 is required")
+    )).toBe("preflight_rejected");
+    expect(classifyStreamingVoiceFailure(
+      new Error("voice_trace_terminal_state_timeout")
+    )).toBe("terminal_state_timeout");
+  });
+
   it("is fail-closed unless remote evaluation is explicitly enabled", () => {
     expect(() => assertStreamingVoiceRemoteEnvironment({})).toThrow(
       "RUN_STREAMING_VOICE_REMOTE_VERIFY=1"
@@ -177,7 +194,9 @@ describe("streaming voice E2E evaluation harness", () => {
     expect(parseQaStreamTraceLine(
       'QA_STREAM_TRACE: {"stream_id":"private","status":"completed","first_token_ms":120,' +
       '"first_sentence_ms":650,"total_stream_ms":2200,"token_chunk_count":20,' +
-      '"sentence_count":2,"provider_call_count":1,"fallback_reason":null}'
+      '"sentence_count":2,"provider_call_count":1,"fallback_reason":null,' +
+      '"provider_id":"qwen-vllm","model":"Qwen/Qwen3.6-27B",' +
+      '"reasoning_enabled":false,"output_token_count":17,"total_token_count":93}'
     )).toEqual({
       observed: true,
       status: "completed",
@@ -187,7 +206,28 @@ describe("streaming voice E2E evaluation harness", () => {
       tokenChunkCount: 20,
       sentenceCount: 2,
       providerCallCount: 1,
+      fallbackReasonPresent: false,
+      providerId: "qwen-vllm",
+      model: "Qwen/Qwen3.6-27B",
+      reasoningEnabled: false,
+      outputTokenCount: 17,
+      totalTokenCount: 93
+    });
+
+    expect(parseQaStreamTraceLine(
+      'QA_STREAM_TRACE: {"status":"completed","model":"private answer text"}'
+    )).toEqual({
+      observed: true,
+      status: "completed",
+      firstTokenMs: undefined,
+      firstSentenceMs: undefined,
+      totalStreamMs: undefined,
       fallbackReasonPresent: false
+    });
+    expect(observedVoiceModelIdentity({ observed: true })).toEqual({
+      provider: "unknown",
+      model: "unknown",
+      reasoningEnabled: null
     });
   });
 
@@ -204,7 +244,9 @@ describe("streaming voice E2E evaluation harness", () => {
         status: "completed",
         timestamps: {
           playback_started: "2026-07-23T00:00:01.000Z",
+          tts_stream_complete: "2026-07-23T00:00:02.000Z",
           stream_completed: "2026-07-23T00:00:02.000Z",
+          transport_complete_written: "2026-07-23T00:00:02.500Z",
           session_completed: "2026-07-23T00:00:03.000Z"
         }
       },
@@ -222,6 +264,16 @@ describe("streaming voice E2E evaluation harness", () => {
       ...snapshot,
       response: { ...snapshot.response, chunkOrderingValid: false }
     })).toBe("unexpected");
+    expect(classifyStreamingVoiceOutcome({
+      ...snapshot,
+      trace: {
+        ...snapshot.trace,
+        timestamps: {
+          ...snapshot.trace.timestamps,
+          tts_partial_audio_failure: "2026-07-23T00:00:02.250Z"
+        }
+      }
+    })).toBe("unexpected");
   });
 
   it("accepts a grounded uncertainty response as safe_fallback without requiring streamed audio", () => {
@@ -237,6 +289,8 @@ describe("streaming voice E2E evaluation harness", () => {
         status: "completed",
         timestamps: {
           audio_play_started: "2026-07-23T00:00:01.000Z",
+          fallback_audio_complete: "2026-07-23T00:00:01.500Z",
+          transport_complete_written: "2026-07-23T00:00:01.750Z",
           session_completed: "2026-07-23T00:00:02.000Z"
         }
       },
@@ -258,6 +312,36 @@ describe("streaming voice E2E evaluation harness", () => {
       ...snapshot,
       qaStreamTrace: { ...snapshot.qaStreamTrace, fallbackReasonPresent: false }
     })).toBe("unexpected");
+  });
+
+  it("accepts a final uncertainty projection streamed after QA fallback", () => {
+    const snapshot = {
+      response: {
+        status: "completed",
+        answerPresent: true,
+        audioChunkCount: 2,
+        chunkOrderingValid: true,
+        fallbackAudioPresent: false
+      },
+      trace: {
+        status: "completed",
+        timestamps: {
+          playback_started: "2026-07-23T00:00:01.000Z",
+          tts_stream_complete: "2026-07-23T00:00:02.000Z",
+          transport_complete_written: "2026-07-23T00:00:02.100Z",
+          session_completed: "2026-07-23T00:00:03.000Z"
+        }
+      },
+      browserOutcome: "completed",
+      qaStreamTrace: {
+        observed: true,
+        status: "completed_with_fallback",
+        fallbackReasonPresent: true
+      }
+    };
+
+    expect(classifyStreamingVoiceOutcome(snapshot)).toBe("safe_fallback");
+    expect(matchesStreamingVoiceExpectedOutcome("safe_fallback", snapshot)).toBe(true);
   });
 
   it("requires both aborted telemetry and an IDLE VoiceSession", () => {

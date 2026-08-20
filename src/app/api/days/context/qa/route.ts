@@ -117,6 +117,7 @@ export async function POST(request: Request) {
   }
 
   const qaInput: AnswerQuestionWithAIInput = {
+    userId: authContext.user.id,
     uploadId,
     question,
     scope,

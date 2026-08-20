@@ -69,4 +69,27 @@ describe("parseVoiceBrowserNdjsonStream", () => {
     await expect(consume()).rejects.toBeInstanceOf(VoiceBrowserStreamProtocolError);
     expect(cancelled).toBe(true);
   });
+
+  it("rejects a clean EOF without complete and any event after complete", async () => {
+    const withoutComplete = async () => {
+      for await (const _event of parseVoiceBrowserNdjsonStream(streamOf([
+        '{"type":"meta","version":1,"conversationSessionId":"conversation_1",' +
+          '"traceId":"11111111-1111-4111-8111-111111111111",' +
+          '"audio":{"format":"pcm_s16le","sampleRate":24000,"channels":1}}\n'
+      ]))) {
+        // Consume the stream.
+      }
+    };
+    await expect(withoutComplete()).rejects.toThrow(/without a terminal completion/u);
+
+    const afterComplete = async () => {
+      for await (const _event of parseVoiceBrowserNdjsonStream(streamOf([
+        '{"type":"complete","status":"completed","errors":[]}\n',
+        '{"type":"complete","status":"completed","errors":[]}\n'
+      ]))) {
+        // Consume the stream.
+      }
+    };
+    await expect(afterComplete()).rejects.toThrow(/after its terminal completion/u);
+  });
 });

@@ -1,38 +1,57 @@
 import { randomUUID } from "crypto";
+import { z } from "zod";
 import type { TranscriptSegment } from "@/lib/domain/types";
 import { classifySegment } from "@/lib/processing/classifier";
+import {
+  createTranscriptionAudioAccessCapability,
+  DAILY_REFLECTION_AUDIO_CAPABILITY_SECRET_ENV,
+  getDailyReflectionAudioCapabilitySecret,
+  TRANSCRIPTION_AUDIO_ACCESS_PURPOSE,
+  TRANSCRIPTION_AUDIO_ACCESS_TTL_SECONDS
+} from "./audio-access-capability";
 import { ChunkTranscriptionError, type ChunkTranscriptionAdapter } from "./chunks/adapter";
 import { createTranscriptChunkFromLocalSegments } from "./chunks/transcript-merge";
-import type { TranscriptionProvider } from "./provider";
+import type { AudioAccessPolicy, TranscriptionProvider } from "./provider";
 
-type SpeakerAsrSubmitResponse = {
-  code?: number;
-  message?: string;
-  data?: SpeakerAsrResultData;
-};
+const SpeakerAsrTimestampPointSchema = z.object({
+  start: z.number().finite().nullable().optional(),
+  end: z.number().finite().nullable().optional()
+}).passthrough();
 
+const SpeakerAsrSentenceSchema = z.object({
+  text: z.string().nullable().optional(),
+  timestamp: z.array(SpeakerAsrTimestampPointSchema).nullable().optional(),
+  timestamps: z.union([
+    z.array(SpeakerAsrTimestampPointSchema),
+    SpeakerAsrTimestampPointSchema
+  ]).nullable().optional(),
+  language: z.string().nullable().optional(),
+  emotion: z.string().nullable().optional(),
+  event: z.string().nullable().optional()
+}).passthrough();
+
+const SpeakerAsrResultDataSchema = z.object({
+  asr_result: z.object({
+    detected_language: z.string().nullable().optional(),
+    total_sentences: z.number().int().nonnegative().nullable().optional(),
+    sentences: z.array(SpeakerAsrSentenceSchema).nullable().optional()
+  }).passthrough().nullable().optional(),
+  speaker_result: z.array(z.object({
+    speaker: z.string().nullable().optional(),
+    text: z.string().nullable().optional()
+  }).passthrough()).nullable().optional()
+}).passthrough();
+
+const SpeakerAsrResponseSchema = z.object({
+  code: z.number().finite().nullable().optional(),
+  message: z.string().nullable().optional(),
+  data: SpeakerAsrResultDataSchema.nullable().optional()
+}).passthrough();
+
+type SpeakerAsrSubmitResponse = z.infer<typeof SpeakerAsrResponseSchema>;
 type SpeakerAsrQueryResponse = SpeakerAsrSubmitResponse;
-
-type SpeakerAsrSentence = {
-  text?: string;
-  timestamp?: Array<{ start?: number; end?: number }>;
-  timestamps?: Array<{ start?: number; end?: number }> | { start?: number; end?: number };
-  language?: string;
-  emotion?: string;
-  event?: string;
-};
-
-type SpeakerAsrResultData = {
-  asr_result?: {
-    detected_language?: string;
-    total_sentences?: number;
-    sentences?: SpeakerAsrSentence[];
-  };
-  speaker_result?: Array<{
-    speaker?: string;
-    text?: string;
-  }>;
-};
+type SpeakerAsrSentence = z.infer<typeof SpeakerAsrSentenceSchema>;
+type SpeakerAsrResultData = z.infer<typeof SpeakerAsrResultDataSchema>;
 
 const BASE_URL_ENV = "SPEAKER_ASR_BASE_URL";
 const AUDIO_BASE_URL_ENV = "SPEAKER_ASR_AUDIO_BASE_URL";
@@ -42,10 +61,12 @@ const SPEAKER_COUNT_ENV = "SPEAKER_ASR_SPEAKER";
 const LANGUAGE_ENV = "SPEAKER_ASR_LANGUAGE";
 const TIMEOUT_MS_ENV = "SPEAKER_ASR_TIMEOUT_MS";
 const POLL_INTERVAL_MS_ENV = "SPEAKER_ASR_POLL_INTERVAL_MS";
+const EMPTY_RESULT_GRACE_MS_ENV = "SPEAKER_ASR_EMPTY_RESULT_GRACE_MS";
 const DEFAULT_LANGUAGE = "cn";
 const DEFAULT_SPEAKER_COUNT = 0;
 const DEFAULT_TIMEOUT_MS = 10 * 60 * 1000;
 const DEFAULT_POLL_INTERVAL_MS = 2_000;
+const DEFAULT_EMPTY_RESULT_GRACE_MS = 30_000;
 const SAFE_ID_PATTERN = /^[A-Za-z0-9_-]+$/;
 
 function readStringEnv(name: string) {
@@ -128,8 +149,38 @@ function appendChunkId(url: string, chunkId: string | undefined) {
   return parsed.toString();
 }
 
-function buildAudioUrl(input: { uploadId: string; filePath: string; userId?: string; chunkId?: string }) {
-  const userId = input.userId ?? parseUserIdFromUploadPath(input.filePath);
+function appendTranscriptionCapability(input: {
+  url: string;
+  secret: string;
+  userId: string;
+  uploadId: string;
+  chunkId?: string;
+}) {
+  const parsed = new URL(input.url);
+  const expiresAtSeconds = Math.floor(Date.now() / 1_000)
+    + TRANSCRIPTION_AUDIO_ACCESS_TTL_SECONDS;
+  parsed.searchParams.set("purpose", TRANSCRIPTION_AUDIO_ACCESS_PURPOSE);
+  parsed.searchParams.set("expires", String(expiresAtSeconds));
+  parsed.searchParams.set(
+    "capability",
+    createTranscriptionAudioAccessCapability(input.secret, {
+      ...input,
+      expiresAtSeconds
+    })
+  );
+  if (input.chunkId) parsed.searchParams.set("chunkId", input.chunkId);
+  return parsed.toString();
+}
+
+type SpeakerAsrAudioInput = {
+  uploadId: string;
+  filePath: string;
+  userId?: string;
+  chunkId?: string;
+  audioAccessPolicy?: AudioAccessPolicy;
+};
+
+function buildLegacyAudioUrl(input: SpeakerAsrAudioInput, userId: string | undefined) {
   const accessToken = readStringEnv(AUDIO_ACCESS_TOKEN_ENV);
   const template = readStringEnv(AUDIO_URL_TEMPLATE_ENV);
 
@@ -141,12 +192,16 @@ function buildAudioUrl(input: { uploadId: string; filePath: string; userId?: str
         false
       );
     }
-    const expanded = template
+    if (template.includes("{token}") && !accessToken) {
+      throw new Error(
+        `${AUDIO_ACCESS_TOKEN_ENV} is required by ${AUDIO_URL_TEMPLATE_ENV}`
+      );
+    }
+    return template
       .replaceAll("{uploadId}", encodeURIComponent(input.uploadId))
       .replaceAll("{userId}", encodeURIComponent(userId ?? ""))
       .replaceAll("{chunkId}", encodeURIComponent(input.chunkId ?? ""))
       .replaceAll("{token}", encodeURIComponent(accessToken ?? ""));
-    return expanded;
   }
 
   const audioBaseUrl = readStringEnv(AUDIO_BASE_URL_ENV);
@@ -160,17 +215,96 @@ function buildAudioUrl(input: { uploadId: string; filePath: string; userId?: str
   return appendChunkId(url, input.chunkId);
 }
 
-async function parseJsonResponse<T>(response: Response): Promise<T> {
-  const rawBody = await response.text();
-  if (!rawBody) {
-    return {} as T;
+function buildDailyReflectionCapabilityAudioUrl(
+  input: SpeakerAsrAudioInput,
+  userId: string | undefined
+) {
+  const capabilitySecret = getDailyReflectionAudioCapabilitySecret();
+  const template = readStringEnv(AUDIO_URL_TEMPLATE_ENV);
+
+  if (template) {
+    if (template.includes("{token}")) {
+      throw new ChunkTranscriptionError(
+        "speaker_asr_audio_url_template_secret_exposure",
+        `${AUDIO_URL_TEMPLATE_ENV} must not contain {token}`,
+        false
+      );
+    }
+    if (input.chunkId && !template.includes("{chunkId}")) {
+      throw new ChunkTranscriptionError(
+        "speaker_asr_chunk_url_template_invalid",
+        `${AUDIO_URL_TEMPLATE_ENV} must include {chunkId} for chunked transcription`,
+        false
+      );
+    }
+    const expanded = template
+      .replaceAll("{uploadId}", encodeURIComponent(input.uploadId))
+      .replaceAll("{userId}", encodeURIComponent(userId ?? ""))
+      .replaceAll("{chunkId}", encodeURIComponent(input.chunkId ?? ""));
+    return capabilitySecret && userId
+      ? appendTranscriptionCapability({
+        url: expanded,
+        secret: capabilitySecret,
+        userId,
+        uploadId: input.uploadId,
+        ...(input.chunkId ? { chunkId: input.chunkId } : {})
+      })
+      : (() => {
+        throw new Error(
+          `${DAILY_REFLECTION_AUDIO_CAPABILITY_SECRET_ENV} and a user-scoped upload file path are required to build speaker-asr audio_url`
+        );
+      })();
   }
 
-  try {
-    return JSON.parse(rawBody) as T;
-  } catch {
-    throw new Error(`speaker-asr provider returned non-JSON response: ${rawBody.slice(0, 180)}`);
+  const audioBaseUrl = readStringEnv(AUDIO_BASE_URL_ENV);
+  if (!audioBaseUrl || !capabilitySecret || !userId) {
+    throw new Error(
+      `${AUDIO_BASE_URL_ENV}, ${DAILY_REFLECTION_AUDIO_CAPABILITY_SECRET_ENV}, and a user-scoped upload file path are required to build speaker-asr audio_url`
+    );
   }
+
+  const url = `${trimBaseUrl(audioBaseUrl)}/api/internal/audio/${encodeURIComponent(userId)}/${encodeURIComponent(input.uploadId)}`;
+  return appendTranscriptionCapability({
+    url: appendChunkId(url, input.chunkId),
+    secret: capabilitySecret,
+    userId,
+    uploadId: input.uploadId,
+    ...(input.chunkId ? { chunkId: input.chunkId } : {})
+  });
+}
+
+function buildAudioUrl(input: SpeakerAsrAudioInput) {
+  const userId = input.userId ?? parseUserIdFromUploadPath(input.filePath);
+  return (input.audioAccessPolicy ?? "legacy_bearer") === "daily_reflection_capability"
+    ? buildDailyReflectionCapabilityAudioUrl(input, userId)
+    : buildLegacyAudioUrl(input, userId);
+}
+
+async function parseJsonResponse(response: Response): Promise<SpeakerAsrSubmitResponse> {
+  const rawBody = await response.text();
+  if (!rawBody) {
+    return {};
+  }
+
+  let payload: unknown;
+  try {
+    payload = JSON.parse(rawBody);
+  } catch {
+    throw new ChunkTranscriptionError(
+      "speaker_asr_invalid_response",
+      "speaker-asr provider returned an invalid response",
+      false
+    );
+  }
+  const parsed = SpeakerAsrResponseSchema.safeParse(payload);
+  if (!parsed.success) {
+    throw new ChunkTranscriptionError(
+      "speaker_asr_invalid_response",
+      "speaker-asr provider returned an invalid response",
+      false
+    );
+  }
+  return parsed.data;
 }
 
 function assertAccepted(payload: SpeakerAsrSubmitResponse, action: "submit" | "query") {
@@ -193,6 +327,7 @@ async function submitSpeakerAsr(input: {
   filePath: string;
   userId?: string;
   chunkId?: string;
+  audioAccessPolicy?: AudioAccessPolicy;
   reqId: string;
   signal?: AbortSignal;
 }) {
@@ -209,7 +344,7 @@ async function submitSpeakerAsr(input: {
       speaker: getSpeakerCount()
     })
   });
-  const payload = await parseJsonResponse<SpeakerAsrSubmitResponse>(response);
+  const payload = await parseJsonResponse(response);
 
   if (!response.ok) {
     throw new ChunkTranscriptionError(
@@ -227,7 +362,7 @@ async function querySpeakerAsr(reqId: string, signal?: AbortSignal) {
   const response = await fetch(`${requireBaseUrl()}/api/ai/non-realtime-asr/query?reqid=${encodeURIComponent(reqId)}`, {
     signal
   });
-  const payload = await parseJsonResponse<SpeakerAsrQueryResponse>(response);
+  const payload: SpeakerAsrQueryResponse = await parseJsonResponse(response);
 
   if (!response.ok) {
     throw new ChunkTranscriptionError(
@@ -240,15 +375,46 @@ async function querySpeakerAsr(reqId: string, signal?: AbortSignal) {
   return payload;
 }
 
-async function waitForSpeakerAsr(reqId: string, signal?: AbortSignal) {
+function hasUsableSpeakerAsrResult(data: SpeakerAsrResultData | null | undefined) {
+  const hasSentence = data?.asr_result?.sentences?.some(
+    (sentence) => Boolean(sentence.text?.trim())
+  );
+  const hasSpeakerText = data?.speaker_result?.some(
+    (item) => Boolean(item.text?.trim())
+  );
+  return Boolean(hasSentence || hasSpeakerText);
+}
+
+async function waitForSpeakerAsr(
+  reqId: string,
+  signal?: AbortSignal,
+  initialEmptyResultAt?: number
+) {
   const startedAt = Date.now();
   const timeoutMs = Math.max(30_000, readNumberEnv(TIMEOUT_MS_ENV, DEFAULT_TIMEOUT_MS));
   const pollIntervalMs = Math.max(500, readNumberEnv(POLL_INTERVAL_MS_ENV, DEFAULT_POLL_INTERVAL_MS));
+  const emptyResultGraceMs = Math.max(
+    500,
+    readNumberEnv(EMPTY_RESULT_GRACE_MS_ENV, DEFAULT_EMPTY_RESULT_GRACE_MS)
+  );
+  let emptyResultAt = initialEmptyResultAt;
 
   while (Date.now() - startedAt <= timeoutMs) {
     const payload = await querySpeakerAsr(reqId, signal);
-    if (payload.code === 0) {
+    if (payload.code === 0 && hasUsableSpeakerAsrResult(payload.data)) {
       return payload.data ?? {};
+    }
+    if (payload.code === 0) {
+      emptyResultAt ??= Date.now();
+      if (Date.now() - emptyResultAt >= emptyResultGraceMs) {
+        throw new ChunkTranscriptionError(
+          "speaker_asr_empty_transcript",
+          `speaker-asr provider returned no transcript text after ${emptyResultGraceMs}ms grace`,
+          true
+        );
+      }
+      await sleep(pollIntervalMs, signal);
+      continue;
     }
     if (payload.code === 2) {
       await sleep(pollIntervalMs, signal);
@@ -382,13 +548,18 @@ async function executeSpeakerAsr(input: {
   filePath: string;
   userId?: string;
   chunkId?: string;
+  audioAccessPolicy?: AudioAccessPolicy;
   reqId: string;
   signal?: AbortSignal;
 }) {
   const submitted = await submitSpeakerAsr(input);
-  return submitted.data?.asr_result || submitted.data?.speaker_result
+  return hasUsableSpeakerAsrResult(submitted.data)
     ? (submitted.data ?? {})
-    : await waitForSpeakerAsr(input.reqId, input.signal);
+    : await waitForSpeakerAsr(
+        input.reqId,
+        input.signal,
+        submitted.code === 0 ? Date.now() : undefined
+      );
 }
 
 export const speakerAsrTranscriptionProvider: TranscriptionProvider = {
@@ -411,7 +582,7 @@ export const speakerAsrTranscriptionProvider: TranscriptionProvider = {
 
 export const speakerAsrChunkTranscriptionAdapter: ChunkTranscriptionAdapter = {
   name: "speaker-asr",
-  async transcribeChunk({ chunk, userId, signal }) {
+  async transcribeChunk({ chunk, userId, audioAccessPolicy, signal }) {
     const filePath = chunk.source.path;
     if (!filePath) {
       throw new ChunkTranscriptionError("chunk_audio_missing", "audio chunk path is missing", false);
@@ -423,6 +594,7 @@ export const speakerAsrChunkTranscriptionAdapter: ChunkTranscriptionAdapter = {
       filePath,
       userId: userId ?? parseUserIdFromUploadPath(filePath),
       chunkId: chunk.source.type === "generated_chunk" ? chunk.id : undefined,
+      audioAccessPolicy,
       reqId,
       signal
     });
@@ -435,12 +607,34 @@ export const speakerAsrChunkTranscriptionAdapter: ChunkTranscriptionAdapter = {
       );
     }
 
+    const requestedSpeakerCount = getSpeakerCount();
+    const speakerResult = data.speaker_result ?? [];
+    const providerLabels = speakerResult.flatMap((item) =>
+      item.speaker?.trim() ? [item.speaker.trim()] : []
+    );
+    const distinctProviderLabels = new Set(providerLabels);
+    const providerLabelCounts = new Map<string, number>();
+    for (const label of providerLabels) {
+      providerLabelCounts.set(label, (providerLabelCounts.get(label) ?? 0) + 1);
+    }
     return createTranscriptChunkFromLocalSegments({
       chunk,
       localSegments,
       providerMetadata: {
         provider: "speaker-asr",
-        requestId: reqId
+        requestId: reqId,
+        requestedSpeakerCount,
+        speakerResultItemCount: speakerResult.length,
+        distinctSpeakerLabelCount: distinctProviderLabels.size,
+        speakerLabelCoverage:
+          localSegments.length > 0
+            ? localSegments.filter((segment) => Boolean(segment.speaker?.trim())).length /
+              localSegments.length
+            : 0,
+        dominantSpeakerLabelRatio:
+          providerLabels.length > 0
+            ? Math.max(...providerLabelCounts.values()) / providerLabels.length
+            : 0
       }
     });
   }

@@ -1,9 +1,20 @@
 import { DEFAULT_VOICE_OUTPUT_AUDIO_FORMAT } from "./audio";
+import { logVoiceDebug } from "./debug";
 import { VoiceEvent, type ParsedVoiceServerEvent } from "./events";
+import {
+  requireSpokenProjection,
+  SpokenProjectionError
+} from "./spoken-projection";
+import { VoiceProviderError } from "./types";
 import type { VoiceProvider, VoiceUnsubscribe } from "./types";
 
-const DEFAULT_SENTENCE_TIMEOUT_MS = 60_000;
-const DEFAULT_MAX_BUFFERED_AUDIO_CHUNKS = 32;
+const DEFAULT_FIRST_AUDIO_TIMEOUT_MS = 10_000;
+const DEFAULT_AUDIO_IDLE_TIMEOUT_MS = 5_000;
+const DEFAULT_HARD_SENTENCE_TIMEOUT_MS = 45_000;
+// Provider events cannot be backpressured. Keep this larger than the browser's
+// five-second PCM queue so normal playback backpressure does not look like a
+// Provider failure, while retaining a hard upper bound.
+const DEFAULT_MAX_BUFFERED_AUDIO_CHUNKS = 256;
 const MAX_SENTENCE_TIMEOUT_MS = 300_000;
 const MAX_BUFFERED_AUDIO_CHUNKS = 1_024;
 
@@ -12,6 +23,12 @@ export type StreamingSpeechSentence = {
   spokenSentence: string;
   supportIds: readonly string[];
   safeForSpeech: true;
+  /**
+   * Grounded commits are released before the canonical answer completes.
+   * A final projection is created only after the canonical answer is final and
+   * may legitimately have no evidence IDs (for example safe uncertainty).
+   */
+  source?: "grounded_commit" | "final_projection";
 };
 
 export type StreamingTtsAudioFormat = typeof DEFAULT_VOICE_OUTPUT_AUDIO_FORMAT;
@@ -73,9 +90,18 @@ export type StreamTextToSpeechOptions = {
   /** The already-started Provider session owned by the surrounding Voice bridge. */
   sessionId: string;
   signal?: AbortSignal;
+  /** @deprecated Use hardSentenceTimeoutMs. Retained for existing callers. */
   sentenceTimeoutMs?: number;
+  /** Maximum wait from request start to the first accepted audio chunk. */
+  firstAudioTimeoutMs?: number;
+  /** Maximum silence between accepted audio chunks before failing closed. */
+  audioIdleTimeoutMs?: number;
+  /** Absolute per-sentence ceiling even while audio is still arriving. */
+  hardSentenceTimeoutMs?: number;
   /** Bounds pushed Provider chunks while the downstream consumer is slower. */
   maxBufferedAudioChunks?: number;
+  /** Content-free hook fired immediately before each Provider TTS request. */
+  onTtsRequestStart?: (input: { sentenceSequence: number }) => void;
 };
 
 type SpeechSentenceSource =
@@ -170,10 +196,14 @@ type ActiveSentenceTurn = {
   started: boolean;
   completed: boolean;
   audioChunkCount: number;
-  currentStream?: ProviderTtsStream;
+  activeChatStream?: ProviderTtsStream;
+  observedStream?: ProviderTtsStream;
   questionId?: string;
   replyId?: string;
-  timeout?: ReturnType<typeof setTimeout>;
+  firstAudioTimeout?: ReturnType<typeof setTimeout>;
+  audioIdleTimeout?: ReturnType<typeof setTimeout>;
+  hardTimeout?: ReturnType<typeof setTimeout>;
+  timeoutCategory?: "first_audio_timeout" | "audio_idle_timeout" | "hard_timeout";
 };
 
 function boundedInteger(
@@ -232,9 +262,15 @@ function providerFailed(event: ParsedVoiceServerEvent) {
 }
 
 function providerFailure(event: ParsedVoiceServerEvent) {
+  const cause = new VoiceProviderError(
+    event.internalFailureReason ?? "provider_error",
+    "Voice provider rejected streaming TTS",
+    event.errorCode
+  );
   return new StreamingTtsError(
     "provider_failure",
-    `Voice provider event ${event.eventName} failed`
+    `Voice provider event ${event.eventName} failed`,
+    { cause }
   );
 }
 
@@ -270,11 +306,20 @@ function validateSentence(
       "Streaming TTS sentence sequences must be strictly increasing"
     );
   }
-  const spokenSentence = typeof sentence.spokenSentence === "string"
-    ? sentence.spokenSentence.trim()
+  const candidate = typeof sentence.spokenSentence === "string"
+    ? sentence.spokenSentence
     : "";
-  if (!spokenSentence) {
-    throw new StreamingTtsError("invalid_sentence", "Streaming TTS sentence must not be empty");
+  let spokenSentence: string;
+  try {
+    spokenSentence = requireSpokenProjection(candidate);
+  } catch (error) {
+    throw new StreamingTtsError(
+      error instanceof SpokenProjectionError && error.reason === "empty_text"
+        ? "invalid_sentence"
+        : "unsafe_sentence",
+      "Streaming TTS requires a citation-free spoken projection",
+      error instanceof Error ? { cause: error } : undefined
+    );
   }
   if (!Array.isArray(sentence.supportIds)) {
     throw new StreamingTtsError("invalid_sentence", "Streaming TTS support IDs must be an array");
@@ -286,17 +331,24 @@ function validateSentence(
     );
   }
   const supportIds = [...new Set(sentence.supportIds.map((id) => id.trim()))];
-  if (supportIds.length === 0 || supportIds.length !== sentence.supportIds.length) {
+  const source = sentence.source ?? "grounded_commit";
+  if (
+    supportIds.length !== sentence.supportIds.length ||
+    (source === "grounded_commit" && supportIds.length === 0)
+  ) {
     throw new StreamingTtsError(
       "invalid_sentence",
-      "Streaming TTS sentence must retain valid, unique support IDs"
+      source === "grounded_commit"
+        ? "Streaming TTS grounded sentence must retain valid, unique support IDs"
+        : "Streaming TTS final projection support IDs must be unique"
     );
   }
   return {
     sequence: sentence.sequence,
     spokenSentence,
     supportIds,
-    safeForSpeech: true
+    safeForSpeech: true,
+    ...(sentence.source ? { source: sentence.source } : {})
   };
 }
 
@@ -335,12 +387,26 @@ export async function* streamTextToSpeech(
   if (!sessionId) {
     throw new StreamingTtsError("invalid_configuration", "Streaming TTS requires a Provider session ID");
   }
-  const sentenceTimeoutMs = boundedInteger(
-    options.sentenceTimeoutMs,
-    DEFAULT_SENTENCE_TIMEOUT_MS,
+  const hardSentenceTimeoutMs = boundedInteger(
+    options.hardSentenceTimeoutMs ?? options.sentenceTimeoutMs,
+    DEFAULT_HARD_SENTENCE_TIMEOUT_MS,
     1,
     MAX_SENTENCE_TIMEOUT_MS,
-    "Streaming TTS sentence timeout"
+    "Streaming TTS hard sentence timeout"
+  );
+  const firstAudioTimeoutMs = boundedInteger(
+    options.firstAudioTimeoutMs,
+    Math.min(DEFAULT_FIRST_AUDIO_TIMEOUT_MS, hardSentenceTimeoutMs),
+    1,
+    hardSentenceTimeoutMs,
+    "Streaming TTS first audio timeout"
+  );
+  const audioIdleTimeoutMs = boundedInteger(
+    options.audioIdleTimeoutMs,
+    Math.min(DEFAULT_AUDIO_IDLE_TIMEOUT_MS, hardSentenceTimeoutMs),
+    1,
+    hardSentenceTimeoutMs,
+    "Streaming TTS audio idle timeout"
   );
   const maxBufferedAudioChunks = boundedInteger(
     options.maxBufferedAudioChunks,
@@ -377,6 +443,31 @@ export async function* streamTextToSpeech(
     : operation;
 
   let unsubscribe: VoiceUnsubscribe = () => undefined;
+  const clearTurnTimers = (turn: ActiveSentenceTurn) => {
+    if (turn.firstAudioTimeout) clearTimeout(turn.firstAudioTimeout);
+    if (turn.audioIdleTimeout) clearTimeout(turn.audioIdleTimeout);
+    if (turn.hardTimeout) clearTimeout(turn.hardTimeout);
+    turn.firstAudioTimeout = undefined;
+    turn.audioIdleTimeout = undefined;
+    turn.hardTimeout = undefined;
+  };
+  const failTurnTimeout = (
+    turn: ActiveSentenceTurn,
+    category: ActiveSentenceTurn["timeoutCategory"],
+    timeoutMs: number
+  ) => {
+    turn.timeoutCategory = category;
+    turn.queue.fail(new StreamingTtsError(
+      "timeout",
+      `Streaming TTS ${category} exceeded ${timeoutMs}ms`
+    ));
+  };
+  const resetAudioIdleTimeout = (turn: ActiveSentenceTurn) => {
+    if (turn.audioIdleTimeout) clearTimeout(turn.audioIdleTimeout);
+    turn.audioIdleTimeout = setTimeout(() => {
+      failTurnTimeout(turn, "audio_idle_timeout", audioIdleTimeoutMs);
+    }, audioIdleTimeoutMs);
+  };
   try {
     unsubscribe = options.provider.onEvent((event) => {
       const turn = activeTurn;
@@ -390,6 +481,7 @@ export async function* streamTextToSpeech(
       if (
         event.eventId !== VoiceEvent.TTSSentenceStart &&
         event.eventId !== VoiceEvent.TTSResponse &&
+        event.eventId !== VoiceEvent.TTSSentenceEnd &&
         event.eventId !== VoiceEvent.TTSEnded
       ) {
         return;
@@ -399,8 +491,14 @@ export async function* streamTextToSpeech(
       if (event.eventId === VoiceEvent.TTSSentenceStart) {
         const stream = providerTtsStream(event);
         if (!stream) return;
-        turn.currentStream = stream;
-        if (stream.type !== "chat_tts_text") return;
+        turn.observedStream = stream;
+        if (stream.type !== "chat_tts_text") {
+          logVoiceDebug("tts_stream_ignored", {
+            sentence_index: turn.sentence.sequence,
+            provider_response_category: "autonomous_stream_start"
+          });
+          return;
+        }
         if (turn.started && !sameProviderTtsStream(turn, stream)) {
           turn.queue.fail(new StreamingTtsError(
             "protocol_error",
@@ -410,6 +508,7 @@ export async function* streamTextToSpeech(
         }
         turn.questionId ??= stream.questionId;
         turn.replyId ??= stream.replyId;
+        turn.activeChatStream ??= stream;
         if (turn.started) return;
         turn.started = true;
         turn.queue.push({
@@ -421,7 +520,7 @@ export async function* streamTextToSpeech(
       }
 
       if (event.eventId === VoiceEvent.TTSResponse) {
-        const stream = turn.currentStream;
+        const stream = turn.observedStream ?? turn.activeChatStream;
         if (
           !turn.started ||
           stream?.type !== "chat_tts_text" ||
@@ -431,6 +530,11 @@ export async function* streamTextToSpeech(
         ) {
           return;
         }
+        if (turn.firstAudioTimeout) {
+          clearTimeout(turn.firstAudioTimeout);
+          turn.firstAudioTimeout = undefined;
+        }
+        resetAudioIdleTimeout(turn);
         turn.audioChunkCount += 1;
         globalAudioSequence += 1;
         turn.queue.push({
@@ -445,7 +549,17 @@ export async function* streamTextToSpeech(
         return;
       }
 
-      const stream = providerTtsStream(event) ?? turn.currentStream;
+      const terminalStream = providerTtsStream(event) ?? turn.observedStream;
+      if (terminalStream && terminalStream.type !== "chat_tts_text") {
+        logVoiceDebug("tts_stream_ignored", {
+          sentence_index: turn.sentence.sequence,
+          provider_response_category: "autonomous_stream_terminal",
+          terminal_event_id: event.eventId
+        });
+        turn.observedStream = undefined;
+        return;
+      }
+      const stream = terminalStream ?? turn.activeChatStream;
       if (
         stream?.type === "chat_tts_text" &&
         turn.started &&
@@ -459,6 +573,7 @@ export async function* streamTextToSpeech(
           return;
         }
         turn.completed = true;
+        clearTurnTimers(turn);
         turn.queue.push({
           type: "sentence_completed",
           sentenceSequence: turn.sentence.sequence,
@@ -467,7 +582,6 @@ export async function* streamTextToSpeech(
         });
         turn.queue.close();
       }
-      turn.currentStream = undefined;
     });
 
     while (true) {
@@ -488,26 +602,70 @@ export async function* streamTextToSpeech(
         audioChunkCount: 0
       };
       activeTurn = turn;
-      turn.timeout = setTimeout(() => {
-        turn.queue.fail(new StreamingTtsError(
-          "timeout",
-          `Streaming TTS sentence did not finish within ${sentenceTimeoutMs}ms`
-        ));
-      }, sentenceTimeoutMs);
+      let providerResponseCategory = "none";
+      turn.firstAudioTimeout = setTimeout(() => {
+        failTurnTimeout(turn, "first_audio_timeout", firstAudioTimeoutMs);
+      }, firstAudioTimeoutMs);
+      turn.hardTimeout = setTimeout(() => {
+        failTurnTimeout(turn, "hard_timeout", hardSentenceTimeoutMs);
+      }, hardSentenceTimeoutMs);
 
       const send = Promise.resolve()
-        .then(() => options.provider.sendText(sentence.spokenSentence));
-      void send.catch((error: unknown) => turn.queue.fail(normalizedProviderFailure(error)));
+        .then(() => {
+          logVoiceDebug("tts_sentence_request", {
+            text_length: sentence.spokenSentence.length,
+            text_bytes: Buffer.byteLength(sentence.spokenSentence, "utf8"),
+            sentence_index: sentence.sequence,
+            provider_response_category: "request_started"
+          });
+          try {
+            options.onTtsRequestStart?.({
+              sentenceSequence: sentence.sequence
+            });
+          } catch {
+            // Observability cannot prevent a safe sentence from reaching TTS.
+          }
+          return options.provider.sendText(sentence.spokenSentence);
+        });
+      void send.catch((error: unknown) => {
+        providerResponseCategory = "send_rejected";
+        turn.queue.fail(normalizedProviderFailure(error));
+      });
 
       try {
         while (true) {
           const queued = await raceAbort(turn.queue.next());
           if (queued.done) break;
+          if (queued.value.type === "sentence_started") {
+            providerResponseCategory = "sentence_started";
+          } else if (queued.value.type === "audio_chunk") {
+            providerResponseCategory = "audio";
+          } else {
+            providerResponseCategory = "sentence_completed";
+          }
           yield queued.value;
         }
         await raceAbort(send);
+        logVoiceDebug("tts_sentence_completed", {
+          text_length: sentence.spokenSentence.length,
+          sentence_index: sentence.sequence,
+          provider_response_category: providerResponseCategory,
+          audio_chunk_count: turn.audioChunkCount
+        });
+      } catch (error) {
+        if (turn.timeoutCategory) providerResponseCategory = turn.timeoutCategory;
+        const failureReason = error instanceof StreamingTtsError
+          ? error.code
+          : "provider_failure";
+        logVoiceDebug("tts_sentence_failed", {
+          text_length: sentence.spokenSentence.length,
+          sentence_index: sentence.sequence,
+          provider_response_category: providerResponseCategory,
+          failure_reason: failureReason
+        });
+        throw error;
       } finally {
-        if (turn.timeout) clearTimeout(turn.timeout);
+        clearTurnTimers(turn);
         if (activeTurn === turn) activeTurn = undefined;
       }
     }
@@ -521,7 +679,7 @@ export async function* streamTextToSpeech(
       audioChunkCount: globalAudioSequence
     };
   } finally {
-    if (activeTurn?.timeout) clearTimeout(activeTurn.timeout);
+    if (activeTurn) clearTurnTimers(activeTurn);
     activeTurn?.queue.fail(abortError());
     activeTurn = undefined;
     unsubscribe();

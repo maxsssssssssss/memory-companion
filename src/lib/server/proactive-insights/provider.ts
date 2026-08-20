@@ -1,6 +1,12 @@
 import type { ProactiveInsightContext } from "@/lib/domain/proactive-insights";
+import type { DateCompanionProactiveValueContext } from "@/lib/domain/date-companion-proactive-value";
 
-import { createDeepseekProactiveInsightProvider, type ProactiveInsightRunResult } from "./deepseek-provider";
+import {
+  createDeepseekDateCompanionProactiveValueProvider,
+  createDeepseekProactiveInsightProvider,
+  type DateCompanionProactiveValueRunResult,
+  type ProactiveInsightRunResult
+} from "./deepseek-provider";
 import type { ProactiveInsightMemoryContext } from "./memory-context";
 
 type ProviderName = "deepseek" | "none";
@@ -53,4 +59,36 @@ export function createProactiveInsightProvider(deps: ProviderDependencies = {}):
 
 export function getProactiveInsightProvider(deps: ProviderDependencies = {}) {
   return createProactiveInsightProvider(deps);
+}
+
+export type DateCompanionProactiveValueProvider = {
+  provider: "deepseek" | "none";
+  model: string;
+  generate(input: {
+    context: DateCompanionProactiveValueContext;
+    sourceFingerprint: string;
+  }): Promise<DateCompanionProactiveValueRunResult>;
+};
+
+export function createDateCompanionProactiveValueProvider(
+  deps: ProviderDependencies = {}
+): DateCompanionProactiveValueProvider {
+  if (getProviderNameByEnv() === "deepseek") {
+    return createDeepseekDateCompanionProactiveValueProvider(deps);
+  }
+  return {
+    provider: "none",
+    model: "none",
+    async generate(input) {
+      return {
+        status: "fallback",
+        value: null,
+        provider: "deepseek",
+        model: "none",
+        elapsedMs: 0,
+        sourceFingerprint: input.sourceFingerprint,
+        failureCode: "provider_disabled"
+      };
+    }
+  };
 }

@@ -112,16 +112,22 @@ describe("relationship signal QA evidence", () => {
     expect(evidence[0].text).not.toContain("模型生成的错误证据");
   });
 
-  it("formats trusted identities and keeps low-confidence identities local", () => {
+  it("formats Provider-verified identities and keeps inferred identities local", () => {
     const trustedSegments: TranscriptSegment[] = [
       {
         ...segments[0],
+        speaker: "Trusted contact",
         identity: {
           globalSpeakerId: "person_1",
           displayName: "Trusted contact",
           identityType: "known_contact",
-          confidence: 0.95,
-          source: "voiceprint"
+          confidence: null,
+          source: "provider_speaker_result",
+          evidence: {
+            type: "provider_label",
+            provider: "company_voiceprint",
+            providerLabel: "Trusted contact"
+          }
         }
       },
       {
@@ -141,17 +147,26 @@ describe("relationship signal QA evidence", () => {
     });
 
     expect(trustedEvidence[0].text).toContain("Trusted contact:");
-    expect(trustedEvidence[0].text).toContain("person_2:");
+    expect(trustedEvidence[0].text).toContain("speaker_2:");
     expect(trustedEvidence[0].text).not.toContain("speaker_1:");
-    expect(trustedEvidence[0].text).not.toContain("speaker_2:");
+    expect(trustedEvidence[0].text).not.toContain("person_2:");
 
     const lowConfidenceEvidence = buildRelationshipSignalEvidence({
       question: "这次边界有没有被尊重？",
       cards: [relationshipCard()],
-      segments: trustedSegments.map((segment) => ({
-        ...segment,
-        identity: segment.identity ? { ...segment.identity, confidence: 0.79 } : undefined
-      }))
+      segments: [
+        {
+          ...segments[0],
+          identity: {
+            globalSpeakerId: "person_1",
+            displayName: "Trusted contact",
+            identityType: "known_contact",
+            confidence: 0.79,
+            source: "voiceprint"
+          }
+        },
+        trustedSegments[1]
+      ]
     });
     expect(lowConfidenceEvidence[0].text).toContain("speaker_1:");
     expect(lowConfidenceEvidence[0].text).toContain("speaker_2:");

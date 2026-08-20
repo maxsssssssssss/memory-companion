@@ -115,6 +115,7 @@ describe("streamTextToSpeech", () => {
   it("serializes sentences, preserves global audio order, and applies input backpressure", async () => {
     const provider = new StreamingVoiceProvider();
     const sourcePulls: number[] = [];
+    const ttsRequestStarts: number[] = [];
     provider.onSendText = (_text, call) => {
       expect(sourcePulls).toEqual(call === 1 ? [1] : [1, 2]);
       emitChatTts(
@@ -134,10 +135,14 @@ describe("streamTextToSpeech", () => {
 
     const events = await collect(streamTextToSpeech(sentences(), {
       provider,
-      sessionId: "voice-session"
+      sessionId: "voice-session",
+      onTtsRequestStart: ({ sentenceSequence }) => {
+        ttsRequestStarts.push(sentenceSequence);
+      }
     }));
 
     expect(provider.sentTexts).toEqual(["first safe sentence", "second safe sentence"]);
+    expect(ttsRequestStarts).toEqual([10, 20]);
     expect(events.filter((event) => event.type === "audio_chunk")).toEqual([
       expect.objectContaining({
         sequence: 1,
@@ -206,6 +211,102 @@ describe("streamTextToSpeech", () => {
     expect(provider.eventCallbacks.size).toBe(0);
   });
 
+  it("keeps the active chat stream across an interleaved default stream without a repeated chat start", async () => {
+    const provider = new StreamingVoiceProvider();
+    provider.onSendText = () => {
+      const chat = {
+        tts_type: "chat_tts_text",
+        question_id: "qa-question",
+        reply_id: "qa-reply"
+      };
+      provider.emit(serverEvent(VoiceEvent.TTSSentenceStart, chat));
+      provider.emit({
+        ...serverEvent(VoiceEvent.TTSResponse),
+        audio: Buffer.from([1, 2])
+      });
+      provider.emit(serverEvent(VoiceEvent.TTSSentenceStart, {
+        tts_type: "default",
+        question_id: "default-question",
+        reply_id: "default-reply"
+      }));
+      provider.emit({
+        ...serverEvent(VoiceEvent.TTSResponse),
+        audio: Buffer.from([9, 9])
+      });
+      provider.emit(serverEvent(VoiceEvent.TTSEnded));
+      provider.emit({
+        ...serverEvent(VoiceEvent.TTSResponse),
+        audio: Buffer.from([3, 4])
+      });
+      provider.emit(serverEvent(VoiceEvent.TTSEnded, chat));
+    };
+
+    const events = await collect(streamTextToSpeech([speechSentence(1)], {
+      provider,
+      sessionId: "voice-session"
+    }));
+
+    expect(events.filter((event) => event.type === "audio_chunk")).toEqual([
+      expect.objectContaining({ audio: Buffer.from([1, 2]) }),
+      expect.objectContaining({ audio: Buffer.from([3, 4]) })
+    ]);
+    expect(events.at(-1)).toMatchObject({
+      type: "stream_completed",
+      sentenceCount: 1,
+      audioChunkCount: 2
+    });
+  });
+
+  it("accepts the provider sentence-end terminal event for one committed sentence", async () => {
+    const provider = new StreamingVoiceProvider();
+    provider.onSendText = () => {
+      const metadata = {
+        tts_type: "chat_tts_text",
+        question_id: "question-sentence-end",
+        reply_id: "reply-sentence-end"
+      };
+      provider.emit(serverEvent(VoiceEvent.TTSSentenceStart, metadata));
+      provider.emit({
+        ...serverEvent(VoiceEvent.TTSResponse),
+        audio: Buffer.from([1, 2])
+      });
+      provider.emit(serverEvent(VoiceEvent.TTSSentenceEnd, metadata));
+    };
+
+    const events = await collect(streamTextToSpeech([speechSentence(1)], {
+      provider,
+      sessionId: "voice-session"
+    }));
+
+    expect(events.at(-1)).toMatchObject({
+      type: "stream_completed",
+      sentenceCount: 1,
+      audioChunkCount: 1
+    });
+  });
+
+  it("absorbs a normal 64-chunk Provider burst without false buffer overflow", async () => {
+    const provider = new StreamingVoiceProvider();
+    provider.onSendText = () => {
+      emitChatTts(
+        provider,
+        Array.from({ length: 64 }, (_, index) => Buffer.from([index])),
+        { questionId: "question-burst", replyId: "reply-burst" }
+      );
+    };
+
+    const events = await collect(streamTextToSpeech([speechSentence(1)], {
+      provider,
+      sessionId: "voice-session"
+    }));
+
+    expect(events.filter((event) => event.type === "audio_chunk")).toHaveLength(64);
+    expect(events.at(-1)).toMatchObject({
+      type: "stream_completed",
+      audioChunkCount: 64
+    });
+  });
+
   it("fails closed for an unsafe sentence before sending it to the provider", async () => {
     const provider = new StreamingVoiceProvider();
 
@@ -221,6 +322,50 @@ describe("streamTextToSpeech", () => {
     expect(provider.eventCallbacks.size).toBe(0);
   });
 
+  it.each([
+    "状态仍未确认。[E1]",
+    "状态已确认。 sourceId=segment_1",
+    "状态\u0000已确认。"
+  ])("does not send citation, metadata, or unsupported controls to TTS: %s", async (text) => {
+    const provider = new StreamingVoiceProvider();
+
+    await expect(collect(streamTextToSpeech([speechSentence(1, text)], {
+      provider,
+      sessionId: "voice-session"
+    }))).rejects.toMatchObject({ code: "unsafe_sentence" });
+
+    expect(provider.sentTexts).toEqual([]);
+  });
+
+  it("logs only structural sentence failure diagnostics", async () => {
+    vi.stubEnv("VOICE_DEBUG", "true");
+    const info = vi.spyOn(console, "info").mockImplementation(() => undefined);
+    try {
+      const provider = new StreamingVoiceProvider();
+      provider.onSendText = () => {
+        throw new Error("PRIVATE PROVIDER RESPONSE");
+      };
+
+      await expect(collect(streamTextToSpeech([
+        speechSentence(7, "PRIVATE SPOKEN CONTENT")
+      ], {
+        provider,
+        sessionId: "voice-session"
+      }))).rejects.toMatchObject({ code: "provider_failure" });
+
+      const output = info.mock.calls.flat().join("\n");
+      expect(output).toContain('"sentence_index":7');
+      expect(output).toContain('"text_length":22');
+      expect(output).toContain('"provider_response_category":"send_rejected"');
+      expect(output).toContain('"failure_reason":"provider_failure"');
+      expect(output).not.toContain("PRIVATE SPOKEN CONTENT");
+      expect(output).not.toContain("PRIVATE PROVIDER RESPONSE");
+    } finally {
+      info.mockRestore();
+      vi.unstubAllEnvs();
+    }
+  });
+
   it("rejects an empty sentence stream without invoking the provider", async () => {
     const provider = new StreamingVoiceProvider();
 
@@ -231,6 +376,28 @@ describe("streamTextToSpeech", () => {
 
     expect(provider.sentTexts).toEqual([]);
     expect(provider.eventCallbacks.size).toBe(0);
+  });
+
+  it("allows an evidence-free final spoken projection only after explicit finalization", async () => {
+    const provider = new StreamingVoiceProvider();
+    provider.onSendText = () => emitChatTts(provider, [Buffer.from([1])], {
+      questionId: "question-final",
+      replyId: "reply-final"
+    });
+
+    const events = await collect(streamTextToSpeech([{
+      sequence: 1,
+      spokenSentence: "没有找到足够证据确认这个信息。",
+      supportIds: [],
+      safeForSpeech: true,
+      source: "final_projection"
+    }], {
+      provider,
+      sessionId: "voice-session"
+    }));
+
+    expect(provider.sentTexts).toEqual(["没有找到足够证据确认这个信息。"]);
+    expect(events.at(-1)).toMatchObject({ type: "stream_completed" });
   });
 
   it("rejects TTSEnded when the provider returned no audio", async () => {
@@ -316,6 +483,49 @@ describe("streamTextToSpeech", () => {
 
       await vi.waitFor(() => expect(provider.sentTexts).toHaveLength(1));
       await vi.advanceTimersByTimeAsync(1_000);
+      await rejection;
+      expect(provider.eventCallbacks.size).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("resets the idle timeout while audio continues and fails after a real idle gap", async () => {
+    vi.useFakeTimers();
+    try {
+      const provider = new StreamingVoiceProvider();
+      provider.onSendText = () => {
+        provider.emit(serverEvent(VoiceEvent.TTSSentenceStart, {
+          tts_type: "chat_tts_text",
+          question_id: "question-timeout",
+          reply_id: "reply-timeout"
+        }));
+        provider.emit({
+          ...serverEvent(VoiceEvent.TTSResponse),
+          audio: Buffer.from([1])
+        });
+      };
+      const result = collect(streamTextToSpeech([speechSentence(1)], {
+        provider,
+        sessionId: "voice-session",
+        firstAudioTimeoutMs: 1_000,
+        audioIdleTimeoutMs: 500,
+        hardSentenceTimeoutMs: 2_000
+      }));
+      const rejection = expect(result).rejects.toMatchObject({ code: "timeout" });
+
+      await vi.waitFor(() => expect(provider.sentTexts).toHaveLength(1));
+      await vi.advanceTimersByTimeAsync(400);
+      provider.emit({
+        ...serverEvent(VoiceEvent.TTSResponse),
+        audio: Buffer.from([2])
+      });
+      await vi.advanceTimersByTimeAsync(400);
+      provider.emit({
+        ...serverEvent(VoiceEvent.TTSResponse),
+        audio: Buffer.from([3])
+      });
+      await vi.advanceTimersByTimeAsync(500);
       await rejection;
       expect(provider.eventCallbacks.size).toBe(0);
     } finally {

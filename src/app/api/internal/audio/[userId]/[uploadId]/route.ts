@@ -5,6 +5,16 @@ import { Readable } from "stream";
 import { NextResponse } from "next/server";
 import type { AudioUpload } from "@/lib/domain/types";
 import { getUserScopedStore, getUserUploadsRootDir } from "@/lib/server/auth/session";
+import {
+  getDailyReflectionRepository,
+  isDailyReflectionUpload,
+  isDailyReflectionUploadEnabled,
+  readDailyReflectionPublishedAsset
+} from "@/lib/server/daily-reflection";
+import {
+  getDailyReflectionAudioCapabilitySecret,
+  verifyTranscriptionAudioAccessCapability
+} from "@/lib/server/transcription/audio-access-capability";
 import { readAudioChunkCheckpoint } from "@/lib/server/transcription/chunks/checkpoint-store";
 
 type StoredUpload = AudioUpload & {
@@ -34,27 +44,65 @@ function unauthorized() {
 
 export async function GET(request: Request, { params }: { params: Promise<{ userId: string; uploadId: string }> }) {
   const token = configuredToken();
+  const capabilitySecret = getDailyReflectionAudioCapabilitySecret();
   const requestUrl = new URL(request.url);
   const requestToken = requestUrl.searchParams.get("token")?.trim();
-
-  if (!token || requestToken !== token) {
-    return unauthorized();
-  }
-
   const { userId, uploadId } = await params;
   if (!isSafeKey(userId) || !isSafeKey(uploadId)) {
     return NextResponse.json({ error: "invalid_audio_request" }, { status: 400 });
   }
 
-  const store = getUserScopedStore(userId);
-  const upload = await store.read<StoredUpload>("uploads", uploadId);
-  if (!upload?.filePath) {
-    return NextResponse.json({ error: "audio_not_found" }, { status: 404 });
-  }
-
   const chunkId = requestUrl.searchParams.get("chunkId")?.trim();
   if (chunkId && !isSafeKey(chunkId)) {
     return NextResponse.json({ error: "invalid_audio_request" }, { status: 400 });
+  }
+  const transcriptionCapabilityValid = Boolean(capabilitySecret) &&
+    verifyTranscriptionAudioAccessCapability({
+      secret: capabilitySecret!,
+      capability: requestUrl.searchParams.get("capability"),
+      purpose: requestUrl.searchParams.get("purpose"),
+      expiresAtSeconds: Number(requestUrl.searchParams.get("expires")),
+      userId,
+      uploadId,
+      ...(chunkId ? { chunkId } : {})
+    });
+  const legacyTokenValid = Boolean(token) && requestToken === token;
+  if (!transcriptionCapabilityValid && !legacyTokenValid) return unauthorized();
+
+  const store = getUserScopedStore(userId);
+  const repository = getDailyReflectionRepository();
+  const reflection = repository.findReflectionByUpload(userId, uploadId);
+  const upload = reflection
+    ? await readDailyReflectionPublishedAsset<StoredUpload>({
+        repository,
+        store,
+        accountId: userId,
+        reflectionId: reflection.id,
+        uploadId,
+        assetKind: "upload"
+      })
+    : await store.read<StoredUpload>("uploads", uploadId);
+  if (!upload?.filePath) {
+    return NextResponse.json({ error: "audio_not_found" }, { status: 404 });
+  }
+  if (
+    isDailyReflectionUpload(upload)
+    && (
+      !isDailyReflectionUploadEnabled()
+      || !transcriptionCapabilityValid
+      || upload.status !== "transcribing"
+      || (() => {
+        const reflection = repository.findReflection(userId, upload.reflectionId);
+        const plan = reflection
+          ? repository.getProcessingPlan(userId, reflection.id)
+          : null;
+        return reflection?.status !== "transcribing"
+          || plan?.ingestionContext !== "daily_reflection"
+          || plan.uploadId !== uploadId;
+      })()
+    )
+  ) {
+    return NextResponse.json({ error: "audio_not_found" }, { status: 404 });
   }
   const chunk = chunkId ? await readAudioChunkCheckpoint(store, chunkId) : null;
   if (chunkId && (!chunk || chunk.uploadId !== uploadId || !chunk.source.path)) {

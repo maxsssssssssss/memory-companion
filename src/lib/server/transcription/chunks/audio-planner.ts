@@ -3,11 +3,13 @@ import { mkdir, readdir, rm, rmdir } from "fs/promises";
 import { dirname, join } from "path";
 import { promisify } from "util";
 import {
+  AudioChunkSchema,
   AudioChunkSetSchema,
   buildAudioChunkId,
   type AudioChunk
 } from "@/lib/domain/chunks";
 import { getFfmpegExecutable, getFfprobeExecutable } from "@/lib/server/ffmpeg";
+import { ChunkTranscriptionError } from "./adapter";
 
 const execFileAsync = promisify(execFile);
 const DEFAULT_CHUNK_DURATION_SECONDS = 5 * 60;
@@ -109,6 +111,10 @@ export async function splitAudioWithFfmpeg(input: {
   await rm(input.outputDirectory, { recursive: true, force: true });
   await mkdir(input.outputDirectory, { recursive: true });
   const outputPattern = join(input.outputDirectory, "chunk_%05d.mp3");
+  const segmentTimes = input.ranges
+    .slice(0, -1)
+    .map((range) => range.endSeconds)
+    .join(",");
 
   try {
     await execFileAsync(getFfmpegExecutable(), [
@@ -120,8 +126,8 @@ export async function splitAudioWithFfmpeg(input: {
       "-vn",
       "-f",
       "segment",
-      "-segment_time",
-      String(input.chunkDurationSeconds),
+      "-segment_times",
+      segmentTimes,
       "-reset_timestamps",
       "1",
       "-ac",
@@ -152,6 +158,88 @@ export async function cleanupGeneratedAudioChunks(chunks: AudioChunk[]) {
   await Promise.all(generatedPaths.map((filePath) => rm(filePath, { force: true })));
   const directories = Array.from(new Set(generatedPaths.map((filePath) => dirname(filePath))));
   await Promise.all(directories.map((directory) => rmdir(directory).catch(() => undefined)));
+}
+
+export type EmptyTranscriptRecoverySplitDependencies = {
+  splitAudio?: typeof splitAudioWithFfmpeg;
+  now?: () => string;
+};
+
+export async function splitAudioChunkForEmptyTranscriptRecovery(
+  chunk: AudioChunk,
+  dependencies: EmptyTranscriptRecoverySplitDependencies = {}
+) {
+  if (!chunk.source.path) {
+    throw new ChunkTranscriptionError(
+      "chunk_recovery_audio_missing",
+      "empty-transcript recovery requires a local chunk path",
+      false
+    );
+  }
+  if (chunk.durationSeconds < 2) {
+    throw new ChunkTranscriptionError(
+      "chunk_recovery_too_short",
+      "empty-transcript recovery requires a chunk of at least two seconds",
+      false
+    );
+  }
+
+  const splitAudio = dependencies.splitAudio ?? splitAudioWithFfmpeg;
+  const now = dependencies.now ?? (() => new Date().toISOString());
+  const splitAt = roundTime(chunk.durationSeconds / 2);
+  const localRanges: AudioChunkRange[] = [
+    { index: 0, startSeconds: 0, endSeconds: splitAt },
+    { index: 1, startSeconds: splitAt, endSeconds: chunk.durationSeconds }
+  ];
+  const outputDirectory = join(dirname(chunk.source.path), `${chunk.id}-empty-recovery`);
+  const paths = await splitAudio({
+    filePath: chunk.source.path,
+    outputDirectory,
+    chunkDurationSeconds: splitAt,
+    ranges: localRanges
+  });
+  if (paths.length !== localRanges.length) {
+    await Promise.all(paths.map((filePath) => rm(filePath, { force: true })));
+    await rmdir(outputDirectory).catch(() => undefined);
+    throw new ChunkTranscriptionError(
+      "chunk_recovery_split_count_mismatch",
+      `expected ${localRanges.length} recovery chunks but ffmpeg created ${paths.length}`,
+      false
+    );
+  }
+
+  const createdAt = now();
+  return localRanges.map((range, recoveryIndex) => {
+    const startSeconds = roundTime(chunk.startSeconds + range.startSeconds);
+    const endSeconds =
+      recoveryIndex === localRanges.length - 1
+        ? chunk.endSeconds
+        : roundTime(chunk.startSeconds + range.endSeconds);
+    return AudioChunkSchema.parse({
+      id: `${chunk.id}_recovery_${String(recoveryIndex).padStart(2, "0")}`,
+      uploadId: chunk.uploadId,
+      index: 1_000_000 + chunk.index * localRanges.length + recoveryIndex,
+      startSeconds,
+      endSeconds,
+      durationSeconds: roundTime(endSeconds - startSeconds),
+      source: {
+        type: "generated_chunk",
+        path: paths[recoveryIndex]
+      },
+      status: "created",
+      retryCount: 0,
+      createdAt,
+      updatedAt: createdAt,
+      metadata: {
+        ...chunk.metadata,
+        mimeType: "audio/mpeg",
+        recoveryParentAudioChunkId: chunk.id,
+        recoveryPartIndex: recoveryIndex,
+        recoveryPartCount: localRanges.length,
+        recoveryReason: "speaker_asr_empty_transcript"
+      }
+    });
+  });
 }
 
 export async function planAudioChunks(

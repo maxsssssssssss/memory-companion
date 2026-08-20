@@ -3,16 +3,31 @@ import { tmpdir } from "os";
 import { join } from "path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AudioInsight, AudioUpload, ProcessingJob, TranscriptSegment } from "@/lib/domain/types";
+import { TranscriptChunkSchema } from "@/lib/domain/chunks";
 import { buildAudioInsights } from "@/lib/processing/audio-insights";
 import { extractBriefItems } from "@/lib/processing/extract-rule-based";
 import { deepseekAudioInsightProvider } from "@/lib/server/audio-insights/deepseek-provider";
 import { openaiAudioInsightProvider } from "@/lib/server/audio-insights/openai-provider";
 import type { EvaluationAuditReport } from "@/lib/server/evaluation/audit-report";
 import * as extractionProviderModule from "@/lib/server/extraction/provider";
+import {
+  deleteMemoryOwnerReviewCandidatesForUpload,
+  generateMemoryOwnerReviewCandidates,
+  MemoryOwnerReviewRepository
+} from "@/lib/server/memory";
 import { openMemoryDatabase } from "@/lib/server/memory/db";
 import { createMemoryRepository } from "@/lib/server/memory/repository";
 import { JsonStore } from "@/lib/server/storage/json-store";
-import { UploadProcessingCancelledError, processUpload } from "./process-upload";
+import { VoiceprintTrainingCandidateRepository } from "@/lib/server/speaker-identity/voiceprint-training-candidates";
+import {
+  DATE_COMPANION_AUDIO_STAGING_COLLECTION,
+  stageDateCompanionParticipantAudio
+} from "@/lib/server/date-companion/audio-staging";
+import {
+  DailyReflectionStandardPipelineRejectedError,
+  UploadProcessingCancelledError,
+  processUpload
+} from "./process-upload";
 
 const {
   emotionSignalAnalyzeMock,
@@ -63,6 +78,7 @@ type StoredUpload = AudioUpload & {
   errorCode?: string;
   errorMessage?: string;
   evaluationRetention?: boolean;
+  dateCompanionAudioSnapshotVersion?: 1;
 };
 
 type DeleteTrigger = (collection: string, id: string, value: unknown) => boolean;
@@ -171,8 +187,28 @@ class FailingProactiveInsightCacheStore extends JsonStore {
   }
 }
 
+class MutationRecordingStore extends JsonStore {
+  readonly mutations: Array<{ collection: string; id: string; operation: "write" | "delete" }> = [];
+
+  override async write<T>(collection: string, id: string, value: T): Promise<void> {
+    this.mutations.push({ collection, id, operation: "write" });
+    await super.write(collection, id, value);
+  }
+
+  override async delete(collection: string, id: string): Promise<void> {
+    this.mutations.push({ collection, id, operation: "delete" });
+    await super.delete(collection, id);
+  }
+}
+
 function restoreProviderEnv(
-  key: "TRANSCRIPTION_PROVIDER" | "EXTRACTION_PROVIDER" | "AUDIO_INSIGHT_PROVIDER" | "AUDIO_INSIGHT_FALLBACK_PROVIDER",
+  key:
+    | "TRANSCRIPTION_PROVIDER"
+    | "EXTRACTION_PROVIDER"
+    | "AUDIO_INSIGHT_PROVIDER"
+    | "AUDIO_INSIGHT_FALLBACK_PROVIDER"
+    | "DAILY_REFLECTION_AUDIO_CAPABILITY_SECRET"
+    | "MEMORY_OWNER_REVIEW_ENABLED",
   value: string | undefined
 ) {
   if (value === undefined) {
@@ -185,6 +221,7 @@ function restoreProviderEnv(
 beforeEach(() => {
   delete process.env.EVALUATION_MODE;
   delete process.env.DEBUG_SAVE_PROVIDER_RESPONSE;
+  delete process.env.MEMORY_OWNER_REVIEW_ENABLED;
   extractFfmpegAcousticFeaturesMock.mockResolvedValue([]);
   emotionSignalAnalyzeMock.mockResolvedValue([]);
   getEmotionSignalProviderMock.mockReturnValue({ analyze: emotionSignalAnalyzeMock });
@@ -234,6 +271,30 @@ afterEach(async () => {
 });
 
 describe("processUpload", () => {
+  it("rejects daily reflection uploads before the standard pipeline mutates any state", async () => {
+    tempDir = await mkdtemp(join(tmpdir(), "brief-pipeline-daily-reflection-guard-"));
+    const store = new MutationRecordingStore(tempDir);
+    const upload = {
+      id: "upload_daily_reflection_guard",
+      originalName: "reflection.wav",
+      mimeType: "audio/wav",
+      sizeBytes: 10,
+      recordingDate: "2026-08-13",
+      status: "uploaded" as const,
+      ingestionContext: "daily_reflection" as const,
+      reflectionId: "reflection_1"
+    };
+    await store.write("uploads", upload.id, upload);
+    store.mutations.length = 0;
+
+    await expect(processUpload({ uploadId: upload.id, store })).rejects.toBeInstanceOf(
+      DailyReflectionStandardPipelineRejectedError
+    );
+
+    expect(store.mutations).toEqual([]);
+    await expect(store.read("uploads", upload.id)).resolves.toEqual(upload);
+  });
+
   it("logs each post-ASR pipeline stage without transcript content", async () => {
     tempDir = await mkdtemp(join(tmpdir(), "brief-pipeline-"));
     const store = new JsonStore(tempDir);
@@ -841,7 +902,12 @@ describe("processUpload", () => {
       });
 
       expect(transcriptionProcessor).toHaveBeenCalledWith(
-        expect.objectContaining({ uploadId: upload.id, store, filePath })
+        expect.objectContaining({
+          uploadId: upload.id,
+          store,
+          filePath,
+          audioAccessPolicy: "legacy_bearer"
+        })
       );
       expect(result.job.status).toBe("ready");
       expect(result.segments).toEqual([
@@ -853,6 +919,169 @@ describe("processUpload", () => {
         })
       ]);
     } finally {
+      restoreProviderEnv("EXTRACTION_PROVIDER", originalExtractionProvider);
+      restoreProviderEnv("AUDIO_INSIGHT_PROVIDER", originalAudioInsightProvider);
+    }
+  });
+
+  it("runs voiceprint candidate generation before deleting the original audio", async () => {
+    tempDir = await mkdtemp(join(tmpdir(), "brief-pipeline-voiceprint-candidate-"));
+    const store = new JsonStore(tempDir);
+    const filePath = join(tempDir, "demo.wav");
+    await writeFile(filePath, "fake audio");
+    const originalExtractionProvider = process.env.EXTRACTION_PROVIDER;
+    const originalAudioInsightProvider = process.env.AUDIO_INSIGHT_PROVIDER;
+    const upload: AudioUpload = {
+      id: "upload_voiceprint_candidate",
+      originalName: "demo.wav",
+      mimeType: "audio/wav",
+      sizeBytes: 10,
+      recordingDate: "2026-07-29",
+      status: "uploaded"
+    };
+    const transcriptSegment: TranscriptSegment = {
+      id: `${upload.id}_chunk_00000_seg_00001`,
+      uploadId: upload.id,
+      startSeconds: 0,
+      endSeconds: 35,
+      speaker: "speaker_1",
+      text: "这是一段本人声纹训练候选录音。",
+      confidence: 0.9,
+      sceneLabels: ["unknown"],
+      valueLabels: []
+    };
+    const transcriptChunk = TranscriptChunkSchema.parse({
+      id: `${upload.id}_transcript_chunk_00000`,
+      uploadId: upload.id,
+      audioChunkId: `${upload.id}_audio_chunk_00000`,
+      index: 0,
+      startSeconds: 0,
+      endSeconds: 35,
+      timebase: "upload_global",
+      speakerIdScope: "chunk",
+      speakerMap: { speaker_1: "speaker_1" },
+      segments: [transcriptSegment],
+      status: "completed",
+      retryCount: 0,
+      createdAt: "2026-07-29T00:00:00.000Z",
+      updatedAt: "2026-07-29T00:00:01.000Z",
+      startedAt: "2026-07-29T00:00:00.000Z",
+      finishedAt: "2026-07-29T00:00:01.000Z",
+      metadata: {}
+    });
+    const voiceprintCandidateGenerator = vi.fn(async (candidateInput: {
+      sourceFilePath: string;
+    }) => {
+      await expect(access(candidateInput.sourceFilePath)).resolves.toBeUndefined();
+      return [];
+    });
+
+    try {
+      process.env.EXTRACTION_PROVIDER = "rule";
+      process.env.AUDIO_INSIGHT_PROVIDER = "rule";
+      await store.write("uploads", upload.id, { ...upload, filePath });
+      await store.write("transcript-chunks", transcriptChunk.id, transcriptChunk);
+
+      const result = await processUpload({
+        uploadId: upload.id,
+        store,
+        userId: "user_1",
+        dependencies: {
+          transcriptionProcessor: async () => [transcriptSegment],
+          voiceprintCandidateGenerator
+        }
+      });
+
+      expect(result.job.status).toBe("ready");
+      expect(voiceprintCandidateGenerator).toHaveBeenCalledWith(
+        expect.objectContaining({
+          uploadId: upload.id,
+          sourceFilePath: filePath,
+          chunks: [transcriptChunk],
+          resolvedSegments: [transcriptSegment]
+        })
+      );
+      await expect(access(filePath)).rejects.toThrow();
+    } finally {
+      restoreProviderEnv("EXTRACTION_PROVIDER", originalExtractionProvider);
+      restoreProviderEnv("AUDIO_INSIGHT_PROVIDER", originalAudioInsightProvider);
+    }
+  });
+
+  it("keeps the upload ready when voiceprint candidate generation fails", async () => {
+    tempDir = await mkdtemp(join(tmpdir(), "brief-pipeline-voiceprint-failure-"));
+    const store = new JsonStore(tempDir);
+    const filePath = join(tempDir, "demo.wav");
+    await writeFile(filePath, "fake audio");
+    const originalExtractionProvider = process.env.EXTRACTION_PROVIDER;
+    const originalAudioInsightProvider = process.env.AUDIO_INSIGHT_PROVIDER;
+    const upload: AudioUpload = {
+      id: "upload_voiceprint_candidate_failure",
+      originalName: "demo.wav",
+      mimeType: "audio/wav",
+      sizeBytes: 10,
+      recordingDate: "2026-07-29",
+      status: "uploaded"
+    };
+    const transcriptSegment: TranscriptSegment = {
+      id: `${upload.id}_chunk_00000_seg_00001`,
+      uploadId: upload.id,
+      startSeconds: 0,
+      endSeconds: 35,
+      speaker: "speaker_1",
+      text: "这是一段候选生成失败时仍可继续处理的录音。",
+      confidence: 0.9,
+      sceneLabels: ["unknown"],
+      valueLabels: []
+    };
+    const transcriptChunk = TranscriptChunkSchema.parse({
+      id: `${upload.id}_transcript_chunk_00000`,
+      uploadId: upload.id,
+      audioChunkId: `${upload.id}_audio_chunk_00000`,
+      index: 0,
+      startSeconds: 0,
+      endSeconds: 35,
+      timebase: "upload_global",
+      speakerIdScope: "chunk",
+      speakerMap: { speaker_1: "speaker_1" },
+      segments: [transcriptSegment],
+      status: "completed",
+      retryCount: 0,
+      createdAt: "2026-07-29T00:00:00.000Z",
+      updatedAt: "2026-07-29T00:00:01.000Z",
+      startedAt: "2026-07-29T00:00:00.000Z",
+      finishedAt: "2026-07-29T00:00:01.000Z",
+      metadata: {}
+    });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+
+    try {
+      process.env.EXTRACTION_PROVIDER = "rule";
+      process.env.AUDIO_INSIGHT_PROVIDER = "rule";
+      await store.write("uploads", upload.id, { ...upload, filePath });
+      await store.write("transcript-chunks", transcriptChunk.id, transcriptChunk);
+
+      const result = await processUpload({
+        uploadId: upload.id,
+        store,
+        userId: "user_1",
+        dependencies: {
+          transcriptionProcessor: async () => [transcriptSegment],
+          voiceprintCandidateGenerator: async () => {
+            throw new Error("candidate generation unavailable");
+          }
+        }
+      });
+
+      expect(result.job.status).toBe("ready");
+      expect(warn).toHaveBeenCalledWith(
+        expect.stringContaining(
+          `[voiceprint-candidates] noncritical_failure upload_id=${upload.id}`
+        )
+      );
+      await expect(access(filePath)).rejects.toThrow();
+    } finally {
+      warn.mockRestore();
       restoreProviderEnv("EXTRACTION_PROVIDER", originalExtractionProvider);
       restoreProviderEnv("AUDIO_INSIGHT_PROVIDER", originalAudioInsightProvider);
     }
@@ -1347,7 +1576,7 @@ describe("processUpload", () => {
         userId: "evaluation-user",
         uploadId: upload.id,
         limit: 100
-      }).length).toBeGreaterThan(0);
+      })).toEqual([]);
     } finally {
       memoryDatabase.close();
       restoreProviderEnv("TRANSCRIPTION_PROVIDER", originalTranscriptionProvider);
@@ -1432,6 +1661,298 @@ describe("processUpload", () => {
         ])
       );
       expect(storedSemanticSegments).not.toBeNull();
+    } finally {
+      restoreProviderEnv("TRANSCRIPTION_PROVIDER", originalTranscriptionProvider);
+      restoreProviderEnv("EXTRACTION_PROVIDER", originalExtractionProvider);
+    }
+  });
+
+  it("stages participant audio only for a marked date-companion upload before deleting raw audio", async () => {
+    tempDir = await mkdtemp(join(tmpdir(), "brief-pipeline-date-companion-stage-"));
+    const store = new JsonStore(tempDir);
+    const originalTranscriptionProvider = process.env.TRANSCRIPTION_PROVIDER;
+    const originalExtractionProvider = process.env.EXTRACTION_PROVIDER;
+    const originalDailyReflectionCapabilitySecret =
+      process.env.DAILY_REFLECTION_AUDIO_CAPABILITY_SECRET;
+    const transcriptionProcessor = vi.fn(async ({ uploadId }: { uploadId: string }) => [{
+      id: `${uploadId}_seg_1`,
+      uploadId,
+      startSeconds: 0,
+      endSeconds: 2,
+      speaker: "speaker_0",
+      text: "date companion transcript",
+      confidence: 0.9,
+      sceneLabels: ["unknown" as const],
+      valueLabels: []
+    }]);
+    const stager = vi.fn(async (input: Parameters<typeof stageDateCompanionParticipantAudio>[0]) => {
+      await expect(access(input.sourceFilePath)).resolves.toBeUndefined();
+      return stageDateCompanionParticipantAudio({
+        ...input,
+        buildAudioSamples: async () => [{
+          speakerId: "speaker_0",
+          mimeType: "audio/mpeg" as const,
+          durationMilliseconds: 2_000,
+          audio: new Uint8Array([1, 2, 3]),
+          sourceRanges: [{ startMilliseconds: 0, endMilliseconds: 2_000 }]
+        }]
+      });
+    });
+    const memoryRepository = {
+      replaceUploadMemories: vi.fn(() => ({ inputCount: 0, memoryCount: 0, mergedCount: 0, relationCount: 0 })),
+      getRelevantMemories: vi.fn(() => []),
+      deleteByUpload: vi.fn()
+    };
+
+    try {
+      process.env.TRANSCRIPTION_PROVIDER = "fixture";
+      process.env.EXTRACTION_PROVIDER = "rule";
+      delete process.env.DAILY_REFLECTION_AUDIO_CAPABILITY_SECRET;
+      for (const marked of [true, false]) {
+        const uploadId = marked ? "upload_date_companion" : "upload_regular";
+        const filePath = join(tempDir, `${uploadId}.wav`);
+        await writeFile(filePath, "fake audio");
+        await store.write("uploads", uploadId, {
+          id: uploadId,
+          originalName: "demo.wav",
+          mimeType: "audio/wav",
+          sizeBytes: 10,
+          recordingDate: "2026-08-04",
+          status: "uploaded",
+          filePath,
+          ...(marked ? { dateCompanionAudioSnapshotVersion: 1 } : {})
+        });
+
+        const result = await processUpload({
+          uploadId,
+          store,
+          userId: "user_1",
+          memoryRepository,
+          dependencies: {
+            dateCompanionAudioStager: stager,
+            transcriptionProcessor
+          }
+        });
+        expect(result.job.status).toBe("ready");
+        await expect(access(filePath)).rejects.toThrow();
+      }
+
+      expect(stager).toHaveBeenCalledOnce();
+      expect(transcriptionProcessor).toHaveBeenCalledWith(expect.objectContaining({
+        uploadId: "upload_date_companion",
+        audioAccessPolicy: "legacy_bearer"
+      }));
+      expect(await store.read(
+        DATE_COMPANION_AUDIO_STAGING_COLLECTION,
+        "upload_date_companion"
+      )).toMatchObject({ status: "ready", userId: "user_1" });
+      expect(await store.read(
+        DATE_COMPANION_AUDIO_STAGING_COLLECTION,
+        "upload_regular"
+      )).toBeNull();
+    } finally {
+      restoreProviderEnv("TRANSCRIPTION_PROVIDER", originalTranscriptionProvider);
+      restoreProviderEnv("EXTRACTION_PROVIDER", originalExtractionProvider);
+      restoreProviderEnv(
+        "DAILY_REFLECTION_AUDIO_CAPABILITY_SECRET",
+        originalDailyReflectionCapabilitySecret
+      );
+    }
+  });
+
+  it("defers Date Companion Memory and owner review until explicit recap confirmation", async () => {
+    tempDir = await mkdtemp(join(tmpdir(), "brief-pipeline-date-companion-memory-gate-"));
+    const store = new JsonStore(tempDir);
+    const originalExtractionProvider = process.env.EXTRACTION_PROVIDER;
+    const originalAudioInsightProvider = process.env.AUDIO_INSIGHT_PROVIDER;
+    const originalMemoryOwnerReviewEnabled = process.env.MEMORY_OWNER_REVIEW_ENABLED;
+    const memoryRepository = {
+      replaceUploadMemories: vi.fn(() => ({
+        inputCount: 2,
+        memoryCount: 1,
+        mergedCount: 0,
+        relationCount: 0
+      })),
+      getRelevantMemories: vi.fn(() => [])
+    };
+    const memoryOwnerReviewCandidateGenerator = vi.fn(async () => []);
+    const memoryOwnerReviewCandidateCleaner = vi.fn(async () => 0);
+    const dateCompanionAudioStager = vi.fn(async ({
+      uploadId,
+      userId
+    }: Parameters<typeof stageDateCompanionParticipantAudio>[0]) => ({
+      version: 1 as const,
+      uploadId,
+      userId,
+      createdAt: "2026-08-18T10:00:00.000Z",
+      status: "not_applicable" as const,
+      reason: "no_eligible_speaker_ranges" as const
+    }));
+    const consoleInfo = vi.spyOn(console, "info").mockImplementation(() => undefined);
+    const segmentsForUpload = (uploadId: string): TranscriptSegment[] => [{
+      id: `${uploadId}_known_preference`,
+      uploadId,
+      startSeconds: 0,
+      endSeconds: 4,
+      speaker: "speaker_self",
+      identity: {
+        globalSpeakerId: "person_user",
+        identityType: "known_contact",
+        confidence: 0.99,
+        source: "voiceprint"
+      },
+      text: "我不喜欢香菜。",
+      confidence: 0.96,
+      sceneLabels: ["unknown"],
+      valueLabels: []
+    }, {
+      id: `${uploadId}_pending_owner_preference`,
+      uploadId,
+      startSeconds: 5,
+      endSeconds: 9,
+      speaker: "Alice",
+      identity: {
+        globalSpeakerId: "unknown_provider_alice",
+        identityType: "unknown_person",
+        confidence: null,
+        source: "provider_speaker_result",
+        evidence: {
+          type: "provider_label",
+          provider: "company_voiceprint",
+          providerLabel: "Alice"
+        }
+      },
+      text: "我不太能吃辣。",
+      confidence: 0.95,
+      sceneLabels: ["unknown"],
+      valueLabels: []
+    }];
+    const runUpload = async (uploadId: string, marked: boolean) => {
+      const filePath = join(tempDir!, `${uploadId}.wav`);
+      await writeFile(filePath, "fake audio");
+      await store.write("uploads", uploadId, {
+        id: uploadId,
+        originalName: "memory-candidate.wav",
+        mimeType: "audio/wav",
+        sizeBytes: 10,
+        recordingDate: "2026-08-18",
+        status: "uploaded",
+        filePath,
+        ...(marked ? { dateCompanionAudioSnapshotVersion: 1 } : {})
+      });
+      await store.write("speaker-identities", uploadId, {
+        structuralGate: { status: "healthy", reasons: [] }
+      });
+      return processUpload({
+        uploadId,
+        store,
+        userId: "user_1",
+        memoryRepository,
+        dependencies: {
+          transcriptionProcessor: async () => segmentsForUpload(uploadId),
+          memoryOwnerReviewCandidateCleaner,
+          memoryOwnerReviewCandidateGenerator,
+          dateCompanionAudioStager
+        }
+      });
+    };
+
+    try {
+      process.env.EXTRACTION_PROVIDER = "rule";
+      process.env.AUDIO_INSIGHT_PROVIDER = "rule";
+      process.env.MEMORY_OWNER_REVIEW_ENABLED = "true";
+
+      const markedUploadId = "upload_date_companion_memory_gate";
+      const markedResult = await runUpload(markedUploadId, true);
+
+      expect(markedResult.job.status).toBe("ready");
+      expect(memoryRepository.replaceUploadMemories).not.toHaveBeenCalled();
+      expect(memoryOwnerReviewCandidateGenerator).not.toHaveBeenCalled();
+      expect(await store.read("memory-owner-audits", markedUploadId)).toBeNull();
+      expect(consoleInfo).toHaveBeenCalledWith(
+        `[memory-index] skipped upload_id=${markedUploadId} reason=date_companion_confirmation_required`
+      );
+
+      const regularUploadId = "upload_regular_memory_control";
+      const regularResult = await runUpload(regularUploadId, false);
+
+      expect(regularResult.job.status).toBe("ready");
+      expect(memoryRepository.replaceUploadMemories).toHaveBeenCalledOnce();
+      expect(memoryRepository.replaceUploadMemories).toHaveBeenCalledWith(
+        expect.objectContaining({
+          uploadId: regularUploadId,
+          memories: [expect.objectContaining({ type: "preference" })]
+        })
+      );
+      expect(memoryOwnerReviewCandidateGenerator).toHaveBeenCalledOnce();
+      expect(memoryOwnerReviewCandidateGenerator).toHaveBeenCalledWith(
+        expect.objectContaining({
+          uploadId: regularUploadId,
+          drafts: [expect.objectContaining({
+            memory: expect.objectContaining({ type: "preference" })
+          })]
+        })
+      );
+      expect(await store.read("memory-owner-audits", regularUploadId)).not.toBeNull();
+    } finally {
+      restoreProviderEnv("EXTRACTION_PROVIDER", originalExtractionProvider);
+      restoreProviderEnv("AUDIO_INSIGHT_PROVIDER", originalAudioInsightProvider);
+      restoreProviderEnv("MEMORY_OWNER_REVIEW_ENABLED", originalMemoryOwnerReviewEnabled);
+      consoleInfo.mockRestore();
+    }
+  });
+
+  it("keeps raw audio and retry metadata when marked staging fails", async () => {
+    tempDir = await mkdtemp(join(tmpdir(), "brief-pipeline-date-companion-stage-fail-"));
+    const store = new JsonStore(tempDir);
+    const filePath = join(tempDir, "demo.wav");
+    await writeFile(filePath, "fake audio");
+    const originalTranscriptionProvider = process.env.TRANSCRIPTION_PROVIDER;
+    const originalExtractionProvider = process.env.EXTRACTION_PROVIDER;
+    const uploadId = "upload_date_companion_stage_fail";
+
+    try {
+      process.env.TRANSCRIPTION_PROVIDER = "fixture";
+      process.env.EXTRACTION_PROVIDER = "rule";
+      await store.write("uploads", uploadId, {
+        id: uploadId,
+        originalName: "demo.wav",
+        mimeType: "audio/wav",
+        sizeBytes: 10,
+        recordingDate: "2026-08-04",
+        status: "uploaded",
+        filePath,
+        dateCompanionAudioSnapshotVersion: 1
+      });
+
+      const result = await processUpload({
+        uploadId,
+        store,
+        userId: "user_1",
+        memoryRepository: {
+          replaceUploadMemories: vi.fn(() => ({ inputCount: 0, memoryCount: 0, mergedCount: 0, relationCount: 0 })),
+          getRelevantMemories: vi.fn(() => []),
+          deleteByUpload: vi.fn()
+        },
+        dependencies: {
+          dateCompanionAudioStager: vi.fn(async () => {
+            throw new Error("snapshot unavailable");
+          })
+        }
+      });
+
+      expect(result.job.status).toBe("failed");
+      await expect(access(filePath)).resolves.toBeUndefined();
+      expect(await store.read<StoredUpload>("uploads", uploadId)).toMatchObject({
+        status: "failed",
+        filePath,
+        errorCode: "processing_failed",
+        dateCompanionAudioSnapshotVersion: 1
+      });
+      expect(await store.read(
+        DATE_COMPANION_AUDIO_STAGING_COLLECTION,
+        uploadId
+      )).toBeNull();
     } finally {
       restoreProviderEnv("TRANSCRIPTION_PROVIDER", originalTranscriptionProvider);
       restoreProviderEnv("EXTRACTION_PROVIDER", originalExtractionProvider);
@@ -1548,6 +2069,100 @@ describe("processUpload", () => {
       expect(await store.read("deleted-uploads", upload.id)).not.toBeNull();
       expect(await store.read("uploads", upload.id)).toBeNull();
       expect(await store.read("proactive-insights", `current_${upload.id}`)).toBeNull();
+    } finally {
+      restoreProviderEnv("TRANSCRIPTION_PROVIDER", originalTranscriptionProvider);
+      restoreProviderEnv("EXTRACTION_PROVIDER", originalExtractionProvider);
+    }
+  });
+
+  it("cleans Owner Review and Voiceprint sidecars after a mid-processing delete", async () => {
+    tempDir = await mkdtemp(join(tmpdir(), "brief-pipeline-sidecar-delete-"));
+    const store = new DeleteDuringWriteStore(
+      tempDir,
+      (collection) => collection === "proactive-insights"
+    );
+    const filePath = join(tempDir, "demo.m4a");
+    await writeFile(filePath, "fake audio");
+    const originalTranscriptionProvider = process.env.TRANSCRIPTION_PROVIDER;
+    const originalExtractionProvider = process.env.EXTRACTION_PROVIDER;
+    const upload: AudioUpload = {
+      id: "upload_mid_delete_sidecars",
+      originalName: "demo.m4a",
+      mimeType: "audio/mp4",
+      sizeBytes: 10,
+      recordingDate: "2026-06-03",
+      status: "uploaded"
+    };
+    const now = "2026-08-12T00:00:00.000Z";
+    const expiresAt = "2026-08-19T00:00:00.000Z";
+    const ownerRepository = new MemoryOwnerReviewRepository(store);
+    const voiceprintRepository = new VoiceprintTrainingCandidateRepository(store);
+    const memoryRepository = {
+      replaceUploadMemories: vi.fn(() => ({
+        inputCount: 0,
+        memoryCount: 0,
+        mergedCount: 0,
+        relationCount: 0
+      })),
+      getRelevantMemories: vi.fn(() => []),
+      deleteByUpload: vi.fn()
+    };
+
+    try {
+      process.env.TRANSCRIPTION_PROVIDER = "fixture";
+      process.env.EXTRACTION_PROVIDER = "rule";
+      await store.write("uploads", upload.id, { ...upload, filePath });
+      await ownerRepository.saveCandidate({
+        version: 1,
+        candidateId: "mor_mid_delete",
+        uploadId: upload.id,
+        memoryId: "memory_mid_delete",
+        memoryType: "preference",
+        title: "待确认偏好",
+        summary: "待确认偏好",
+        evidenceSegmentIds: ["segment_mid_delete"],
+        evidenceDigest: "a".repeat(64),
+        providerLabels: ["Alice"],
+        structuralGate: { status: "blocked", reasons: ["test"] },
+        status: "daily_only",
+        audioClips: [],
+        failureReason: "structural_gate_blocked",
+        createdAt: now,
+        updatedAt: now,
+        expiresAt
+      });
+      await voiceprintRepository.save({
+        version: 1,
+        candidateId: "vp_mid_delete",
+        uploadId: upload.id,
+        candidateKey: "chunk_0::speaker_1",
+        chunkId: "chunk_0",
+        chunkIndex: 0,
+        localSpeaker: "speaker_1",
+        segmentIds: [],
+        sourceRanges: [],
+        durationMilliseconds: 0,
+        audioFilePath: null,
+        identityState: "unknown",
+        status: "insufficient",
+        createdAt: now,
+        updatedAt: now,
+        expiresAt
+      });
+
+      await expect(processUpload({
+        uploadId: upload.id,
+        store,
+        userId: "user_1",
+        memoryRepository,
+        dependencies: {
+          memoryOwnerReviewCandidateCleaner: async () => 0
+        }
+      })).rejects.toBeInstanceOf(UploadProcessingCancelledError);
+
+      expect(await ownerRepository.listCandidates(upload.id)).toEqual([]);
+      expect(await voiceprintRepository.listByUpload(upload.id)).toEqual([]);
+      expect(memoryRepository.deleteByUpload).toHaveBeenCalledWith("user_1", upload.id);
     } finally {
       restoreProviderEnv("TRANSCRIPTION_PROVIDER", originalTranscriptionProvider);
       restoreProviderEnv("EXTRACTION_PROVIDER", originalExtractionProvider);
@@ -1850,6 +2465,499 @@ describe("processUpload", () => {
     } finally {
       restoreProviderEnv("TRANSCRIPTION_PROVIDER", originalTranscriptionProvider);
       restoreProviderEnv("EXTRACTION_PROVIDER", originalExtractionProvider);
+      warnSpy.mockRestore();
+    }
+  });
+
+  it("keeps Memory owner review disabled unless explicitly enabled", async () => {
+    tempDir = await mkdtemp(join(tmpdir(), "brief-pipeline-owner-review-off-"));
+    const store = new JsonStore(tempDir);
+    const filePath = join(tempDir, "demo.m4a");
+    await writeFile(filePath, "fake audio");
+    const originalExtractionProvider = process.env.EXTRACTION_PROVIDER;
+    const originalAudioInsightProvider = process.env.AUDIO_INSIGHT_PROVIDER;
+    const originalMemoryOwnerReviewEnabled = process.env.MEMORY_OWNER_REVIEW_ENABLED;
+    const memoryRepository = {
+      replaceUploadMemories: vi.fn(() => ({
+        inputCount: 0,
+        memoryCount: 0,
+        mergedCount: 0,
+        relationCount: 0
+      })),
+      getRelevantMemories: vi.fn(() => [])
+    };
+    const memoryOwnerReviewCandidateGenerator = vi.fn(async () => []);
+    const segment: TranscriptSegment = {
+      id: "segment_owner_review_off",
+      uploadId: "upload_owner_review_off",
+      startSeconds: 0,
+      endSeconds: 8,
+      speaker: "Alice",
+      identity: {
+        globalSpeakerId: "unknown_alice",
+        identityType: "unknown_person",
+        confidence: null,
+        source: "provider_speaker_result",
+        evidence: {
+          type: "provider_label",
+          provider: "company_voiceprint",
+          providerLabel: "Alice"
+        }
+      },
+      text: "我不喜欢香菜。",
+      confidence: 0.9,
+      sceneLabels: ["unknown"],
+      valueLabels: []
+    };
+    const upload: AudioUpload = {
+      id: segment.uploadId,
+      originalName: "demo.m4a",
+      mimeType: "audio/mp4",
+      sizeBytes: 10,
+      recordingDate: "2026-08-10",
+      status: "uploaded"
+    };
+
+    try {
+      process.env.EXTRACTION_PROVIDER = "rule";
+      process.env.AUDIO_INSIGHT_PROVIDER = "rule";
+      process.env.MEMORY_OWNER_REVIEW_ENABLED = "false";
+      await store.write("uploads", upload.id, { ...upload, filePath });
+
+      const result = await processUpload({
+        uploadId: upload.id,
+        store,
+        userId: "user_1",
+        memoryRepository,
+        dependencies: {
+          transcriptionProcessor: async () => [segment],
+          memoryOwnerReviewCandidateGenerator
+        }
+      });
+
+      expect(result.job.status).toBe("ready");
+      expect(memoryOwnerReviewCandidateGenerator).not.toHaveBeenCalled();
+      expect(memoryRepository.replaceUploadMemories).toHaveBeenCalledWith(
+        expect.objectContaining({ memories: [] })
+      );
+    } finally {
+      restoreProviderEnv("EXTRACTION_PROVIDER", originalExtractionProvider);
+      restoreProviderEnv("AUDIO_INSIGHT_PROVIDER", originalAudioInsightProvider);
+      restoreProviderEnv("MEMORY_OWNER_REVIEW_ENABLED", originalMemoryOwnerReviewEnabled);
+    }
+  });
+
+  it("passes the verified identity structural gate to owner review and keeps failures observable", async () => {
+    tempDir = await mkdtemp(join(tmpdir(), "brief-pipeline-owner-review-on-"));
+    const store = new JsonStore(tempDir);
+    const filePath = join(tempDir, "demo.m4a");
+    await writeFile(filePath, "fake audio");
+    const originalExtractionProvider = process.env.EXTRACTION_PROVIDER;
+    const originalAudioInsightProvider = process.env.AUDIO_INSIGHT_PROVIDER;
+    const originalMemoryOwnerReviewEnabled = process.env.MEMORY_OWNER_REVIEW_ENABLED;
+    const memoryRepository = {
+      replaceUploadMemories: vi.fn(() => ({
+        inputCount: 0,
+        memoryCount: 0,
+        mergedCount: 0,
+        relationCount: 0
+      })),
+      getRelevantMemories: vi.fn(() => [])
+    };
+    const segment: TranscriptSegment = {
+      id: "segment_owner_review_blocked",
+      uploadId: "upload_owner_review_blocked",
+      startSeconds: 2,
+      endSeconds: 12,
+      speaker: "Alice",
+      identity: {
+        globalSpeakerId: "unknown_alice",
+        identityType: "unknown_person",
+        confidence: null,
+        source: "provider_speaker_result",
+        evidence: {
+          type: "provider_label",
+          provider: "company_voiceprint",
+          providerLabel: "Alice"
+        }
+      },
+      text: "我不喜欢香菜。",
+      confidence: 0.95,
+      sceneLabels: ["unknown"],
+      valueLabels: []
+    };
+    const upload: AudioUpload = {
+      id: segment.uploadId,
+      originalName: "demo.m4a",
+      mimeType: "audio/mp4",
+      sizeBytes: 10,
+      recordingDate: "2026-08-10",
+      status: "uploaded"
+    };
+    const memoryOwnerReviewCandidateGenerator = vi.fn(async () => {
+      throw new Error("owner review store unavailable");
+    });
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+
+    try {
+      process.env.EXTRACTION_PROVIDER = "rule";
+      process.env.AUDIO_INSIGHT_PROVIDER = "rule";
+      process.env.MEMORY_OWNER_REVIEW_ENABLED = "true";
+      await store.write("uploads", upload.id, { ...upload, filePath });
+      await store.write("speaker-identities", upload.id, {
+        structuralGate: {
+          status: "blocked",
+          reasons: ["speaker_count_mismatch"]
+        }
+      });
+
+      const result = await processUpload({
+        uploadId: upload.id,
+        store,
+        userId: "user_1",
+        memoryRepository,
+        dependencies: {
+          transcriptionProcessor: async () => [segment],
+          memoryOwnerReviewCandidateGenerator
+        }
+      });
+
+      expect(result.job.status).toBe("ready");
+      expect(memoryOwnerReviewCandidateGenerator).toHaveBeenCalledOnce();
+      expect(memoryOwnerReviewCandidateGenerator).toHaveBeenCalledWith(
+        expect.objectContaining({
+          drafts: [
+            expect.objectContaining({
+              structuralGate: {
+                status: "blocked",
+                reasons: ["speaker_count_mismatch"]
+              },
+              memory: expect.objectContaining({
+                evidence: [
+                  expect.objectContaining({
+                    sourceId: segment.id,
+                    uploadId: upload.id,
+                    quote: segment.text
+                  })
+                ]
+              }),
+              evidenceSegments: [segment]
+            })
+          ]
+        })
+      );
+      expect(memoryRepository.replaceUploadMemories).toHaveBeenCalledWith(
+        expect.objectContaining({ memories: [] })
+      );
+      expect(warnSpy).toHaveBeenCalledWith(
+        `[memory-owner-review] noncritical_failure upload_id=${upload.id} error_name=Error`
+      );
+    } finally {
+      restoreProviderEnv("EXTRACTION_PROVIDER", originalExtractionProvider);
+      restoreProviderEnv("AUDIO_INSIGHT_PROVIDER", originalAudioInsightProvider);
+      restoreProviderEnv("MEMORY_OWNER_REVIEW_ENABLED", originalMemoryOwnerReviewEnabled);
+      warnSpy.mockRestore();
+    }
+  });
+
+  it("cleans a prior-run Owner Review candidate when the rerun has no review drafts", async () => {
+    tempDir = await mkdtemp(join(tmpdir(), "brief-pipeline-owner-review-cleanup-"));
+    const store = new JsonStore(tempDir);
+    const filePath = join(tempDir, "demo.m4a");
+    const ownerReviewUploadsRoot = join(tempDir, "owner-review-uploads");
+    await writeFile(filePath, "fake audio");
+    const originalExtractionProvider = process.env.EXTRACTION_PROVIDER;
+    const originalAudioInsightProvider = process.env.AUDIO_INSIGHT_PROVIDER;
+    const originalMemoryOwnerReviewEnabled = process.env.MEMORY_OWNER_REVIEW_ENABLED;
+    const upload: AudioUpload = {
+      id: "upload_owner_review_rerun_no_draft",
+      originalName: "demo.m4a",
+      mimeType: "audio/mp4",
+      sizeBytes: 10,
+      recordingDate: "2026-08-10",
+      status: "uploaded"
+    };
+    const staleSegment: TranscriptSegment = {
+      id: "segment_owner_review_stale",
+      uploadId: upload.id,
+      startSeconds: 0,
+      endSeconds: 6,
+      speaker: "Alice",
+      identity: {
+        globalSpeakerId: "unknown_alice",
+        identityType: "unknown_person",
+        confidence: null,
+        source: "provider_speaker_result",
+        evidence: {
+          type: "provider_label",
+          provider: "company_voiceprint",
+          providerLabel: "Alice"
+        }
+      },
+      text: "我不喜欢香菜。",
+      confidence: 0.9,
+      sceneLabels: [],
+      valueLabels: []
+    };
+    const rerunSegment: TranscriptSegment = {
+      id: "segment_owner_review_rerun",
+      uploadId: upload.id,
+      startSeconds: 0,
+      endSeconds: 5,
+      speaker: "speaker_1",
+      text: "今天散步了。",
+      confidence: 0.9,
+      sceneLabels: [],
+      valueLabels: []
+    };
+    const memoryRepository = {
+      replaceUploadMemories: vi.fn(() => ({
+        inputCount: 0,
+        memoryCount: 0,
+        mergedCount: 0,
+        relationCount: 0
+      })),
+      getRelevantMemories: vi.fn(() => [])
+    };
+
+    try {
+      process.env.EXTRACTION_PROVIDER = "rule";
+      process.env.AUDIO_INSIGHT_PROVIDER = "rule";
+      process.env.MEMORY_OWNER_REVIEW_ENABLED = "false";
+      await store.write("uploads", upload.id, { ...upload, filePath });
+      await generateMemoryOwnerReviewCandidates({
+        store,
+        uploadId: upload.id,
+        sourceFilePath: null,
+        uploadsRootDir: ownerReviewUploadsRoot,
+        drafts: [{
+          memory: {
+            id: "memory_owner_review_stale",
+            type: "preference",
+            title: "饮食偏好",
+            summary: staleSegment.text,
+            importance: 0.8,
+            importanceReasons: ["test"],
+            date: upload.recordingDate,
+            createdAt: "2026-08-10T00:00:00.000Z",
+            updatedAt: "2026-08-10T00:00:00.000Z",
+            evidence: [{
+              id: "evidence_owner_review_stale",
+              sourceType: "transcript",
+              sourceId: staleSegment.id,
+              uploadId: upload.id,
+              date: upload.recordingDate,
+              quote: staleSegment.text,
+              createdAt: "2026-08-10T00:00:00.000Z"
+            }]
+          },
+          evidenceSegments: [staleSegment],
+          providerLabels: ["Alice"],
+          structuralGate: { status: "blocked", reasons: ["prior_run"] }
+        }],
+        now: () => "2026-08-10T00:00:00.000Z"
+      });
+      const repository = new MemoryOwnerReviewRepository(store);
+      expect(await repository.listCandidates(upload.id)).toHaveLength(1);
+
+      const result = await processUpload({
+        uploadId: upload.id,
+        store,
+        userId: "user_1",
+        memoryRepository,
+        dependencies: {
+          transcriptionProcessor: async () => [rerunSegment],
+          memoryOwnerReviewCandidateCleaner: (cleanupInput) =>
+            deleteMemoryOwnerReviewCandidatesForUpload({
+              ...cleanupInput,
+              uploadsRootDir: ownerReviewUploadsRoot
+            })
+        }
+      });
+
+      expect(result.job.status).toBe("ready");
+      expect(await repository.listCandidates(upload.id)).toEqual([]);
+      expect(memoryRepository.replaceUploadMemories).toHaveBeenCalledOnce();
+    } finally {
+      restoreProviderEnv("EXTRACTION_PROVIDER", originalExtractionProvider);
+      restoreProviderEnv("AUDIO_INSIGHT_PROVIDER", originalAudioInsightProvider);
+      restoreProviderEnv("MEMORY_OWNER_REVIEW_ENABLED", originalMemoryOwnerReviewEnabled);
+    }
+  });
+
+  it("cleans Owner Review state before generating replacement candidates", async () => {
+    tempDir = await mkdtemp(join(tmpdir(), "brief-pipeline-owner-review-order-"));
+    const store = new JsonStore(tempDir);
+    const filePath = join(tempDir, "demo.m4a");
+    await writeFile(filePath, "fake audio");
+    const originalExtractionProvider = process.env.EXTRACTION_PROVIDER;
+    const originalAudioInsightProvider = process.env.AUDIO_INSIGHT_PROVIDER;
+    const originalMemoryOwnerReviewEnabled = process.env.MEMORY_OWNER_REVIEW_ENABLED;
+    const executionOrder: string[] = [];
+    const memoryRepository = {
+      replaceUploadMemories: vi.fn(() => ({
+        inputCount: 0,
+        memoryCount: 0,
+        mergedCount: 0,
+        relationCount: 0
+      })),
+      getRelevantMemories: vi.fn(() => [])
+    };
+    const upload: AudioUpload = {
+      id: "upload_owner_review_cleanup_order",
+      originalName: "demo.m4a",
+      mimeType: "audio/mp4",
+      sizeBytes: 10,
+      recordingDate: "2026-08-10",
+      status: "uploaded"
+    };
+    const segment: TranscriptSegment = {
+      id: "segment_owner_review_cleanup_order",
+      uploadId: upload.id,
+      startSeconds: 0,
+      endSeconds: 8,
+      speaker: "Alice",
+      identity: {
+        globalSpeakerId: "unknown_alice",
+        identityType: "unknown_person",
+        confidence: null,
+        source: "provider_speaker_result",
+        evidence: {
+          type: "provider_label",
+          provider: "company_voiceprint",
+          providerLabel: "Alice"
+        }
+      },
+      text: "我不喜欢香菜。",
+      confidence: 0.9,
+      sceneLabels: [],
+      valueLabels: []
+    };
+    const memoryOwnerReviewCandidateCleaner = vi.fn(async () => {
+      executionOrder.push("cleanup");
+      return 1;
+    });
+    const memoryOwnerReviewCandidateGenerator = vi.fn(async () => {
+      executionOrder.push("generate");
+      return [];
+    });
+
+    try {
+      process.env.EXTRACTION_PROVIDER = "rule";
+      process.env.AUDIO_INSIGHT_PROVIDER = "rule";
+      process.env.MEMORY_OWNER_REVIEW_ENABLED = "true";
+      await store.write("uploads", upload.id, { ...upload, filePath });
+
+      const result = await processUpload({
+        uploadId: upload.id,
+        store,
+        userId: "user_1",
+        memoryRepository,
+        dependencies: {
+          transcriptionProcessor: async () => [segment],
+          memoryOwnerReviewCandidateCleaner,
+          memoryOwnerReviewCandidateGenerator
+        }
+      });
+
+      expect(result.job.status).toBe("ready");
+      expect(memoryOwnerReviewCandidateCleaner).toHaveBeenCalledOnce();
+      expect(memoryOwnerReviewCandidateGenerator).toHaveBeenCalledOnce();
+      expect(executionOrder).toEqual(["cleanup", "generate"]);
+      expect(memoryRepository.replaceUploadMemories).toHaveBeenCalledWith(
+        expect.objectContaining({ memories: [] })
+      );
+    } finally {
+      restoreProviderEnv("EXTRACTION_PROVIDER", originalExtractionProvider);
+      restoreProviderEnv("AUDIO_INSIGHT_PROVIDER", originalAudioInsightProvider);
+      restoreProviderEnv("MEMORY_OWNER_REVIEW_ENABLED", originalMemoryOwnerReviewEnabled);
+    }
+  });
+
+  it("skips Owner Review generation and logs a safe warning when rerun cleanup fails", async () => {
+    tempDir = await mkdtemp(join(tmpdir(), "brief-pipeline-owner-review-cleanup-failure-"));
+    const store = new JsonStore(tempDir);
+    const filePath = join(tempDir, "demo.m4a");
+    await writeFile(filePath, "fake audio");
+    const originalExtractionProvider = process.env.EXTRACTION_PROVIDER;
+    const originalAudioInsightProvider = process.env.AUDIO_INSIGHT_PROVIDER;
+    const originalMemoryOwnerReviewEnabled = process.env.MEMORY_OWNER_REVIEW_ENABLED;
+    const memoryRepository = {
+      replaceUploadMemories: vi.fn(() => ({
+        inputCount: 0,
+        memoryCount: 0,
+        mergedCount: 0,
+        relationCount: 0
+      })),
+      getRelevantMemories: vi.fn(() => [])
+    };
+    const upload: AudioUpload = {
+      id: "upload_owner_review_cleanup_failure",
+      originalName: "demo.m4a",
+      mimeType: "audio/mp4",
+      sizeBytes: 10,
+      recordingDate: "2026-08-10",
+      status: "uploaded"
+    };
+    const segment: TranscriptSegment = {
+      id: "segment_owner_review_cleanup_failure",
+      uploadId: upload.id,
+      startSeconds: 0,
+      endSeconds: 8,
+      speaker: "Alice",
+      identity: {
+        globalSpeakerId: "unknown_alice",
+        identityType: "unknown_person",
+        confidence: null,
+        source: "provider_speaker_result",
+        evidence: {
+          type: "provider_label",
+          provider: "company_voiceprint",
+          providerLabel: "Alice"
+        }
+      },
+      text: "我不喜欢香菜。",
+      confidence: 0.9,
+      sceneLabels: [],
+      valueLabels: []
+    };
+    const memoryOwnerReviewCandidateCleaner = vi.fn(async () => {
+      throw new Error("owner review cleanup unavailable");
+    });
+    const memoryOwnerReviewCandidateGenerator = vi.fn(async () => []);
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+
+    try {
+      process.env.EXTRACTION_PROVIDER = "rule";
+      process.env.AUDIO_INSIGHT_PROVIDER = "rule";
+      process.env.MEMORY_OWNER_REVIEW_ENABLED = "true";
+      await store.write("uploads", upload.id, { ...upload, filePath });
+
+      const result = await processUpload({
+        uploadId: upload.id,
+        store,
+        userId: "user_1",
+        memoryRepository,
+        dependencies: {
+          transcriptionProcessor: async () => [segment],
+          memoryOwnerReviewCandidateCleaner,
+          memoryOwnerReviewCandidateGenerator
+        }
+      });
+
+      expect(result.job.status).toBe("ready");
+      expect(memoryOwnerReviewCandidateCleaner).toHaveBeenCalledOnce();
+      expect(memoryOwnerReviewCandidateGenerator).not.toHaveBeenCalled();
+      expect(memoryRepository.replaceUploadMemories).toHaveBeenCalledWith(
+        expect.objectContaining({ memories: [] })
+      );
+      expect(warnSpy).toHaveBeenCalledWith(
+        `[memory-owner-review] cleanup_failure upload_id=${upload.id} error_name=Error`
+      );
+    } finally {
+      restoreProviderEnv("EXTRACTION_PROVIDER", originalExtractionProvider);
+      restoreProviderEnv("AUDIO_INSIGHT_PROVIDER", originalAudioInsightProvider);
+      restoreProviderEnv("MEMORY_OWNER_REVIEW_ENABLED", originalMemoryOwnerReviewEnabled);
       warnSpy.mockRestore();
     }
   });

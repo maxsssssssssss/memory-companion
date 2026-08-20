@@ -1,0 +1,555 @@
+{
+  "version": 1,
+  "sourceId": "long45_independent",
+  "designedAfterMemoryManifestHash": "863abaddf02cd0c60c72b2abf96c34d698c474ff5c38d04ac9aeded08dbe17d7",
+  "cases": [
+    {
+      "caseId": "h01",
+      "question": "这周工作上最让人疲惫的具体问题是什么，准备先怎么处理？",
+      "scope": "current",
+      "category": "fact",
+      "queryIntent": ["fact", "current-state"],
+      "requiredAnswerAspects": ["需求反复改方向且验收标准不清楚", "列出关键假设并向负责人确认"],
+      "goldEvidenceGroups": [
+        {
+          "id": "work-problem",
+          "sourceSegmentIds": [
+            "b2375c8a-51de-4041-a8e1-1061077f7c36_chunk_00001_seg_00001",
+            "b2375c8a-51de-4041-a8e1-1061077f7c36_chunk_00001_seg_00004",
+            "b2375c8a-51de-4041-a8e1-1061077f7c36_chunk_00001_seg_00005"
+          ]
+        },
+        {
+          "id": "work-next-step",
+          "sourceSegmentIds": [
+            "b2375c8a-51de-4041-a8e1-1061077f7c36_chunk_00001_seg_00013",
+            "b2375c8a-51de-4041-a8e1-1061077f7c36_chunk_00001_seg_00014"
+          ]
+        }
+      ],
+      "acceptableAlternativeEvidenceGroups": [],
+      "requiredLifecycleStates": ["current", "next-step"],
+      "requiredDates": ["2026-07-15"],
+      "requiredEntities": ["工作", "验收标准"],
+      "memoryShouldHelp": false
+    },
+    {
+      "caseId": "h02",
+      "question": "为什么想更新简历，而不是已经决定马上离职？",
+      "scope": "current",
+      "category": "decision",
+      "queryIntent": ["decision-reason", "distinguish-plan-from-final-decision"],
+      "requiredAnswerAspects": ["给自己保留选择", "不是马上离开"],
+      "goldEvidenceGroups": [
+        {
+          "id": "resume-decision-reason",
+          "sourceSegmentIds": [
+            "b2375c8a-51de-4041-a8e1-1061077f7c36_chunk_00001_seg_00016",
+            "b2375c8a-51de-4041-a8e1-1061077f7c36_chunk_00001_seg_00017",
+            "b2375c8a-51de-4041-a8e1-1061077f7c36_chunk_00001_seg_00018",
+            "b2375c8a-51de-4041-a8e1-1061077f7c36_chunk_00001_seg_00019"
+          ]
+        }
+      ],
+      "acceptableAlternativeEvidenceGroups": [],
+      "requiredLifecycleStates": ["considering"],
+      "requiredDates": ["2026-07-15"],
+      "requiredEntities": ["简历", "离职"],
+      "memoryShouldHelp": true
+    },
+    {
+      "caseId": "h03",
+      "question": "简历检查这件事从最初想法到最后确认，完整安排是什么？",
+      "scope": "current",
+      "category": "lifecycle",
+      "queryIntent": ["lifecycle-chain", "initial-change-final"],
+      "requiredAnswerAspects": ["先整理并发链接", "周六晚八点前检查", "范围和变更通知规则"],
+      "goldEvidenceGroups": [
+        {
+          "id": "resume-initial",
+          "sourceSegmentIds": [
+            "b2375c8a-51de-4041-a8e1-1061077f7c36_chunk_00001_seg_00023",
+            "b2375c8a-51de-4041-a8e1-1061077f7c36_chunk_00001_seg_00024"
+          ]
+        },
+        {
+          "id": "resume-commitment",
+          "sourceSegmentIds": [
+            "b2375c8a-51de-4041-a8e1-1061077f7c36_chunk_00002_seg_00001",
+            "b2375c8a-51de-4041-a8e1-1061077f7c36_chunk_00002_seg_00003",
+            "b2375c8a-51de-4041-a8e1-1061077f7c36_chunk_00002_seg_00008"
+          ]
+        },
+        {
+          "id": "resume-final",
+          "sourceSegmentIds": [
+            "b2375c8a-51de-4041-a8e1-1061077f7c36_chunk_00008_seg_00001",
+            "b2375c8a-51de-4041-a8e1-1061077f7c36_chunk_00008_seg_00003",
+            "b2375c8a-51de-4041-a8e1-1061077f7c36_chunk_00008_seg_00004",
+            "b2375c8a-51de-4041-a8e1-1061077f7c36_chunk_00008_seg_00005"
+          ]
+        }
+      ],
+      "acceptableAlternativeEvidenceGroups": [],
+      "requiredLifecycleStates": ["initial", "committed", "final-confirmed"],
+      "requiredDates": ["2026-07-15"],
+      "requiredEntities": ["简历", "周六"],
+      "memoryShouldHelp": true
+    },
+    {
+      "caseId": "h04",
+      "question": "长期点咖啡时应记住哪些偏好，又要保留什么选择空间？",
+      "scope": "current",
+      "category": "preference",
+      "queryIntent": ["preference", "stable-principle", "active-choice"],
+      "requiredAnswerAspects": ["不太甜且不要糖浆", "小杯热拿铁只是合适例子", "每次仍要确认"],
+      "goldEvidenceGroups": [
+        {
+          "id": "coffee-initial",
+          "sourceSegmentIds": [
+            "b2375c8a-51de-4041-a8e1-1061077f7c36_chunk_00002_seg_00012",
+            "b2375c8a-51de-4041-a8e1-1061077f7c36_chunk_00002_seg_00013",
+            "b2375c8a-51de-4041-a8e1-1061077f7c36_chunk_00002_seg_00017",
+            "b2375c8a-51de-4041-a8e1-1061077f7c36_chunk_00002_seg_00018"
+          ]
+        },
+        {
+          "id": "coffee-revisited",
+          "sourceSegmentIds": [
+            "b2375c8a-51de-4041-a8e1-1061077f7c36_chunk_00007_seg_00001",
+            "b2375c8a-51de-4041-a8e1-1061077f7c36_chunk_00007_seg_00003",
+            "b2375c8a-51de-4041-a8e1-1061077f7c36_chunk_00007_seg_00004",
+            "b2375c8a-51de-4041-a8e1-1061077f7c36_chunk_00007_seg_00005"
+          ]
+        },
+        {
+          "id": "coffee-final-principle",
+          "sourceSegmentIds": [
+            "b2375c8a-51de-4041-a8e1-1061077f7c36_chunk_00008_seg_00017",
+            "b2375c8a-51de-4041-a8e1-1061077f7c36_chunk_00008_seg_00018",
+            "b2375c8a-51de-4041-a8e1-1061077f7c36_chunk_00008_seg_00019"
+          ]
+        }
+      ],
+      "acceptableAlternativeEvidenceGroups": [],
+      "requiredLifecycleStates": ["repeated", "active"],
+      "requiredDates": ["2026-07-15"],
+      "requiredEntities": ["咖啡"],
+      "memoryShouldHelp": true
+    },
+    {
+      "caseId": "h05",
+      "question": "博物馆计划后来如何从想法变成最终确认的安排？",
+      "scope": "current",
+      "category": "lifecycle",
+      "queryIntent": ["lifecycle-chain", "later", "final"],
+      "requiredAnswerAspects": ["最初想周日下午去", "等待开放和预约信息", "最终预约两点场并确认交通见面时间"],
+      "goldEvidenceGroups": [
+        {
+          "id": "museum-initial",
+          "sourceSegmentIds": [
+            "b2375c8a-51de-4041-a8e1-1061077f7c36_chunk_00003_seg_00001",
+            "b2375c8a-51de-4041-a8e1-1061077f7c36_chunk_00003_seg_00003"
+          ]
+        },
+        {
+          "id": "museum-pending",
+          "sourceSegmentIds": [
+            "b2375c8a-51de-4041-a8e1-1061077f7c36_chunk_00003_seg_00016",
+            "b2375c8a-51de-4041-a8e1-1061077f7c36_chunk_00003_seg_00018",
+            "b2375c8a-51de-4041-a8e1-1061077f7c36_chunk_00003_seg_00019"
+          ]
+        },
+        {
+          "id": "museum-final",
+          "sourceSegmentIds": [
+            "b2375c8a-51de-4041-a8e1-1061077f7c36_chunk_00007_seg_00010",
+            "b2375c8a-51de-4041-a8e1-1061077f7c36_chunk_00007_seg_00014",
+            "b2375c8a-51de-4041-a8e1-1061077f7c36_chunk_00007_seg_00017"
+          ]
+        }
+      ],
+      "acceptableAlternativeEvidenceGroups": [],
+      "requiredLifecycleStates": ["initial", "pending", "final-confirmed"],
+      "requiredDates": ["2026-07-15"],
+      "requiredEntities": ["博物馆"],
+      "memoryShouldHelp": true
+    },
+    {
+      "caseId": "h06",
+      "question": "线上发生分歧时，两个人最后约定怎样暂停和恢复沟通？",
+      "scope": "current",
+      "category": "relationship",
+      "queryIntent": ["relationship-boundary", "final-agreement"],
+      "requiredAnswerAspects": ["暂停前说明不是结束", "十到二十分钟并在一小时内再确认", "恢复时先复述理解"],
+      "goldEvidenceGroups": [
+        {
+          "id": "pause-problem",
+          "sourceSegmentIds": [
+            "b2375c8a-51de-4041-a8e1-1061077f7c36_chunk_00005_seg_00006",
+            "b2375c8a-51de-4041-a8e1-1061077f7c36_chunk_00005_seg_00007",
+            "b2375c8a-51de-4041-a8e1-1061077f7c36_chunk_00005_seg_00011"
+          ]
+        },
+        {
+          "id": "pause-agreement",
+          "sourceSegmentIds": [
+            "b2375c8a-51de-4041-a8e1-1061077f7c36_chunk_00006_seg_00001",
+            "b2375c8a-51de-4041-a8e1-1061077f7c36_chunk_00006_seg_00003",
+            "b2375c8a-51de-4041-a8e1-1061077f7c36_chunk_00006_seg_00005",
+            "b2375c8a-51de-4041-a8e1-1061077f7c36_chunk_00006_seg_00006"
+          ]
+        },
+        {
+          "id": "pause-final",
+          "sourceSegmentIds": [
+            "b2375c8a-51de-4041-a8e1-1061077f7c36_chunk_00008_seg_00006",
+            "b2375c8a-51de-4041-a8e1-1061077f7c36_chunk_00008_seg_00007",
+            "b2375c8a-51de-4041-a8e1-1061077f7c36_chunk_00008_seg_00008",
+            "b2375c8a-51de-4041-a8e1-1061077f7c36_chunk_00008_seg_00009"
+          ]
+        }
+      ],
+      "acceptableAlternativeEvidenceGroups": [],
+      "requiredLifecycleStates": ["problem", "agreement", "active"],
+      "requiredDates": ["2026-07-15"],
+      "requiredEntities": ["两个人", "线上沟通"],
+      "memoryShouldHelp": true
+    },
+    {
+      "caseId": "h07",
+      "question": "最后确认的博物馆入场和见面时间是什么？",
+      "scope": "current",
+      "category": "temporal",
+      "queryIntent": ["final", "latest-time"],
+      "requiredAnswerAspects": ["周日两点入场", "十二点五十老地方见"],
+      "goldEvidenceGroups": [
+        {
+          "id": "museum-latest-time",
+          "sourceSegmentIds": [
+            "b2375c8a-51de-4041-a8e1-1061077f7c36_chunk_00007_seg_00010",
+            "b2375c8a-51de-4041-a8e1-1061077f7c36_chunk_00007_seg_00014",
+            "b2375c8a-51de-4041-a8e1-1061077f7c36_chunk_00008_seg_00015",
+            "b2375c8a-51de-4041-a8e1-1061077f7c36_chunk_00008_seg_00016"
+          ]
+        }
+      ],
+      "acceptableAlternativeEvidenceGroups": [],
+      "requiredLifecycleStates": ["final-confirmed"],
+      "requiredDates": ["2026-07-15"],
+      "requiredEntities": ["博物馆"],
+      "memoryShouldHelp": true
+    },
+    {
+      "caseId": "h08",
+      "question": "本周工作方向反复变化带来的主要影响和应对动作是什么？",
+      "scope": "week",
+      "category": "fact",
+      "queryIntent": ["week", "fact", "next-step"],
+      "requiredAnswerAspects": ["缺乏确定节奏并担心返工", "写下假设后确认"],
+      "goldEvidenceGroups": [
+        {
+          "id": "week-work-impact",
+          "sourceSegmentIds": [
+            "b2375c8a-51de-4041-a8e1-1061077f7c36_chunk_00001_seg_00002",
+            "b2375c8a-51de-4041-a8e1-1061077f7c36_chunk_00001_seg_00007",
+            "b2375c8a-51de-4041-a8e1-1061077f7c36_chunk_00001_seg_00011"
+          ]
+        },
+        {
+          "id": "week-work-action",
+          "sourceSegmentIds": [
+            "b2375c8a-51de-4041-a8e1-1061077f7c36_chunk_00001_seg_00013",
+            "b2375c8a-51de-4041-a8e1-1061077f7c36_chunk_00001_seg_00014"
+          ]
+        }
+      ],
+      "acceptableAlternativeEvidenceGroups": [],
+      "requiredLifecycleStates": ["current", "next-step"],
+      "requiredDates": ["2026-07-15"],
+      "requiredEntities": ["工作"],
+      "memoryShouldHelp": false
+    },
+    {
+      "caseId": "h09",
+      "question": "本周简历检查最后维持的承诺是什么？",
+      "scope": "week",
+      "category": "lifecycle",
+      "queryIntent": ["week", "final-state", "commitment"],
+      "requiredAnswerAspects": ["周六晚上八点前完成", "下午六点前通知变化", "检查项目描述和技能"],
+      "goldEvidenceGroups": [
+        {
+          "id": "resume-week-final",
+          "sourceSegmentIds": [
+            "b2375c8a-51de-4041-a8e1-1061077f7c36_chunk_00008_seg_00002",
+            "b2375c8a-51de-4041-a8e1-1061077f7c36_chunk_00008_seg_00003",
+            "b2375c8a-51de-4041-a8e1-1061077f7c36_chunk_00008_seg_00004",
+            "b2375c8a-51de-4041-a8e1-1061077f7c36_chunk_00008_seg_00005"
+          ]
+        }
+      ],
+      "acceptableAlternativeEvidenceGroups": [],
+      "requiredLifecycleStates": ["final-active"],
+      "requiredDates": ["2026-07-15"],
+      "requiredEntities": ["简历", "周六"],
+      "memoryShouldHelp": true
+    },
+    {
+      "caseId": "h10",
+      "question": "本周多次提到的咖啡偏好，稳定原则和当次选择分别是什么？",
+      "scope": "week",
+      "category": "preference",
+      "queryIntent": ["week", "preference", "occurrence"],
+      "requiredAnswerAspects": ["不太甜是稳定原则", "当次小杯热无糖拿铁", "以后仍要确认"],
+      "goldEvidenceGroups": [
+        {
+          "id": "week-coffee-initial",
+          "sourceSegmentIds": [
+            "b2375c8a-51de-4041-a8e1-1061077f7c36_chunk_00002_seg_00012",
+            "b2375c8a-51de-4041-a8e1-1061077f7c36_chunk_00002_seg_00018"
+          ]
+        },
+        {
+          "id": "week-coffee-repeated",
+          "sourceSegmentIds": [
+            "b2375c8a-51de-4041-a8e1-1061077f7c36_chunk_00007_seg_00001",
+            "b2375c8a-51de-4041-a8e1-1061077f7c36_chunk_00007_seg_00004"
+          ]
+        },
+        {
+          "id": "week-coffee-final",
+          "sourceSegmentIds": [
+            "b2375c8a-51de-4041-a8e1-1061077f7c36_chunk_00008_seg_00017",
+            "b2375c8a-51de-4041-a8e1-1061077f7c36_chunk_00008_seg_00018",
+            "b2375c8a-51de-4041-a8e1-1061077f7c36_chunk_00008_seg_00019"
+          ]
+        }
+      ],
+      "acceptableAlternativeEvidenceGroups": [],
+      "requiredLifecycleStates": ["repeated", "active"],
+      "requiredDates": ["2026-07-15"],
+      "requiredEntities": ["咖啡"],
+      "memoryShouldHelp": true
+    },
+    {
+      "caseId": "h11",
+      "question": "本周形成的沟通边界如何同时照顾暂停者和等待者？",
+      "scope": "week",
+      "category": "relationship",
+      "queryIntent": ["week", "relationship-boundary", "reciprocal"],
+      "requiredAnswerAspects": ["暂停者说明状态和回来节点", "等待者不连续追问", "双方都可延期但不失联"],
+      "goldEvidenceGroups": [
+        {
+          "id": "week-boundary-speaker",
+          "sourceSegmentIds": [
+            "b2375c8a-51de-4041-a8e1-1061077f7c36_chunk_00006_seg_00003",
+            "b2375c8a-51de-4041-a8e1-1061077f7c36_chunk_00006_seg_00006",
+            "b2375c8a-51de-4041-a8e1-1061077f7c36_chunk_00006_seg_00009"
+          ]
+        },
+        {
+          "id": "week-boundary-waiter",
+          "sourceSegmentIds": [
+            "b2375c8a-51de-4041-a8e1-1061077f7c36_chunk_00006_seg_00005",
+            "b2375c8a-51de-4041-a8e1-1061077f7c36_chunk_00006_seg_00012",
+            "b2375c8a-51de-4041-a8e1-1061077f7c36_chunk_00006_seg_00014"
+          ]
+        },
+        {
+          "id": "week-boundary-final",
+          "sourceSegmentIds": [
+            "b2375c8a-51de-4041-a8e1-1061077f7c36_chunk_00008_seg_00006",
+            "b2375c8a-51de-4041-a8e1-1061077f7c36_chunk_00008_seg_00009",
+            "b2375c8a-51de-4041-a8e1-1061077f7c36_chunk_00008_seg_00010"
+          ]
+        }
+      ],
+      "acceptableAlternativeEvidenceGroups": [],
+      "requiredLifecycleStates": ["active-agreement"],
+      "requiredDates": ["2026-07-15"],
+      "requiredEntities": ["双方"],
+      "memoryShouldHelp": true
+    },
+    {
+      "caseId": "h12",
+      "question": "为什么最终把博物馆作为周日主计划，而没有排满后续活动？",
+      "scope": "all",
+      "category": "decision",
+      "queryIntent": ["all", "decision-reason", "final"],
+      "requiredAnswerAspects": ["喜欢慢慢看展", "只保留博物馆主计划和后续留白", "最终按体力决定是否直接回去"],
+      "goldEvidenceGroups": [
+        {
+          "id": "museum-decision-principle",
+          "sourceSegmentIds": [
+            "b2375c8a-51de-4041-a8e1-1061077f7c36_chunk_00003_seg_00009",
+            "b2375c8a-51de-4041-a8e1-1061077f7c36_chunk_00003_seg_00010",
+            "b2375c8a-51de-4041-a8e1-1061077f7c36_chunk_00003_seg_00011",
+            "b2375c8a-51de-4041-a8e1-1061077f7c36_chunk_00003_seg_00012"
+          ]
+        },
+        {
+          "id": "museum-decision-final",
+          "sourceSegmentIds": [
+            "b2375c8a-51de-4041-a8e1-1061077f7c36_chunk_00008_seg_00015",
+            "b2375c8a-51de-4041-a8e1-1061077f7c36_chunk_00008_seg_00016"
+          ]
+        }
+      ],
+      "acceptableAlternativeEvidenceGroups": [],
+      "requiredLifecycleStates": ["final"],
+      "requiredDates": ["2026-07-15"],
+      "requiredEntities": ["博物馆"],
+      "memoryShouldHelp": true
+    },
+    {
+      "caseId": "h13",
+      "question": "从所有记录看，博物馆安排经历了哪些状态变化？",
+      "scope": "all",
+      "category": "lifecycle",
+      "queryIntent": ["all", "lifecycle-sequence"],
+      "requiredAnswerAspects": ["提出想法", "等待官网和预约信息", "预约成功并确认见面交通"],
+      "goldEvidenceGroups": [
+        {
+          "id": "all-museum-initial",
+          "sourceSegmentIds": [
+            "b2375c8a-51de-4041-a8e1-1061077f7c36_chunk_00003_seg_00001",
+            "b2375c8a-51de-4041-a8e1-1061077f7c36_chunk_00003_seg_00003"
+          ]
+        },
+        {
+          "id": "all-museum-change",
+          "sourceSegmentIds": [
+            "b2375c8a-51de-4041-a8e1-1061077f7c36_chunk_00003_seg_00016",
+            "b2375c8a-51de-4041-a8e1-1061077f7c36_chunk_00003_seg_00018"
+          ]
+        },
+        {
+          "id": "all-museum-final",
+          "sourceSegmentIds": [
+            "b2375c8a-51de-4041-a8e1-1061077f7c36_chunk_00007_seg_00010",
+            "b2375c8a-51de-4041-a8e1-1061077f7c36_chunk_00007_seg_00017",
+            "b2375c8a-51de-4041-a8e1-1061077f7c36_chunk_00008_seg_00015"
+          ]
+        }
+      ],
+      "acceptableAlternativeEvidenceGroups": [],
+      "requiredLifecycleStates": ["initial", "pending", "final"],
+      "requiredDates": ["2026-07-15"],
+      "requiredEntities": ["博物馆"],
+      "memoryShouldHelp": true
+    },
+    {
+      "caseId": "h14",
+      "question": "最后收尾时，简历、沟通边界、博物馆和咖啡偏好各确认到了什么状态？",
+      "scope": "all",
+      "category": "temporal",
+      "queryIntent": ["all", "final", "aggregate-latest-state"],
+      "requiredAnswerAspects": ["简历承诺", "暂停沟通约定", "博物馆最终时间", "咖啡稳定原则"],
+      "goldEvidenceGroups": [
+        {
+          "id": "final-resume",
+          "sourceSegmentIds": [
+            "b2375c8a-51de-4041-a8e1-1061077f7c36_chunk_00008_seg_00001",
+            "b2375c8a-51de-4041-a8e1-1061077f7c36_chunk_00008_seg_00005"
+          ]
+        },
+        {
+          "id": "final-relationship",
+          "sourceSegmentIds": [
+            "b2375c8a-51de-4041-a8e1-1061077f7c36_chunk_00008_seg_00006",
+            "b2375c8a-51de-4041-a8e1-1061077f7c36_chunk_00008_seg_00010"
+          ]
+        },
+        {
+          "id": "final-museum",
+          "sourceSegmentIds": [
+            "b2375c8a-51de-4041-a8e1-1061077f7c36_chunk_00008_seg_00015",
+            "b2375c8a-51de-4041-a8e1-1061077f7c36_chunk_00008_seg_00016"
+          ]
+        },
+        {
+          "id": "final-coffee",
+          "sourceSegmentIds": [
+            "b2375c8a-51de-4041-a8e1-1061077f7c36_chunk_00008_seg_00017",
+            "b2375c8a-51de-4041-a8e1-1061077f7c36_chunk_00008_seg_00019"
+          ]
+        }
+      ],
+      "acceptableAlternativeEvidenceGroups": [],
+      "requiredLifecycleStates": ["final"],
+      "requiredDates": ["2026-07-15"],
+      "requiredEntities": ["简历", "沟通", "博物馆", "咖啡"],
+      "memoryShouldHelp": true
+    },
+    {
+      "caseId": "h15",
+      "question": "所有已确认安排中，简历反馈和博物馆分别是什么时间？",
+      "scope": "all",
+      "category": "fact",
+      "queryIntent": ["all", "time-fact", "multi-aspect"],
+      "requiredAnswerAspects": ["周六晚八点前简历反馈", "周日十二点五十见面和两点入场"],
+      "goldEvidenceGroups": [
+        {
+          "id": "resume-time",
+          "sourceSegmentIds": [
+            "b2375c8a-51de-4041-a8e1-1061077f7c36_chunk_00002_seg_00003",
+            "b2375c8a-51de-4041-a8e1-1061077f7c36_chunk_00002_seg_00008",
+            "b2375c8a-51de-4041-a8e1-1061077f7c36_chunk_00008_seg_00003"
+          ]
+        },
+        {
+          "id": "museum-time",
+          "sourceSegmentIds": [
+            "b2375c8a-51de-4041-a8e1-1061077f7c36_chunk_00007_seg_00010",
+            "b2375c8a-51de-4041-a8e1-1061077f7c36_chunk_00007_seg_00014",
+            "b2375c8a-51de-4041-a8e1-1061077f7c36_chunk_00008_seg_00016"
+          ]
+        }
+      ],
+      "acceptableAlternativeEvidenceGroups": [],
+      "requiredLifecycleStates": ["confirmed"],
+      "requiredDates": ["2026-07-15"],
+      "requiredEntities": ["简历", "博物馆"],
+      "memoryShouldHelp": true
+    },
+    {
+      "caseId": "h16",
+      "question": "从全部对话看，这段关系里对线上沉默建立了什么边界，又如何避免把它解释成人格问题？",
+      "scope": "all",
+      "category": "relationship",
+      "queryIntent": ["all", "relationship-boundary", "safe-attribution"],
+      "requiredAnswerAspects": ["沉默曾制造不确定但不推断恶意", "以后明确状态和回来时间", "约定是可调整的共同保障"],
+      "goldEvidenceGroups": [
+        {
+          "id": "relationship-safe-attribution",
+          "sourceSegmentIds": [
+            "b2375c8a-51de-4041-a8e1-1061077f7c36_chunk_00005_seg_00008",
+            "b2375c8a-51de-4041-a8e1-1061077f7c36_chunk_00005_seg_00009",
+            "b2375c8a-51de-4041-a8e1-1061077f7c36_chunk_00005_seg_00010"
+          ]
+        },
+        {
+          "id": "relationship-boundary",
+          "sourceSegmentIds": [
+            "b2375c8a-51de-4041-a8e1-1061077f7c36_chunk_00006_seg_00003",
+            "b2375c8a-51de-4041-a8e1-1061077f7c36_chunk_00006_seg_00006",
+            "b2375c8a-51de-4041-a8e1-1061077f7c36_chunk_00006_seg_00009"
+          ]
+        },
+        {
+          "id": "relationship-adjustable",
+          "sourceSegmentIds": [
+            "b2375c8a-51de-4041-a8e1-1061077f7c36_chunk_00006_seg_00022",
+            "b2375c8a-51de-4041-a8e1-1061077f7c36_chunk_00006_seg_00023",
+            "b2375c8a-51de-4041-a8e1-1061077f7c36_chunk_00008_seg_00010"
+          ]
+        }
+      ],
+      "acceptableAlternativeEvidenceGroups": [],
+      "requiredLifecycleStates": ["problem", "agreement", "active"],
+      "requiredDates": ["2026-07-15"],
+      "requiredEntities": ["双方", "线上沟通"],
+      "memoryShouldHelp": true
+    }
+  ]
+}

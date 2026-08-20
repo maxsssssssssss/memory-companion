@@ -11,6 +11,7 @@ import { JsonStore } from "@/lib/server/storage/json-store";
 import { JsonVoiceSessionTraceRepository } from "./trace-repository";
 import {
   VoiceSessionTracer,
+  calculateVoiceLatencySegments,
   calculateVoiceStreamingTraceLatencies,
   calculateVoiceSessionTraceLatencies,
   createVoiceSessionTraceModel,
@@ -122,9 +123,13 @@ describe("VoiceSessionTrace", () => {
     tracer.mark("tts_stream_started");
     tracer.mark("first_audio_chunk_received");
     tracer.mark("playback_started");
-    tracer.mark("stream_completed");
+    tracer.mark("tts_stream_complete");
 
     const trace = tracer.snapshot();
+    expect(trace.timestamps).toMatchObject({
+      tts_stream_complete: dateAt(260).toISOString(),
+      stream_completed: dateAt(260).toISOString()
+    });
     expect(trace.streamingLatencies).toEqual({
       speechToFirstSentenceCommittedMs: 20,
       speechToFirstSafeSentenceMs: 100,
@@ -135,6 +140,28 @@ describe("VoiceSessionTrace", () => {
     });
     expect(trace.latencies.totalResponseLatencyMs).toBe(130);
     expect(trace.latencies.ttsLatencyMs).toBe(25);
+  });
+
+  it("keeps QA, partial-audio, fallback-audio, and transport terminals as distinct milestones", () => {
+    const offsets = [0, 10, 20, 30, 40];
+    const tracer = new VoiceSessionTracer({
+      sessionId: SESSION_ID,
+      scope: "all",
+      now: () => dateAt(offsets.shift() ?? 40),
+      logger: { info: vi.fn(), warn: vi.fn() }
+    });
+
+    tracer.mark("qa_provider_stream_complete");
+    tracer.mark("tts_partial_audio_failure");
+    tracer.mark("fallback_audio_complete");
+    tracer.mark("transport_complete_written");
+
+    expect(tracer.snapshot().timestamps).toMatchObject({
+      qa_provider_stream_complete: dateAt(10).toISOString(),
+      tts_partial_audio_failure: dateAt(20).toISOString(),
+      fallback_audio_complete: dateAt(30).toISOString(),
+      transport_complete_written: dateAt(40).toISOString()
+    });
   });
 
   it("keeps missing or reversed streaming latency pairs null", () => {
@@ -159,6 +186,52 @@ describe("VoiceSessionTrace", () => {
       firstAudioChunkToPlaybackMs: null,
       speechToFirstAudioPlayMs: null,
       streamDurationMs: null
+    });
+  });
+
+  it("records the detailed Voice first-audio critical path without inferring missing stages", () => {
+    const offsets = [0, 100, 130, 300, 420, 430, 900, 960, 1_200];
+    const tracer = new VoiceSessionTracer({
+      sessionId: SESSION_ID,
+      scope: "all",
+      now: () => dateAt(offsets.shift() ?? 1_200),
+      logger: { info: vi.fn(), warn: vi.fn() }
+    });
+
+    tracer.mark("voice_question_received");
+    tracer.mark("retrieval_complete");
+    tracer.mark("llm_first_token");
+    tracer.mark("first_sentence_committed");
+    tracer.mark("tts_request_start");
+    tracer.mark("first_audio_chunk_received");
+    tracer.mark("playback_started");
+    tracer.complete();
+
+    const trace = tracer.snapshot();
+    expect(trace.timestamps).toMatchObject({
+      sentence_commit: dateAt(420).toISOString(),
+      tts_first_audio_chunk: dateAt(900).toISOString(),
+      browser_playback_start: dateAt(960).toISOString(),
+      complete: dateAt(1_200).toISOString()
+    });
+    expect(trace.latencySegments).toEqual({
+      retrieval_ms: 30,
+      llm_ttft_ms: 170,
+      sentence_commit_wait_ms: 120,
+      tts_request_latency_ms: 10,
+      tts_first_audio_ms: 470,
+      browser_buffer_ms: 60,
+      first_audio_total_ms: 860
+    });
+
+    expect(calculateVoiceLatencySegments({
+      session_created: dateAt(0).toISOString(),
+      voice_question_received: dateAt(200).toISOString(),
+      retrieval_complete: dateAt(100).toISOString()
+    })).toMatchObject({
+      retrieval_ms: null,
+      llm_ttft_ms: null,
+      first_audio_total_ms: null
     });
   });
 

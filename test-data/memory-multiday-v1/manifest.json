@@ -3,7 +3,7 @@
   "description": "Privacy-safe synthetic Chinese two-speaker conversations for deterministic multi-day memory evaluation.",
   "timezone": "Asia/Shanghai",
   "productionDateField": "recordingDate",
-  "manualSpeakerIdentities": {
+  "providerVerifiedSpeakerIdentities": {
     "A": "fixture_person_a",
     "B": "fixture_person_b"
   },

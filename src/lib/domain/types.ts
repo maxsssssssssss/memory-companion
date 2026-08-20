@@ -137,18 +137,43 @@ export const SpeakerIdentityTypeSchema = z.enum([
 ]);
 export const SpeakerIdentitySourceSchema = z.enum([
   "voiceprint",
+  "provider_speaker_result",
   "cross_chunk_matching",
   "manual_mapping"
 ]);
+export const ProviderLabelIdentityEvidenceSchema = z.object({
+  type: z.literal("provider_label"),
+  provider: z.literal("company_voiceprint"),
+  providerLabel: z.string().min(1)
+}).strict();
 export const TranscriptSpeakerIdentitySchema = z
   .object({
     globalSpeakerId: z.string().min(1),
     displayName: z.string().min(1).optional(),
     identityType: SpeakerIdentityTypeSchema,
-    confidence: z.number().min(0).max(1),
-    source: SpeakerIdentitySourceSchema
+    confidence: z.number().min(0).max(1).nullable(),
+    source: SpeakerIdentitySourceSchema,
+    evidence: ProviderLabelIdentityEvidenceSchema.optional()
   })
-  .strict();
+  .strict()
+  .superRefine((identity, context) => {
+    if (identity.source === "provider_speaker_result") {
+      if (identity.confidence !== null) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["confidence"],
+          message: "Provider speaker-result identity cannot contain an acoustic confidence"
+        });
+      }
+      if (!identity.evidence || identity.evidence.type !== "provider_label") {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["evidence"],
+          message: "Provider speaker-result identity requires provider-label evidence"
+        });
+      }
+    }
+  });
 
 export const TranscriptSegmentSchema = z
   .object({
@@ -353,7 +378,18 @@ export const QuestionAnswerSchema = z.object({
         startSeconds: z.number().nonnegative(),
         endSeconds: z.number().positive(),
         excerpt: z.string().min(1),
-        sourceSegmentIds: z.array(z.string().min(1)).min(1)
+        sourceSegmentIds: z.array(z.string().min(1)).min(1),
+        memoryIds: z.array(z.string().min(1)).min(1).optional(),
+        memoryEvidenceIds: z.array(z.string().min(1)).min(1).optional(),
+        sourceOrigin: z.enum([
+          "user_reflection",
+          "direct_conversation",
+          "unknown"
+        ]).optional(),
+        contentKind: z.enum([
+          "user_confirmed_derived_content",
+          "memory_navigation"
+        ]).optional()
       })
     )
     .optional(),

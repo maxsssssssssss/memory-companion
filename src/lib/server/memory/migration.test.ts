@@ -38,6 +38,13 @@ describe("memory migration", () => {
       uploadId,
       startSeconds: 0,
       endSeconds: 5,
+      speaker: "provider_user_A",
+      identity: {
+        globalSpeakerId: "user_A",
+        identityType: "known_user",
+        confidence: 0.95,
+        source: "voiceprint"
+      },
       text: "我会在周五前确认。",
       confidence: 0.95,
       sceneLabels: ["unknown"],

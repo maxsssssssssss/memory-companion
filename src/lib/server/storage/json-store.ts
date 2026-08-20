@@ -1,10 +1,49 @@
 import { randomUUID } from "node:crypto";
 import { mkdir, readFile, readdir, rename, rm, writeFile } from "fs/promises";
 import { dirname, join, resolve } from "path";
+import { setTimeout as wait } from "node:timers/promises";
 import { getDataRootDir } from "@/lib/server/storage/paths";
 
 const STORE_KEY_PATTERN = /^[A-Za-z0-9_-]+$/;
+const TRANSIENT_RENAME_ERROR_CODES = new Set(["EACCES", "EBUSY", "EPERM"]);
+const TRANSIENT_RENAME_RETRY_DELAYS_MS = [10, 20, 40, 80] as const;
 const pathWriteQueues = new Map<string, Promise<void>>();
+
+type RenameWithRetryOptions = {
+  renameFile?: (sourcePath: string, destinationPath: string) => Promise<void>;
+  retryDelaysMs?: readonly number[];
+  waitForRetry?: (delayMs: number) => Promise<void>;
+};
+
+function isTransientRenameError(error: unknown) {
+  return error instanceof Error &&
+    "code" in error &&
+    typeof error.code === "string" &&
+    TRANSIENT_RENAME_ERROR_CODES.has(error.code);
+}
+
+export async function renameWithTransientRetry(
+  sourcePath: string,
+  destinationPath: string,
+  options: RenameWithRetryOptions = {}
+) {
+  const renameFile = options.renameFile ?? rename;
+  const retryDelaysMs = options.retryDelaysMs ?? TRANSIENT_RENAME_RETRY_DELAYS_MS;
+  const waitForRetry = options.waitForRetry ?? ((delayMs: number) => wait(delayMs));
+
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      await renameFile(sourcePath, destinationPath);
+      return;
+    } catch (error) {
+      const retryDelayMs = retryDelaysMs[attempt];
+      if (retryDelayMs === undefined || !isTransientRenameError(error)) {
+        throw error;
+      }
+      await waitForRetry(retryDelayMs);
+    }
+  }
+}
 
 async function serializePathWrite(filePath: string, write: () => Promise<void>) {
   const key = resolve(filePath);
@@ -30,7 +69,7 @@ export class JsonStore {
       const temporaryPath = `${filePath}.${process.pid}.${randomUUID()}.tmp`;
       try {
         await writeFile(temporaryPath, JSON.stringify(value, null, 2), "utf8");
-        await rename(temporaryPath, filePath);
+        await renameWithTransientRetry(temporaryPath, filePath);
       } finally {
         await rm(temporaryPath, { force: true });
       }

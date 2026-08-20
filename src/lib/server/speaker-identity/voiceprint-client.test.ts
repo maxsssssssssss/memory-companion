@@ -65,7 +65,8 @@ describe("HttpVoiceprintProvider", () => {
     await provider.save({
       userId: "user_1",
       recordId: "record_1",
-      speakerId: "partner",
+      speakerId: "speaker_1",
+      speakerName: "Partner",
       requestId: "request_2"
     });
 
@@ -74,7 +75,8 @@ describe("HttpVoiceprintProvider", () => {
     expect(JSON.parse(String(init?.body))).toEqual({
       user_id: "user_1",
       record_id: "record_1",
-      speaker_id: "partner",
+      speaker_id: "speaker_1",
+      speaker_name: "Partner",
       req_id: "request_2"
     });
   });
@@ -93,6 +95,7 @@ describe("HttpVoiceprintProvider", () => {
         userId: "user_1",
         recordId: "record_1",
         speakerId: "partner",
+        speakerName: "Partner",
         requestId: "request_2"
       })).rejects.toBeInstanceOf(VoiceprintProviderError);
     }
@@ -160,6 +163,7 @@ describe("HttpVoiceprintProvider", () => {
       userId: "user_1",
       recordId: "record_1",
       speakerId: "partner",
+      speakerName: "Partner",
       requestId: "request_network"
     })).rejects.toMatchObject({
       reason: "network_error",
@@ -176,10 +180,12 @@ describe("HttpVoiceprintProvider", () => {
       userId: "user_1",
       recordId: "record_1",
       speakerId: "partner",
+      speakerName: "Partner",
       requestId: "request_rate_limit"
     })).rejects.toMatchObject({
       reason: "http_error",
       status: 429,
+      providerCode: 9,
       retryable: true,
       attemptCount: 1,
       message: "voiceprint provider request failed"
@@ -202,6 +208,7 @@ describe("HttpVoiceprintProvider", () => {
       userId: "user_1",
       recordId: "record_1",
       speakerId: "partner",
+      speakerName: "Partner",
       requestId: "request_retry"
     })).resolves.toEqual({
       code: 0,
@@ -247,6 +254,7 @@ describe("HttpVoiceprintProvider", () => {
       userId: "user_1",
       recordId: "record_1",
       speakerId: "partner",
+      speakerName: "Partner",
       requestId: "request_retry_after"
     })).resolves.toMatchObject({ attemptCount: 2 });
     expect(sleeper).toHaveBeenCalledWith(10_000);
@@ -274,6 +282,7 @@ describe("HttpVoiceprintProvider", () => {
         userId: "user_1",
         recordId: "record_1",
         speakerId: "partner",
+        speakerName: "Partner",
         requestId: "request_non_retryable"
       })).rejects.toMatchObject({
         retryable: false,
@@ -304,6 +313,7 @@ describe("HttpVoiceprintProvider", () => {
         userId: "user_1",
         recordId: "record_1",
         speakerId: "partner",
+        speakerName: "Partner",
         requestId: `request_http_${status}`
       })).rejects.toMatchObject({
         reason: "http_error",
@@ -334,6 +344,7 @@ describe("HttpVoiceprintProvider", () => {
       userId: "user_1",
       recordId: "record_1",
       speakerId: "partner",
+      speakerName: "Partner",
       requestId: "request_stalled_body"
     });
     const assertion = expect(request).rejects.toMatchObject({
@@ -342,6 +353,44 @@ describe("HttpVoiceprintProvider", () => {
       attemptCount: 1
     });
     await vi.advanceTimersByTimeAsync(1_000);
+    await assertion;
+  });
+
+  it("uses a dedicated longer deadline for synchronous Train requests", async () => {
+    vi.useFakeTimers();
+    const fetcher = vi.fn(async (_url: string, init?: RequestInit) =>
+      await new Promise<Response>((_resolve, reject) => {
+        const abort = () => reject(new DOMException("aborted", "AbortError"));
+        if (init?.signal?.aborted) abort();
+        else init?.signal?.addEventListener("abort", abort, { once: true });
+      })
+    );
+    const provider = new HttpVoiceprintProvider({
+      baseUrl: "https://voiceprint.example.test",
+      fetcher: fetcher as typeof fetch,
+      timeoutMs: 1_000,
+      trainTimeoutMs: 2_000,
+      maxRetries: 0
+    });
+
+    const request = provider.train({
+      userId: "user_1",
+      requestId: "request_sync_train",
+      audio: [{
+        url: "https://audio.example.test/current.wav",
+        rule: [[0, 8_000]]
+      }]
+    });
+    const assertion = expect(request).rejects.toMatchObject({
+      reason: "timeout",
+      retryable: true,
+      attemptCount: 1
+    });
+    await vi.advanceTimersByTimeAsync(1_999);
+    expect(
+      (fetcher.mock.calls[0]?.[1]?.signal as AbortSignal | undefined)?.aborted
+    ).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
     await assertion;
   });
 
@@ -361,6 +410,7 @@ describe("HttpVoiceprintProvider", () => {
       userId: "user_1",
       recordId: "record_1",
       speakerId: "partner",
+      speakerName: "Partner",
       requestId: "request_oversized_response"
     })).rejects.toMatchObject({
       reason: "invalid_response",
@@ -378,15 +428,43 @@ describe("HttpVoiceprintProvider", () => {
     vi.stubEnv("VOICEPRINT_BASE_URL", "https://voiceprint.example.test");
     expect(createConfiguredVoiceprintProvider()).toBeInstanceOf(HttpVoiceprintProvider);
   });
+
+  it("allows the product enrollment path to force zero Train retries", async () => {
+    vi.stubEnv("VOICEPRINT_BASE_URL", "https://voiceprint.example.test");
+    vi.stubEnv("VOICEPRINT_MAX_RETRIES", "1");
+    const fetcher = vi.fn(async () => {
+      throw new TypeError("network unavailable");
+    });
+    const provider = createConfiguredVoiceprintProvider({
+      fetcher: fetcher as typeof fetch,
+      trainTimeoutMs: 240_000,
+      maxRetries: 0
+    });
+
+    await expect(provider.train({
+      userId: "user_1",
+      requestId: "product_enrollment_request",
+      audio: [{
+        url: "https://audio.example.test/candidate.mp3",
+        rule: [[0, 35_000]]
+      }]
+    })).rejects.toMatchObject({
+      reason: "network_error",
+      attemptCount: 1
+    });
+    expect(fetcher).toHaveBeenCalledOnce();
+  });
 });
 
 describe("InMemoryVoiceprintProvider", () => {
   it("records deterministic mock calls and returns configured identifications", async () => {
     const provider = new InMemoryVoiceprintProvider([{
       localSpeaker: "speaker_1",
-      globalSpeakerId: "person_partner",
-      displayName: "Partner",
-      confidence: 0.96
+      providerLabel: "Alice",
+      evidence: {
+        type: "provider_label",
+        provider: "company_voiceprint"
+      }
     }]);
 
     await provider.train({
@@ -398,6 +476,7 @@ describe("InMemoryVoiceprintProvider", () => {
       userId: "user_1",
       recordId: "record_1",
       speakerId: "partner",
+      speakerName: "Partner",
       requestId: "request_2"
     });
 
@@ -405,7 +484,10 @@ describe("InMemoryVoiceprintProvider", () => {
       userId: "user_1",
       recordId: "record_1",
       localSpeakers: ["speaker_1"]
-    })).resolves.toEqual([expect.objectContaining({ globalSpeakerId: "person_partner" })]);
+    })).resolves.toEqual([expect.objectContaining({
+      localSpeaker: "speaker_1",
+      providerLabel: "Alice"
+    })]);
     expect(provider.trainCalls).toHaveLength(1);
     expect(provider.saveCalls).toHaveLength(1);
   });

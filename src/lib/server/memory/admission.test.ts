@@ -3,6 +3,7 @@
 import { describe, expect, it } from "vitest";
 import type { RelationshipSignalCard } from "@/lib/domain/types";
 import { evaluateMemoryAdmission, isStablePreferenceText } from "./admission";
+import type { MemoryOwnerResolution } from "./owner-attribution/types";
 import type { MemoryWriteInput } from "./types";
 
 function memory(summary: string): MemoryWriteInput {
@@ -27,6 +28,14 @@ function memory(summary: string): MemoryWriteInput {
   };
 }
 
+function commitmentMemory(summary: string): MemoryWriteInput {
+  return {
+    ...memory(summary),
+    id: "commitment_memory_1",
+    type: "commitment"
+  };
+}
+
 function signal(signalType: RelationshipSignalCard["signalType"], summary: string): RelationshipSignalCard {
   return {
     id: "signal_1",
@@ -48,6 +57,48 @@ function signal(signalType: RelationshipSignalCard["signalType"], summary: strin
     suggestedReflection: "可以回看这段互动。",
     ...(signalType === "evasive_answer" ? { caution: "单次片段不足以下结论。" } : {}),
     createdAt: "2026-07-15T10:00:00.000Z"
+  };
+}
+
+function unknownOwner(memoryId = "memory_1"): MemoryOwnerResolution {
+  return {
+    version: 1,
+    memoryId,
+    memoryType: "relationship_signal",
+    scope: "unknown",
+    owner: { type: "unknown", confidence: 0, source: "unknown" },
+    participants: [],
+    evidenceSegmentIds: ["segment_1"],
+    observations: [],
+    reasons: ["no_trusted_identity"]
+  };
+}
+
+function knownCommitmentOwner(): MemoryOwnerResolution {
+  return {
+    version: 1,
+    memoryId: "commitment_memory_1",
+    memoryType: "commitment",
+    scope: "individual",
+    owner: {
+      type: "known_identity",
+      identityId: "person_partner",
+      confidence: 1,
+      source: "explicit_statement"
+    },
+    participants: [{
+      role: "actor",
+      attribution: {
+        type: "known_identity",
+        identityId: "person_partner",
+        confidence: 1,
+        source: "explicit_statement"
+      },
+      evidenceSegmentIds: ["segment_1"]
+    }],
+    evidenceSegmentIds: ["segment_1"],
+    observations: [],
+    reasons: ["commitment_actor"]
   };
 }
 
@@ -109,5 +160,82 @@ describe("relationship signal memory admission", () => {
       occurrenceCount: 2,
       distinctDates: 2
     })).toMatchObject({ shouldPersist: true, memoryTier: "long_term" });
+  });
+
+  it("keeps otherwise durable content daily-only without a verified identity", () => {
+    const commitment = "我们答应周六晚上八点前检查并回复简历。";
+    const result = evaluateMemoryAdmission({
+      memory: memory(commitment),
+      relationshipSignal: signal("clear_commitment", commitment),
+      ownerAttribution: unknownOwner()
+    });
+
+    expect(result).toMatchObject({
+      shouldPersist: false,
+      memoryTier: "daily_only"
+    });
+    expect(result.reasons).toContain(
+      "verified_identity_required_for_long_term_memory"
+    );
+  });
+});
+
+describe("commitment memory admission", () => {
+  it.each([
+    "我没有答应明天联系她",
+    "我明天不会联系她",
+    "我不答应明天联系她",
+    "我拒绝答应明天联系她"
+  ])("keeps a negated commitment out of long-term memory: %s", (summary) => {
+    const result = evaluateMemoryAdmission({
+      memory: commitmentMemory(summary)
+    });
+
+    expect(result).toMatchObject({
+      shouldPersist: false,
+      memoryTier: "daily_only"
+    });
+    expect(result.reasons).toContain("negated_commitment");
+  });
+
+  it("keeps a weather prediction out of long-term commitment memory", () => {
+    const result = evaluateMemoryAdmission({
+      memory: commitmentMemory("我觉得明天会下雨")
+    });
+
+    expect(result).toMatchObject({
+      shouldPersist: false,
+      memoryTier: "daily_only"
+    });
+  });
+
+  it.each([
+    "我会联系她",
+    "我愿意帮她",
+    "我打算联系她",
+    "我计划联系她"
+  ])("admits an explicit action owned by a confirmed speaker: %s", (summary) => {
+    const result = evaluateMemoryAdmission({
+      memory: commitmentMemory(summary),
+      ownerAttribution: knownCommitmentOwner()
+    });
+
+    expect(result).toMatchObject({
+      shouldPersist: true,
+      memoryTier: "long_term"
+    });
+    expect(result.reasons).toContain("explicit_future_action");
+  });
+
+  it("admits an explicit first-person future commitment", () => {
+    const result = evaluateMemoryAdmission({
+      memory: commitmentMemory("我答应明天确认见面时间。")
+    });
+
+    expect(result).toMatchObject({
+      shouldPersist: true,
+      memoryTier: "long_term"
+    });
+    expect(result.reasons).toContain("explicit_future_action");
   });
 });

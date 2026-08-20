@@ -12,6 +12,8 @@ const TRANSCRIPT_CHUNKS_COLLECTION = "transcript-chunks";
 export interface ChunkCheckpointStore {
   saveAudioChunk(chunk: AudioChunk): Promise<void>;
   saveTranscriptChunk(chunk: TranscriptChunk): Promise<void>;
+  deleteAudioChunk?(chunkId: string): Promise<void>;
+  deleteTranscriptChunk?(chunkId: string): Promise<void>;
   listAudioChunks(uploadId: string): Promise<AudioChunk[]>;
   listTranscriptChunks(uploadId: string): Promise<TranscriptChunk[]>;
   deleteUpload(uploadId: string): Promise<void>;
@@ -28,6 +30,14 @@ export class JsonChunkCheckpointStore implements ChunkCheckpointStore {
   async saveTranscriptChunk(chunk: TranscriptChunk) {
     const parsed = TranscriptChunkSchema.parse(chunk);
     await this.store.write(TRANSCRIPT_CHUNKS_COLLECTION, parsed.id, parsed);
+  }
+
+  async deleteAudioChunk(chunkId: string) {
+    await this.store.delete(AUDIO_CHUNKS_COLLECTION, chunkId);
+  }
+
+  async deleteTranscriptChunk(chunkId: string) {
+    await this.store.delete(TRANSCRIPT_CHUNKS_COLLECTION, chunkId);
   }
 
   async readAudioChunk(chunkId: string) {

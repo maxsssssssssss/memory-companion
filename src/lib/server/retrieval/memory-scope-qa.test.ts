@@ -37,6 +37,106 @@ afterEach(async () => {
 });
 
 describe("memory scope QA shadow isolation", () => {
+  it("keeps unpublished Reflection uploads out and uses only published canonical allowlisted segments", async () => {
+    tempDir = await mkdtemp(join(tmpdir(), "memory-scope-reflection-"));
+    const store = new JsonStore(tempDir);
+    const reflectionUpload = {
+      id: "daily-reflection-reflection_1",
+      originalName: "reflection.wav",
+      mimeType: "audio/wav",
+      sizeBytes: 100,
+      recordingDate: "2026-08-13",
+      status: "ready" as const,
+      ingestionContext: "daily_reflection" as const,
+      reflectionId: "reflection_1"
+    };
+    await store.write("uploads", reflectionUpload.id, reflectionUpload);
+    await store.write("segments", reflectionUpload.id, [{
+      id: "segment_store_bypass",
+      uploadId: reflectionUpload.id,
+      text: "This pending or excluded store projection must not be retrieved."
+    }]);
+    retrieveMemoryIndexEvidenceMock.mockReturnValue({
+      scope: "all",
+      memories: [],
+      evidence: [],
+      sourceIds: [],
+      distinctDates: [],
+      count: 0,
+      retrievalTimeMs: 0
+    });
+
+    await expect(answerMemoryScopeQuestion({
+      scopeId: "all_memory",
+      question: "What did I reflect on?",
+      qaScope: "all",
+      userId: "user_1",
+      store,
+      resolveUploadSource: () => ({
+        visible: false,
+        attribution: {
+          origin: "unknown",
+          statement: "来源尚未完全确认",
+          date: "2026-08-13",
+          contentKind: "memory_navigation",
+          sourceSegmentIds: []
+        }
+      })
+    })).resolves.toBeNull();
+    expect(answerQuestionWithAIMock).not.toHaveBeenCalled();
+
+    const canonical = {
+      id: "segment_kept",
+      uploadId: reflectionUpload.id,
+      speaker: "self",
+      startSeconds: 0,
+      endSeconds: 4,
+      text: "I prefer quiet cafes.",
+      confidence: 1,
+      sceneLabels: ["self_reflection" as const],
+      valueLabels: ["notable_quote" as const]
+    };
+    answerQuestionWithAIMock.mockImplementationOnce(async (input) => ({
+      id: "answer_reflection",
+      uploadId: input.uploadId,
+      question: input.question,
+      answer: "You mentioned quiet cafes. [E1]",
+      citedSegmentIds: [canonical.id],
+      createdAt: "2026-08-13T10:00:00.000Z"
+    }));
+    await answerMemoryScopeQuestion({
+      scopeId: "all_memory",
+      question: "What did I reflect on?",
+      qaScope: "all",
+      userId: "user_1",
+      store,
+      resolveUploadSource: () => ({
+        visible: true,
+        canonicalSegments: [canonical],
+        attribution: {
+          origin: "user_reflection",
+          statement: "你在 2026-08-13 的复盘中提到……",
+          date: "2026-08-13",
+          contentKind: "user_confirmed_derived_content",
+          reflectionId: "reflection_1",
+          sourceSegmentIds: [canonical.id]
+        }
+      })
+    });
+    expect(answerQuestionWithAIMock).toHaveBeenCalledWith(expect.objectContaining({
+      segments: [expect.objectContaining({
+        id: canonical.id,
+        text: expect.stringContaining(canonical.text)
+      })],
+      audioInsights: [],
+      semanticSegments: [],
+      briefItems: [],
+      relationshipSignals: []
+    }));
+    expect(JSON.stringify(answerQuestionWithAIMock.mock.calls.at(-1)?.[0]))
+      .not.toContain("segment_store_bypass");
+  });
+
   it("passes SQLite memory context into all-scope QA", async () => {
     tempDir = await mkdtemp(join(tmpdir(), "memory-scope-context-"));
     const store = new JsonStore(tempDir);
@@ -71,12 +171,17 @@ describe("memory scope QA shadow isolation", () => {
     retrieveMemoryIndexEvidenceMock.mockReturnValue(memoryContext);
     retrieveQaEvidenceMock.mockReturnValue([]);
     answerQuestionWithAIMock.mockResolvedValue(expectedAnswer);
+    const shadowReviewContext = {
+      voiceSessionId: "voice_session_1",
+      traceId: "11111111-1111-4111-8111-111111111111"
+    };
 
     const answer = await answerMemoryScopeQuestion({
       scopeId: "all_memory",
       question: "过去有哪些未解决的问题？",
       qaScope: "all",
       userId: "user_1",
+      shadowReviewContext,
       store
     });
 
@@ -85,8 +190,10 @@ describe("memory scope QA shadow isolation", () => {
       expect.objectContaining({ userId: "user_1", scope: "all", query: "过去有哪些未解决的问题？" })
     );
     expect(answerQuestionWithAIMock).toHaveBeenCalledWith(
-      expect.objectContaining({ memoryContext })
+      expect.objectContaining({ memoryContext, shadowReviewContext })
     );
+    expect(answerQuestionWithAIMock.mock.calls[0][0].shadowReviewContext)
+      .toBe(shadowReviewContext);
     expect(answerQuestionWithAIMock.mock.calls[0][0]).not.toHaveProperty("memoryIndexFallback");
   });
 

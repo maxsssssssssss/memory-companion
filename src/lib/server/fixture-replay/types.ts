@@ -23,7 +23,23 @@ export const FixtureManifestSchema = z.object({
   timezone: z.string().min(1),
   productionDateField: z.literal("recordingDate"),
   manualSpeakerIdentities: z.record(SafeIdSchema, SafeIdSchema).optional(),
+  providerVerifiedSpeakerIdentities: z.record(
+    SafeIdSchema,
+    SafeIdSchema
+  ).optional(),
   sessions: z.array(FixtureSessionSchema).min(1)
+}).superRefine((manifest, context) => {
+  const manualLabels = new Set(Object.keys(manifest.manualSpeakerIdentities ?? {}));
+  for (const providerLabel of Object.keys(
+    manifest.providerVerifiedSpeakerIdentities ?? {}
+  )) {
+    if (!manualLabels.has(providerLabel)) continue;
+    context.addIssue({
+      code: "custom",
+      path: ["providerVerifiedSpeakerIdentities", providerLabel],
+      message: "Fixture speaker identity provenance must be unique"
+    });
+  }
 });
 
 const ExpectedAssertionSchema = z.object({

@@ -8,6 +8,7 @@ import {
   requireAuthContext,
   unauthorizedResponse
 } from "@/lib/server/auth/request-context";
+import { isDailyReflectionUpload } from "@/lib/server/daily-reflection/upload-record";
 import {
   VoiceprintProviderError,
   VoiceprintWorkflowError,
@@ -75,7 +76,7 @@ export async function POST(request: Request) {
   }
 
   const upload = await authContext.store.read<AudioUpload>("uploads", parsed.data.uploadId);
-  if (!upload) {
+  if (!upload || isDailyReflectionUpload(upload)) {
     return NextResponse.json({ error: "upload_not_found" }, { status: 404 });
   }
   const chunks = await new JsonChunkCheckpointStore(authContext.store)

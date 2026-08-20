@@ -33,6 +33,17 @@ export async function* parseVoiceBrowserNdjsonStream(
   const decoder = new TextDecoder("utf-8", { fatal: true });
   let buffer = "";
   let completed = false;
+  let terminalEventSeen = false;
+  const decodeEvent = (line: string) => {
+    if (terminalEventSeen) {
+      throw new VoiceBrowserStreamProtocolError(
+        "Voice stream returned an event after its terminal completion"
+      );
+    }
+    const event = parseLine(line);
+    if (event.type === "complete") terminalEventSeen = true;
+    return event;
+  };
   try {
     while (true) {
       const result = await reader.read();
@@ -49,7 +60,7 @@ export async function* parseVoiceBrowserNdjsonStream(
       while (newline >= 0) {
         const line = buffer.slice(0, newline).trim();
         buffer = buffer.slice(newline + 1);
-        if (line) yield parseLine(line);
+        if (line) yield decodeEvent(line);
         newline = buffer.indexOf("\n");
       }
     }
@@ -60,6 +71,11 @@ export async function* parseVoiceBrowserNdjsonStream(
     }
     if (buffer.trim()) {
       throw new VoiceBrowserStreamProtocolError("Voice stream ended with an incomplete frame");
+    }
+    if (!terminalEventSeen) {
+      throw new VoiceBrowserStreamProtocolError(
+        "Voice stream ended without a terminal completion"
+      );
     }
     completed = true;
   } finally {

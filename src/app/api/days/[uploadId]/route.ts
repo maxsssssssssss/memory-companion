@@ -7,6 +7,7 @@ import {
 import { applyAudioInsightCorrections, type StoredAudioInsightCorrections } from "@/lib/domain/audio-insight-corrections";
 import { sanitizeSpeakerAliases, type StoredSpeakerAliases } from "@/lib/domain/speaker-aliases";
 import { isUnauthenticatedError, requireAuthContext, unauthorizedResponse } from "@/lib/server/auth/request-context";
+import { isDailyReflectionUploadRecord } from "@/lib/server/daily-reflection/upload-record";
 
 type StoredUpload = AudioUpload & {
   filePath?: string;
@@ -32,7 +33,7 @@ export async function GET(_request: Request, { params }: { params: Promise<{ upl
   }
 
   const upload = await authContext.store.read<StoredUpload>("uploads", uploadId);
-  if (!upload) {
+  if (!upload || isDailyReflectionUploadRecord(upload)) {
     return NextResponse.json({ error: "upload_not_found" }, { status: 404 });
   }
 

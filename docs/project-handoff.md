@@ -248,7 +248,7 @@ EMOTION_SIGNAL_PROVIDER=none
 
 ```bash
 TRANSCRIPTION_PROVIDER=speaker-asr
-SPEAKER_ASR_BASE_URL=http://14.103.196.9:8300
+SPEAKER_ASR_BASE_URL=http://speaker-asr.example.invalid:8300
 SPEAKER_ASR_AUDIO_BASE_URL=https://daydiary.vision-intelligence.tech
 SPEAKER_ASR_AUDIO_ACCESS_TOKEN=replace-with-long-random-token
 SPEAKER_ASR_SPEAKER=true

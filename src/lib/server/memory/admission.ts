@@ -33,6 +33,12 @@ const ORDINARY_CHATTER_PATTERN =
 const BOUNDARY_AGREEMENT_PATTERN =
   /(?:双方|我们).{0,16}(?:同意|约定|说好|确认|接受).{0,40}(?:暂停|休息|边界|回来|恢复|不追问|说明)|(?:暂停|休息|边界).{0,32}(?:约定|说好|双方确认|恢复沟通|回来继续|不连续追问)/u;
 const EXPLICIT_COMMITMENT_PATTERN = /答应|承诺|约定|说好|保证|promise|commitment/iu;
+const COMMITMENT_ACTION_PATTERN =
+  /答应|承诺|约定|说好|保证|负责|准备|打算|计划|愿意|陪|帮|联系|回复|确认|完成|提交|发送|通知|检查|查询|预约|处理|安排|跟进|解决|去|来|做|参加|见面|promise|commitment|contact|reply|confirm|complete|submit|send|check|book|help|attend|meet/iu;
+const INTENTIONAL_FUTURE_ACTION_PATTERN =
+  /(?:会|将|要|愿意|打算|计划|准备)[^，。！？；,.!?;\n]{0,12}(?:联系|回复|发送|通知|确认|完成|提交|检查|查询|预约|处理|安排|跟进|解决|陪|帮|去|来|做|参加|见面|contact|reply|send|confirm|complete|submit|check|book|help|attend|meet)/iu;
+const NEGATED_COMMITMENT_PATTERN =
+  /(?:我|本人)?[^，。！？；,.!?;\n]{0,18}(?:没有|没(?:有)?|不(?:会|再|打算|准备|愿意|负责)?|拒绝|取消(?:了)?|撤回(?:了)?)[^，。！？；,.!?;\n]{0,18}(?:答应|承诺|约定|说好|保证|会|将|要|负责|准备|打算|计划|愿意|陪|帮|联系|回复|发送|通知|确认|完成|提交|检查|查询|预约|处理|安排|跟进|解决|去|来|做|参加|见面)/iu;
 const TRANSIENT_SAME_SESSION_PATTERN = /吃完|饭后|待会|一会儿|这顿|当晚具体安排|回去路上/iu;
 const DURABLE_TIME_PATTERN =
   /\d{1,2}(?:点|时|[:：]\d{1,2})|明天|后天|周[一二三四五六日天]|星期[一二三四五六日天]|下周|下次|月底|before|by\s+\w+/iu;
@@ -67,6 +73,21 @@ function isBroadAggregate(memory: MemoryWriteInput, sourceSegmentCount: number) 
   );
 }
 
+function hasRequiredVerifiedIdentity(
+  type: MemoryWriteInput["type"],
+  attribution: MemoryOwnerResolution
+) {
+  if (type === "preference" || type === "commitment") {
+    return attribution.owner.type === "known_identity";
+  }
+  return (
+    attribution.owner.type === "known_identity" ||
+    attribution.participants.some(
+      (participant) => participant.attribution.type === "known_identity"
+    )
+  );
+}
+
 export function evaluateMemoryAdmission(input: {
   memory: MemoryWriteInput;
   ownerAttribution?: MemoryOwnerResolution;
@@ -93,7 +114,10 @@ export function evaluateMemoryAdmission(input: {
     ].join(" ");
     const specificSignal = hasSpecificContent(signal.summary) &&
       !GENERIC_RELATIONSHIP_SUMMARY_PATTERN.test(signal.summary.trim());
-    const actionableCommitment = FUTURE_ACTION_PATTERN.test(groundedSignalText) && specificSignal && (
+    const actionableCommitment = !NEGATED_COMMITMENT_PATTERN.test(groundedSignalText) &&
+      COMMITMENT_ACTION_PATTERN.test(groundedSignalText) &&
+      (FUTURE_ACTION_PATTERN.test(groundedSignalText) ||
+        INTENTIONAL_FUTURE_ACTION_PATTERN.test(groundedSignalText)) && specificSignal && (
       DEADLINE_PATTERN.test(groundedSignalText) || EXPLICIT_COMMITMENT_PATTERN.test(groundedSignalText)
     ) && (!TRANSIENT_SAME_SESSION_PATTERN.test(groundedSignalText) || DURABLE_TIME_PATTERN.test(groundedSignalText));
     if (signal.signalType === "clear_commitment" && actionableCommitment) {
@@ -127,9 +151,18 @@ export function evaluateMemoryAdmission(input: {
       reasons.push("preference_owner_not_reliably_identified");
     }
   } else if (memory.type === "commitment") {
-    shouldPersist = FUTURE_ACTION_PATTERN.test(text) && hasSpecificContent(text) && !broadAggregate;
+    const negatedCommitment = NEGATED_COMMITMENT_PATTERN.test(text);
+    shouldPersist = !negatedCommitment && COMMITMENT_ACTION_PATTERN.test(text) &&
+      (FUTURE_ACTION_PATTERN.test(text) || INTENTIONAL_FUTURE_ACTION_PATTERN.test(text)) &&
+      hasSpecificContent(text) && !broadAggregate;
     score = shouldPersist ? 0.78 + (DEADLINE_PATTERN.test(text) ? 0.08 : 0) : 0.36;
-    reasons.push(shouldPersist ? "explicit_future_action" : "ambiguous_non_actionable_commitment");
+    reasons.push(
+      shouldPersist
+        ? "explicit_future_action"
+        : negatedCommitment
+          ? "negated_commitment"
+          : "ambiguous_non_actionable_commitment"
+    );
     if (shouldPersist && DEADLINE_PATTERN.test(text)) reasons.push("specific_deadline");
   } else if (memory.type === "question") {
     const broad = broadAggregate;
@@ -151,6 +184,16 @@ export function evaluateMemoryAdmission(input: {
     shouldPersist = false;
     score -= 0.15;
     reasons.push("broad_single_day_evidence_span");
+  }
+
+  if (
+    shouldPersist &&
+    input.ownerAttribution &&
+    !hasRequiredVerifiedIdentity(memory.type, input.ownerAttribution)
+  ) {
+    shouldPersist = false;
+    score = Math.min(score, 0.34);
+    reasons.push("verified_identity_required_for_long_term_memory");
   }
 
   return {

@@ -1,10 +1,14 @@
 import { VoiceEvent, type ParsedVoiceServerEvent } from "@/lib/server/voice/events";
 import { logVoiceDebug } from "@/lib/server/voice/debug";
+import type {
+  VoiceQaShadowReviewVoiceMetrics
+} from "@/lib/server/evaluation/voice-qa-shadow-review";
 import {
   safeElapsedMs,
   type QaExecutionDiagnostics
 } from "@/lib/server/retrieval/qa-observability";
 import type { QaAnswerStreamEvent } from "@/lib/server/retrieval/qa-streaming";
+import type { VoiceQaShadowReviewContext } from "@/lib/server/retrieval/ai-qa";
 import type {
   VoiceProvider,
   VoiceSessionConfig,
@@ -14,8 +18,13 @@ import { VoiceProviderError } from "@/lib/server/voice/types";
 import {
   StreamingTtsError,
   streamTextToSpeech,
+  type StreamingSpeechSentence,
   type StreamingTtsEvent
 } from "@/lib/server/voice/streaming-tts";
+import {
+  requireSpokenProjection,
+  SpokenProjectionError
+} from "@/lib/server/voice/spoken-projection";
 
 import {
   normalizeVoiceQaQuery,
@@ -31,8 +40,7 @@ import {
   voiceResponseSourceFromQuestionAnswer
 } from "./response-optimizer";
 import {
-  optimizeStreamingVoiceSentence,
-  type StreamingSpeechSentence
+  optimizeStreamingVoiceSentence
 } from "./streaming-response-optimizer";
 import {
   buildVoiceQaLatencyBreakdown,
@@ -62,6 +70,10 @@ export type VoiceQaStreamingOutputEvent =
 
 const DEFAULT_TTS_TIMEOUT_MS = 60_000;
 const DEFAULT_QA_TIMEOUT_MS = 60_000;
+const MAX_STREAMING_TTS_FIRST_AUDIO_TIMEOUT_MS = 10_000;
+const MAX_STREAMING_TTS_AUDIO_IDLE_TIMEOUT_MS = 5_000;
+const MAX_STREAMING_TTS_HARD_SENTENCE_TIMEOUT_MS = 45_000;
+const MAX_STREAMING_TTS_RECOVERY_MS = 12_000;
 const ASR_FAILURE_TEXT = "无法识别，请再说一次";
 const QA_FAILURE_TEXT = "暂时无法获取相关记录";
 
@@ -73,6 +85,8 @@ type ActiveTtsTurn = {
   timeout: ReturnType<typeof setTimeout>;
   settled: boolean;
   chatTtsStarted: boolean;
+  activeChatStream?: ProviderTtsStream;
+  observedStream?: ProviderTtsStream;
   questionId?: string;
   replyId?: string;
 };
@@ -138,6 +152,41 @@ type LiveStreamingTtsResult = {
   audioChunkCount: number;
   error?: unknown;
 };
+
+type VoiceQaShadowReviewTurn = {
+  responseBaselineAtMs: number;
+  asrLatencyMs: number | null;
+  retrievalCompletedAtMs: number | null;
+  llmFirstTokenLatencyMs: number | null;
+  firstPlayableSentenceLatencyMs: number | null;
+  firstAudioLatencyMs: number | null;
+  streamingComplete: boolean;
+  ttsFailures: Set<string>;
+};
+
+function streamingTtsAllowsFullTextFallback(error: unknown) {
+  return error instanceof StreamingTtsError && [
+    "buffer_overflow",
+    "empty_audio",
+    "provider_failure",
+    "protocol_error",
+    "timeout"
+  ].includes(error.code);
+}
+
+function ttsFailureReason(error: unknown) {
+  if (error instanceof SpokenProjectionError) return error.reason;
+  if (error instanceof StreamingTtsError) return error.code;
+  if (error instanceof VoiceProviderError) return error.reason;
+  return "unknown";
+}
+
+function ttsProviderResponseCategory(error: unknown) {
+  if (error instanceof SpokenProjectionError) return "input_rejected";
+  if (error instanceof StreamingTtsError) return "stream_failed";
+  if (error instanceof VoiceProviderError) return "provider_rejected";
+  return "unknown";
+}
 
 const EXACT_SESSION_EVENTS = new Set<number>([
   VoiceEvent.ASRResponse,
@@ -281,6 +330,26 @@ async function withQaTimeout<T>(promise: Promise<T>, timeoutMs: number) {
   }
 }
 
+async function withVoiceOperationTimeout<T>(
+  promise: Promise<T>,
+  timeoutMs: number,
+  message: string
+) {
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<never>((_resolve, reject) => {
+        timeout = setTimeout(() => {
+          reject(new VoiceProviderError("timeout", message));
+        }, timeoutMs);
+      })
+    ]);
+  } finally {
+    if (timeout) clearTimeout(timeout);
+  }
+}
+
 export class VoiceQaBridge {
   private readonly provider: VoiceProvider;
   private readonly answerer: VoiceQaAnswerer;
@@ -311,12 +380,15 @@ export class VoiceQaBridge {
   private closePromise?: Promise<void>;
   private abortPromise?: Promise<void>;
   private activeTts?: ActiveTtsTurn;
-  private currentProviderTts?: ProviderTtsStream;
+  private autonomousTtsActive = false;
+  private readonly autonomousTtsIdleWaiters = new Set<() => void>();
   private bufferedTranscript?: string;
   private bufferedTranscriptIsFinal = false;
   private asrTurnActive = false;
   private asrTurnHadFinal = false;
   private audioInputFinished = false;
+  private shadowReviewSpeechEndedAtMs: number | null = null;
+  private activeShadowReviewTurn?: VoiceQaShadowReviewTurn;
   private turnTail: Promise<void> = Promise.resolve();
   private reconnectPromise?: Promise<boolean>;
 
@@ -432,6 +504,7 @@ export class VoiceQaBridge {
     }
     if (this.audioInputFinished) return;
     this.audioInputFinished = true;
+    this.shadowReviewSpeechEndedAtMs = performance.now();
 
     try {
       await this.provider.finishAudioInput();
@@ -509,10 +582,11 @@ export class VoiceQaBridge {
     this.asrTurnActive = true;
     this.asrTurnHadFinal = true;
     this.trace?.mark("asr_final_received");
+    const shadowReviewTurn = this.beginShadowReviewTurn();
     logVoiceDebug("asr_final_received", { has_transcript: true });
     this.bufferedTranscript = undefined;
     this.bufferedTranscriptIsFinal = false;
-    return this.enqueueTurn(() => this.answerAndSpeak(transcript));
+    return this.enqueueTurn(() => this.answerAndSpeak(transcript, shadowReviewTurn));
   }
 
   async submitTextQuery(transcript: string): Promise<VoiceQAResponse> {
@@ -582,7 +656,6 @@ export class VoiceQaBridge {
       "connection_closed",
       "Voice QA bridge was aborted"
     ));
-    this.currentProviderTts = undefined;
     void this.turnTail.catch(() => undefined);
     this.abortPromise = (async () => {
       // Volcengine's graceful close can wait for a provider event. Start that
@@ -608,39 +681,67 @@ export class VoiceQaBridge {
 
     if (event.eventId === VoiceEvent.TTSSentenceStart) {
       const stream = providerTtsStream(event);
-      this.currentProviderTts = stream;
-      if (stream?.type === "chat_tts_text" && this.activeTts) {
-        this.activeTts.chatTtsStarted = true;
-        this.activeTts.questionId ??= stream.questionId;
-        this.activeTts.replyId ??= stream.replyId;
+      const turn = this.activeTts;
+      if (!stream) return;
+      if (stream.type !== "chat_tts_text") {
+        this.setAutonomousTtsActive(true);
+      } else if (this.autonomousTtsActive) {
+        this.setAutonomousTtsActive(false);
       }
+      if (!turn) return;
+      turn.observedStream = stream;
+      if (stream.type !== "chat_tts_text") return;
+      if (turn.chatTtsStarted && !sameProviderTtsStream(turn, stream)) return;
+      turn.chatTtsStarted = true;
+      turn.activeChatStream ??= stream;
+      turn.questionId ??= stream.questionId;
+      turn.replyId ??= stream.replyId;
       return;
     }
 
     if (event.eventId === VoiceEvent.TTSResponse) {
+      const turn = this.activeTts;
+      const stream = turn?.observedStream ?? turn?.activeChatStream;
       if (
-        this.activeTts &&
-        this.activeTts.chatTtsStarted &&
-        this.currentProviderTts?.type === "chat_tts_text" &&
-        sameProviderTtsStream(this.activeTts, this.currentProviderTts) &&
+        turn &&
+        turn.chatTtsStarted &&
+        stream?.type === "chat_tts_text" &&
+        sameProviderTtsStream(turn, stream) &&
         event.audio &&
         event.audio.byteLength > 0
       ) {
-        this.activeTts.chunks.push(Buffer.from(event.audio));
+        this.markShadowReviewFirstAudio();
+        turn.chunks.push(Buffer.from(event.audio));
       }
       return;
     }
 
-    if (event.eventId === VoiceEvent.TTSEnded) {
-      const stream = providerTtsStream(event) ?? this.currentProviderTts;
+    if (
+      event.eventId === VoiceEvent.TTSSentenceEnd ||
+      event.eventId === VoiceEvent.TTSEnded
+    ) {
+      const turn = this.activeTts;
+      const explicitTerminalStream = providerTtsStream(event);
+      if (
+        explicitTerminalStream?.type === "default" ||
+        (!explicitTerminalStream && this.autonomousTtsActive && !turn?.chatTtsStarted)
+      ) {
+        this.setAutonomousTtsActive(false);
+      }
+      if (!turn) return;
+      const terminalStream = explicitTerminalStream ?? turn.observedStream;
+      if (terminalStream && terminalStream.type !== "chat_tts_text") {
+        turn.observedStream = undefined;
+        return;
+      }
+      const stream = terminalStream ?? turn.activeChatStream;
       if (
         stream?.type === "chat_tts_text" &&
-        this.activeTts?.chatTtsStarted &&
-        sameProviderTtsStream(this.activeTts, stream)
+        turn.chatTtsStarted &&
+        sameProviderTtsStream(turn, stream)
       ) {
         this.resolveActiveTts();
       }
-      this.currentProviderTts = undefined;
       return;
     }
 
@@ -742,7 +843,33 @@ export class VoiceQaBridge {
     return run;
   }
 
-  private async answerAndSpeak(transcript: string): Promise<VoiceQAResponse> {
+  private async answerAndSpeak(
+    transcript: string,
+    shadowReviewTurn: VoiceQaShadowReviewTurn
+  ): Promise<VoiceQAResponse> {
+    const session = this.requireOpenSession();
+    const voiceSessionId = this.applicationSessionId ?? session.id;
+    const traceId = this.trace?.sessionId;
+    const shadowReviewContext: VoiceQaShadowReviewContext | undefined = traceId
+      ? { voiceSessionId, traceId }
+      : undefined;
+    this.activeShadowReviewTurn = shadowReviewTurn;
+    try {
+      return await this.answerAndSpeakTurn(transcript, shadowReviewContext);
+    } finally {
+      this.trace?.mark("voice_response_complete");
+      const metrics = this.completeShadowReviewTurn(shadowReviewTurn);
+      if (this.activeShadowReviewTurn === shadowReviewTurn) {
+        this.activeShadowReviewTurn = undefined;
+      }
+      this.recordShadowReviewVoiceOutcome(shadowReviewContext, metrics);
+    }
+  }
+
+  private async answerAndSpeakTurn(
+    transcript: string,
+    shadowReviewContext: VoiceQaShadowReviewContext | undefined
+  ): Promise<VoiceQAResponse> {
     const session = this.requireOpenSession();
     if (session.state === "listening" || session.state === "idle") {
       session.transition("thinking");
@@ -766,6 +893,27 @@ export class VoiceQaBridge {
     let liveSentenceQueue: StreamingSentenceQueue | undefined;
     let liveStreamingTask: Promise<LiveStreamingTtsResult> | undefined;
 
+    const ensureLiveStreaming = async () => {
+      if (liveSentenceQueue) return liveSentenceQueue;
+      const queue = new StreamingSentenceQueue();
+      liveSentenceQueue = queue;
+      this.trace?.mark("first_safe_sentence");
+      this.markShadowReviewFirstPlayableSentence();
+      if (session.state !== "thinking") {
+        throw new VoiceProviderError(
+          "invalid_state",
+          `Voice QA cannot begin streaming speech while ${session.state}`
+        );
+      }
+      session.transition("speaking");
+      if (this.onLifecycleStateChange) await this.updateLifecycleState("RESPONDING");
+      this.trace?.mark("tts_started");
+      this.trace?.mark("tts_stream_started");
+      logVoiceDebug("tts_stream_started", { early_commit: acceptingLiveSentences });
+      liveStreamingTask = this.consumeLiveStreamingTts(queue);
+      return queue;
+    };
+
     const acceptCommittedSentence = async (
       event: Extract<QaAnswerStreamEvent, { type: "sentence_completed" }>
     ) => {
@@ -781,60 +929,115 @@ export class VoiceQaBridge {
         groundingValidated: event.groundingValidated
       });
       if (!optimized.ok) return;
-
-      if (!liveSentenceQueue) {
-        const queue = new StreamingSentenceQueue();
-        liveSentenceQueue = queue;
-        this.trace?.mark("first_safe_sentence");
-        if (session.state !== "thinking") {
-          throw new VoiceProviderError(
-            "invalid_state",
-            `Voice QA cannot begin streaming speech while ${session.state}`
-          );
-        }
-        session.transition("speaking");
-        if (this.onLifecycleStateChange) await this.updateLifecycleState("RESPONDING");
-        this.trace?.mark("tts_started");
-        this.trace?.mark("tts_stream_started");
-        logVoiceDebug("tts_stream_started", { early_commit: true });
-        liveStreamingTask = this.consumeLiveStreamingTts(queue);
+      try {
+        requireSpokenProjection(optimized.spokenSentence);
+      } catch (error) {
+        logVoiceDebug("tts_sentence_rejected", {
+          text_length: optimized.spokenSentence.length,
+          sentence_index: optimized.sequence,
+          provider_response_category: "input_rejected",
+          failure_reason: ttsFailureReason(error)
+        });
+        return;
       }
+
+      const queue = await ensureLiveStreaming();
 
       try {
         await this.onStreamingEvent({ type: "speech_sentence", ...optimized });
       } catch {
         acceptingLiveSentences = false;
-        liveSentenceQueue.close();
+        queue.close();
         return;
       }
       liveSpokenSentences.push(optimized.spokenSentence);
-      liveSentenceQueue.push(optimized);
+      queue.push({
+        ...optimized,
+        source: "grounded_commit"
+      });
     };
 
+    const acceptFinalProjection = async (
+      finalText: string,
+      supportIds: readonly string[]
+    ) => {
+      if (!this.onStreamingEvent || liveStreamingTask) return false;
+      let spokenSentence: string;
+      try {
+        spokenSentence = requireSpokenProjection(finalText);
+      } catch (error) {
+        logVoiceDebug("tts_sentence_rejected", {
+          text_length: finalText.length,
+          sentence_index: 1,
+          provider_response_category: "final_projection_rejected",
+          failure_reason: ttsFailureReason(error)
+        });
+        return false;
+      }
+      const queue = await ensureLiveStreaming();
+      const sentence: StreamingSpeechSentence = {
+        sequence: 1,
+        spokenSentence,
+        supportIds: [...new Set(supportIds)],
+        safeForSpeech: true,
+        source: "final_projection"
+      };
+      try {
+        await this.onStreamingEvent({ type: "speech_sentence", ...sentence });
+      } catch {
+        queue.close();
+        return false;
+      }
+      liveSpokenSentences.push(spokenSentence);
+      queue.push(sentence);
+      queue.close();
+      return true;
+    };
+
+    this.trace?.mark("voice_question_received");
     this.trace?.mark("qa_started");
     const qaStartedAt = performance.now();
     logVoiceDebug("qa_started", { conversation_messages: this.conversation.length });
     try {
+      const voiceSessionId = this.applicationSessionId ?? session.id;
+      const traceId = shadowReviewContext?.traceId;
       const answerPromise = this.answerer.answer({
-        sessionId: this.applicationSessionId ?? session.id,
+        sessionId: voiceSessionId,
         transcript,
         ...(this.userId ? { userId: this.userId } : {}),
         scope: this.scope,
         ...(this.uploadId ? { uploadId: this.uploadId } : {}),
         mode: this.responseMode,
+        ...(traceId ? { traceId } : {}),
+        ...(shadowReviewContext ? { shadowReviewContext } : {}),
         onRetrievedMemoryIds: (memoryIds) => {
           retrievedMemoryIds.splice(0, retrievedMemoryIds.length, ...new Set(memoryIds));
         },
         onQaDiagnostics: (diagnostics) => {
           qaDiagnostics = diagnostics;
         },
+        onQaMilestone: (milestone) => {
+          if (milestone === "retrieval_complete") {
+            this.trace?.mark("retrieval_complete");
+            this.markShadowReviewRetrievalComplete();
+          } else if (milestone === "llm_first_token") {
+            this.trace?.mark("llm_first_token");
+            this.markShadowReviewLlmFirstToken();
+          }
+        },
         ...(this.onStreamingEvent ? {
           onQaStreamEvent: (event: Extract<
             QaAnswerStreamEvent,
             { type: "sentence_completed" | "final" }
-          >) => event.type === "sentence_completed"
-            ? acceptCommittedSentence(event)
-            : undefined
+          >) => {
+            if (event.type === "sentence_completed") {
+              return acceptCommittedSentence(event);
+            }
+            if (event.source === "provider_stream") {
+              this.trace?.mark("qa_provider_stream_complete");
+            }
+            return undefined;
+          }
         } : {}),
         ...(this.conversation.length > 0 ? { conversation: [...this.conversation] } : {})
       });
@@ -900,13 +1103,24 @@ export class VoiceQaBridge {
         logVoiceQaBenchmark(benchmarkInput);
       }
       this.trace?.recordFailure("qa", "qa_failed");
+      const fallbackText = qaFailure?.text ?? QA_FAILURE_TEXT;
+      if (await acceptFinalProjection(fallbackText, [])) {
+        const liveResult = await liveStreamingTask!;
+        return this.finishLiveStreamingResponse({
+          transcript,
+          text: fallbackText,
+          streamResult: liveResult,
+          errors: qaFailure?.errors ?? ["qa_failed"],
+          errorCodes: qaFailure?.errorCodes ?? []
+        });
+      }
       if (liveStreamingTask) {
         const liveResult = await liveStreamingTask;
         return this.finishLiveStreamingResponse({
           transcript,
           text: liveResult.audioChunkCount > 0 && liveSpokenSentences.length > 0
             ? liveSpokenSentences.join(" ")
-            : qaFailure?.text ?? QA_FAILURE_TEXT,
+            : fallbackText,
           streamResult: liveResult,
           errors: qaFailure?.errors ?? ["qa_failed"],
           errorCodes: qaFailure?.errorCodes ?? []
@@ -914,7 +1128,7 @@ export class VoiceQaBridge {
       }
       return this.speakFallback(
         transcript,
-        qaFailure?.text ?? QA_FAILURE_TEXT,
+        fallbackText,
         qaFailure?.errors ?? ["qa_failed"],
         qaFailure?.errorCodes ?? []
       );
@@ -951,6 +1165,7 @@ export class VoiceQaBridge {
         retrievedMemoryIds: [...retrievedMemoryIds]
       });
     }
+    await acceptFinalProjection(text, answer.citedSegmentIds);
     if (liveStreamingTask) {
       const liveResult = await liveStreamingTask;
       return this.finishLiveStreamingResponse({
@@ -975,28 +1190,73 @@ export class VoiceQaBridge {
     return this.speakResponse({ transcript, text, answer, errors: [] });
   }
 
+  private recordShadowReviewVoiceOutcome(
+    context: VoiceQaShadowReviewContext | undefined,
+    metrics: VoiceQaShadowReviewVoiceMetrics
+  ) {
+    if (!context?.caseId || !this.userId) return;
+    const caseId = context.caseId;
+    const userId = this.userId;
+    void import("@/lib/server/evaluation/voice-qa-shadow-review")
+      .then(({ recordVoiceQaShadowReviewVoiceOutcome }) =>
+        recordVoiceQaShadowReviewVoiceOutcome({
+          caseId,
+          userId,
+          traceId: context.traceId,
+          metrics
+        })
+      )
+      .catch((error: unknown) => {
+        console.warn(
+          `[voice-qa-shadow-review] case_id=${caseId} ` +
+          `scope=${this.scope} status=fallback ` +
+          "fallback_reason=voice_outcome_persistence_failed " +
+          `error_name=${error instanceof Error ? error.name : "unknown"}`
+        );
+      });
+  }
+
   private async consumeLiveStreamingTts(
     sentences: AsyncIterable<StreamingSpeechSentence>
   ): Promise<LiveStreamingTtsResult> {
     let audioChunkCount = 0;
     const ttsStartedAt = performance.now();
     try {
+      await this.prepareProviderForCanonicalTts();
       for await (const event of streamTextToSpeech(sentences, {
         provider: this.provider,
         sessionId: this.requireProviderSessionId(),
         ...(this.streamingSignal ? { signal: this.streamingSignal } : {}),
-        sentenceTimeoutMs: this.ttsTimeoutMs
+        firstAudioTimeoutMs: Math.min(
+          this.ttsTimeoutMs,
+          MAX_STREAMING_TTS_FIRST_AUDIO_TIMEOUT_MS
+        ),
+        audioIdleTimeoutMs: Math.min(
+          this.ttsTimeoutMs,
+          MAX_STREAMING_TTS_AUDIO_IDLE_TIMEOUT_MS
+        ),
+        hardSentenceTimeoutMs: Math.min(
+          this.ttsTimeoutMs,
+          MAX_STREAMING_TTS_HARD_SENTENCE_TIMEOUT_MS
+        ),
+        onTtsRequestStart: () => {
+          this.trace?.mark("tts_request_start");
+        }
       })) {
         if (event.type === "audio_chunk") {
           const firstAudioChunk = audioChunkCount === 0;
           audioChunkCount += 1;
           this.trace?.mark("first_audio_chunk_received");
-          // Browser playback telemetry can arrive as soon as this callback
-          // resolves. Persist its prerequisite first so the trace API cannot
-          // observe playback_started before first_audio_chunk_received.
-          if (firstAudioChunk) await this.trace?.flush();
+          this.markShadowReviewFirstAudio();
+          // Persistence starts synchronously inside mark(), but no audio chunk
+          // waits for JsonStore I/O. If browser telemetry wins the race, its
+          // bounded 409 retry observes the queued first-chunk checkpoint.
+          if (firstAudioChunk) void this.trace?.flush();
         }
-        if (event.type === "stream_completed") this.trace?.mark("stream_completed");
+        if (event.type === "stream_completed") {
+          this.trace?.mark("tts_stream_complete");
+          this.markShadowReviewStreamingComplete();
+        }
         await this.onStreamingEvent?.(event);
       }
       logVoiceDebug("tts_stream_completed", {
@@ -1007,6 +1267,8 @@ export class VoiceQaBridge {
     } catch (error) {
       const afterAudio = audioChunkCount > 0;
       this.trace?.recordFailure("tts", "tts_failed");
+      this.markShadowReviewTtsFailure("tts_failed");
+      if (afterAudio) this.trace?.mark("tts_partial_audio_failure");
       logVoiceDebug("tts_stream_failed", {
         elapsed_ms: Math.max(0, Math.round(performance.now() - ttsStartedAt)),
         after_audio: afterAudio,
@@ -1051,11 +1313,29 @@ export class VoiceQaBridge {
         input.streamResult.audioChunkCount === 0 &&
         !this.streamingSignal?.aborted
       ) {
-        try {
-          fallbackAudio = await this.synthesizeText(input.text);
-        } catch {
+        if (streamingTtsAllowsFullTextFallback(input.streamResult.error)) {
+          try {
+            fallbackAudio = await this.recoverStreamingTtsWithoutAudio(input.text);
+            this.trace?.mark("fallback_audio_complete");
+          } catch (error) {
+            errors.push("tts_failed");
+            errorCodes.push(this.errorHandler.ttsFailed(input.text).code);
+            logVoiceDebug("tts_fallback_failed", {
+              text_length: input.text.length,
+              sentence_index: 1,
+              provider_response_category: ttsProviderResponseCategory(error),
+              failure_reason: ttsFailureReason(error)
+            });
+          }
+        } else {
           errors.push("tts_failed");
           errorCodes.push(this.errorHandler.ttsFailed(input.text).code);
+          logVoiceDebug("tts_fallback_skipped", {
+            text_length: input.text.length,
+            sentence_index: 1,
+            provider_response_category: "stream_failed",
+            failure_reason: ttsFailureReason(input.streamResult.error)
+          });
         }
       } else if (input.streamResult.error) {
         errors.push("tts_failed");
@@ -1112,7 +1392,10 @@ export class VoiceQaBridge {
     let audio: Buffer | undefined;
     const errors = [...input.errors];
     const errorCodes = [...(input.errorCodes ?? [])];
-    if (input.synthesize !== false) this.trace?.mark("tts_started");
+    if (input.synthesize !== false) {
+      this.trace?.mark("tts_started");
+      this.markShadowReviewFirstPlayableSentence();
+    }
     const ttsStartedAt = performance.now();
     if (input.synthesize !== false) logVoiceDebug("tts_started");
     try {
@@ -1124,6 +1407,7 @@ export class VoiceQaBridge {
         errorCodes.push(this.errorHandler.connectionLost().code);
       }
       this.trace?.recordFailure("tts", "tts_failed");
+      this.markShadowReviewTtsFailure("tts_failed");
       errors.push("tts_failed");
       const decision = this.errorHandler.ttsFailed(input.text);
       errorCodes.push(decision.code);
@@ -1155,18 +1439,78 @@ export class VoiceQaBridge {
   }
 
   private async synthesizeText(text: string) {
+    return this.synthesizeTextWithin(text, this.ttsTimeoutMs);
+  }
+
+  private async recoverStreamingTtsWithoutAudio(text: string) {
+    const recoveryBudgetMs = Math.min(
+      this.ttsTimeoutMs,
+      MAX_STREAMING_TTS_RECOVERY_MS
+    );
+    const startedAt = performance.now();
+    const recovered = await withVoiceOperationTimeout(
+      this.recoverProviderConnection(false),
+      recoveryBudgetMs,
+      "Voice TTS recovery exceeded its bounded budget"
+    );
+    if (!recovered) {
+      throw new VoiceProviderError(
+        "connection_failed",
+        "Voice TTS recovery did not restore a provider session"
+      );
+    }
+    const remainingMs = Math.max(
+      1,
+      recoveryBudgetMs - Math.round(performance.now() - startedAt)
+    );
+    return this.synthesizeTextWithin(text, remainingMs);
+  }
+
+  private async synthesizeTextWithin(text: string, timeoutMs: number) {
+    const spokenProjection = requireSpokenProjection(text);
+    const deadline = performance.now() + timeoutMs;
     for (let attempt = 0; attempt < 2; attempt += 1) {
-      const turn = this.beginTtsTurn();
+      const remainingMs = Math.floor(deadline - performance.now());
+      if (remainingMs < 1) {
+        throw new VoiceProviderError(
+          "timeout",
+          "Voice QA TTS exhausted its bounded retry budget"
+        );
+      }
+      await this.prepareProviderForCanonicalTts();
+      const turn = this.beginTtsTurn(remainingMs);
+      this.trace?.mark("tts_request_start");
+      logVoiceDebug("tts_request", {
+        text_length: spokenProjection.length,
+        text_bytes: Buffer.byteLength(spokenProjection, "utf8"),
+        sentence_index: 1,
+        attempt: attempt + 1,
+        provider_response_category: "request_started"
+      });
       try {
         const [, audio] = await Promise.all([
-          this.provider.sendText(text),
+          this.provider.sendText(spokenProjection),
           turn.promise
         ]);
+        logVoiceDebug("tts_request_completed", {
+          text_length: spokenProjection.length,
+          sentence_index: 1,
+          attempt: attempt + 1,
+          provider_response_category: "completed",
+          audio_bytes: audio.byteLength
+        });
         return audio;
       } catch (error) {
         const normalized = error instanceof Error ? error : new Error("Voice TTS failed");
         this.rejectActiveTts(normalized);
         await turn.promise.catch(() => undefined);
+        logVoiceDebug("tts_request_failed", {
+          text_length: spokenProjection.length,
+          sentence_index: 1,
+          attempt: attempt + 1,
+          provider_response_category: ttsProviderResponseCategory(normalized),
+          failure_reason: ttsFailureReason(normalized)
+        });
         if (attempt === 0 && isVoiceConnectionLoss(normalized)) {
           const recovered = await this.recoverProviderConnection(false);
           if (recovered) continue;
@@ -1177,7 +1521,50 @@ export class VoiceQaBridge {
     throw new VoiceProviderError("connection_closed", "Voice TTS recovery did not complete");
   }
 
-  private beginTtsTurn(): ActiveTtsTurn {
+  private setAutonomousTtsActive(active: boolean) {
+    this.autonomousTtsActive = active;
+    if (active) return;
+    for (const resolve of this.autonomousTtsIdleWaiters) resolve();
+    this.autonomousTtsIdleWaiters.clear();
+  }
+
+  private waitForAutonomousTtsIdle(timeoutMs: number) {
+    if (!this.autonomousTtsActive) return Promise.resolve();
+    return new Promise<void>((resolve) => {
+      let settled = false;
+      const finish = () => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timeout);
+        this.autonomousTtsIdleWaiters.delete(finish);
+        resolve();
+      };
+      const timeout = setTimeout(finish, timeoutMs);
+      this.autonomousTtsIdleWaiters.add(finish);
+    });
+  }
+
+  private async prepareProviderForCanonicalTts() {
+    if (!this.autonomousTtsActive) return;
+    if (!this.provider.interruptResponse) {
+      logVoiceDebug("autonomous_tts_interrupt_skipped", {
+        provider_response_category: "unsupported"
+      });
+      return;
+    }
+    logVoiceDebug("autonomous_tts_interrupt_started", {
+      provider_response_category: "default_stream_active"
+    });
+    await this.provider.interruptResponse();
+    await this.waitForAutonomousTtsIdle(1_500);
+    logVoiceDebug("autonomous_tts_interrupt_completed", {
+      provider_response_category: this.autonomousTtsActive
+        ? "terminal_not_observed"
+        : "terminal_observed"
+    });
+  }
+
+  private beginTtsTurn(timeoutMs = this.ttsTimeoutMs): ActiveTtsTurn {
     if (this.activeTts) {
       throw new VoiceProviderError("invalid_state", "A Voice QA TTS turn is already active");
     }
@@ -1195,9 +1582,9 @@ export class VoiceQaBridge {
       timeout: setTimeout(() => {
         this.rejectActiveTts(new VoiceProviderError(
           "timeout",
-          `Voice QA TTS did not finish within ${this.ttsTimeoutMs}ms`
+          `Voice QA TTS did not finish within ${timeoutMs}ms`
         ));
-      }, this.ttsTimeoutMs),
+      }, timeoutMs),
       settled: false,
       chatTtsStarted: false
     };
@@ -1277,12 +1664,106 @@ export class VoiceQaBridge {
     await this.onLifecycleStateChange?.(state);
   }
 
+  private beginShadowReviewTurn(): VoiceQaShadowReviewTurn {
+    const asrCompletedAtMs = performance.now();
+    const responseBaselineAtMs =
+      this.shadowReviewSpeechEndedAtMs ?? asrCompletedAtMs;
+    return {
+      responseBaselineAtMs,
+      asrLatencyMs:
+        this.shadowReviewSpeechEndedAtMs === null
+          ? null
+          : Math.max(
+              0,
+              Math.round(asrCompletedAtMs - this.shadowReviewSpeechEndedAtMs)
+            ),
+      retrievalCompletedAtMs: null,
+      llmFirstTokenLatencyMs: null,
+      firstPlayableSentenceLatencyMs: null,
+      firstAudioLatencyMs: null,
+      streamingComplete: false,
+      ttsFailures: new Set<string>()
+    };
+  }
+
+  private shadowReviewElapsedSince(startedAtMs: number) {
+    return Math.max(0, Math.round(performance.now() - startedAtMs));
+  }
+
+  private markShadowReviewRetrievalComplete() {
+    const turn = this.activeShadowReviewTurn;
+    if (turn && turn.retrievalCompletedAtMs === null) {
+      turn.retrievalCompletedAtMs = performance.now();
+    }
+  }
+
+  private markShadowReviewLlmFirstToken() {
+    const turn = this.activeShadowReviewTurn;
+    if (
+      turn &&
+      turn.llmFirstTokenLatencyMs === null &&
+      turn.retrievalCompletedAtMs !== null
+    ) {
+      turn.llmFirstTokenLatencyMs = this.shadowReviewElapsedSince(
+        turn.retrievalCompletedAtMs
+      );
+    }
+  }
+
+  private markShadowReviewFirstPlayableSentence() {
+    const turn = this.activeShadowReviewTurn;
+    if (turn && turn.firstPlayableSentenceLatencyMs === null) {
+      turn.firstPlayableSentenceLatencyMs = this.shadowReviewElapsedSince(
+        turn.responseBaselineAtMs
+      );
+    }
+  }
+
+  private markShadowReviewFirstAudio() {
+    const turn = this.activeShadowReviewTurn;
+    if (turn && turn.firstAudioLatencyMs === null) {
+      turn.firstAudioLatencyMs = this.shadowReviewElapsedSince(
+        turn.responseBaselineAtMs
+      );
+    }
+  }
+
+  private markShadowReviewStreamingComplete() {
+    if (this.activeShadowReviewTurn) {
+      this.activeShadowReviewTurn.streamingComplete = true;
+    }
+  }
+
+  private markShadowReviewTtsFailure(code: string) {
+    this.activeShadowReviewTurn?.ttsFailures.add(code);
+  }
+
+  private completeShadowReviewTurn(
+    turn: VoiceQaShadowReviewTurn
+  ): VoiceQaShadowReviewVoiceMetrics {
+    return {
+      asrLatencyMs: turn.asrLatencyMs,
+      llmFirstTokenLatencyMs: turn.llmFirstTokenLatencyMs,
+      firstPlayableSentenceLatencyMs: turn.firstPlayableSentenceLatencyMs,
+      firstAudioLatencyMs: turn.firstAudioLatencyMs,
+      completeLatencyMs: this.shadowReviewElapsedSince(
+        turn.responseBaselineAtMs
+      ),
+      streamingComplete: turn.streamingComplete,
+      ttsFailure:
+        turn.ttsFailures.size > 0
+          ? [...turn.ttsFailures].sort().join(",")
+          : null
+    };
+  }
+
   private resetAsrTurn() {
     this.bufferedTranscript = undefined;
     this.bufferedTranscriptIsFinal = false;
     this.asrTurnActive = false;
     this.asrTurnHadFinal = false;
     this.audioInputFinished = false;
+    this.shadowReviewSpeechEndedAtMs = null;
     this.audioReplayChunks.length = 0;
   }
 

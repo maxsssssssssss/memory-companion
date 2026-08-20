@@ -484,6 +484,20 @@ export async function POST(request: Request) {
     void (async () => {
       let audioChunkCount = 0;
       let answerWritten = false;
+      let terminalWritten = false;
+      const writeComplete = async (
+        status: Extract<VoiceBrowserStreamEvent, { type: "complete" }>["status"],
+        errors: string[]
+      ) => {
+        if (terminalWritten) return;
+        await writeEvent({
+          type: "complete",
+          status,
+          errors: [...new Set(errors)]
+        });
+        terminalWritten = true;
+        trace.mark("transport_complete_written");
+      };
       try {
         await writeEvent({
           type: "meta",
@@ -593,15 +607,14 @@ export async function POST(request: Request) {
         });
         answerWritten = true;
 
+        await writeComplete(
+          errors.length > 0 ? "completed_with_errors" : "completed",
+          errors
+        );
         if (audioChunkCount === 0 && !fallbackAudioBase64) {
           trace.complete();
           await trace.flush();
         }
-        await writeEvent({
-          type: "complete",
-          status: errors.length > 0 ? "completed_with_errors" : "completed",
-          errors: [...new Set(errors)]
-        });
       } catch (error) {
         const failure = publicFailure(error);
         const aborted = failure.error === "voice_request_aborted";
@@ -619,9 +632,10 @@ export async function POST(request: Request) {
             authContext.user.id
           );
         }
+        let traceStatus: "aborted" | "incomplete" | "failed";
         if (aborted) {
           trace.recordFailure("session", "request_aborted");
-          trace.complete("aborted");
+          traceStatus = "aborted";
         } else if (failure.error === "voice_response_timeout") {
           const snapshot = trace.snapshot();
           if (!snapshot.timestamps.asr_final_received) {
@@ -632,25 +646,27 @@ export async function POST(request: Request) {
             trace.recordFailure("qa", "qa_timeout");
           }
           trace.recordFailure("session", "response_timeout");
-          trace.complete("incomplete");
+          traceStatus = "incomplete";
         } else {
           trace.recordFailure("session", "session_failed");
-          trace.complete("failed");
+          traceStatus = "failed";
         }
-        await trace.flush();
         console.warn(
           `[browser-voice-qa-stream] failed error_name=${error instanceof Error ? error.name : "unknown"} error_code=${failure.error}`
         );
-        await writeEvent({
-          type: "error",
-          code: failure.error,
-          textAvailable: answerWritten
-        }).catch(() => undefined);
-        await writeEvent({
-          type: "complete",
-          status: aborted ? "aborted" : "failed",
-          errors: [failure.error]
-        }).catch(() => undefined);
+        if (!terminalWritten) {
+          await writeEvent({
+            type: "error",
+            code: failure.error,
+            textAvailable: answerWritten
+          }).catch(() => undefined);
+          await writeComplete(
+            aborted ? "aborted" : "failed",
+            [failure.error]
+          ).catch(() => undefined);
+        }
+        trace.complete(traceStatus);
+        await trace.flush();
       } finally {
         request.signal.removeEventListener("abort", onRequestAbort);
         await writer.close().catch(() => undefined);

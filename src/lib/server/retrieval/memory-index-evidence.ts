@@ -7,6 +7,10 @@ import type {
 } from "@/lib/server/memory/types";
 import type { MemoryOwnerMetadata } from "@/lib/server/memory/owner-attribution/types";
 import { filterMemoryOwnerMetadataByEvidence } from "@/lib/server/memory/owner-attribution/storage";
+import {
+  resolveMemoryRetrievalSource,
+  type MemoryRetrievalSourceAttribution
+} from "./source-awareness";
 
 export type MemoryIndexQaScope = "current" | "week" | "all";
 
@@ -19,6 +23,7 @@ export type MemoryIndexQaContext = {
   scope: MemoryIndexQaScope;
   memories: MemoryItem[];
   ownerAttributions?: MemoryOwnerMetadata[];
+  sourceAttributions?: MemoryRetrievalSourceAttribution[];
   evidence: MemoryEvidence[];
   sourceIds: string[];
   distinctDates: string[];
@@ -65,12 +70,15 @@ function inferMemoryIntent(query: string): MemoryIntent {
   return types.length > 0 ? { types, typed: true } : { types: ALL_MEMORY_TYPES, typed: false };
 }
 
-function validateWeekDateRange(scope: MemoryIndexQaScope, dateRange?: MemoryIndexQaDateRange) {
-  if (scope !== "week") {
+function validateDateRange(scope: MemoryIndexQaScope, dateRange?: MemoryIndexQaDateRange) {
+  if (scope === "all") {
     return undefined;
   }
   if (!dateRange || dateRange.startDate > dateRange.endDate) {
-    throw new Error("week memory QA retrieval requires a valid date range");
+    throw new Error(`${scope} memory QA retrieval requires a valid date range`);
+  }
+  if (scope === "current" && dateRange.startDate !== dateRange.endDate) {
+    throw new Error("current memory QA retrieval requires a single-day date range");
   }
   return dateRange;
 }
@@ -93,7 +101,7 @@ function isEligibleForScope(memory: MemoryItem, scope: MemoryIndexQaScope) {
   if (memory.status === "expired" || memory.status === "superseded") {
     return false;
   }
-  if (scope === "week") {
+  if (scope === "current" || scope === "week") {
     return (
       memory.importanceScore >= WEEK_MIN_IMPORTANCE_SCORE ||
       memory.status === "active" ||
@@ -120,6 +128,7 @@ function emptyContext(scope: MemoryIndexQaScope, startedAt: number): MemoryIndex
     scope,
     memories: [],
     ownerAttributions: [],
+    sourceAttributions: [],
     evidence: [],
     sourceIds: [],
     distinctDates: [],
@@ -135,17 +144,17 @@ export function retrieveMemoryIndexEvidence(input: {
   dateRange?: MemoryIndexQaDateRange;
   repository?: Pick<MemoryRepository, "getRelevantMemories"> &
     Partial<Pick<MemoryRepository, "getMemoryOwnerAttributions">>;
+  sourceResolver?: typeof resolveMemoryRetrievalSource;
 }): MemoryIndexQaContext {
   const startedAt = performance.now();
-  if (input.scope === "current") {
+  if (input.scope === "current" && !input.dateRange) {
     return emptyContext(input.scope, startedAt);
   }
-
-  const dateRange = validateWeekDateRange(input.scope, input.dateRange);
+  const dateRange = validateDateRange(input.scope, input.dateRange);
   const intent = inferMemoryIntent(input.query);
   const repository = input.repository ?? getMemoryRepository();
   const limit = intent.typed ? MAX_TYPED_MEMORIES : MAX_GENERIC_MEMORIES;
-  const memories = repository
+  const candidates = repository
     .getRelevantMemories({
       userId: input.userId,
       ...(dateRange ? { startDate: dateRange.startDate, endDate: dateRange.endDate } : {}),
@@ -153,10 +162,27 @@ export function retrieveMemoryIndexEvidence(input: {
       limit: 80
     })
     .filter((memory) => intent.types.includes(memory.type))
-    .filter((memory) => isEligibleForScope(memory, input.scope))
     .filter(hasTranscriptEvidence)
-    .sort((left, right) => compareMemories(left, right, input.scope))
+    .sort((left, right) => compareMemories(left, right, input.scope));
+  const sourceResolver = input.sourceResolver ?? resolveMemoryRetrievalSource;
+  const sourceByMemoryId = new Map(candidates.map((memory) => [
+    memory.id,
+    sourceResolver({ userId: input.userId, memory })
+  ]));
+  const memories = candidates
+    .filter((memory) => {
+      const source = sourceByMemoryId.get(memory.id);
+      return source?.eligible === true
+        && (
+          isEligibleForScope(memory, input.scope)
+          || source.attribution.origin === "user_reflection" && memory.status === "active"
+        );
+    })
     .slice(0, limit);
+  const sourceAttributions = memories.flatMap((memory) => {
+    const resolved = sourceByMemoryId.get(memory.id);
+    return resolved ? [resolved.attribution] : [];
+  });
   const evidenceById = new Map(
     memories.flatMap((memory) => memory.evidence).map((evidence) => [evidence.id, evidence])
   );
@@ -186,6 +212,7 @@ export function retrieveMemoryIndexEvidence(input: {
     scope: input.scope,
     memories,
     ownerAttributions,
+    sourceAttributions,
     evidence,
     sourceIds: [...new Set(evidence.map((item) => item.sourceId))],
     distinctDates: [...new Set(evidence.map((item) => item.date))].sort(),

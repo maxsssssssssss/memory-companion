@@ -34,6 +34,9 @@ type ParsedTraceEvent = {
   outcome?: ClientTraceOutcome;
 };
 
+const PLAYBACK_CHECKPOINT_WAIT_MS = 2_000;
+const PLAYBACK_CHECKPOINT_POLL_MS = 25;
+
 class InvalidVoiceTraceTransitionError extends Error {
   constructor() {
     super("Invalid voice trace transition");
@@ -91,6 +94,62 @@ function traceUpdate(input: ParsedTraceEvent): UpdateVoiceSessionTraceInput {
     };
   }
   return { event: "session_completed", terminalStatus: "completed" };
+}
+
+function wait(milliseconds: number) {
+  return new Promise<void>((resolve) => setTimeout(resolve, milliseconds));
+}
+
+async function waitForPlaybackCheckpoint(
+  repository: JsonVoiceSessionTraceRepository,
+  traceId: string
+) {
+  const initial = await repository.read(traceId);
+  if (!initial) throw new VoiceSessionTraceNotFoundError(traceId);
+  if (
+    initial.timestamps.first_audio_chunk_received ||
+    !initial.timestamps.voice_question_received ||
+    isTerminalVoiceSessionTraceStatus(initial.status)
+  ) {
+    return;
+  }
+
+  const deadline = Date.now() + PLAYBACK_CHECKPOINT_WAIT_MS;
+  while (Date.now() < deadline) {
+    await wait(PLAYBACK_CHECKPOINT_POLL_MS);
+    const current = await repository.read(traceId);
+    if (!current) throw new VoiceSessionTraceNotFoundError(traceId);
+    if (
+      current.timestamps.first_audio_chunk_received ||
+      isTerminalVoiceSessionTraceStatus(current.status)
+    ) {
+      return;
+    }
+  }
+}
+
+async function updateTrace(
+  repository: JsonVoiceSessionTraceRepository,
+  parsed: ParsedTraceEvent,
+  observedAt: Date
+) {
+  const update = () => repository.update(
+    parsed.traceId,
+    { ...traceUpdate(parsed), now: () => observedAt },
+    (current) => validateTraceTransition(current, parsed)
+  );
+  try {
+    return await update();
+  } catch (error) {
+    if (
+      parsed.event !== "playback_started" ||
+      !(error instanceof InvalidVoiceTraceTransitionError)
+    ) {
+      throw error;
+    }
+    await waitForPlaybackCheckpoint(repository, parsed.traceId);
+    return update();
+  }
 }
 
 function validateTraceTransition(current: VoiceSessionTrace, input: ParsedTraceEvent) {
@@ -161,11 +220,13 @@ export async function POST(request: Request) {
 
   try {
     const repository = new JsonVoiceSessionTraceRepository(authContext.store);
-    const result = await repository.update(
-      parsed.traceId,
-      traceUpdate(parsed),
-      (current) => validateTraceTransition(current, parsed)
-    );
+    // Streaming playback starts as soon as the first PCM chunk reaches the
+    // browser. Persisting the corresponding server checkpoint is intentionally
+    // asynchronous, so let that narrow race settle without making playback
+    // telemetry retry. Keep the request-arrival time as the actual playback
+    // timestamp rather than the later persistence time.
+    const observedAt = new Date();
+    const result = await updateTrace(repository, parsed, observedAt);
     if (parsed.event === "session_completed" && parsed.outcome === "aborted") {
       await synchronizeAbortedVoiceSession(
         result.trace,

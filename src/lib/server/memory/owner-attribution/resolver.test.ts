@@ -208,7 +208,7 @@ describe("resolveMemoryOwnerAttribution", () => {
     });
   });
 
-  it("represents a trusted anonymous resolved identity as local_speaker", () => {
+  it("rejects an anonymous cross-chunk identity even when its score is high", () => {
     const result = resolveMemoryOwnerAttribution({
       memoryId: "memory_anonymous",
       memoryType: "preference",
@@ -224,10 +224,13 @@ describe("resolveMemoryOwnerAttribution", () => {
     });
 
     expect(result.owner).toEqual({
-      type: "local_speaker",
-      identityId: "anonymous_person_1",
-      confidence: 0.9,
-      source: "explicit_statement"
+      type: "unknown",
+      confidence: 0,
+      source: "unknown"
+    });
+    expect(result.observations[0]).toMatchObject({
+      eligible: false,
+      reason: "identity_not_provider_verified"
     });
   });
 
@@ -247,7 +250,7 @@ describe("resolveMemoryOwnerAttribution", () => {
     expect(JSON.stringify(result)).not.toContain("speaker_0");
   });
 
-  it("attributes a commitment actor and only the unique trusted receiver", () => {
+  it("does not admit a manual-only commitment actor as a verified owner", () => {
     const result = resolveMemoryOwnerAttribution({
       memoryId: "memory_commitment",
       memoryType: "commitment",
@@ -271,22 +274,115 @@ describe("resolveMemoryOwnerAttribution", () => {
     });
 
     expect(result.owner).toEqual({
+      type: "unknown",
+      confidence: 0,
+      source: "unknown"
+    });
+    expect(result.scope).toBe("unknown");
+    expect(result.participants).toEqual([]);
+    expect(result.observations[0]).toMatchObject({
+      eligible: false,
+      reason: "identity_not_provider_verified"
+    });
+  });
+
+  it.each([
+    "我没有答应明天联系她",
+    "我明天不会联系她",
+    "我不答应明天联系她",
+    "我拒绝答应明天联系她"
+  ])("does not assign a known owner to a negated first-person commitment: %s", (text) => {
+    const result = resolveMemoryOwnerAttribution({
+      memoryId: "memory_negated_commitment",
+      memoryType: "commitment",
+      evidenceSegments: [segment({
+        id: "seg_negated_commitment",
+        text,
+        globalSpeakerId: "person_reporter"
+      })]
+    });
+
+    expect(result.owner).toEqual({ type: "unknown", confidence: 0, source: "unknown" });
+    expect(result.participants).toEqual([]);
+    expect(result.observations[0]).toMatchObject({
+      statementKind: "other"
+    });
+  });
+
+  it("does not treat a first-person weather prediction as a commitment", () => {
+    const result = resolveMemoryOwnerAttribution({
+      memoryId: "memory_weather_prediction",
+      memoryType: "commitment",
+      evidenceSegments: [segment({
+        id: "seg_weather_prediction",
+        text: "我觉得明天会下雨",
+        globalSpeakerId: "person_reporter"
+      })]
+    });
+
+    expect(result.owner).toEqual({ type: "unknown", confidence: 0, source: "unknown" });
+    expect(result.participants).toEqual([]);
+    expect(result.observations[0]).toMatchObject({
+      statementKind: "other"
+    });
+  });
+
+  it.each([
+    "我会联系她",
+    "我愿意帮她",
+    "我打算联系她",
+    "我计划联系她"
+  ])("attributes an explicit commitment to its confirmed manual-mapping speaker: %s", (text) => {
+    const result = resolveMemoryOwnerAttribution({
+      memoryId: "memory_manual_mapping_commitment",
+      memoryType: "commitment",
+      allowManualMappingIdentity: true,
+      evidenceSegments: [segment({
+        id: "seg_manual_mapping_commitment",
+        text,
+        globalSpeakerId: "person_partner",
+        identitySource: "manual_mapping",
+        identityConfidence: 1
+      })]
+    });
+
+    expect(result.owner).toEqual({
       type: "known_identity",
       identityId: "person_partner",
+      confidence: 1,
+      source: "explicit_statement"
+    });
+    expect(result.participants).toEqual([
+      expect.objectContaining({
+        role: "actor",
+        evidenceSegmentIds: ["seg_manual_mapping_commitment"]
+      })
+    ]);
+  });
+
+  it("keeps an explicit first-person commitment attributed to its verified speaker", () => {
+    const result = resolveMemoryOwnerAttribution({
+      memoryId: "memory_explicit_commitment",
+      memoryType: "commitment",
+      evidenceSegments: [segment({
+        id: "seg_explicit_commitment",
+        text: "我答应明天确认见面时间。",
+        globalSpeakerId: "person_reporter"
+      })]
+    });
+
+    expect(result.owner).toEqual({
+      type: "known_identity",
+      identityId: "person_reporter",
       confidence: 0.95,
       source: "explicit_statement"
     });
-    expect(result.scope).toBe("individual");
-    expect(result.participants).toEqual(expect.arrayContaining([
+    expect(result.participants).toEqual([
       expect.objectContaining({
         role: "actor",
-        attribution: expect.objectContaining({ identityId: "person_partner" })
-      }),
-      expect.objectContaining({
-        role: "receiver",
-        attribution: expect.objectContaining({ identityId: "person_user" })
+        evidenceSegmentIds: ["seg_explicit_commitment"]
       })
-    ]));
+    ]);
   });
 
   it("does not invent a commitment receiver without a unique other identity", () => {
@@ -327,6 +423,73 @@ describe("resolveMemoryOwnerAttribution", () => {
     expect(result.owner.type).toBe("unknown");
     expect(result.participants).toEqual([]);
     expect(result.reasons).toContain("ambiguous_owner");
+  });
+
+  it("fails closed when one commitment candidate mixes third-person reporting with a self statement", () => {
+    const result = resolveMemoryOwnerAttribution({
+      memoryId: "memory_mixed_commitment_subjects",
+      memoryType: "commitment",
+      evidenceSegments: [
+        segment({
+          id: "seg_reported_commitment",
+          text: "他承诺的检索问题清单仍未完成。",
+          globalSpeakerId: "person_reporter"
+        }),
+        segment({
+          id: "seg_self_commitment",
+          text: "我会继续完成检索问题清单。",
+          globalSpeakerId: "person_reporter",
+          startSeconds: 6
+        })
+      ]
+    });
+
+    expect(result.scope).toBe("unknown");
+    expect(result.owner).toEqual({ type: "unknown", confidence: 0, source: "unknown" });
+    expect(result.participants).toEqual([]);
+    expect(result.reasons).toContain("ambiguous_owner");
+  });
+
+  it("keeps a verified speaker as an event participant without inventing an owner", () => {
+    const result = resolveMemoryOwnerAttribution({
+      memoryId: "memory_completed_report",
+      memoryType: "event",
+      evidenceSegments: [segment({
+        id: "seg_completed_report",
+        text: "导师汇报最终版本已于15:20提交完成，任务已经结束。",
+        globalSpeakerId: "person_reporter"
+      })]
+    });
+
+    expect(result.scope).toBe("individual");
+    expect(result.owner).toEqual({ type: "unknown", confidence: 0, source: "unknown" });
+    expect(result.participants).toEqual([
+      expect.objectContaining({
+        role: "participant",
+        attribution: expect.objectContaining({
+          type: "known_identity",
+          identityId: "person_reporter"
+        }),
+        evidenceSegmentIds: ["seg_completed_report"]
+      })
+    ]);
+    expect(result.reasons).toContain("individual_participant");
+  });
+
+  it("does not treat a negated together phrase as a shared event", () => {
+    const result = resolveMemoryOwnerAttribution({
+      memoryId: "memory_negated_shared_event",
+      memoryType: "event",
+      evidenceSegments: [segment({
+        id: "seg_negated_shared_event",
+        text: "陶艺体验已经完成，不会和博物馆计划混在一起。",
+        globalSpeakerId: "person_reporter"
+      })]
+    });
+
+    expect(result.scope).toBe("individual");
+    expect(result.participants).toHaveLength(1);
+    expect(result.reasons).toEqual(["individual_participant"]);
   });
 
   it("models a shared event with participants instead of forcing an owner", () => {

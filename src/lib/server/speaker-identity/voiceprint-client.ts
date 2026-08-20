@@ -1,3 +1,9 @@
+/**
+ * Provider-emitted speaker label for the authenticated user's trained voice.
+ * It is meaningful only inside that user's isolated Voiceprint profile store.
+ */
+export const VOICEPRINT_PROVIDER_KNOWN_USER_LABEL = "我";
+
 export type VoiceprintTrainingAudio = {
   url: string;
   rule: Array<[startMilliseconds: number, endMilliseconds: number]>;
@@ -13,6 +19,7 @@ export type VoiceprintSaveInput = {
   userId: string;
   recordId: string;
   speakerId: string;
+  speakerName: string;
   requestId: string;
 };
 
@@ -24,9 +31,11 @@ export type VoiceprintIdentifyInput = {
 
 export type VoiceprintIdentification = {
   localSpeaker: string;
-  globalSpeakerId: string;
-  displayName?: string;
-  confidence: number;
+  providerLabel: string;
+  evidence: {
+    type: "provider_label";
+    provider: "company_voiceprint";
+  };
 };
 
 export type VoiceprintOperationResult = {
@@ -89,6 +98,7 @@ type HttpVoiceprintProviderOptions = {
   baseUrl: string;
   fetcher?: Fetcher;
   timeoutMs?: number;
+  trainTimeoutMs?: number;
   maxRetries?: number;
   retryDelayMs?: number;
   maxResponseBytes?: number;
@@ -100,6 +110,8 @@ const MAX_TRAINING_RANGES_PER_AUDIO = 100;
 const MAX_TRAINING_TIMESTAMP_MS = 86_400_000;
 const MAX_IDENTIFIER_LENGTH = 512;
 const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
+const DEFAULT_TRAIN_TIMEOUT_MS = 240_000;
+const MAX_TRAIN_TIMEOUT_MS = 300_000;
 const DEFAULT_MAX_RETRIES = 1;
 const MAX_MAX_RETRIES = 1;
 const DEFAULT_RETRY_DELAY_MS = 500;
@@ -138,6 +150,21 @@ function validatedTimeoutMs(value: number | undefined) {
     throw new VoiceprintProviderError(
       "invalid_configuration",
       "voiceprint timeoutMs must be an integer between 1000 and 120000"
+    );
+  }
+  return timeoutMs;
+}
+
+function validatedTrainTimeoutMs(value: number | undefined) {
+  const timeoutMs = value ?? DEFAULT_TRAIN_TIMEOUT_MS;
+  if (
+    !Number.isInteger(timeoutMs) ||
+    timeoutMs < 1_000 ||
+    timeoutMs > MAX_TRAIN_TIMEOUT_MS
+  ) {
+    throw new VoiceprintProviderError(
+      "invalid_configuration",
+      `voiceprint trainTimeoutMs must be an integer between 1000 and ${MAX_TRAIN_TIMEOUT_MS}`
     );
   }
   return timeoutMs;
@@ -323,7 +350,10 @@ async function parseOperationResponse(
   if (!response.ok) {
     throw responseError(response, {
       okReason: "invalid_response",
-      okMessage: "voiceprint provider returned an invalid response"
+      okMessage: "voiceprint provider returned an invalid response",
+      ...(record && typeof record.code === "number"
+        ? { providerCode: record.code }
+        : {})
     });
   }
   if (!record || record.code !== 0) {
@@ -356,6 +386,7 @@ export class HttpVoiceprintProvider implements VoiceprintProvider {
   private readonly baseUrl: string;
   private readonly fetcher: Fetcher;
   private readonly timeoutMs: number;
+  private readonly trainTimeoutMs: number;
   private readonly maxRetries: number;
   private readonly retryDelayMs: number;
   private readonly maxResponseBytes: number;
@@ -365,6 +396,7 @@ export class HttpVoiceprintProvider implements VoiceprintProvider {
     this.baseUrl = validatedBaseUrl(options.baseUrl);
     this.fetcher = options.fetcher ?? fetch;
     this.timeoutMs = validatedTimeoutMs(options.timeoutMs);
+    this.trainTimeoutMs = validatedTrainTimeoutMs(options.trainTimeoutMs);
     this.maxRetries = validatedMaxRetries(options.maxRetries);
     this.retryDelayMs = validatedRetryDelayMs(options.retryDelayMs);
     this.maxResponseBytes = validatedMaxResponseBytes(options.maxResponseBytes);
@@ -373,7 +405,12 @@ export class HttpVoiceprintProvider implements VoiceprintProvider {
     });
   }
 
-  private async attempt(path: string, body: Record<string, unknown>, attemptCount: number) {
+  private async attempt(
+    path: string,
+    body: Record<string, unknown>,
+    attemptCount: number,
+    timeoutMs: number
+  ) {
     const controller = new AbortController();
     let timeout: ReturnType<typeof setTimeout> | undefined;
     const deadline = new Promise<never>((_resolve, reject) => {
@@ -386,7 +423,7 @@ export class HttpVoiceprintProvider implements VoiceprintProvider {
           undefined,
           attemptCount
         ));
-      }, this.timeoutMs);
+      }, timeoutMs);
     });
 
     try {
@@ -432,11 +469,20 @@ export class HttpVoiceprintProvider implements VoiceprintProvider {
     }
   }
 
-  private async post(path: string, body: Record<string, unknown>) {
+  private async post(
+    path: string,
+    body: Record<string, unknown>,
+    timeoutMs: number
+  ) {
     const totalAttempts = this.maxRetries + 1;
     for (let attemptCount = 1; attemptCount <= totalAttempts; attemptCount += 1) {
       try {
-        const result = await this.attempt(path, body, attemptCount);
+        const result = await this.attempt(
+          path,
+          body,
+          attemptCount,
+          timeoutMs
+        );
         return { ...result, attemptCount };
       } catch (error) {
         if (
@@ -467,7 +513,7 @@ export class HttpVoiceprintProvider implements VoiceprintProvider {
       user_id: requiredIdentifier(input.userId, "userId"),
       audio: trainingAudio(input.audio),
       req_id: requiredIdentifier(input.requestId, "requestId")
-    });
+    }, this.trainTimeoutMs);
   }
 
   async save(input: VoiceprintSaveInput) {
@@ -475,8 +521,9 @@ export class HttpVoiceprintProvider implements VoiceprintProvider {
       user_id: requiredIdentifier(input.userId, "userId"),
       record_id: requiredIdentifier(input.recordId, "recordId"),
       speaker_id: requiredIdentifier(input.speakerId, "speakerId"),
+      speaker_name: requiredIdentifier(input.speakerName, "speakerName"),
       req_id: requiredIdentifier(input.requestId, "requestId")
-    });
+    }, this.timeoutMs);
   }
 
   async identify(_input: VoiceprintIdentifyInput): Promise<VoiceprintIdentification[]> {
@@ -488,6 +535,12 @@ function configuredTimeoutMs() {
   const raw = process.env.VOICEPRINT_TIMEOUT_MS?.trim();
   if (!raw) return DEFAULT_REQUEST_TIMEOUT_MS;
   return validatedTimeoutMs(Number(raw));
+}
+
+function configuredTrainTimeoutMs() {
+  const raw = process.env.VOICEPRINT_TRAIN_TIMEOUT_MS?.trim();
+  if (raw) return validatedTrainTimeoutMs(Number(raw));
+  return DEFAULT_TRAIN_TIMEOUT_MS;
 }
 
 function configuredMaxRetries() {
@@ -508,7 +561,11 @@ function configuredMaxResponseBytes() {
   return validatedMaxResponseBytes(Number(raw));
 }
 
-export function createConfiguredVoiceprintProvider(options: { fetcher?: Fetcher } = {}) {
+export function createConfiguredVoiceprintProvider(options: {
+  fetcher?: Fetcher;
+  trainTimeoutMs?: number;
+  maxRetries?: number;
+} = {}) {
   const baseUrl =
     process.env.VOICEPRINT_BASE_URL?.trim() ||
     process.env.SPEAKER_ASR_BASE_URL?.trim();
@@ -521,7 +578,8 @@ export function createConfiguredVoiceprintProvider(options: { fetcher?: Fetcher 
   return new HttpVoiceprintProvider({
     baseUrl,
     timeoutMs: configuredTimeoutMs(),
-    maxRetries: configuredMaxRetries(),
+    trainTimeoutMs: options.trainTimeoutMs ?? configuredTrainTimeoutMs(),
+    maxRetries: options.maxRetries ?? configuredMaxRetries(),
     retryDelayMs: configuredRetryDelayMs(),
     maxResponseBytes: configuredMaxResponseBytes(),
     ...(options.fetcher ? { fetcher: options.fetcher } : {})

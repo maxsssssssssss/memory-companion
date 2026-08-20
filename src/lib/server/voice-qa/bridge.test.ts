@@ -2,6 +2,28 @@
 
 import { describe, expect, it, vi } from "vitest";
 
+type RecordedShadowReviewVoiceOutcome = {
+  caseId: string;
+  userId: string;
+  traceId: string;
+  metrics: {
+    asrLatencyMs: number | null;
+    llmFirstTokenLatencyMs: number | null;
+    firstPlayableSentenceLatencyMs: number | null;
+    firstAudioLatencyMs: number | null;
+    completeLatencyMs: number | null;
+    streamingComplete: boolean;
+    ttsFailure: string | null;
+  };
+};
+
+const recordVoiceQaShadowReviewVoiceOutcome = vi.hoisted(() =>
+  vi.fn(async (_input: RecordedShadowReviewVoiceOutcome) => undefined)
+);
+vi.mock("@/lib/server/evaluation/voice-qa-shadow-review", () => ({
+  recordVoiceQaShadowReviewVoiceOutcome
+}));
+
 import type { QuestionAnswer } from "@/lib/domain/types";
 import type { QaAnswerStreamEvent } from "@/lib/server/retrieval/qa-streaming";
 import { VoiceEvent, type ParsedVoiceServerEvent } from "@/lib/server/voice/events";
@@ -46,6 +68,7 @@ class BridgeVoiceProvider implements VoiceProvider {
   failFinishAudioWithConnectionOnce = false;
   failTtsWithConnectionOnce = false;
   failReconnect = false;
+  autoCompleteTtsAfterReconnect = false;
   reconnectCount = 0;
   startConfig?: VoiceSessionConfig;
   currentSessionId = "voice-session";
@@ -85,6 +108,15 @@ class BridgeVoiceProvider implements VoiceProvider {
     }
   }
 
+  async interruptResponse() {
+    this.calls.push("interrupt-response");
+    this.emit(serverEvent(VoiceEvent.TTSEnded, {
+      tts_type: "default",
+      question_id: "provider-question",
+      reply_id: "provider-reply"
+    }, this.currentSessionId));
+  }
+
   async sendText(text: string) {
     this.calls.push("send-text");
     this.sentTexts.push(text);
@@ -118,6 +150,7 @@ class BridgeVoiceProvider implements VoiceProvider {
       throw new VoiceProviderError("connection_failed", "reconnect unavailable");
     }
     this.currentSessionId = "voice-session-restored";
+    if (this.autoCompleteTtsAfterReconnect) this.autoCompleteTts = true;
     return { sessionId: this.currentSessionId };
   }
 
@@ -216,14 +249,17 @@ function streamingBridgeWith(input: {
   provider?: BridgeVoiceProvider;
   sentence?: Extract<QaAnswerStreamEvent, { type: "sentence_completed" }>;
   emitSentence?: boolean;
+  finalAnswer?: QuestionAnswer;
   finalGate?: Promise<void>;
   trace?: VoiceSessionTraceRecorder;
   onStreamingEvent: (event: VoiceQaStreamingOutputEvent) => void | Promise<void>;
 }) {
   const provider = input.provider ?? new BridgeVoiceProvider();
-  const finalAnswer = answer();
+  const finalAnswer = input.finalAnswer ?? answer();
   const answerer: VoiceQaAnswerer = {
     answer: async (request) => {
+      request.onQaMilestone?.("retrieval_complete");
+      request.onQaMilestone?.("llm_first_token");
       if (input.emitSentence !== false) {
         await request.onQaStreamEvent?.(input.sentence ?? committedSentence());
       }
@@ -244,6 +280,132 @@ function streamingBridgeWith(input: {
 }
 
 describe("VoiceQaBridge", () => {
+  it("forwards one trace-linked shadow review context for duplicate final ASR", async () => {
+    const qa = vi.fn(async (_request: VoiceQARequest) => answer());
+    const trace = traceRecorder();
+    const provider = new BridgeVoiceProvider();
+    const bridge = new VoiceQaBridge({
+      provider,
+      answerer: { answer: qa },
+      userId: "user-1",
+      scope: "all",
+      applicationSessionId: "conversation-session",
+      trace,
+      ttsTimeoutMs: 1_000
+    });
+    await bridge.start();
+
+    await expect(bridge.acceptTranscript({
+      transcript: "What did I decide?",
+      finality: "final",
+      sessionId: "voice-session"
+    })).resolves.toMatchObject({ transcript: "What did I decide?" });
+    await expect(bridge.acceptTranscript({
+      transcript: "What did I decide?",
+      finality: "final",
+      sessionId: "voice-session"
+    })).resolves.toBeNull();
+
+    expect(qa).toHaveBeenCalledOnce();
+    const request = qa.mock.calls[0][0];
+    expect(request).toMatchObject({
+      sessionId: "conversation-session",
+      traceId: trace.sessionId,
+      shadowReviewContext: {
+        voiceSessionId: "conversation-session",
+        traceId: trace.sessionId
+      }
+    });
+    await bridge.close();
+  });
+
+  it("keeps collector Voice metrics isolated across two turns in one session", async () => {
+    recordVoiceQaShadowReviewVoiceOutcome.mockClear();
+    let turn = 0;
+    const qa = vi.fn(async (request: VoiceQARequest) => {
+      turn += 1;
+      if (request.shadowReviewContext) {
+        request.shadowReviewContext.caseId = `case-${turn}`;
+      }
+      request.onQaMilestone?.("retrieval_complete");
+      if (turn === 1) request.onQaMilestone?.("llm_first_token");
+      return answer(request.transcript);
+    });
+    const trace = traceRecorder();
+    const { bridge, provider } = bridgeWith({ answer: qa }, trace);
+    await bridge.start();
+
+    provider.failTts = true;
+    await bridge.submitTextQuery("first question");
+    provider.failTts = false;
+    await bridge.submitTextQuery("second question");
+
+    await vi.waitFor(() => {
+      expect(recordVoiceQaShadowReviewVoiceOutcome).toHaveBeenCalledTimes(2);
+    });
+    const first = recordVoiceQaShadowReviewVoiceOutcome.mock.calls[0]![0];
+    const second = recordVoiceQaShadowReviewVoiceOutcome.mock.calls[1]![0];
+    expect(first).toMatchObject({
+      caseId: "case-1",
+      traceId: trace.sessionId,
+      metrics: {
+        llmFirstTokenLatencyMs: expect.any(Number),
+        ttsFailure: "tts_failed"
+      }
+    });
+    expect(second).toMatchObject({
+      caseId: "case-2",
+      traceId: trace.sessionId,
+      metrics: {
+        asrLatencyMs: null,
+        llmFirstTokenLatencyMs: null,
+        ttsFailure: null
+      }
+    });
+    expect(second.metrics).not.toBe(first.metrics);
+    await bridge.close();
+  });
+
+  it("completes Voice playback when shadow outcome persistence throws", async () => {
+    recordVoiceQaShadowReviewVoiceOutcome.mockReset();
+    recordVoiceQaShadowReviewVoiceOutcome.mockRejectedValueOnce(
+      new Error("collector unavailable")
+    );
+    const warn = vi.spyOn(console, "warn").mockImplementation(
+      () => undefined
+    );
+    const qa = vi.fn(async (request: VoiceQARequest) => {
+      if (request.shadowReviewContext) {
+        request.shadowReviewContext.caseId = "case-collector-throws";
+      }
+      return answer(request.transcript);
+    });
+    const trace = traceRecorder();
+    const { bridge, provider } = bridgeWith({ answer: qa }, trace);
+    await bridge.start();
+
+    const response = await bridge.submitTextQuery(
+      "collector failure question"
+    );
+    expect(response.answer?.answer).toBe(
+      "你今天主要确认了排练安排。[E1]"
+    );
+    expect(response.errors ?? []).toEqual([]);
+    expect(provider.sentTexts).toEqual([
+      "你今天主要确认了排练安排。"
+    ]);
+    await vi.waitFor(() => {
+      expect(recordVoiceQaShadowReviewVoiceOutcome)
+        .toHaveBeenCalledOnce();
+      expect(warn).toHaveBeenCalledWith(
+        expect.stringContaining(
+          "voice_outcome_persistence_failed"
+        )
+      );
+    });
+    await bridge.close();
+  });
+
   it("ignores partial ASR and invokes QA once for the final transcript", async () => {
     const qa = vi.fn(async () => answer());
     const trace = traceRecorder();
@@ -562,6 +724,83 @@ describe("VoiceQaBridge", () => {
       audio: Buffer.from([3, 4])
     });
     provider.emit(serverEvent(VoiceEvent.TTSEnded));
+
+    await expect(responsePromise).resolves.toMatchObject({
+      audio: Buffer.from([1, 2, 3, 4])
+    });
+    await bridge.close();
+  });
+
+  it("interrupts a pre-existing autonomous TTS stream before canonical TTS", async () => {
+    const { bridge, provider } = bridgeWith({ answer: async () => answer() });
+    provider.autoCompleteTts = false;
+    await bridge.start();
+    provider.emit(serverEvent(VoiceEvent.TTSSentenceStart, {
+      tts_type: "default",
+      question_id: "provider-question",
+      reply_id: "provider-reply"
+    }));
+
+    const responsePromise = bridge.submitTextQuery("今天有什么重要事情？");
+    await vi.waitFor(() => expect(provider.sentTexts).toHaveLength(1));
+    expect(provider.calls.indexOf("interrupt-response")).toBeGreaterThan(-1);
+    expect(provider.calls.indexOf("interrupt-response")).toBeLessThan(
+      provider.calls.indexOf("send-text")
+    );
+
+    provider.emit(serverEvent(VoiceEvent.TTSSentenceStart, {
+      tts_type: "chat_tts_text",
+      question_id: "qa-question",
+      reply_id: "qa-reply"
+    }));
+    provider.emit({
+      ...serverEvent(VoiceEvent.TTSResponse),
+      audio: Buffer.from([1, 2, 3, 4])
+    });
+    provider.emit(serverEvent(VoiceEvent.TTSEnded, {
+      tts_type: "chat_tts_text",
+      question_id: "qa-question",
+      reply_id: "qa-reply"
+    }));
+
+    await expect(responsePromise).resolves.toMatchObject({
+      audio: Buffer.from([1, 2, 3, 4])
+    });
+    await bridge.close();
+  });
+
+  it("keeps buffered ChatTTSText active after an interleaved default stream without another chat start", async () => {
+    const { bridge, provider } = bridgeWith({ answer: async () => answer() });
+    provider.autoCompleteTts = false;
+    await bridge.start();
+
+    const responsePromise = bridge.submitTextQuery("今天有什么重要事情？");
+    await vi.waitFor(() => expect(provider.sentTexts).toHaveLength(1));
+    const chat = {
+      tts_type: "chat_tts_text",
+      question_id: "qa-question",
+      reply_id: "qa-reply"
+    };
+    provider.emit(serverEvent(VoiceEvent.TTSSentenceStart, chat));
+    provider.emit({
+      ...serverEvent(VoiceEvent.TTSResponse),
+      audio: Buffer.from([1, 2])
+    });
+    provider.emit(serverEvent(VoiceEvent.TTSSentenceStart, {
+      tts_type: "default",
+      question_id: "provider-question",
+      reply_id: "provider-reply"
+    }));
+    provider.emit({
+      ...serverEvent(VoiceEvent.TTSResponse),
+      audio: Buffer.from([9, 9])
+    });
+    provider.emit(serverEvent(VoiceEvent.TTSEnded));
+    provider.emit({
+      ...serverEvent(VoiceEvent.TTSResponse),
+      audio: Buffer.from([3, 4])
+    });
+    provider.emit(serverEvent(VoiceEvent.TTSEnded, chat));
 
     await expect(responsePromise).resolves.toMatchObject({
       audio: Buffer.from([1, 2, 3, 4])
@@ -1131,16 +1370,20 @@ describe("VoiceQaBridge", () => {
       streamedAudio: true
     });
     expect(response.audio).toBeUndefined();
+    expect(trace.mark).toHaveBeenCalledWith("voice_question_received");
+    expect(trace.mark).toHaveBeenCalledWith("retrieval_complete");
+    expect(trace.mark).toHaveBeenCalledWith("llm_first_token");
     expect(trace.mark).toHaveBeenCalledWith("first_sentence_committed");
     expect(trace.mark).toHaveBeenCalledWith("first_safe_sentence");
     expect(trace.mark).toHaveBeenCalledWith("tts_stream_started");
+    expect(trace.mark).toHaveBeenCalledWith("tts_request_start");
     expect(trace.mark).toHaveBeenCalledWith("first_audio_chunk_received");
-    expect(trace.mark).toHaveBeenCalledWith("stream_completed");
+    expect(trace.mark).toHaveBeenCalledWith("tts_stream_complete");
     expect(bridge.snapshot().state).toBe("idle");
     await bridge.close();
   });
 
-  it("uses the unchanged full-text TTS path when QA emits no safe sentence", async () => {
+  it("streams the final canonical projection when QA emits no early safe sentence", async () => {
     const events: VoiceQaStreamingOutputEvent[] = [];
     const { bridge, provider } = streamingBridgeWith({
       emitSentence: false,
@@ -1153,16 +1396,26 @@ describe("VoiceQaBridge", () => {
     const response = await bridge.submitTextQuery("今天有什么重要事情？");
 
     expect(provider.sentTexts).toEqual(["你今天主要确认了排练安排。"]);
-    expect(events).toEqual([]);
+    expect(events.map((event) => event.type)).toEqual([
+      "speech_sentence",
+      "sentence_started",
+      "audio_chunk",
+      "sentence_completed",
+      "stream_completed"
+    ]);
+    expect(events[0]).toMatchObject({
+      source: "final_projection",
+      spokenSentence: "你今天主要确认了排练安排。"
+    });
     expect(response).toMatchObject({
       text: "你今天主要确认了排练安排。",
-      audio: Buffer.from([1, 2, 3, 4])
+      streamedAudio: true
     });
-    expect(response.streamedAudio).toBeUndefined();
+    expect(response.audio).toBeUndefined();
     await bridge.close();
   });
 
-  it("uses the unchanged full-text TTS path when sentence support fails preflight", async () => {
+  it("streams only the final canonical projection when early sentence support fails preflight", async () => {
     const events: VoiceQaStreamingOutputEvent[] = [];
     const { bridge, provider } = streamingBridgeWith({
       sentence: committedSentence({ supportIds: ["segment-outside-answer"] }),
@@ -1175,9 +1428,13 @@ describe("VoiceQaBridge", () => {
     const response = await bridge.submitTextQuery("今天有什么重要事情？");
 
     expect(provider.sentTexts).toEqual(["你今天主要确认了排练安排。"]);
-    expect(events).toEqual([]);
-    expect(response.audio).toEqual(Buffer.from([1, 2, 3, 4]));
-    expect(response.streamedAudio).toBeUndefined();
+    expect(events[0]).toMatchObject({
+      type: "speech_sentence",
+      source: "final_projection",
+      supportIds: ["segment-1"]
+    });
+    expect(response.audio).toBeUndefined();
+    expect(response.streamedAudio).toBe(true);
     await bridge.close();
   });
 
@@ -1213,12 +1470,92 @@ describe("VoiceQaBridge", () => {
     await bridge.close();
   });
 
+  it("streams an evidence-free safe uncertainty projection without sending citation metadata", async () => {
+    const events: VoiceQaStreamingOutputEvent[] = [];
+    const uncertainty: QuestionAnswer = {
+      ...answer(),
+      answer: "没有找到足够证据确认这个信息。",
+      citedSegmentIds: [],
+      citations: []
+    };
+    const { bridge, provider } = streamingBridgeWith({
+      emitSentence: false,
+      finalAnswer: uncertainty,
+      onStreamingEvent: (event) => {
+        events.push(event);
+      }
+    });
+    await bridge.start();
+
+    const response = await bridge.submitTextQuery("有没有相关证据？");
+
+    expect(provider.sentTexts).toEqual(["没有找到足够证据确认这个信息。"]);
+    expect(events[0]).toMatchObject({
+      type: "speech_sentence",
+      source: "final_projection",
+      supportIds: []
+    });
+    expect(response).toMatchObject({
+      text: "没有找到足够证据确认这个信息。",
+      streamedAudio: true
+    });
+    await bridge.close();
+  });
+
+  it("reconnects once and uses bounded buffered audio recovery after a no-audio timeout", async () => {
+    vi.useFakeTimers();
+    try {
+      const events: VoiceQaStreamingOutputEvent[] = [];
+      const provider = new BridgeVoiceProvider();
+      provider.autoCompleteTts = false;
+      provider.autoCompleteTtsAfterReconnect = true;
+      const trace = traceRecorder();
+      const { bridge } = streamingBridgeWith({
+        provider,
+        trace,
+        onStreamingEvent: (event) => {
+          events.push(event);
+        }
+      });
+      await bridge.start();
+
+      const responsePromise = bridge.submitTextQuery("今天有什么重要事情？");
+      await vi.waitFor(() => expect(provider.sentTexts).toHaveLength(1));
+      await vi.advanceTimersByTimeAsync(1_000);
+      const response = await responsePromise;
+
+      expect(provider.sentTexts).toEqual([
+        "你今天主要确认了排练安排。",
+        "你今天主要确认了排练安排。"
+      ]);
+      expect(provider.reconnectCount).toBe(1);
+      expect(events).toContainEqual({
+        type: "stream_error",
+        code: "tts_failed",
+        afterAudio: false
+      });
+      expect(response).toMatchObject({
+        text: "你今天主要确认了排练安排。",
+        audio: Buffer.from([1, 2, 3, 4])
+      });
+      expect(response.errors).toBeUndefined();
+      expect(response.streamedAudio).toBeUndefined();
+      expect(trace.mark).toHaveBeenCalledWith("fallback_audio_complete");
+      expect(bridge.snapshot().state).toBe("idle");
+      await bridge.close();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("does not replay the full response after partial streaming audio was delivered", async () => {
     const events: VoiceQaStreamingOutputEvent[] = [];
     const provider = new BridgeVoiceProvider();
     provider.autoCompleteTts = false;
+    const trace = traceRecorder();
     const { bridge } = streamingBridgeWith({
       provider,
+      trace,
       onStreamingEvent: (event) => {
         events.push(event);
       }
@@ -1258,6 +1595,7 @@ describe("VoiceQaBridge", () => {
       errorCodes: ["VOICE_TTS_FAILED"]
     });
     expect(response.audio).toBeUndefined();
+    expect(trace.mark).toHaveBeenCalledWith("tts_partial_audio_failure");
     expect(bridge.snapshot().state).toBe("idle");
     await bridge.close();
   });

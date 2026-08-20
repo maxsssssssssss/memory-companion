@@ -1,4 +1,4 @@
-import { randomUUID } from "crypto";
+import { createHash, randomUUID } from "crypto";
 import { transcriptSpeakerLabel } from "@/lib/domain/speaker-identity";
 import type {
   AudioInsight,
@@ -9,17 +9,12 @@ import type {
   TranscriptSegment,
   ValueLabel
 } from "@/lib/domain/types";
-import {
-  createOpenAIClient,
-  resolveOpenAIClientProvider,
-  type OpenAIClientProvider
-} from "@/lib/server/openai/client";
-import { getOpenAIClientRuntimeConfig, getQaModelPreference, getQaPromptPreference } from "@/lib/server/settings/provider-config";
+import { getQaPromptPreference } from "@/lib/server/settings/provider-config";
 import type { JsonStore } from "@/lib/server/storage/json-store";
 import { meaningfulTextTokens, sharedTokenCount } from "@/lib/server/text-features";
-import { answerSameDayQuestion } from "./qa";
 import {
   buildRelationshipSignalEvidence,
+  buildRelationshipSignalEvidenceCorpus,
   isForbiddenRelationshipQaOutput,
   isRelationshipEvidenceQuestion
 } from "./relationship-signal-evidence";
@@ -38,10 +33,13 @@ import {
   type QaExecutionDiagnosticsObserver
 } from "./qa-observability";
 import {
-  QaProviderStreamError,
-  requestQaAnswerText,
-  requestQaAnswerTextStream
+  QaProviderStreamError
 } from "./qa-provider";
+import {
+  resolveQaLlmProvider,
+  type QaLlmProviderId,
+  type QaLlmProviderMetricsObserver
+} from "./qa-llm-provider";
 import {
   createQaStreamingTraceRecorder,
   notifyQaStreamingTrace,
@@ -69,10 +67,15 @@ import {
   projectCompactEvidence
 } from "./evidence-compression/projection";
 import { observeCompactEvidenceShadow } from "./evidence-compression/shadow";
+import {
+  resolveQaHybridRetrievalMode,
+  type QaHybridRetrievalMode
+} from "./hybrid/runtime-config";
 
 export { analyzeQaQueryIntent } from "./lifecycle-retrieval";
 
 export type QaScope = "current" | "week" | "all";
+export type QaAnswerScope = QaScope | "relationship";
 
 export type QaConversationMessage = {
   role: "user" | "assistant";
@@ -81,11 +84,31 @@ export type QaConversationMessage = {
 
 export type QaEvaluationEvidenceView = "canonical" | "compact";
 
+export type QaExecutionMilestone =
+  | "retrieval_complete"
+  | "llm_started"
+  | "llm_first_token";
+
+export type QaExecutionMilestoneObserver = (
+  milestone: QaExecutionMilestone
+) => unknown;
+
+export type VoiceQaShadowReviewContext = {
+  voiceSessionId: string;
+  traceId: string;
+  caseId?: string;
+  started?: boolean;
+};
+
 export type AnswerQuestionWithAIInput = {
+  /** Trusted authenticated user id used only to resolve a user-scoped sidecar. */
+  userId?: string;
   uploadId: string;
   question: string;
   conversation?: QaConversationMessage[];
   scope?: QaScope;
+  /** Server-only relationship Evidence scope; never accepted from browser QA context. */
+  relationshipScope?: boolean;
   qaPromptInstruction?: string;
   settingsStore?: JsonStore;
   segments: TranscriptSegment[];
@@ -101,8 +124,35 @@ export type AnswerQuestionWithAIInput = {
   memoryRetrievalMs?: number | null;
   /** Internal diagnostics observer. It must never alter answer generation. */
   onDiagnostics?: QaExecutionDiagnosticsObserver;
+  /** Content-free real-time milestone observer used by Voice latency tracing. */
+  onExecutionMilestone?: QaExecutionMilestoneObserver;
+  /** Voice-only fail-closed policy for uncertainty-bearing provisional sentences. */
+  withholdUncertainProvisionalSentences?: boolean;
   /** Internal observer used by the Memory shadow audit to reuse the actual ranked evidence. */
   onRetrievedEvidence?: (evidence: QaRetrievedEvidence[], retrievalMs: number) => unknown;
+  /** Caller-owned hard boundary for scopes that must stay on canonical lexical retrieval. */
+  disableHybridRetrieval?: boolean;
+  /** Caller-owned fail-closed policy for a model/provider contract mismatch. */
+  failClosedOnModelProviderMismatch?: boolean;
+  /** Evaluation-only Provider usage observer. It must never alter answer generation. */
+  onProviderMetrics?: QaLlmProviderMetricsObserver;
+  /**
+   * Internal caller-owned Provider selection. Voice uses this to select Qwen
+   * without changing Text QA or the public canonical answer contract.
+   */
+  llmProviderId?: QaLlmProviderId;
+  /** Allows only an explicitly Voice-selected loopback Qwen Provider in production. */
+  allowQwenInProduction?: boolean;
+  /**
+   * Internal Voice-only review context.
+   *
+   * It is never serialized into the public QA contract. The mutable fields make
+   * one Voice turn single-flight even when streaming falls back to the
+   * non-streaming answer path.
+   */
+  shadowReviewContext?: VoiceQaShadowReviewContext;
+  /** Internal provenance for a synchronous Voice answer attempt. */
+  shadowReviewAttemptKind?: "sync_primary" | "sync_fallback";
   /**
    * Evaluation-only Provider payload switch.
    *
@@ -110,7 +160,47 @@ export type AnswerQuestionWithAIInput = {
    * mapping, and sentence grounding always continue to use canonical Evidence.
    */
   evaluationEvidenceView?: QaEvaluationEvidenceView;
+  /** Internal cancellation boundary for Voice/realtime work; omitted by Text QA. */
+  signal?: AbortSignal;
 };
+
+function qaAbortError(signal: AbortSignal | undefined) {
+  return signal?.reason instanceof Error
+    ? signal.reason
+    : new DOMException("Canonical QA request aborted", "AbortError");
+}
+
+function throwIfQaAborted(signal: AbortSignal | undefined) {
+  if (signal?.aborted) throw qaAbortError(signal);
+}
+
+function isQaAbort(error: unknown, signal: AbortSignal | undefined) {
+  return signal?.aborted === true ||
+    (error instanceof Error && error.name === "AbortError");
+}
+
+function notifyQaExecutionMilestone(
+  observer: QaExecutionMilestoneObserver | undefined,
+  milestone: QaExecutionMilestone
+) {
+  if (!observer) return;
+  try {
+    const result = observer(milestone);
+    if (result && typeof (result as PromiseLike<unknown>).then === "function") {
+      void Promise.resolve(result).catch((error: unknown) => {
+        console.warn(
+          `[qa-observability] milestone_observer_failed milestone=${milestone} ` +
+          `error_name=${error instanceof Error ? error.name : "unknown"}`
+        );
+      });
+    }
+  } catch (error) {
+    console.warn(
+      `[qa-observability] milestone_observer_failed milestone=${milestone} ` +
+      `error_name=${error instanceof Error ? error.name : "unknown"}`
+    );
+  }
+}
 
 export type AnswerQuestionStreamInput = AnswerQuestionWithAIInput & {
   /** Content-free stream trace observer. It never receives prompts, deltas, or answers. */
@@ -160,19 +250,25 @@ const MAX_EVIDENCE_ITEMS = 16;
 const MAX_EVIDENCE_TEXT_LENGTH = 900;
 const MAX_CONVERSATION_MESSAGES = 8;
 const MAX_CONVERSATION_TEXT_LENGTH = 1200;
+const MAX_QA_PROVIDER_ANSWER_CHARACTERS = 1200;
+const MAX_VOICE_PROVISIONAL_SENTENCES = 3;
+const SAFE_UNCERTAINTY_ANSWER = "没有找到足够证据确认这个信息。";
 const MIN_LIFECYCLE_TOPIC_OVERLAP = 2;
-const qaScopeLabels: Record<QaScope, string> = {
+const qaScopeLabels: Record<QaAnswerScope, string> = {
   current: "当天证据",
   week: "本周记忆",
-  all: "全部本地记忆"
+  all: "全部本地记忆",
+  relationship: "当前关系内已确认的相处证据"
 };
 
-const qaScopeInstructions: Record<QaScope, string> = {
+const qaScopeInstructions: Record<QaAnswerScope, string> = {
   current: "当天问答，只基于当前日期或当前上传录音，不能引用其它日期。",
   week:
     "本周问答，关注反复主题、项目推进、承诺、风险、变化和卡点；如果证据只来自一天，要说明“目前证据主要来自某一天”。",
   all:
-    "全部记忆问答，关注长期反复问题、过去表达、跨日期变化；长期判断必须有至少两个不同日期的证据，只有单日证据时，不能包装成长期趋势。"
+    "全部记忆问答，关注长期反复问题、过去表达、跨日期变化；长期判断必须有至少两个不同日期的证据，只有单日证据时，不能包装成长期趋势。",
+  relationship:
+    "当前关系问答，只能使用服务端提供的当前关系内已最终确认且保留的原始证据；不得引用其他关系、草稿、被排除或已删除内容。长期判断必须有至少两个不同日期的证据。"
 };
 const categoryHints: Array<{ label: ValueLabel; pattern: RegExp; terms: string[] }> = [
   { label: "commitment", pattern: /答应|承诺|promise|commitment/i, terms: ["承诺", "待办", "跟进"] },
@@ -215,7 +311,7 @@ const categoryHints: Array<{ label: ValueLabel; pattern: RegExp; terms: string[]
   }
 ];
 
-export function buildHumanizedQaSystemPrompt(scope: QaScope = "current", qaPromptInstruction?: string) {
+export function buildHumanizedQaSystemPrompt(scope: QaAnswerScope = "current", qaPromptInstruction?: string) {
   const roleInstruction = qaPromptInstruction?.trim();
 
   return [
@@ -263,7 +359,7 @@ export function buildHumanizedQaSystemPrompt(scope: QaScope = "current", qaPromp
  * be benchmarked with a smaller instruction packet.
  */
 export function buildDirectContextQaSystemPrompt(
-  scope: QaScope = "current",
+  scope: QaAnswerScope = "current",
   qaPromptInstruction?: string
 ) {
   const roleInstruction = qaPromptInstruction?.trim();
@@ -528,6 +624,57 @@ function duplicateEvidenceRank(question: string, item: EvidenceItem) {
   return 0;
 }
 
+function canonicalQaEvidenceFromInput(
+  input: AnswerQuestionWithAIInput,
+  relationshipEvidence: QaRetrievedEvidence[]
+) {
+  return [
+    ...relationshipEvidence,
+    ...evidenceFromBriefItems(input.briefItems),
+    ...evidenceFromAudioInsights(input.audioInsights),
+    ...evidenceFromSemanticSegments(input.semanticSegments),
+    ...evidenceFromRawSegments(input.segments)
+  ];
+}
+
+/**
+ * Returns the existing Canonical Evidence pool before ranking and Top-16 selection.
+ * Hybrid Retrieval uses this only in shadow/evaluation paths; QA continues to call
+ * retrieveQaEvidenceWithDiagnostics and receives the unchanged ranked shape.
+ */
+export function buildCanonicalQaEvidence(
+  input: AnswerQuestionWithAIInput
+): QaRetrievedEvidence[] {
+  const relationshipEvidence = buildRelationshipSignalEvidence({
+    question: input.question,
+    conversation: input.conversation,
+    cards: input.relationshipSignals,
+    segments: input.segments
+  });
+  return canonicalQaEvidenceFromInput(input, relationshipEvidence);
+}
+
+export function buildCanonicalQaEvidenceCorpus(input: Pick<
+  AnswerQuestionWithAIInput,
+  "segments" | "audioInsights" | "semanticSegments" | "briefItems" | "relationshipSignals"
+>): QaRetrievedEvidence[] {
+  return canonicalQaEvidenceFromInput(
+    {
+      uploadId: "embedding-corpus",
+      question: "",
+      segments: input.segments,
+      audioInsights: input.audioInsights,
+      semanticSegments: input.semanticSegments,
+      briefItems: input.briefItems,
+      relationshipSignals: input.relationshipSignals
+    },
+    buildRelationshipSignalEvidenceCorpus({
+      cards: input.relationshipSignals,
+      segments: input.segments
+    })
+  );
+}
+
 export type QaEvidenceRetrievalResult = {
   evidence: QaRetrievedEvidence[];
   relationshipContextBuildingMs: number;
@@ -540,6 +687,14 @@ export type QaEvidenceRetrievalResult = {
       topicOverlap: number;
     }>;
   };
+  hybridDiagnostics?: {
+    mode: QaHybridRetrievalMode;
+    denseRetrievalMs: number | null;
+    indexCoverage: number | null;
+    fallbackReason: string | null;
+  };
+  /** Non-enumerable evaluation-only view of the lexical ordering before Top-16. */
+  reviewRanking?: QaLexicalReviewCandidate[];
 };
 
 type RankedEvidenceCandidate = {
@@ -548,6 +703,16 @@ type RankedEvidenceCandidate = {
   duplicateRank: number;
   lifecycleState: QaLifecycleEvidenceState;
   topicOverlap: number;
+};
+
+export type QaLexicalReviewCandidate = {
+  evidence: QaRetrievedEvidence;
+  score: number;
+  duplicateRank: number;
+  lifecycleState: QaLifecycleEvidenceState;
+  topicOverlap: number;
+  representative: boolean;
+  reasons: string[];
 };
 
 function compareRankedEvidence(
@@ -607,13 +772,7 @@ export function retrieveQaEvidenceWithDiagnostics(
   });
   const relationshipContextBuildingMs = safeElapsedMs(relationshipStartedAt, now());
   const rerankingStartedAt = now();
-  const evidence = [
-    ...relationshipEvidence,
-    ...evidenceFromBriefItems(input.briefItems),
-    ...evidenceFromAudioInsights(input.audioInsights),
-    ...evidenceFromSemanticSegments(input.semanticSegments),
-    ...evidenceFromRawSegments(input.segments)
-  ];
+  const evidence = canonicalQaEvidenceFromInput(input, relationshipEvidence);
   const maxEvidenceEndSeconds = evidence.reduce((maximum, item) => Math.max(maximum, item.endSeconds), 0);
   const bestBySourceSet = new Map<string, RankedEvidenceCandidate>();
 
@@ -655,14 +814,35 @@ export function retrieveQaEvidenceWithDiagnostics(
   );
   const representatives = lifecycleChainRepresentatives(deduplicatedCandidates, queryIntent);
   const representativeIds = new Set(representatives.map((candidate) => candidate.item.id));
-  const rankedEvidence = [
+  const orderedCandidates = [
     ...representatives,
     ...generallyRanked.filter((candidate) => !representativeIds.has(candidate.item.id))
-  ]
+  ];
+  const rankedEvidence = orderedCandidates
     .map(({ item }) => item)
     .slice(0, MAX_EVIDENCE_ITEMS);
+  const reviewRanking: QaLexicalReviewCandidate[] = orderedCandidates
+    .slice(0, 30)
+    .map((candidate) => {
+      const representative = representativeIds.has(candidate.item.id);
+      return {
+        evidence: candidate.item,
+        score: candidate.score,
+        duplicateRank: candidate.duplicateRank,
+        lifecycleState: candidate.lifecycleState,
+        topicOverlap: candidate.topicOverlap,
+        representative,
+        reasons: [
+          `lexical_score:${candidate.score.toFixed(6)}`,
+          `duplicate_rank:${candidate.duplicateRank}`,
+          `lifecycle_state:${candidate.lifecycleState}`,
+          `topic_overlap:${candidate.topicOverlap}`,
+          ...(representative ? ["lifecycle_chain_representative"] : [])
+        ]
+      };
+    });
 
-  return {
+  const result: QaEvidenceRetrievalResult = {
     evidence: rankedEvidence,
     relationshipContextBuildingMs,
     rerankingMs: safeElapsedMs(rerankingStartedAt, now()),
@@ -674,13 +854,291 @@ export function retrieveQaEvidenceWithDiagnostics(
           item: candidate.item,
           state: candidate.lifecycleState,
           topicOverlap: candidate.topicOverlap
-        }))
+      }))
     }
   };
+  Object.defineProperty(result, "reviewRanking", {
+    value: reviewRanking,
+    enumerable: false,
+    configurable: false,
+    writable: false
+  });
+  return result;
 }
 
 export function retrieveQaEvidence(input: AnswerQuestionWithAIInput): QaRetrievedEvidence[] {
   return retrieveQaEvidenceWithDiagnostics(input).evidence;
+}
+
+function voiceQaShadowReviewMode() {
+  const normalized =
+    process.env.VOICE_QA_SHADOW_REVIEW_MODE?.trim().toLowerCase() || "off";
+  return normalized === "off" || normalized === "collect"
+    ? normalized
+    : "invalid";
+}
+
+function enqueueVoiceQaShadowReview(
+  input: AnswerQuestionWithAIInput,
+  lexical: QaEvidenceRetrievalResult
+) {
+  const mode = voiceQaShadowReviewMode();
+  const context = input.shadowReviewContext;
+  if (mode === "invalid") {
+    if (context) {
+      console.warn(
+        `[voice-qa-shadow-review] status=fallback scope=${input.scope ?? "current"} ` +
+        "fallback_reason=invalid_configuration"
+      );
+    }
+    return false;
+  }
+  if (mode !== "collect" || !context || !input.userId) return false;
+
+  context.caseId ??= randomUUID();
+  if (!context.started) {
+    context.started = true;
+    const caseId = context.caseId;
+    void import("@/lib/server/evaluation/voice-qa-shadow-review")
+      .then(({ collectVoiceQaShadowReviewRetrieval }) =>
+        collectVoiceQaShadowReviewRetrieval({
+          caseId,
+          input,
+          lexical
+        })
+      )
+      .catch((error: unknown) => {
+        console.warn(
+          `[voice-qa-shadow-review] case_id=${caseId} ` +
+          `scope=${input.scope ?? "current"} status=fallback ` +
+          `fallback_reason=collector_unavailable ` +
+          `error_name=${error instanceof Error ? error.name : "unknown"}`
+        );
+      });
+  }
+  return true;
+}
+
+function recordVoiceQaShadowReviewAnswer(input: {
+  qaInput: AnswerQuestionWithAIInput;
+  answer: QuestionAnswer;
+  attemptKind:
+    | "sync_primary"
+    | "sync_fallback"
+    | "final_projection";
+  provider: string;
+  selectedModel: string;
+  providerMetadata?: {
+    providerId: "gpt-5.5" | "qwen-vllm";
+    wireApi: "chat" | "responses";
+    reasoningEnabled: boolean | null;
+    endpointFingerprint: string;
+  };
+  fallbackReason: string | null;
+  systemPrompt?: string;
+  userPrompt?: string;
+  qaLatencyMs: number;
+}) {
+  const context = input.qaInput.shadowReviewContext;
+  if (
+    voiceQaShadowReviewMode() !== "collect" ||
+    !context?.caseId ||
+    !input.qaInput.userId
+  ) {
+    return;
+  }
+  const caseId = context.caseId;
+  void import("@/lib/server/evaluation/voice-qa-shadow-review")
+    .then(({ recordVoiceQaShadowReviewOfficialAnswer }) =>
+      recordVoiceQaShadowReviewOfficialAnswer({
+        caseId,
+        userId: input.qaInput.userId!,
+        answer: input.answer,
+        attemptKind: input.attemptKind,
+        provider: input.provider,
+        selectedModel: input.selectedModel,
+        ...(input.providerMetadata
+          ? { providerMetadata: input.providerMetadata }
+          : {}),
+        fallbackReason: input.fallbackReason,
+        ...(input.systemPrompt ? { systemPrompt: input.systemPrompt } : {}),
+        ...(input.userPrompt ? { userPrompt: input.userPrompt } : {}),
+        qaLatencyMs: input.qaLatencyMs
+      })
+    )
+    .catch((error: unknown) => {
+      console.warn(
+        `[voice-qa-shadow-review] case_id=${caseId} ` +
+        `scope=${input.qaInput.scope ?? "current"} status=fallback ` +
+        `fallback_reason=answer_persistence_failed ` +
+        `error_name=${error instanceof Error ? error.name : "unknown"}`
+      );
+    });
+}
+
+async function retrieveQaEvidenceForAnswer(
+  input: AnswerQuestionWithAIInput
+): Promise<QaEvidenceRetrievalResult> {
+  throwIfQaAborted(input.signal);
+  const lexical = retrieveQaEvidenceWithDiagnostics(input);
+  // Lexical ranking is synchronous. It cannot be preempted mid-call, so both
+  // sides are guarded to prevent cancelled work from reaching a Provider.
+  throwIfQaAborted(input.signal);
+  if (input.disableHybridRetrieval === true) {
+    return {
+      ...lexical,
+      hybridDiagnostics: {
+        mode: "off",
+        denseRetrievalMs: null,
+        indexCoverage: null,
+        fallbackReason: null
+      }
+    };
+  }
+  if (enqueueVoiceQaShadowReview(input, lexical)) {
+    return {
+      ...lexical,
+      hybridDiagnostics: {
+        mode: "off",
+        denseRetrievalMs: null,
+        indexCoverage: null,
+        fallbackReason: null
+      }
+    };
+  }
+  let mode: QaHybridRetrievalMode;
+  try {
+    mode = resolveQaHybridRetrievalMode();
+  } catch (error) {
+    console.warn(
+      `[hybrid-qa] mode=off fallback_reason=invalid_configuration ` +
+      `error_name=${error instanceof Error ? error.name : "unknown"}`
+    );
+    return {
+      ...lexical,
+      hybridDiagnostics: {
+        mode: "off",
+        denseRetrievalMs: null,
+        indexCoverage: null,
+        fallbackReason: "invalid_configuration"
+      }
+    };
+  }
+  if (mode === "off") {
+    return {
+      ...lexical,
+      hybridDiagnostics: {
+        mode,
+        denseRetrievalMs: null,
+        indexCoverage: null,
+        fallbackReason: null
+      }
+    };
+  }
+  const runHybrid = async () => {
+    const hybrid = await import("./hybrid/production-retrieval");
+    try {
+      return await hybrid.retrieveProductionHybridEvidence({
+        qaInput: input,
+        lexical
+      });
+    } catch (error) {
+      const reason =
+        error instanceof hybrid.ProductionHybridRetrievalError
+          ? error.reason
+          : "embedding_unavailable";
+      const coverage =
+        error instanceof hybrid.ProductionHybridRetrievalError
+          ? error.indexCoverage
+          : null;
+      throw Object.assign(
+        error instanceof Error ? error : new Error("Hybrid retrieval failed"),
+        { hybridReason: reason, hybridCoverage: coverage }
+      );
+    }
+  };
+  if (mode === "shadow") {
+    throwIfQaAborted(input.signal);
+    void runHybrid().then((result) => {
+      const lexicalIds = new Set(lexical.evidence.map((item) => item.id));
+      const overlap = result.evidence.filter((item) => lexicalIds.has(item.id)).length;
+      console.info(
+        `[hybrid-qa] mode=shadow status=completed candidates=${result.evidence.length} ` +
+        `overlap=${overlap} dense_ms=${result.denseRetrievalMs} ` +
+        `index_coverage=${result.indexCoverage.toFixed(4)}`
+      );
+    }).catch((error: unknown) => {
+      const detail = error as Error & {
+        hybridReason?: string;
+        hybridCoverage?: number | null;
+      };
+      console.warn(
+        `[hybrid-qa] mode=shadow status=fallback ` +
+        `fallback_reason=${detail.hybridReason ?? "embedding_unavailable"} ` +
+        `index_coverage=${detail.hybridCoverage ?? "unknown"} ` +
+        `error_name=${detail.name || "unknown"}`
+      );
+    });
+    return {
+      ...lexical,
+      hybridDiagnostics: {
+        mode,
+        denseRetrievalMs: null,
+        indexCoverage: null,
+        fallbackReason: null
+      }
+    };
+  }
+  const hybridStartedAt = performance.now();
+  try {
+    const result = await runHybrid();
+    throwIfQaAborted(input.signal);
+    return {
+      ...lexical,
+      evidence: result.evidence,
+      rerankingMs:
+        lexical.rerankingMs + safeElapsedMs(hybridStartedAt),
+      hybridDiagnostics: {
+        mode,
+        denseRetrievalMs: result.denseRetrievalMs,
+        indexCoverage: result.indexCoverage,
+        fallbackReason: null
+      }
+    };
+  } catch (error) {
+    if (isQaAbort(error, input.signal)) throw qaAbortError(input.signal);
+    const detail = error as Error & {
+      hybridReason?: string;
+      hybridCoverage?: number | null;
+    };
+    const fallbackReason = detail.hybridReason ?? "embedding_unavailable";
+    console.warn(
+      `[hybrid-qa] mode=phase31 status=fallback fallback_reason=${fallbackReason} ` +
+      `index_coverage=${detail.hybridCoverage ?? "unknown"} ` +
+      `error_name=${detail.name || "unknown"}`
+    );
+    return {
+      ...lexical,
+      hybridDiagnostics: {
+        mode,
+        denseRetrievalMs: safeElapsedMs(hybridStartedAt),
+        indexCoverage: detail.hybridCoverage ?? null,
+        fallbackReason
+      }
+    };
+  }
+}
+
+function qaHybridDiagnosticFields(retrieval: QaEvidenceRetrievalResult) {
+  const diagnostics = retrieval.hybridDiagnostics;
+  return diagnostics
+    ? {
+        retrievalMode: diagnostics.mode,
+        denseRetrievalMs: diagnostics.denseRetrievalMs,
+        embeddingIndexCoverage: diagnostics.indexCoverage,
+        retrievalFallbackReason: diagnostics.fallbackReason
+      }
+    : {};
 }
 
 function evidencePrompt(evidence: EvidenceItem[]) {
@@ -692,13 +1150,38 @@ function evidencePrompt(evidence: EvidenceItem[]) {
     .join("\n\n");
 }
 
+function evidenceSourceSemanticsPrompt(
+  evidence: EvidenceItem[],
+  context?: MemoryIndexQaContext
+) {
+  const attributions = context?.sourceAttributions ?? [];
+  const lines = evidence.flatMap((item, index) => {
+    const sourceIds = new Set(item.sourceSegmentIds);
+    const source = attributions.find((candidate) =>
+      candidate.sourceSegmentIds.some((sourceId) => sourceIds.has(sourceId))
+    );
+    if (!source) return [];
+    const boundary = source.origin === "user_reflection"
+      ? "Memory wording is user_confirmed_derived_content and is not a verbatim quote; cite only this canonical transcript Evidence."
+      : source.origin === "unknown"
+        ? "Do not infer a speaker, owner, or verbatim quote from this source."
+        : "Treat Memory wording as navigation; cite only this canonical transcript Evidence.";
+    return [`[E${index + 1}] ${source.statement} ${boundary}`];
+  });
+  return lines.length > 0
+    ? `\n\n[Evidence source semantics]\n${lines.join("\n")}`
+    : "";
+}
+
 function providerEvidencePrompt(input: {
   evidence: EvidenceItem[];
   queryIntent: QaQueryIntentAnalysis;
   view?: QaEvaluationEvidenceView;
+  memoryContext?: MemoryIndexQaContext;
 }) {
   if (input.view === undefined || input.view === "canonical") {
-    return evidencePrompt(input.evidence);
+    return evidencePrompt(input.evidence)
+      + evidenceSourceSemanticsPrompt(input.evidence, input.memoryContext);
   }
   if (input.view !== "compact") {
     throw new Error("Unknown evaluation Evidence view");
@@ -715,7 +1198,8 @@ function providerEvidencePrompt(input: {
   ) {
     throw new Error("Compact Evidence projection failed safety invariants");
   }
-  return compactEvidencePromptForEvaluation(projection);
+  return compactEvidencePromptForEvaluation(projection)
+    + evidenceSourceSemanticsPrompt(input.evidence, input.memoryContext);
 }
 
 type MemoryPromptResult = {
@@ -764,11 +1248,11 @@ function memoryOwnerPrompt(
 }
 
 function memoryContextPrompt(
-  scope: QaScope,
+  scope: QaAnswerScope,
   context: MemoryIndexQaContext | undefined,
   evidence: EvidenceItem[]
 ): MemoryPromptResult {
-  if (!context || scope === "current") {
+  if (!context || scope === "relationship") {
     return { text: "", memoryCount: 0, evidenceCount: 0 };
   }
 
@@ -781,7 +1265,10 @@ function memoryContextPrompt(
     const caution = dates.length < 2
       ? "Caution: this memory currently maps to one evidence date and cannot establish a long-term pattern."
       : "Caution: treat this compressed memory as navigation and verify every claim with the listed original evidence.";
-    return [{ memory, evidenceIds, dates, caution }];
+    const source = context.sourceAttributions?.find(
+      (candidate) => candidate.memoryId === memory.id
+    );
+    return [{ memory, evidenceIds, dates, caution, source }];
   });
   if (mapped.length === 0) {
     return { text: "", memoryCount: 0, evidenceCount: 0 };
@@ -791,10 +1278,12 @@ function memoryContextPrompt(
   const text = [
     "[Long-term memory]",
     "This is compressed supporting context, not direct fact. Use only the mapped original evidence in the answer.",
-    ...mapped.map(({ memory, evidenceIds: mappedEvidenceIds, dates, caution }, index) =>
+    ...mapped.map(({ memory, evidenceIds: mappedEvidenceIds, dates, caution, source }, index) =>
       [
         `[M${index + 1}] type=${memory.type} status=${memory.status} importance=${memory.importanceScore.toFixed(2)} occurrences=${memory.occurrenceCount}`,
         `Date coverage: ${dates.join(", ")}`,
+        `Source semantics: ${source?.statement ?? "来源尚未完全确认"}`,
+        `Content kind: ${source?.contentKind ?? "memory_navigation"}`,
         `Observation: ${compactText(`${memory.title}: ${memory.summary}`, 500)}`,
         memoryOwnerPrompt(memory.id, context),
         `Original evidence: ${mappedEvidenceIds.map((id) => `[${id}]`).join(" ")}`,
@@ -814,7 +1303,7 @@ function evidenceDates(evidence: EvidenceItem[]) {
   ].sort();
 }
 
-function scopeMetadataPrompt(scope: QaScope, evidence: EvidenceItem[]) {
+function scopeMetadataPrompt(scope: QaAnswerScope, evidence: EvidenceItem[]) {
   const dates = evidenceDates(evidence);
   const dateText = dates.length > 0 ? dates.join(", ") : scope === "current" ? "当前录音" : "未从证据中识别到日期";
 
@@ -844,23 +1333,15 @@ function evidenceForCitationIds(citationIds: string[], evidence: EvidenceItem[])
 }
 
 function violatesRelationshipScopeBoundary(
-  scope: QaScope,
+  scope: QaAnswerScope,
   question: string,
   answerText: string,
   evidence: EvidenceItem[],
   citationIds: string[]
 ) {
   const citedEvidence = evidenceForCitationIds(citationIds, evidence);
-  const relationshipEvidence = citedEvidence.filter((item) => item.relationshipSignal);
-  if (relationshipEvidence.length === 0) {
-    return false;
-  }
-
-  const relationshipDates = new Set(
-    relationshipEvidence.flatMap((item) => (item.relationshipSignal?.recordingDate ? [item.relationshipSignal.recordingDate] : []))
-  );
   const asksForPattern =
-    scope === "all"
+    scope === "all" || scope === "relationship"
       ? /长期|反复|一直|模式|趋势/u.test(question)
       : scope === "week" && /本周|这一周/u.test(question) && /反复|变化|模式|趋势|一直/u.test(question);
   const longTermTerms = "长期|反复|一直|总是|每次|模式|趋势";
@@ -874,6 +1355,18 @@ function violatesRelationshipScopeBoundary(
     (new RegExp(`(?:显示|说明|表明|证明|意味着|可以看出|属于|存在|就是|是|发现).{0,30}(?:${longTermTerms})`, "u").test(answerText) ||
       new RegExp(`(?:${longTermTerms}).{0,30}(?:回避|否定|模式|倾向|问题|态度|行为)`, "u").test(answerText));
 
+  if (scope === "relationship") {
+    return evidenceDates(citedEvidence).length < 2 && (asksForPattern || affirmativeLongTermClaim);
+  }
+
+  const relationshipEvidence = citedEvidence.filter((item) => item.relationshipSignal);
+  if (relationshipEvidence.length === 0) {
+    return false;
+  }
+  const relationshipDates = new Set(
+    relationshipEvidence.flatMap((item) => (item.relationshipSignal?.recordingDate ? [item.relationshipSignal.recordingDate] : []))
+  );
+
   if (scope === "current") {
     return affirmativeLongTermClaim;
   }
@@ -882,7 +1375,7 @@ function violatesRelationshipScopeBoundary(
 }
 
 function violatesMemoryScopeBoundary(
-  scope: QaScope,
+  scope: QaAnswerScope,
   question: string,
   answerText: string,
   evidence: EvidenceItem[],
@@ -986,6 +1479,30 @@ function buildAnswerFromAI(
     const index = Number.parseInt(id.slice(1), 10) - 1;
     return evidence[index] ? [{ id, item: evidence[index] }] : [];
   });
+  const memoryProjection = (item: EvidenceItem) => {
+    const sourceIds = new Set(item.sourceSegmentIds);
+    const memories = input.memoryContext?.memories.filter((memory) =>
+      memory.evidence.some((evidenceItem) => sourceIds.has(evidenceItem.sourceId))
+    ) ?? [];
+    if (memories.length === 0) return {};
+    const memoryIds = memories.map((memory) => memory.id);
+    const memoryEvidenceIds = memories.flatMap((memory) =>
+      memory.evidence
+        .filter((evidenceItem) => sourceIds.has(evidenceItem.sourceId))
+        .map((evidenceItem) => evidenceItem.id)
+    );
+    const sources = input.memoryContext?.sourceAttributions?.filter((source) =>
+      memoryIds.includes(source.memoryId)
+    ) ?? [];
+    const sourceOrigins = new Set(sources.map((source) => source.origin));
+    const contentKinds = new Set(sources.map((source) => source.contentKind));
+    return {
+      memoryIds: [...new Set(memoryIds)],
+      memoryEvidenceIds: [...new Set(memoryEvidenceIds)],
+      ...(sourceOrigins.size === 1 ? { sourceOrigin: [...sourceOrigins][0] } : {}),
+      ...(contentKinds.size === 1 ? { contentKind: [...contentKinds][0] } : {})
+    };
+  };
 
   return {
     id: randomUUID(),
@@ -1002,7 +1519,8 @@ function buildAnswerFromAI(
       startSeconds: item.startSeconds,
       endSeconds: item.endSeconds,
       excerpt: compactText(item.text, 220),
-      sourceSegmentIds: item.sourceSegmentIds
+      sourceSegmentIds: item.sourceSegmentIds,
+      ...memoryProjection(item)
     })),
     createdAt: new Date().toISOString()
   };
@@ -1102,29 +1620,26 @@ function groundedLifecycleUnsupportedAnswer(
     );
   }
 
-  return buildAnswerFromAI(
-    input,
-    "我在当前记录中没有找到足够的同主题证据，暂时不能确认这件事的后续状态。",
-    evidence,
-    []
-  );
+  return null;
 }
 
-function deterministicQaAnswer(input: AnswerQuestionWithAIInput, scope: QaScope) {
-  return answerSameDayQuestion(
-    input.question,
-    input.segments,
-    input.briefItems,
-    input.uploadId,
-    scope,
-    input.relationshipSignals ?? [],
-    input.conversation ?? []
-  );
+function safeUncertaintyAnswer(input: AnswerQuestionWithAIInput): QuestionAnswer {
+  return {
+    id: randomUUID(),
+    uploadId: input.uploadId,
+    question: input.question,
+    answer: SAFE_UNCERTAINTY_ANSWER,
+    citedSegmentIds: [],
+    citations: [],
+    createdAt: new Date().toISOString()
+  };
 }
 
 type QaFallbackReason =
   | "none"
+  | "insufficient_evidence"
   | "empty_answer"
+  | "answer_too_long"
   | "forbidden_relationship_output"
   | "unsupported_answer"
   | "missing_citations"
@@ -1139,7 +1654,7 @@ function isQaModelProviderMismatchError(error: unknown) {
 }
 
 function qaRunLog(input: {
-  provider: OpenAIClientProvider;
+  provider: "openrouter" | "openai-compatible" | "qwen-vllm";
   selectedModel: string;
   fallbackReason: QaFallbackReason;
   startedAt: number;
@@ -1152,7 +1667,7 @@ function qaRunLog(input: {
 
 type QaProviderAnswerFinalizationInput = {
   input: AnswerQuestionWithAIInput;
-  scope: QaScope;
+  scope: QaAnswerScope;
   answerMode: QaAnswerMode;
   answerText: string;
   evidence: EvidenceItem[];
@@ -1185,7 +1700,7 @@ function finalizeQaProviderAnswerText(
   ): QaProviderAnswerFinalizationResult => ({ answer, fallbackReason });
 
   if (!answerText) {
-    return result(deterministicQaAnswer(input, scope), "empty_answer");
+    return result(safeUncertaintyAnswer(input), "empty_answer");
   }
 
   const isRelationshipQuestion =
@@ -1198,16 +1713,19 @@ function finalizeQaProviderAnswerText(
     isRelationshipQuestion &&
     (isForbiddenRelationshipQaOutput(answerText) || containsAbsoluteRelationshipConclusion(answerText))
   ) {
-    return result(deterministicQaAnswer(input, scope), "forbidden_relationship_output");
+    return result(safeUncertaintyAnswer(input), "forbidden_relationship_output");
   }
 
   const structuredAnswer = parseStructuredAiAnswer(answerText);
   if (structuredAnswer) {
     if (structuredAnswer.mode === "assistant_meta") {
       if (answerMode === "direct" && !isAssistantMetaQuestion(input.question)) {
-        return result(deterministicQaAnswer(input, scope), "assistant_meta_scope");
+        return result(safeUncertaintyAnswer(input), "assistant_meta_scope");
       }
       return result(buildAnswerFromAI(input, structuredAnswer.answer, evidence, []));
+    }
+    if (structuredAnswer.answer.length > MAX_QA_PROVIDER_ANSWER_CHARACTERS) {
+      return result(safeUncertaintyAnswer(input), "answer_too_long");
     }
 
     if (structuredAnswer.mode === "unsupported") {
@@ -1219,25 +1737,13 @@ function finalizeQaProviderAnswerText(
       if (groundedLifecycleAnswer) {
         return result(groundedLifecycleAnswer, "unsupported_answer");
       }
-      const deterministicAnswer = deterministicQaAnswer(input, scope);
-      if (deterministicAnswer.citedSegmentIds.length > 0) {
-        return result(deterministicAnswer, "unsupported_answer");
-      }
-
-      return result(
-        buildAnswerFromAI(
-          input,
-          structuredAnswer.answer,
-          evidence,
-          normalizeCitationIds(structuredAnswer.citationIds, evidence)
-        )
-      );
+      return result(safeUncertaintyAnswer(input), "unsupported_answer");
     }
 
     const citationIds = normalizeCitationIds(structuredAnswer.citationIds, evidence);
     const inlineCitationIds = citationIdsFromAnswer(structuredAnswer.answer, evidence);
     if (citationIds.length === 0 && inlineCitationIds.length === 0) {
-      return result(deterministicQaAnswer(input, scope), "missing_citations");
+      return result(safeUncertaintyAnswer(input), "missing_citations");
     }
 
     const effectiveCitationIds = citationIds.length > 0 ? citationIds : inlineCitationIds;
@@ -1250,7 +1756,7 @@ function finalizeQaProviderAnswerText(
         effectiveCitationIds
       )
     ) {
-      return result(deterministicQaAnswer(input, scope), "relationship_scope_boundary");
+      return result(safeUncertaintyAnswer(input), "relationship_scope_boundary");
     }
     if (
       violatesMemoryScopeBoundary(
@@ -1262,7 +1768,7 @@ function finalizeQaProviderAnswerText(
         memoryPrompt
       )
     ) {
-      return result(deterministicQaAnswer(input, scope), "memory_scope_boundary");
+      return result(safeUncertaintyAnswer(input), "memory_scope_boundary");
     }
 
     return result(
@@ -1275,15 +1781,21 @@ function finalizeQaProviderAnswerText(
     );
   }
 
+  if (answerText.length > MAX_QA_PROVIDER_ANSWER_CHARACTERS) {
+    return result(safeUncertaintyAnswer(input), "answer_too_long");
+  }
   const citationIds = citationIdsFromAnswer(answerText, evidence);
-  if (citationIds.length === 0 && !answerLooksUnsupported(answerText)) {
-    return result(deterministicQaAnswer(input, scope), "missing_citations");
+  if (citationIds.length === 0) {
+    return result(
+      safeUncertaintyAnswer(input),
+      answerLooksUnsupported(answerText) ? "unsupported_answer" : "missing_citations"
+    );
   }
   if (violatesRelationshipScopeBoundary(scope, input.question, answerText, evidence, citationIds)) {
-    return result(deterministicQaAnswer(input, scope), "relationship_scope_boundary");
+    return result(safeUncertaintyAnswer(input), "relationship_scope_boundary");
   }
   if (violatesMemoryScopeBoundary(scope, input.question, answerText, evidence, citationIds, memoryPrompt)) {
-    return result(deterministicQaAnswer(input, scope), "memory_scope_boundary");
+    return result(safeUncertaintyAnswer(input), "memory_scope_boundary");
   }
 
   return result(buildAnswerFromAI(input, answerText, evidence));
@@ -1301,6 +1813,342 @@ function normalizeCompletedQaAnswer(
       answer: answer.answer
     })
   };
+}
+
+const QA_EVALUATION_EVIDENCE_DELIMITER = "\n\n本地证据：\n";
+
+function qaEvaluationSha256(value: string) {
+  return createHash("sha256").update(value).digest("hex");
+}
+
+function qaEvaluationPromptFingerprint(
+  systemPrompt: string,
+  userPrompt: string
+) {
+  return qaEvaluationSha256(JSON.stringify({
+    systemPromptHash: qaEvaluationSha256(systemPrompt),
+    userPromptHash: qaEvaluationSha256(userPrompt)
+  }));
+}
+
+export type QaSelectedEvidenceEvaluationInput = {
+  qaInput: AnswerQuestionWithAIInput;
+  selectedEvidence: readonly QaRetrievedEvidence[];
+  systemPrompt: string;
+  userPromptPrefix: string;
+  expectedEvidenceSectionHash?: string;
+  expectedOfficialPromptFingerprint?: string;
+  expectedMemoryCount?: number;
+  expectedMemoryEvidenceCount?: number;
+};
+
+export type QaSelectedEvidenceEvaluationPreparation = {
+  evidenceSection: string;
+  evidenceSectionHash: string;
+  systemPromptHash: string;
+  userPromptPrefixHash: string;
+  fullPromptFingerprint: string;
+  memoryCount: number;
+  memoryEvidenceCount: number;
+  lexicalEvidenceIds: string[];
+};
+
+type InternalQaSelectedEvidenceEvaluationPreparation =
+  QaSelectedEvidenceEvaluationPreparation & {
+    qaInput: AnswerQuestionWithAIInput;
+    selectedEvidence: QaRetrievedEvidence[];
+    systemPrompt: string;
+    userPrompt: string;
+    scope: QaAnswerScope;
+    answerMode: QaAnswerMode;
+    lifecycleContext: QaEvidenceRetrievalResult["lifecycleContext"];
+    memoryPrompt: MemoryPromptResult;
+    responseIntent: ReturnType<typeof classifyCompanionResponseIntent>;
+  };
+
+function prepareQaSelectedEvidenceInternal(
+  input: QaSelectedEvidenceEvaluationInput
+): InternalQaSelectedEvidenceEvaluationPreparation {
+  if (
+    input.selectedEvidence.length === 0 ||
+    input.selectedEvidence.length > MAX_EVIDENCE_ITEMS
+  ) {
+    throw new Error("Evaluation selected Evidence count is invalid");
+  }
+  const selectedEvidenceIds = new Set<string>();
+  const selectedEvidence = input.selectedEvidence.map((item) => {
+    if (selectedEvidenceIds.has(item.id)) {
+      throw new Error("Evaluation selected Evidence ids must be unique");
+    }
+    selectedEvidenceIds.add(item.id);
+    return {
+      ...item,
+      sourceSegmentIds: [...item.sourceSegmentIds],
+      ...(item.relationshipSignal
+        ? { relationshipSignal: { ...item.relationshipSignal } }
+        : {})
+    };
+  });
+  const lexical = retrieveQaEvidenceWithDiagnostics(input.qaInput);
+  const scope = input.qaInput.scope ?? "current";
+  const answerMode = input.qaInput.answerMode ?? "agent";
+  const memoryPrompt = memoryContextPrompt(
+    scope,
+    input.qaInput.memoryContext,
+    selectedEvidence
+  );
+  const evidenceSection = providerEvidencePrompt({
+    evidence: selectedEvidence,
+    queryIntent: lexical.lifecycleContext.queryIntent,
+    view: "canonical",
+    memoryContext: input.qaInput.memoryContext
+  });
+  if (
+    input.userPromptPrefix.includes(QA_EVALUATION_EVIDENCE_DELIMITER) ||
+    evidenceSection.includes(QA_EVALUATION_EVIDENCE_DELIMITER)
+  ) {
+    throw new Error("Evaluation Prompt Evidence delimiter is not unique");
+  }
+  const evidenceSectionHash = qaEvaluationSha256(evidenceSection);
+  const userPrompt =
+    input.userPromptPrefix +
+    QA_EVALUATION_EVIDENCE_DELIMITER +
+    evidenceSection;
+  const fullPromptFingerprint = qaEvaluationPromptFingerprint(
+    input.systemPrompt,
+    userPrompt
+  );
+  if (
+    input.expectedEvidenceSectionHash !== undefined &&
+    input.expectedEvidenceSectionHash !== evidenceSectionHash
+  ) {
+    throw new Error("Evaluation Evidence section hash mismatch");
+  }
+  if (
+    input.expectedOfficialPromptFingerprint !== undefined &&
+    input.expectedOfficialPromptFingerprint !== fullPromptFingerprint
+  ) {
+    throw new Error("Evaluation official Prompt fingerprint mismatch");
+  }
+  if (
+    input.expectedMemoryCount !== undefined &&
+    input.expectedMemoryCount !== memoryPrompt.memoryCount
+  ) {
+    throw new Error("Evaluation Memory count mismatch");
+  }
+  if (
+    input.expectedMemoryEvidenceCount !== undefined &&
+    input.expectedMemoryEvidenceCount !== memoryPrompt.evidenceCount
+  ) {
+    throw new Error("Evaluation Memory Evidence count mismatch");
+  }
+  return {
+    qaInput: input.qaInput,
+    selectedEvidence,
+    systemPrompt: input.systemPrompt,
+    userPrompt,
+    scope,
+    answerMode,
+    lifecycleContext: lexical.lifecycleContext,
+    memoryPrompt,
+    responseIntent: classifyCompanionResponseIntent(
+      input.qaInput.question,
+      input.qaInput.conversation
+    ),
+    evidenceSection,
+    evidenceSectionHash,
+    systemPromptHash: qaEvaluationSha256(input.systemPrompt),
+    userPromptPrefixHash: qaEvaluationSha256(input.userPromptPrefix),
+    fullPromptFingerprint,
+    memoryCount: memoryPrompt.memoryCount,
+    memoryEvidenceCount: memoryPrompt.evidenceCount,
+    lexicalEvidenceIds: lexical.evidence.map((item) => item.id)
+  };
+}
+
+/**
+ * Evaluation-only preflight for a frozen selected-Evidence QA attempt.
+ * It does not resolve or call a Provider and is not used by Text/Voice QA.
+ */
+export function prepareQaSelectedEvidenceForEvaluation(
+  input: QaSelectedEvidenceEvaluationInput
+): QaSelectedEvidenceEvaluationPreparation {
+  const prepared = prepareQaSelectedEvidenceInternal(input);
+  return {
+    evidenceSection: prepared.evidenceSection,
+    evidenceSectionHash: prepared.evidenceSectionHash,
+    systemPromptHash: prepared.systemPromptHash,
+    userPromptPrefixHash: prepared.userPromptPrefixHash,
+    fullPromptFingerprint: prepared.fullPromptFingerprint,
+    memoryCount: prepared.memoryCount,
+    memoryEvidenceCount: prepared.memoryEvidenceCount,
+    lexicalEvidenceIds: prepared.lexicalEvidenceIds
+  };
+}
+
+export type QaSelectedEvidenceEvaluationAnswer = {
+  answer: QuestionAnswer;
+  fallbackReason: QaFallbackReason;
+  providerId: "gpt-5.5";
+  logProvider: "openrouter" | "openai-compatible";
+  model: string;
+  wireApi: "chat" | "responses";
+  reasoningEnabled: boolean | null;
+  endpointFingerprint: string;
+  generationLatencyMs: number;
+  evidenceSectionHash: string;
+  fullPromptFingerprint: string;
+  memoryCount: number;
+  memoryEvidenceCount: number;
+};
+
+export type QaSelectedEvidenceEvaluationSession = {
+  providerId: "gpt-5.5";
+  logProvider: "openrouter" | "openai-compatible";
+  model: string;
+  wireApi: "chat" | "responses";
+  reasoningEnabled: boolean | null;
+  endpointFingerprint: string;
+  answer(
+    input: QaSelectedEvidenceEvaluationInput
+  ): Promise<QaSelectedEvidenceEvaluationAnswer>;
+};
+
+/**
+ * Evaluation-only selected-Evidence entry. It resolves the same configured
+ * production GPT-5.5 Provider once, then reuses the canonical Evidence prompt,
+ * lifecycle/Memory boundaries, finalizer, and response normalization.
+ */
+export async function createQaSelectedEvidenceEvaluationSession(input: {
+  settingsStore?: JsonStore;
+  expectedLogProvider: "openrouter" | "openai-compatible";
+  expectedModel: string;
+  expectedWireApi: "chat" | "responses";
+  expectedReasoningEnabled: boolean | null;
+  expectedEndpointFingerprint: string;
+}): Promise<QaSelectedEvidenceEvaluationSession> {
+  const provider = await resolveQaLlmProvider({
+    settingsStore: input.settingsStore
+  });
+  if (
+    provider.id !== "gpt-5.5" ||
+    provider.logProvider === "qwen-vllm" ||
+    provider.logProvider !== input.expectedLogProvider ||
+    provider.model !== input.expectedModel ||
+    provider.wireApi !== input.expectedWireApi ||
+    provider.reasoningEnabled !== input.expectedReasoningEnabled ||
+    provider.endpointFingerprint !== input.expectedEndpointFingerprint ||
+    !/(?:^|\/)gpt-5\.5$/u.test(provider.model)
+  ) {
+    throw new Error("Evaluation Provider or model does not match official GPT-5.5");
+  }
+  const providerId = provider.id as "gpt-5.5";
+  const logProvider = provider.logProvider as
+    | "openrouter"
+    | "openai-compatible";
+  return {
+    providerId,
+    logProvider,
+    model: provider.model,
+    wireApi: provider.wireApi,
+    reasoningEnabled: provider.reasoningEnabled,
+    endpointFingerprint: provider.endpointFingerprint,
+    async answer(
+      selectedInput: QaSelectedEvidenceEvaluationInput
+    ): Promise<QaSelectedEvidenceEvaluationAnswer> {
+      const prepared = prepareQaSelectedEvidenceInternal(selectedInput);
+      const startedAt = performance.now();
+      const answerText = await provider.answerText(
+        prepared.systemPrompt,
+        prepared.userPrompt
+      );
+      const finalized = finalizeQaProviderAnswerText({
+        input: prepared.qaInput,
+        scope: prepared.scope,
+        answerMode: prepared.answerMode,
+        answerText,
+        evidence: prepared.selectedEvidence,
+        lifecycleContext: prepared.lifecycleContext,
+        memoryPrompt: prepared.memoryPrompt,
+        responseIntent: prepared.responseIntent
+      });
+      return {
+        answer: normalizeCompletedQaAnswer(
+          prepared.qaInput,
+          finalized.answer
+        ),
+        fallbackReason: finalized.fallbackReason,
+        providerId,
+        logProvider,
+        model: provider.model,
+        wireApi: provider.wireApi,
+        reasoningEnabled: provider.reasoningEnabled,
+        endpointFingerprint: provider.endpointFingerprint,
+        generationLatencyMs: safeElapsedMs(startedAt),
+        evidenceSectionHash: prepared.evidenceSectionHash,
+        fullPromptFingerprint: prepared.fullPromptFingerprint,
+        memoryCount: prepared.memoryCount,
+        memoryEvidenceCount: prepared.memoryEvidenceCount
+      };
+    }
+  };
+}
+
+/**
+ * Mirrors the production evidence-poor path without resolving a Provider.
+ * Consumers persist only the deterministic answer/citations projection.
+ */
+export function noProviderQaAnswerForEvaluation(
+  input: AnswerQuestionWithAIInput
+) {
+  return normalizeCompletedQaAnswer(input, safeUncertaintyAnswer(input));
+}
+
+export function qaSelectedEvidenceCitationValidityForEvaluation(
+  answer: QuestionAnswer,
+  evidence: readonly QaRetrievedEvidence[]
+) {
+  const byCitationId = new Map<string, QaRetrievedEvidence>(
+    evidence.map((item, index) => [`E${index + 1}`, item] as const)
+  );
+  const citations = answer.citations ?? [];
+  const citationIds = citations.map((citation) => citation.id);
+  if (new Set(citationIds).size !== citationIds.length) return false;
+  const inlineCitationIds = [
+    ...answer.answer.matchAll(/\[(E\d+)\]/gu)
+  ].map((match) => match[1]!);
+  if (
+    inlineCitationIds.some(
+      (citationId) => !byCitationId.has(citationId)
+    )
+  ) {
+    return false;
+  }
+  for (const citation of citations) {
+    const selected = byCitationId.get(citation.id);
+    if (
+      !selected ||
+      citation.title !== selected.title ||
+      citation.startSeconds !== selected.startSeconds ||
+      citation.endSeconds !== selected.endSeconds ||
+      citation.excerpt !== compactText(selected.text, 220) ||
+      citation.sourceSegmentIds.length !== selected.sourceSegmentIds.length ||
+      !citation.sourceSegmentIds.every(
+        (sourceId, index) => sourceId === selected.sourceSegmentIds[index]
+      )
+    ) {
+      return false;
+    }
+  }
+  const citedSourceIds = [
+    ...new Set(citations.flatMap((citation) => citation.sourceSegmentIds))
+  ].sort();
+  return (
+    answer.citedSegmentIds.length === citedSourceIds.length &&
+    [...answer.citedSegmentIds].sort().every(
+      (sourceId, index) => sourceId === citedSourceIds[index]
+    )
+  );
 }
 
 function sameCanonicalIds(left: readonly string[], right: readonly string[]) {
@@ -1338,6 +2186,11 @@ function violatesProvisionalOwnerBoundary(
   return namedOwnerClaim;
 }
 
+function isUncertaintyBearingSentence(sentence: string) {
+  return /(?:证据(?:不足|有限|不够)|没有(?:找到|足够)?证据|尚未(?:确认|确定)|还不能(?:确认|确定|判断)|无法(?:确认|确定|判断)|不能(?:确认|确定|判断)|不确定|未知|未确认)/u
+    .test(sentence);
+}
+
 /**
  * Reuses the production finalizer as a deterministic sentence-local policy
  * gate. The sentence has already passed the strict citation allowlist in
@@ -1347,13 +2200,19 @@ function violatesProvisionalOwnerBoundary(
 function provisionalSentenceSafetyReason(input: {
   sentence: ProvisionalSentenceCommitInput;
   qaInput: AnswerQuestionWithAIInput;
-  scope: QaScope;
+  scope: QaAnswerScope;
   answerMode: QaAnswerMode;
   evidence: EvidenceItem[];
   lifecycleContext: QaEvidenceRetrievalResult["lifecycleContext"];
   memoryPrompt: MemoryPromptResult;
   responseIntent: ReturnType<typeof classifyCompanionResponseIntent>;
 }): SentenceCommitReason | null {
+  if (
+    input.qaInput.withholdUncertainProvisionalSentences === true &&
+    isUncertaintyBearingSentence(input.sentence.sentence)
+  ) {
+    return "safety_boundary";
+  }
   const finalized = finalizeQaProviderAnswerText({
     input: input.qaInput,
     scope: input.scope,
@@ -1426,11 +2285,16 @@ function provisionalSentenceSafetyReason(input: {
 }
 
 export async function answerQuestionWithAI(input: AnswerQuestionWithAIInput): Promise<QuestionAnswer> {
+  throwIfQaAborted(input.signal);
   const totalStartedAt = performance.now();
-  const scope = input.scope ?? "current";
+  const scope: QaAnswerScope = input.relationshipScope === true
+    ? "relationship"
+    : input.scope ?? "current";
   const answerMode = input.answerMode ?? "agent";
-  const retrieval = retrieveQaEvidenceWithDiagnostics(input);
+  const retrieval = await retrieveQaEvidenceForAnswer(input);
+  throwIfQaAborted(input.signal);
   const evidence = retrieval.evidence;
+  notifyQaExecutionMilestone(input.onExecutionMilestone, "retrieval_complete");
   if (input.evaluationEvidenceView === undefined) {
     observeCompactEvidenceShadow({
       attempt: "sync",
@@ -1464,7 +2328,7 @@ export async function answerQuestionWithAI(input: AnswerQuestionWithAIInput): Pr
   });
   const initialPromptConstructionMs = safeElapsedMs(initialPromptConstructionStartedAt);
   const startedAt = Date.now();
-  let provider: OpenAIClientProvider = "openai-compatible";
+  let provider: "openrouter" | "openai-compatible" | "qwen-vllm" = "openai-compatible";
   let selectedModel = "unresolved";
   let promptConstructionMs: number | null = null;
   let llmGenerationMs: number | null = null;
@@ -1474,6 +2338,13 @@ export async function answerQuestionWithAI(input: AnswerQuestionWithAIInput): Pr
   let providerCallCount = 0;
   let validationStartedAt: number | null = null;
   let diagnosticsEmitted = false;
+  let reviewSystemPrompt: string | undefined;
+  let reviewUserPrompt: string | undefined;
+  let reviewProviderMetadata:
+    | NonNullable<
+        Parameters<typeof recordVoiceQaShadowReviewAnswer>[0]["providerMetadata"]
+      >
+    | undefined;
   const emitDiagnostics = (fallbackReason: QaFallbackReason) => {
     if (diagnosticsEmitted) return;
     diagnosticsEmitted = true;
@@ -1490,7 +2361,8 @@ export async function answerQuestionWithAI(input: AnswerQuestionWithAIInput): Pr
       responseCharacters,
       evidenceCount: evidence.length,
       providerCallCount,
-      fallbackReason
+      fallbackReason,
+      ...qaHybridDiagnosticFields(retrieval)
     };
     notifyQaExecutionDiagnostics(input.onDiagnostics, diagnostics);
   };
@@ -1509,18 +2381,44 @@ export async function answerQuestionWithAI(input: AnswerQuestionWithAIInput): Pr
       console.info(message);
     }
     emitDiagnostics(fallbackReason);
+    recordVoiceQaShadowReviewAnswer({
+      qaInput: input,
+      answer: normalizedAnswer,
+      attemptKind: input.shadowReviewAttemptKind ?? "sync_primary",
+      provider,
+      selectedModel,
+      ...(reviewProviderMetadata
+        ? { providerMetadata: reviewProviderMetadata }
+        : {}),
+      fallbackReason,
+      ...(reviewSystemPrompt ? { systemPrompt: reviewSystemPrompt } : {}),
+      ...(reviewUserPrompt ? { userPrompt: reviewUserPrompt } : {}),
+      qaLatencyMs: safeElapsedMs(totalStartedAt)
+    });
     return normalizedAnswer;
   };
 
+  if (evidence.length === 0 && !isAssistantMetaQuestion(contextualQuestion(input))) {
+    return complete(safeUncertaintyAnswer(input), "insufficient_evidence");
+  }
+
   try {
-    const runtimeConfig = await getOpenAIClientRuntimeConfig(input.settingsStore);
-    provider = resolveOpenAIClientProvider(runtimeConfig);
-    const [qaModel, savedQaPromptInstruction] = await Promise.all([
-      getQaModelPreference(input.settingsStore, provider),
+    const [llmProvider, savedQaPromptInstruction] = await Promise.all([
+      resolveQaLlmProvider({
+        settingsStore: input.settingsStore,
+        providerId: input.llmProviderId,
+        allowQwenInProduction: input.allowQwenInProduction
+      }),
       getQaPromptPreference(input.settingsStore)
     ]);
-    selectedModel = qaModel;
-    const client = createOpenAIClient(runtimeConfig);
+    provider = llmProvider.logProvider;
+    selectedModel = llmProvider.model;
+    reviewProviderMetadata = {
+      providerId: llmProvider.id,
+      wireApi: llmProvider.wireApi,
+      reasoningEnabled: llmProvider.reasoningEnabled,
+      endpointFingerprint: llmProvider.endpointFingerprint
+    };
     const providerPromptStartedAt = performance.now();
     const qaPromptInstruction = input.qaPromptInstruction?.trim() || savedQaPromptInstruction;
     const systemPrompt = answerMode === "direct"
@@ -1529,15 +2427,26 @@ export async function answerQuestionWithAI(input: AnswerQuestionWithAIInput): Pr
     const userPrompt = `${conversationPrompt(input.conversation)}当前问题：${input.question}\n问答范围：${qaScopeLabels[scope]}\n\n回答风格：\n${responseStyleInstruction}\n\n${scopeMetadataPrompt(scope, evidence)}${memoryPrompt.text ? `\n\n${memoryPrompt.text}` : ""}\n\n本地证据：\n${providerEvidencePrompt({
       evidence,
       queryIntent: retrieval.lifecycleContext.queryIntent,
-      view: input.evaluationEvidenceView
+      view: input.evaluationEvidenceView,
+      memoryContext: input.memoryContext
     })}`;
+    reviewSystemPrompt = systemPrompt;
+    reviewUserPrompt = userPrompt;
     promptCharacters = systemPrompt.length + userPrompt.length;
     promptConstructionMs = initialPromptConstructionMs + safeElapsedMs(providerPromptStartedAt);
     providerCallCount = 1;
     const generationStartedAt = performance.now();
     let answerText: string;
     try {
-      answerText = await requestQaAnswerText(client, qaModel, systemPrompt, userPrompt);
+      throwIfQaAborted(input.signal);
+      notifyQaExecutionMilestone(input.onExecutionMilestone, "llm_started");
+      answerText = await llmProvider.answerText(
+        systemPrompt,
+        userPrompt,
+        input.onProviderMetrics,
+        input.signal
+      );
+      throwIfQaAborted(input.signal);
     } finally {
       llmGenerationMs = safeElapsedMs(generationStartedAt);
     }
@@ -1555,10 +2464,15 @@ export async function answerQuestionWithAI(input: AnswerQuestionWithAIInput): Pr
     });
     return complete(finalized.answer, finalized.fallbackReason);
   } catch (error) {
+    if (isQaAbort(error, input.signal)) throw qaAbortError(input.signal);
     if (isQaModelProviderMismatchError(error)) {
       const mismatchedModel = (error as Error & { model?: unknown }).model;
       if (typeof mismatchedModel === "string" && mismatchedModel.trim()) {
         selectedModel = mismatchedModel.trim();
+      }
+      if (input.failClosedOnModelProviderMismatch === true) {
+        if (promptConstructionMs === null) promptConstructionMs = initialPromptConstructionMs;
+        return complete(safeUncertaintyAnswer(input), "model_provider_mismatch");
       }
       console.warn(qaRunLog({ provider, selectedModel, fallbackReason: "model_provider_mismatch", startedAt }));
       if (promptConstructionMs === null) promptConstructionMs = initialPromptConstructionMs;
@@ -1567,7 +2481,7 @@ export async function answerQuestionWithAI(input: AnswerQuestionWithAIInput): Pr
     }
 
     if (promptConstructionMs === null) promptConstructionMs = initialPromptConstructionMs;
-    return complete(deterministicQaAnswer(input, scope), "provider_error");
+    return complete(safeUncertaintyAnswer(input), "provider_error");
   }
 }
 
@@ -1584,6 +2498,7 @@ export async function answerQuestionWithAI(input: AnswerQuestionWithAIInput): Pr
 export async function* answerQuestionStream(
   input: AnswerQuestionStreamInput
 ): AsyncGenerator<QaAnswerStreamEvent> {
+  throwIfQaAborted(input.signal);
   const recorder = createQaStreamingTraceRecorder();
   yield {
     type: "stream_started",
@@ -1592,7 +2507,9 @@ export async function* answerQuestionStream(
   };
 
   const totalStartedAt = performance.now();
-  const scope = input.scope ?? "current";
+  const scope: QaAnswerScope = input.relationshipScope === true
+    ? "relationship"
+    : input.scope ?? "current";
   const answerMode = input.answerMode ?? "agent";
   let tokenChunkCount = 0;
   let accumulatedText = "";
@@ -1602,12 +2519,32 @@ export async function* answerQuestionStream(
   let answer: QuestionAnswer;
   let sentenceCommitEvidence: SentenceCommitEvidence[] = [];
   let sentenceCommitManager: SentenceCommitManager | null = null;
+  let providerMetrics: import("./qa-streaming").QaStreamingProviderMetrics | undefined;
+  const observeProviderMetrics: QaLlmProviderMetricsObserver | undefined =
+    input.onProviderMetrics || process.env.QA_PROVIDER_USAGE_METRICS === "1"
+      ? (metrics) => {
+          providerMetrics = metrics;
+          return input.onProviderMetrics?.(metrics);
+        }
+      : undefined;
   const emittedSentenceSignatures = new Set<string>();
   let emittedSentenceCount = 0;
+  let firstTokenMilestoneObserved = false;
+  let reviewProvider = "unresolved";
+  let reviewSelectedModel = "unresolved";
+  let reviewSystemPrompt: string | undefined;
+  let reviewUserPrompt: string | undefined;
+  let reviewProviderMetadata:
+    | NonNullable<
+        Parameters<typeof recordVoiceQaShadowReviewAnswer>[0]["providerMetadata"]
+      >
+    | undefined;
 
   try {
-    const retrieval = retrieveQaEvidenceWithDiagnostics(input);
+    const retrieval = await retrieveQaEvidenceForAnswer(input);
+    throwIfQaAborted(input.signal);
     const evidence = retrieval.evidence;
+    notifyQaExecutionMilestone(input.onExecutionMilestone, "retrieval_complete");
     if (input.evaluationEvidenceView === undefined) {
       observeCompactEvidenceShadow({
         attempt: "stream",
@@ -1637,6 +2574,50 @@ export async function* answerQuestionStream(
       );
     }
 
+    if (evidence.length === 0 && !isAssistantMetaQuestion(contextualQuestion(input))) {
+      const fallbackAnswer = normalizeCompletedQaAnswer(input, safeUncertaintyAnswer(input));
+      const fallbackTrace = recorder.complete({
+        status: "completed_with_fallback",
+        tokenChunkCount: 0,
+        sentenceCount: 0,
+        providerCallCount: 0,
+        fallbackReason: "insufficient_evidence"
+      });
+      notifyQaExecutionDiagnostics(input.onDiagnostics, {
+        answerMode,
+        memoryRetrievalMs: input.memoryRetrievalMs ?? null,
+        relationshipContextBuildingMs: retrieval.relationshipContextBuildingMs,
+        rerankingMs: retrieval.rerankingMs,
+        promptConstructionMs: null,
+        llmGenerationMs: null,
+        responseValidationMs: null,
+        totalMs: safeElapsedMs(totalStartedAt),
+        promptCharacters: null,
+        responseCharacters: 0,
+        evidenceCount: 0,
+        providerCallCount: 0,
+        fallbackReason: "insufficient_evidence",
+        ...qaHybridDiagnosticFields(retrieval)
+      });
+      notifyQaStreamingTrace(input.onStreamTrace, fallbackTrace);
+      recordVoiceQaShadowReviewAnswer({
+        qaInput: input,
+        answer: fallbackAnswer,
+        attemptKind: "final_projection",
+        provider: reviewProvider,
+        selectedModel: reviewSelectedModel,
+        fallbackReason: "insufficient_evidence",
+        qaLatencyMs: safeElapsedMs(totalStartedAt)
+      });
+      yield {
+        type: "final",
+        answer: fallbackAnswer,
+        source: "non_stream_fallback",
+        trace: fallbackTrace
+      };
+      return;
+    }
+
     const initialPromptConstructionStartedAt = performance.now();
     const memoryPrompt = memoryContextPrompt(scope, input.memoryContext, evidence);
     const responseIntent = classifyCompanionResponseIntent(input.question, input.conversation);
@@ -1658,13 +2639,22 @@ export async function* answerQuestionStream(
       })
     });
     const initialPromptConstructionMs = safeElapsedMs(initialPromptConstructionStartedAt);
-    const runtimeConfig = await getOpenAIClientRuntimeConfig(input.settingsStore);
-    const provider = resolveOpenAIClientProvider(runtimeConfig);
-    const [qaModel, savedQaPromptInstruction] = await Promise.all([
-      getQaModelPreference(input.settingsStore, provider),
+    const [llmProvider, savedQaPromptInstruction] = await Promise.all([
+      resolveQaLlmProvider({
+        settingsStore: input.settingsStore,
+        providerId: input.llmProviderId,
+        allowQwenInProduction: input.allowQwenInProduction
+      }),
       getQaPromptPreference(input.settingsStore)
     ]);
-    const client = createOpenAIClient(runtimeConfig);
+    reviewProvider = llmProvider.logProvider;
+    reviewSelectedModel = llmProvider.model;
+    reviewProviderMetadata = {
+      providerId: llmProvider.id,
+      wireApi: llmProvider.wireApi,
+      reasoningEnabled: llmProvider.reasoningEnabled,
+      endpointFingerprint: llmProvider.endpointFingerprint
+    };
     const providerPromptStartedAt = performance.now();
     const qaPromptInstruction = input.qaPromptInstruction?.trim() || savedQaPromptInstruction;
     const systemPrompt = answerMode === "direct"
@@ -1673,21 +2663,31 @@ export async function* answerQuestionStream(
     const userPrompt = `${conversationPrompt(input.conversation)}当前问题：${input.question}\n问答范围：${qaScopeLabels[scope]}\n\n回答风格：\n${responseStyleInstruction}\n\n${scopeMetadataPrompt(scope, evidence)}${memoryPrompt.text ? `\n\n${memoryPrompt.text}` : ""}\n\n本地证据：\n${providerEvidencePrompt({
       evidence,
       queryIntent: retrieval.lifecycleContext.queryIntent,
-      view: input.evaluationEvidenceView
+      view: input.evaluationEvidenceView,
+      memoryContext: input.memoryContext
     })}`;
+    reviewSystemPrompt = systemPrompt;
+    reviewUserPrompt = userPrompt;
     const promptCharacters = systemPrompt.length + userPrompt.length;
     const promptConstructionMs = initialPromptConstructionMs + safeElapsedMs(providerPromptStartedAt);
     const generationStartedAt = performance.now();
     streamAttempted = true;
     recorder.markProviderStarted();
     try {
-      for await (const delta of requestQaAnswerTextStream(
-        client,
-        qaModel,
+      throwIfQaAborted(input.signal);
+      notifyQaExecutionMilestone(input.onExecutionMilestone, "llm_started");
+      for await (const delta of llmProvider.answerTextStream(
         systemPrompt,
-        userPrompt
+        userPrompt,
+        observeProviderMetrics,
+        input.signal
       )) {
+        throwIfQaAborted(input.signal);
         if (!delta) continue;
+        if (!firstTokenMilestoneObserved) {
+          firstTokenMilestoneObserved = true;
+          notifyQaExecutionMilestone(input.onExecutionMilestone, "llm_first_token");
+        }
         tokenChunkCount += 1;
         accumulatedText += delta;
         const sentenceSnapshot = sentenceCommitManager.ingestDelta(delta);
@@ -1704,6 +2704,12 @@ export async function* answerQuestionStream(
           validated: false
         };
         for (const result of sentenceCommitManager.drainCommitted()) {
+          if (
+            input.withholdUncertainProvisionalSentences === true &&
+            emittedSentenceCount >= MAX_VOICE_PROVISIONAL_SENTENCES
+          ) {
+            continue;
+          }
           const signature = JSON.stringify([
             result.sentence,
             result.citationIds,
@@ -1735,6 +2741,7 @@ export async function* answerQuestionStream(
     } finally {
       recorder.markProviderEnded();
     }
+    throwIfQaAborted(input.signal);
     // The normal generation metric continues to cover the full provider stream.
     const llmGenerationMs = safeElapsedMs(generationStartedAt);
 
@@ -1771,12 +2778,16 @@ export async function* answerQuestionStream(
       responseCharacters: accumulatedText.length,
       evidenceCount: evidence.length,
       providerCallCount: 1,
-      fallbackReason: finalized.fallbackReason
+      fallbackReason: finalized.fallbackReason,
+      ...qaHybridDiagnosticFields(retrieval)
     });
   } catch (streamError) {
     sentenceCommitManager?.cancel(
       streamError instanceof QaProviderStreamError ? streamError.code : "provider_error"
     );
+    if (isQaAbort(streamError, input.signal)) {
+      throw qaAbortError(input.signal);
+    }
     source = "non_stream_fallback";
     fallbackReason ??= streamError instanceof QaProviderStreamError
       ? streamError.code
@@ -1784,7 +2795,11 @@ export async function* answerQuestionStream(
         ? "provider_error_after_partial_stream"
         : "provider_error";
     try {
-      answer = await answerQuestionWithAI(input);
+      answer = await answerQuestionWithAI({
+        ...input,
+        shadowReviewAttemptKind: "sync_fallback",
+        ...(observeProviderMetrics ? { onProviderMetrics: observeProviderMetrics } : {})
+      });
       sentenceCommitManager = createSentenceCommitManager({ evidence: sentenceCommitEvidence });
     } catch (fallbackError) {
       const trace = recorder.complete({
@@ -1792,7 +2807,8 @@ export async function* answerQuestionStream(
         tokenChunkCount,
         sentenceCount: 0,
         providerCallCount: streamAttempted ? 2 : 1,
-        fallbackReason
+        fallbackReason,
+        ...(providerMetrics ? { providerMetrics } : {})
       });
       notifyQaStreamingTrace(input.onStreamTrace, trace);
       throw fallbackError instanceof Error ? fallbackError : streamError;
@@ -1800,14 +2816,25 @@ export async function* answerQuestionStream(
   }
 
   sentenceCommitManager ??= createSentenceCommitManager({ evidence: sentenceCommitEvidence });
+  throwIfQaAborted(input.signal);
   const sentenceResults = sentenceCommitManager.commitValidatedAnswer(answer);
   const sentenceCommit = summarizeSentenceCommits(sentenceResults);
   const committedSentences = sentenceResults.filter(
     (result) => result.status === "committed" && result.groundingValidated
   );
+  const withholdFinalUncertaintySentences =
+    input.withholdUncertainProvisionalSentences === true &&
+    committedSentences.some((result) => isUncertaintyBearingSentence(result.sentence));
   const canReleaseFinalSentences =
-    emittedSentenceSignatures.size === 0 || source === "provider_stream";
+    !withholdFinalUncertaintySentences &&
+    (emittedSentenceSignatures.size === 0 || source === "provider_stream");
   for (const result of canReleaseFinalSentences ? committedSentences : []) {
+    if (
+      input.withholdUncertainProvisionalSentences === true &&
+      emittedSentenceCount >= MAX_VOICE_PROVISIONAL_SENTENCES
+    ) {
+      continue;
+    }
     const signature = JSON.stringify([
       result.sentence,
       result.citationIds,
@@ -1844,8 +2871,24 @@ export async function* answerQuestionStream(
     sentenceCount: emittedSentenceCount,
     providerCallCount: source === "non_stream_fallback" ? (streamAttempted ? 2 : 1) : 1,
     fallbackReason,
-    sentenceCommit
+    sentenceCommit,
+    ...(providerMetrics ? { providerMetrics } : {})
   });
   notifyQaStreamingTrace(input.onStreamTrace, trace);
+  throwIfQaAborted(input.signal);
+  recordVoiceQaShadowReviewAnswer({
+    qaInput: input,
+    answer,
+    attemptKind: "final_projection",
+    provider: reviewProvider,
+    selectedModel: reviewSelectedModel,
+    ...(reviewProviderMetadata
+      ? { providerMetadata: reviewProviderMetadata }
+      : {}),
+    fallbackReason,
+    ...(reviewSystemPrompt ? { systemPrompt: reviewSystemPrompt } : {}),
+    ...(reviewUserPrompt ? { userPrompt: reviewUserPrompt } : {}),
+    qaLatencyMs: safeElapsedMs(totalStartedAt)
+  });
   yield { type: "final", answer, source, trace };
 }

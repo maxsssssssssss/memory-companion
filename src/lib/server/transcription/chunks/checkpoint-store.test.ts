@@ -46,4 +46,20 @@ describe("JSON chunk checkpoint store", () => {
     expect(await checkpoints.listAudioChunks("upload_a")).toEqual([]);
     expect(await checkpoints.listAudioChunks("upload_b")).toHaveLength(1);
   });
+
+  it("deletes individual recovery checkpoints without removing the parent chunk", async () => {
+    tempDir = await mkdtemp(join(tmpdir(), "chunk-checkpoints-"));
+    const checkpoints = new JsonChunkCheckpointStore(new JsonStore(tempDir));
+    const parent = chunk("upload_a", 0);
+    const recovery = {
+      ...chunk("upload_a", 100),
+      id: `${parent.id}_recovery_00`
+    };
+    await checkpoints.saveAudioChunk(parent);
+    await checkpoints.saveAudioChunk(recovery);
+
+    await checkpoints.deleteAudioChunk(recovery.id);
+
+    expect(await checkpoints.listAudioChunks("upload_a")).toEqual([parent]);
+  });
 });

@@ -121,10 +121,12 @@ describe("chunk scheduler", () => {
     "retries a retryable %s chunk failure and records retryCount",
     async (failureCode) => {
     const attempts = new Map<number, number>();
+    const policies: Array<string | undefined> = [];
     const checkpoints = recordingCheckpoints();
     const adapter: ChunkTranscriptionAdapter = {
       name: "fake",
-      async transcribeChunk({ chunk }) {
+      async transcribeChunk({ chunk, audioAccessPolicy }) {
+        policies.push(audioAccessPolicy);
         const attempt = (attempts.get(chunk.index) ?? 0) + 1;
         attempts.set(chunk.index, attempt);
         if (attempt === 1) {
@@ -138,6 +140,7 @@ describe("chunk scheduler", () => {
       chunks: [audioChunk(0)],
       adapter,
       checkpoints,
+      audioAccessPolicy: "daily_reflection_capability",
       options: {
         concurrency: 1,
         maxRetries: 1,
@@ -149,6 +152,10 @@ describe("chunk scheduler", () => {
 
     expect(result.completed).toHaveLength(1);
     expect(result.completed[0].retryCount).toBe(1);
+    expect(policies).toEqual([
+      "daily_reflection_capability",
+      "daily_reflection_capability"
+    ]);
     expect(checkpoints.audio.get(buildAudioChunkId("upload_1", 0))).toMatchObject({
       status: "completed",
       retryCount: 1

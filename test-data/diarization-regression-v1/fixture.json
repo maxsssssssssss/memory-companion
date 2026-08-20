@@ -1,0 +1,70 @@
+{
+  "version": 1,
+  "provider": "deterministic_fixture",
+  "cases": [
+    {
+      "case": "single_speaker",
+      "expectedSpeakerCount": 1,
+      "expected": [
+        { "startSeconds": 0, "endSeconds": 4, "speaker": "A", "identity": "user_A" },
+        { "startSeconds": 4, "endSeconds": 8, "speaker": "A", "identity": "user_A" }
+      ],
+      "observed": [
+        { "startSeconds": 0, "endSeconds": 4.1, "speaker": "speaker_1", "resolvedIdentity": "user_A", "providerVerified": true },
+        { "startSeconds": 4.1, "endSeconds": 8, "speaker": "speaker_1", "resolvedIdentity": "user_A", "providerVerified": true }
+      ]
+    },
+    {
+      "case": "two_speakers",
+      "expectedSpeakerCount": 2,
+      "expected": [
+        { "startSeconds": 0, "endSeconds": 3, "speaker": "A", "identity": "user_A" },
+        { "startSeconds": 3, "endSeconds": 6, "speaker": "B", "identity": "contact_B" },
+        { "startSeconds": 6, "endSeconds": 9, "speaker": "A", "identity": "user_A" }
+      ],
+      "observed": [
+        { "startSeconds": 0, "endSeconds": 3.1, "speaker": "speaker_2", "resolvedIdentity": "user_A", "providerVerified": true },
+        { "startSeconds": 3.1, "endSeconds": 6.1, "speaker": "speaker_1", "resolvedIdentity": "contact_B", "providerVerified": true },
+        { "startSeconds": 6.1, "endSeconds": 9, "speaker": "speaker_2", "resolvedIdentity": "user_A", "providerVerified": true }
+      ]
+    },
+    {
+      "case": "multi_speaker",
+      "expectedSpeakerCount": 3,
+      "expected": [
+        { "startSeconds": 0, "endSeconds": 3, "speaker": "A" },
+        { "startSeconds": 3, "endSeconds": 6, "speaker": "B" },
+        { "startSeconds": 6, "endSeconds": 9, "speaker": "C" }
+      ],
+      "observed": [
+        { "startSeconds": 0, "endSeconds": 3, "speaker": "speaker_3" },
+        { "startSeconds": 3, "endSeconds": 6.1, "speaker": "speaker_1" },
+        { "startSeconds": 6.1, "endSeconds": 9, "speaker": "speaker_2" }
+      ]
+    },
+    {
+      "case": "noise",
+      "expectedSpeakerCount": 1,
+      "expected": [
+        { "startSeconds": 1, "endSeconds": 4, "speaker": "A" },
+        { "startSeconds": 5, "endSeconds": 8, "speaker": "A" }
+      ],
+      "observed": [
+        { "startSeconds": 1.1, "endSeconds": 4.1, "speaker": "speaker_1" },
+        { "startSeconds": 5.1, "endSeconds": 8, "speaker": "speaker_1" }
+      ]
+    },
+    {
+      "case": "overlap_speech",
+      "expectedSpeakerCount": 2,
+      "expected": [
+        { "startSeconds": 0, "endSeconds": 4, "speaker": "A", "identity": "user_A" },
+        { "startSeconds": 2, "endSeconds": 6, "speaker": "B", "identity": "contact_B" }
+      ],
+      "observed": [
+        { "startSeconds": 0, "endSeconds": 4.1, "speaker": "speaker_2", "resolvedIdentity": "user_A", "providerVerified": true },
+        { "startSeconds": 2.1, "endSeconds": 6, "speaker": "speaker_1", "resolvedIdentity": "contact_B", "providerVerified": true }
+      ]
+    }
+  ]
+}

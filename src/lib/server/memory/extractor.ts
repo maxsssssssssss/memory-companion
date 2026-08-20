@@ -22,9 +22,18 @@ import {
 import {
   resolveMemoryOwnerAttribution,
   resolveMemoryOwnerAttributions,
+  auditMemoryOwnerAttributions,
   type MemoryOwnerAudit,
   type MemoryOwnerResolution
 } from "./owner-attribution";
+import {
+  memoryOwnerReviewCandidateId,
+  memoryOwnerReviewEvidenceDigest,
+  providerReviewLabels,
+  type MemoryOwnerReviewDraft,
+  type MemoryOwnerReviewOverride,
+  type MemoryOwnerReviewStructuralGate
+} from "./owner-review";
 
 export type ExtractUploadMemoriesInput = {
   userId: string;
@@ -38,6 +47,8 @@ export type ExtractUploadMemoriesInput = {
     edges: RelationshipLifecycleEdge[];
     candidateIdsByCardId?: Record<string, string[]>;
   };
+  identityStructuralGate?: MemoryOwnerReviewStructuralGate;
+  ownerReviewOverrides?: MemoryOwnerReviewOverride[];
   now?: string;
 };
 
@@ -64,6 +75,10 @@ const preferencePattern =
   /(?:我|我们|你|你们|他|她|对方).{0,12}(?:不喜欢|更喜欢|最喜欢|特别喜欢|偏好|习惯|通常|一般|总是|每次)|(?:我|我们).{0,12}(?:希望|需要).{0,16}(?:先|再|被|得到|不要|别|提前)|不喜欢临时|prefer(?:ence)?|usually|habit/i;
 const commitmentPattern =
   /(?:我|我们|他|她|对方|双方).{0,10}(?:承诺|答应|约定|说好|保证)|(?:明天|后天|下周|周末|下次).{0,24}(?:一起|去|做|见|确认|联系|安排|完成)|(?:我|我们|他|她|对方).{0,10}(?:会|将|计划|打算|准备).{0,28}(?:确认|联系|安排|去|做|不再|及时|一起|完成|回复)|promise|commitment|agreed? to|will (?:confirm|contact|meet|do|finish)/i;
+const completedTaskPattern =
+  /已(?:经)?.{0,16}(?:完成|提交|交付|结束)|(?:完成|提交|交付)(?:了|完成)|任务已(?:经)?结束|\b(?:completed|submitted|delivered|finished|done)\b/i;
+const unfinishedTaskPattern =
+  /(?:还|仍)(?:需要|需|要|剩|差)|仍未|尚未|未(?:完成|提交|交付|结束)|待(?:完成|提交|交付|核对)|(?:计划|准备|打算).{0,24}(?:完成|提交|交付|核对)|会.{0,12}(?:继续|完成|提交|交付|核对)|\b(?:pending|still (?:open|incomplete|unfinished)|not (?:done|completed|finished))\b/i;
 const recentEventPattern =
   /今天|昨天|刚刚|这次|当时|上次|已经.{0,12}(?:完成|解决|确认)|(?:完成|解决|确认)了|today|yesterday|this time|last time/i;
 const MAX_RECENT_SEMANTIC_EVENTS = 2;
@@ -104,6 +119,13 @@ function classifyBriefItem(item: BriefItem): MemoryClassification | null {
   const text = sourceText({ title: item.title, summary: item.body, excerpt: item.transcriptExcerpt });
   if (preferencePattern.test(text)) {
     return { type: "preference", reason: "extraction: contains explicit stable preference or habit" };
+  }
+  if (
+    item.category === "task" &&
+    completedTaskPattern.test(text) &&
+    !unfinishedTaskPattern.test(text)
+  ) {
+    return { type: "event", reason: "extraction: brief task is explicitly completed" };
   }
   if (item.category === "task") {
     return { type: "commitment", reason: "extraction: brief task contains a future action" };
@@ -435,6 +457,8 @@ function deduplicateExtractionCandidates(candidates: MemoryCandidate[]) {
 export function extractUploadMemoriesWithAudit(input: ExtractUploadMemoriesInput): {
   memories: MemoryWriteInput[];
   ownerAttributions: MemoryOwnerResolution[];
+  ownerReviewDrafts: MemoryOwnerReviewDraft[];
+  appliedOwnerReviewCandidateIds: string[];
   audit: MemoryExtractionAudit;
 } {
   const now = input.now ?? new Date().toISOString();
@@ -566,27 +590,113 @@ export function extractUploadMemoriesWithAudit(input: ExtractUploadMemoriesInput
   const ownerAttributionByMemoryId = new Map(
     ownerResolution.attributions.map((attribution) => [attribution.memoryId, attribution])
   );
-  const evaluated = normalizedCandidates.map((candidate) => ({
-    ...candidate,
-    ownerAttribution: ownerAttributionByMemoryId.get(candidate.memory.id),
-    decision: evaluateMemoryAdmission({
-      ...candidate,
-      ownerAttribution: ownerAttributionByMemoryId.get(candidate.memory.id)
-    })
-  }));
-  const persisted = evaluated.filter((candidate) => candidate.decision.shouldPersist);
-  const memories = persisted.map((candidate) => candidate.memory);
-  const persistedOwnerResolution = resolveMemoryOwnerAttributions({
-    memories: persisted.map((candidate) => ({
+  const ownerReviewOverrideByCandidateId = new Map(
+    (input.ownerReviewOverrides ?? []).map((override) => [override.candidateId, override])
+  );
+  const candidateReviewData = new Map<string, {
+    candidateId: string;
+    evidenceDigest: string;
+    evidenceSegments: TranscriptSegment[];
+    providerLabels: string[];
+  }>();
+  for (const candidate of normalizedCandidates) {
+    const evidenceSegments = sourceSegmentsForMemory(candidate.memory, segmentById);
+    const providerLabels = providerReviewLabels(evidenceSegments);
+    if (providerLabels.length === 0) continue;
+    const candidateId = memoryOwnerReviewCandidateId(input.uploadId, candidate.memory.id);
+    candidateReviewData.set(candidate.memory.id, {
+      candidateId,
+      evidenceDigest: memoryOwnerReviewEvidenceDigest({
+        uploadId: input.uploadId,
+        memory: candidate.memory,
+        evidenceSegments,
+        providerLabels
+      }),
+      evidenceSegments,
+      providerLabels
+    });
+  }
+  const manualOwnerResolution = (
+    candidate: MemoryCandidate,
+    reviewData: NonNullable<ReturnType<typeof candidateReviewData.get>>,
+    override: MemoryOwnerReviewOverride
+  ): MemoryOwnerResolution => {
+    const evidenceSegmentIds = reviewData.evidenceSegments.map((segment) => segment.id);
+    const attribution = {
+      type: "known_identity" as const,
+      identityId: override.ownerIdentityId,
+      confidence: 1,
+      source: "manual_mapping" as const
+    };
+    return {
+      version: 1,
       memoryId: candidate.memory.id,
       memoryType: candidate.memory.type,
-      evidenceSegments: sourceSegmentsForMemory(candidate.memory, segmentById)
-    })),
-    now: () => now
+      scope: "individual",
+      owner: attribution,
+      participants: [{
+        role: "owner",
+        attribution,
+        evidenceSegmentIds
+      }],
+      evidenceSegmentIds,
+      observations: [],
+      reasons: ["explicit_owner"]
+    };
+  };
+  const appliedOwnerReviewCandidateIds = new Set<string>();
+  const evaluated = normalizedCandidates.map((candidate) => {
+    const reviewData = candidateReviewData.get(candidate.memory.id);
+    const override = reviewData
+      ? ownerReviewOverrideByCandidateId.get(reviewData.candidateId)
+      : undefined;
+    const ownerAttribution = (
+      reviewData &&
+      override &&
+      override.evidenceDigest === reviewData.evidenceDigest
+    )
+      ? manualOwnerResolution(candidate, reviewData, override)
+      : ownerAttributionByMemoryId.get(candidate.memory.id);
+    if (reviewData && override && ownerAttribution?.owner.source === "manual_mapping") {
+      appliedOwnerReviewCandidateIds.add(reviewData.candidateId);
+    }
+    return {
+      ...candidate,
+      ownerAttribution,
+      decision: evaluateMemoryAdmission({
+        ...candidate,
+        ownerAttribution
+      })
+    };
+  });
+  const persisted = evaluated.filter((candidate) => candidate.decision.shouldPersist);
+  const memories = persisted.map((candidate) => candidate.memory);
+  const persistedAttributions = persisted.flatMap((candidate) =>
+    candidate.ownerAttribution ? [candidate.ownerAttribution] : []
+  );
+  const ownerReviewDrafts = evaluated.flatMap((candidate): MemoryOwnerReviewDraft[] => {
+    const reviewData = candidateReviewData.get(candidate.memory.id);
+    if (!reviewData) return [];
+    const contentDecision = evaluateMemoryAdmission({
+      ...candidate,
+      ownerAttribution: undefined
+    });
+    if (!contentDecision.shouldPersist || candidate.decision.shouldPersist) return [];
+    return [{
+      memory: candidate.memory,
+      evidenceSegments: reviewData.evidenceSegments,
+      providerLabels: reviewData.providerLabels,
+      structuralGate: input.identityStructuralGate ?? {
+        status: "degraded",
+        reasons: ["identity_structural_gate_unavailable"]
+      }
+    }];
   });
   return {
     memories,
-    ownerAttributions: persistedOwnerResolution.attributions,
+    ownerAttributions: persistedAttributions,
+    ownerReviewDrafts,
+    appliedOwnerReviewCandidateIds: [...appliedOwnerReviewCandidateIds].sort(),
     audit: {
       candidateCount: normalizedCandidates.length,
       persistedCount: memories.length,
@@ -611,7 +721,7 @@ export function extractUploadMemoriesWithAudit(input: ExtractUploadMemoriesInput
           lifecycleRelationTypes: candidate.lifecycleRelationTypes
         } : {})
       }] : []),
-      ownerAttribution: persistedOwnerResolution.audit
+      ownerAttribution: auditMemoryOwnerAttributions(persistedAttributions, () => now)
     }
   };
 }

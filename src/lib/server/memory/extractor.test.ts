@@ -3,6 +3,10 @@
 import { describe, expect, it } from "vitest";
 import type { BriefItem, RelationshipSignalCard, SemanticSegment, TranscriptSegment } from "@/lib/domain/types";
 import { extractUploadMemories, extractUploadMemoriesWithAudit } from "./extractor";
+import {
+  memoryOwnerReviewCandidateId,
+  memoryOwnerReviewEvidenceDigest
+} from "./owner-review";
 
 const segments: TranscriptSegment[] = [
   {
@@ -15,7 +19,7 @@ const segments: TranscriptSegment[] = [
       globalSpeakerId: "person_user",
       identityType: "known_contact",
       confidence: 0.96,
-      source: "manual_mapping"
+      source: "voiceprint"
     },
     text: "我会在周五前确认餐厅。",
     confidence: 0.96,
@@ -32,7 +36,7 @@ const segments: TranscriptSegment[] = [
       globalSpeakerId: "person_partner",
       identityType: "known_contact",
       confidence: 0.95,
-      source: "manual_mapping"
+      source: "voiceprint"
     },
     text: "那周六具体几点还需要再确认。",
     confidence: 0.94,
@@ -506,6 +510,188 @@ describe("memory extraction", () => {
     expect(memories[0]?.importanceReasons).toContain(
       "extraction: contains future action and commitment language"
     );
+  });
+
+  it("keeps Provider-label ownership pending until an explicit Memory owner review", () => {
+    const pendingSegment: TranscriptSegment = {
+      ...segments[0],
+      id: "preference_provider_pending",
+      speaker: "Alice",
+      identity: {
+        globalSpeakerId: "unknown_provider_alice",
+        identityType: "unknown_person",
+        confidence: null,
+        source: "provider_speaker_result",
+        evidence: {
+          type: "provider_label",
+          provider: "company_voiceprint",
+          providerLabel: "Alice"
+        }
+      },
+      text: "我不太能吃辣。",
+      valueLabels: []
+    };
+    const baseInput = {
+      userId: "user_1",
+      uploadId: "upload_1",
+      recordingDate: "2026-07-08",
+      segments: [pendingSegment],
+      briefItems: [],
+      semanticSegments: [],
+      relationshipSignals: [],
+      identityStructuralGate: { status: "healthy" as const, reasons: [] },
+      now: "2026-07-10T10:00:00.000Z"
+    };
+    const pending = extractUploadMemoriesWithAudit(baseInput);
+
+    expect(pending.memories).toEqual([]);
+    expect(pending.ownerReviewDrafts).toHaveLength(1);
+    expect(pending.ownerReviewDrafts[0]).toMatchObject({
+      providerLabels: ["Alice"],
+      structuralGate: { status: "healthy" }
+    });
+
+    const draft = pending.ownerReviewDrafts[0];
+    const candidateId = memoryOwnerReviewCandidateId("upload_1", draft.memory.id);
+    const evidenceDigest = memoryOwnerReviewEvidenceDigest({
+      uploadId: "upload_1",
+      memory: draft.memory,
+      evidenceSegments: draft.evidenceSegments,
+      providerLabels: draft.providerLabels
+    });
+    const confirmed = extractUploadMemoriesWithAudit({
+      ...baseInput,
+      ownerReviewOverrides: [{
+        candidateId,
+        evidenceDigest,
+        ownerIdentityId: "contact_alice"
+      }]
+    });
+
+    expect(confirmed.memories).toHaveLength(1);
+    expect(confirmed.appliedOwnerReviewCandidateIds).toEqual([candidateId]);
+    expect(confirmed.ownerAttributions[0]).toMatchObject({
+      owner: {
+        type: "known_identity",
+        identityId: "contact_alice",
+        confidence: 1,
+        source: "manual_mapping"
+      }
+    });
+  });
+
+  it("does not create an owner review candidate for a chunk-local unknown label", () => {
+    const result = extractUploadMemoriesWithAudit({
+      userId: "user_1",
+      uploadId: "upload_1",
+      recordingDate: "2026-07-08",
+      segments: [{
+        ...segments[0],
+        id: "preference_chunk_local_unknown",
+        speaker: "speaker_1",
+        identity: undefined,
+        text: "我不太能吃辣。",
+        valueLabels: []
+      }],
+      briefItems: [],
+      semanticSegments: [],
+      relationshipSignals: [],
+      now: "2026-07-10T10:00:00.000Z"
+    });
+
+    expect(result.memories).toEqual([]);
+    expect(result.ownerReviewDrafts).toEqual([]);
+  });
+
+  it("keeps a partially completed brief task as a commitment while work remains", () => {
+    const pendingSegment: TranscriptSegment = {
+      ...segments[0],
+      id: "segment_pending_task",
+      text: "导师汇报第二部分已经按7日数据重写完成，我计划明天下午提交最终版本，提交前还需要核对引用。",
+      valueLabels: ["task"]
+    };
+    const pendingBrief: BriefItem = {
+      ...briefItems[0],
+      id: "brief_pending_task",
+      category: "task",
+      title: "明天下午提交导师汇报最终版本",
+      body: "第二部分已完成，但还需要核对引用，并计划在明天下午提交最终版本。",
+      sourceSegmentIds: [pendingSegment.id],
+      sourceTimeRange: {
+        startSeconds: pendingSegment.startSeconds,
+        endSeconds: pendingSegment.endSeconds
+      },
+      transcriptExcerpt: pendingSegment.text
+    };
+
+    const memories = extractUploadMemories({
+      userId: "user_1",
+      uploadId: "upload_1",
+      recordingDate: "2026-07-08",
+      segments: [pendingSegment],
+      briefItems: [pendingBrief],
+      semanticSegments: [],
+      relationshipSignals: [],
+      now: "2026-07-10T10:00:00.000Z"
+    });
+
+    expect(memories).toHaveLength(1);
+    expect(memories[0]).toMatchObject({ type: "commitment" });
+    expect(memories[0]?.importanceReasons).toContain(
+      "extraction: brief task contains a future action"
+    );
+  });
+
+  it("classifies an explicitly completed brief task as an event with a verified participant", () => {
+    const completedSegment: TranscriptSegment = {
+      ...segments[0],
+      id: "segment_completed_task",
+      text: "导师汇报最终版本已于15:20提交完成，任务已经结束。",
+      valueLabels: ["task"]
+    };
+    const completedBrief: BriefItem = {
+      ...briefItems[0],
+      id: "brief_completed_task",
+      category: "task",
+      title: "导师汇报最终版本已经提交完成",
+      body: "最终版本已于15:20提交完成，任务已经结束。",
+      sourceSegmentIds: [completedSegment.id],
+      sourceTimeRange: {
+        startSeconds: completedSegment.startSeconds,
+        endSeconds: completedSegment.endSeconds
+      },
+      transcriptExcerpt: completedSegment.text
+    };
+
+    const extraction = extractUploadMemoriesWithAudit({
+      userId: "user_1",
+      uploadId: "upload_1",
+      recordingDate: "2026-07-08",
+      segments: [completedSegment],
+      briefItems: [completedBrief],
+      semanticSegments: [],
+      relationshipSignals: [],
+      now: "2026-07-10T10:00:00.000Z"
+    });
+
+    expect(extraction.memories).toHaveLength(1);
+    expect(extraction.memories[0]).toMatchObject({ type: "event" });
+    expect(extraction.memories[0]?.importanceReasons).toContain(
+      "extraction: brief task is explicitly completed"
+    );
+    expect(extraction.ownerAttributions[0]).toMatchObject({
+      scope: "individual",
+      owner: { type: "unknown" },
+      participants: [
+        {
+          role: "participant",
+          attribution: {
+            type: "known_identity",
+            identityId: "person_user"
+          }
+        }
+      ]
+    });
   });
 
   it("classifies explicit stable preferences and unresolved questions", () => {

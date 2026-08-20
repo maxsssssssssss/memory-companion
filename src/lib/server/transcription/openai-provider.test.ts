@@ -1,26 +1,15 @@
+// @vitest-environment node
+
 import { mkdtemp, rm, writeFile } from "fs/promises";
 import { tmpdir } from "os";
 import { join } from "path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-const { execFileMock, getOpenAIClientRuntimeConfigMock, openAIMock, transcribeMock } = vi.hoisted(() => ({
+const { directFetchMock, execFileMock, getOpenAIClientRuntimeConfigMock, transcribeMock } = vi.hoisted(() => ({
+  directFetchMock: vi.fn(),
   execFileMock: vi.fn(),
   getOpenAIClientRuntimeConfigMock: vi.fn(),
-  openAIMock: vi.fn(),
   transcribeMock: vi.fn()
-}));
-
-vi.mock("openai", () => ({
-  default: function MockOpenAI(...args: unknown[]) {
-    openAIMock(...args);
-    return {
-      audio: {
-        transcriptions: {
-          create: transcribeMock
-        }
-      }
-    } as never;
-  }
 }));
 
 vi.mock("child_process", () => ({
@@ -45,6 +34,10 @@ let tempAudioPath: string | undefined;
 describe("openai transcription provider", () => {
   const originalApiKey = process.env.OPENAI_API_KEY;
   const originalOpenAiBaseUrl = process.env.OPENAI_BASE_URL;
+  const originalTranscribeApiKey = process.env.OPENAI_TRANSCRIBE_API_KEY;
+  const originalTranscribeBaseUrl = process.env.OPENAI_TRANSCRIBE_BASE_URL;
+  const originalTranscribeLanguage = process.env.OPENAI_TRANSCRIBE_LANGUAGE;
+  const originalAuthHeaderMode = process.env.OPENAI_AUTH_HEADER_MODE;
   const originalOpenRouterApiKey = process.env.OPENROUTER_API_KEY;
   const originalOpenRouterBaseUrl = process.env.OPENROUTER_BASE_URL;
   const originalOpenRouterReferer = process.env.OPENROUTER_HTTP_REFERER;
@@ -64,17 +57,33 @@ describe("openai transcription provider", () => {
     await writeFile(tempAudioPath, "audio-placeholder");
     process.env.OPENAI_API_KEY = "test_key";
     delete process.env.OPENAI_BASE_URL;
+    delete process.env.OPENAI_TRANSCRIBE_API_KEY;
+    delete process.env.OPENAI_TRANSCRIBE_BASE_URL;
+    delete process.env.OPENAI_TRANSCRIBE_LANGUAGE;
+    delete process.env.OPENAI_AUTH_HEADER_MODE;
     delete process.env.OPENROUTER_API_KEY;
     delete process.env.OPENROUTER_BASE_URL;
     delete process.env.OPENROUTER_HTTP_REFERER;
     delete process.env.OPENROUTER_APP_TITLE;
     delete process.env.OPENROUTER_TRANSCRIBE_CHUNK_SECONDS;
     delete process.env.OPENAI_TRANSCRIBE_MODEL;
+    process.env.OPENAI_MAX_RETRIES = "0";
     process.env.FFMPEG_PATH = "ffmpeg";
     process.env.FFPROBE_PATH = "ffprobe";
-    globalThis.fetch = originalFetch;
+    directFetchMock.mockReset();
+    directFetchMock.mockImplementation(async () => {
+      const payload = (await transcribeMock()) as { text?: string; segments?: Array<{ text?: string }> };
+      const normalizedPayload =
+        payload.segments && payload.text === undefined
+          ? { ...payload, text: payload.segments.map((segment) => segment.text ?? "").join(" ") }
+          : payload;
+      return new Response(JSON.stringify(normalizedPayload), {
+        status: 200,
+        headers: { "Content-Type": "application/json" }
+      });
+    });
+    globalThis.fetch = directFetchMock as unknown as typeof fetch;
     transcribeMock.mockReset();
-    openAIMock.mockReset();
     getOpenAIClientRuntimeConfigMock.mockReset();
     getOpenAIClientRuntimeConfigMock.mockResolvedValue({});
     execFileMock.mockReset();
@@ -99,6 +108,26 @@ describe("openai transcription provider", () => {
       delete process.env.OPENAI_BASE_URL;
     } else {
       process.env.OPENAI_BASE_URL = originalOpenAiBaseUrl;
+    }
+    if (originalTranscribeApiKey === undefined) {
+      delete process.env.OPENAI_TRANSCRIBE_API_KEY;
+    } else {
+      process.env.OPENAI_TRANSCRIBE_API_KEY = originalTranscribeApiKey;
+    }
+    if (originalTranscribeBaseUrl === undefined) {
+      delete process.env.OPENAI_TRANSCRIBE_BASE_URL;
+    } else {
+      process.env.OPENAI_TRANSCRIBE_BASE_URL = originalTranscribeBaseUrl;
+    }
+    if (originalTranscribeLanguage === undefined) {
+      delete process.env.OPENAI_TRANSCRIBE_LANGUAGE;
+    } else {
+      process.env.OPENAI_TRANSCRIBE_LANGUAGE = originalTranscribeLanguage;
+    }
+    if (originalAuthHeaderMode === undefined) {
+      delete process.env.OPENAI_AUTH_HEADER_MODE;
+    } else {
+      process.env.OPENAI_AUTH_HEADER_MODE = originalAuthHeaderMode;
     }
     if (originalOpenRouterApiKey === undefined) {
       delete process.env.OPENROUTER_API_KEY;
@@ -173,6 +202,13 @@ describe("openai transcription provider", () => {
     expect(segments[0].speaker).toBe("speaker_1");
     expect(segments[0].uploadId).toBe("upload_test");
     expect(segments.every((segment) => segment.sceneLabels.length > 0)).toBe(true);
+    const request = new Request(
+      directFetchMock.mock.calls[0]?.[0] as string,
+      directFetchMock.mock.calls[0]?.[1] as RequestInit
+    );
+    const form = await request.formData();
+    expect(form.get("response_format")).toBe("diarized_json");
+    expect(form.get("chunking_strategy")).toBe("auto");
   });
 
   it("falls back to the text field when segments are missing", async () => {
@@ -195,23 +231,22 @@ describe("openai transcription provider", () => {
     ]);
   });
 
-  it("passes OpenAI client env config into SDK options", async () => {
+  it("fails closed when only the generic OpenAI base URL is custom", async () => {
     const input = {
       ...inputTemplate,
       filePath: tempAudioPath ?? "/tmp/audio.m4a"
     };
 
-    process.env.OPENAI_REQUEST_TIMEOUT_MS = "90000";
-    process.env.OPENAI_MAX_RETRIES = "4";
-    transcribeMock.mockResolvedValue({ text: "ok" });
+    process.env.OPENAI_BASE_URL = "https://llm-gateway.example/v1";
 
-    await openaiTranscriptionProvider.transcribe(input);
-
-    expect(openAIMock).toHaveBeenCalledWith({
-      apiKey: "test_key",
-      timeout: 90000,
-      maxRetries: 4
+    await expect(openaiTranscriptionProvider.transcribe(input)).rejects.toMatchObject({
+      code: "provider_config_error",
+      metadata: {
+        requiredEnvironmentVariables: ["OPENAI_TRANSCRIBE_BASE_URL", "OPENAI_TRANSCRIBE_API_KEY"]
+      }
     });
+
+    expect(directFetchMock).not.toHaveBeenCalled();
   });
 
   it("uses json response_format for gpt-4o-transcribe model", async () => {
@@ -221,20 +256,75 @@ describe("openai transcription provider", () => {
     };
 
     process.env.OPENAI_TRANSCRIBE_MODEL = "openai/gpt-4o-transcribe";
+    process.env.OPENAI_TRANSCRIBE_LANGUAGE = "zh";
     transcribeMock.mockResolvedValue({ text: "ok" });
 
     await openaiTranscriptionProvider.transcribe(input);
 
-    expect(transcribeMock).toHaveBeenCalledWith(
-      expect.objectContaining({
-        response_format: "json"
-      })
+    const request = new Request(
+      directFetchMock.mock.calls[0]?.[0] as string,
+      directFetchMock.mock.calls[0]?.[1] as RequestInit
     );
-    expect(transcribeMock).toHaveBeenCalledWith(
-      expect.objectContaining({
-        model: "openai/gpt-4o-transcribe"
-      })
+    const form = await request.formData();
+    expect(request.url).toBe("https://api.openai.com/v1/audio/transcriptions");
+    expect(form.get("response_format")).toBe("json");
+    expect(form.get("model")).toBe("openai/gpt-4o-transcribe");
+    expect(form.get("language")).toBe("zh");
+    expect(form.has("chunking_strategy")).toBe(false);
+  });
+
+  it("uses the dedicated transcription base and key without leaking the generic key", async () => {
+    const input = {
+      ...inputTemplate,
+      filePath: tempAudioPath ?? "/tmp/audio.m4a"
+    };
+    process.env.OPENAI_BASE_URL = "https://llm-gateway.example/v1";
+    process.env.OPENAI_TRANSCRIBE_BASE_URL = "https://stt.internal.example/v1/";
+    process.env.OPENAI_TRANSCRIBE_API_KEY = "dedicated_transcription_key";
+    transcribeMock.mockResolvedValue({ text: "ok" });
+
+    await openaiTranscriptionProvider.transcribe(input);
+
+    const request = new Request(
+      directFetchMock.mock.calls[0]?.[0] as string,
+      directFetchMock.mock.calls[0]?.[1] as RequestInit
     );
+    expect(request.url).toBe("https://stt.internal.example/v1/audio/transcriptions");
+    expect(request.headers.get("authorization")).toBe("Bearer dedicated_transcription_key");
+    expect(request.headers.get("authorization")).not.toBe("Bearer test_key");
+  });
+
+  it("fails closed for a runtime custom OpenAI base without dedicated transcription config", async () => {
+    const input = {
+      ...inputTemplate,
+      filePath: tempAudioPath ?? "/tmp/audio.m4a"
+    };
+    getOpenAIClientRuntimeConfigMock.mockResolvedValue({
+      openAiApiKey: "runtime_generic_key",
+      openAiBaseUrl: "https://runtime-llm-gateway.example/v1"
+    });
+
+    await expect(openaiTranscriptionProvider.transcribe(input)).rejects.toMatchObject({
+      code: "provider_config_error",
+      metadata: {
+        requiredEnvironmentVariables: ["OPENAI_TRANSCRIBE_BASE_URL", "OPENAI_TRANSCRIBE_API_KEY"]
+      }
+    });
+    expect(directFetchMock).not.toHaveBeenCalled();
+  });
+
+  it("requires a dedicated key whenever a transcription base is explicit", async () => {
+    const input = {
+      ...inputTemplate,
+      filePath: tempAudioPath ?? "/tmp/audio.m4a"
+    };
+    process.env.OPENAI_TRANSCRIBE_BASE_URL = "https://stt.internal.example/v1";
+
+    await expect(openaiTranscriptionProvider.transcribe(input)).rejects.toMatchObject({
+      code: "provider_config_error",
+      metadata: { requiredEnvironmentVariables: ["OPENAI_TRANSCRIBE_API_KEY"] }
+    });
+    expect(directFetchMock).not.toHaveBeenCalled();
   });
 
   it("uses OpenRouter STT JSON API instead of multipart SDK upload when configured with OpenRouter", async () => {
@@ -262,11 +352,9 @@ describe("openai transcription provider", () => {
     process.env.OPENROUTER_APP_TITLE = "Founder Daily Brief";
     process.env.OPENAI_TRANSCRIBE_MODEL = "openai/gpt-4o-transcribe";
     globalThis.fetch = fetchMock as unknown as typeof fetch;
-    transcribeMock.mockResolvedValue({ text: "SDK multipart result" });
 
     const segments = await openaiTranscriptionProvider.transcribe(input);
 
-    expect(openAIMock).not.toHaveBeenCalled();
     expect(fetchMock).toHaveBeenCalledWith(
       "https://openrouter.ai/api/v1/audio/transcriptions",
       expect.objectContaining({
@@ -366,7 +454,6 @@ describe("openai transcription provider", () => {
 
     await openaiTranscriptionProvider.transcribe(input);
 
-    expect(openAIMock).not.toHaveBeenCalled();
     expect(fetchMock).toHaveBeenCalledWith(
       "https://openrouter.ai/api/v1/audio/transcriptions",
       expect.objectContaining({
@@ -400,7 +487,6 @@ describe("openai transcription provider", () => {
 
     await openaiTranscriptionProvider.transcribe(input);
 
-    expect(openAIMock).not.toHaveBeenCalled();
     expect(fetchMock).toHaveBeenCalledWith(
       "https://openrouter.ai/api/v1/audio/transcriptions",
       expect.objectContaining({
@@ -554,7 +640,8 @@ describe("openai transcription provider", () => {
     const ffmpegCall = execFileMock.mock.calls.find(([command]) => command === "ffmpeg");
     expect(ffmpegCall).toBeTruthy();
     const ffmpegArgs = ffmpegCall?.[1] as string[];
-    expect(ffmpegArgs[ffmpegArgs.indexOf("-segment_time") + 1]).toBe("60");
+    expect(ffmpegArgs).not.toContain("-segment_time");
+    expect(ffmpegArgs[ffmpegArgs.indexOf("-segment_times") + 1]).toBe("60");
     expect(ffmpegArgs).toEqual(expect.arrayContaining(["-ac", "1", "-ar", "16000", "-codec:a", "libmp3lame", "-b:a", "32k"]));
     expect(ffmpegArgs.at(-1)).toMatch(/chunk_%05d\.mp3$/);
     expect(fetchMock).toHaveBeenCalledTimes(2);

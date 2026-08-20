@@ -269,6 +269,50 @@ describe("voiceprint API routes", () => {
     expect(fetch).not.toHaveBeenCalled();
   });
 
+  it("rejects parked Daily Reflection uploads before train or save side effects", async () => {
+    await writeAvailableUpload("upload_reflection", {
+      originalName: "reflection.wav",
+      mimeType: "audio/wav",
+      sizeBytes: 15,
+      recordingDate: "2026-08-13",
+      status: "extracting",
+      ingestionContext: "daily_reflection",
+      reflectionId: "reflection_1"
+    });
+
+    const trainResponse = await trainVoiceprint(new Request(
+      "http://localhost/api/speaker-identity/voiceprint/train",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          requestId: "train_daily_reflection",
+          audio: [{ uploadId: "upload_reflection", rule: [[0, 5_000]] }]
+        })
+      }
+    ));
+    const saveResponse = await saveVoiceprint(new Request(
+      "http://localhost/api/speaker-identity/voiceprint/save",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          requestId: "save_daily_reflection",
+          uploadId: "upload_reflection",
+          chunkId: "chunk_reflection",
+          localSpeaker: "speaker_1",
+          displayName: "Alice"
+        })
+      }
+    ));
+
+    expect([trainResponse.status, saveResponse.status]).toEqual([404, 404]);
+    expect(fetch).not.toHaveBeenCalled();
+    await expect(store.listIds("speaker-identities")).resolves.toEqual([]);
+    await expect(store.listIds("speaker-manual-mappings")).resolves.toEqual([]);
+    await expect(store.listIds("voiceprint-operations")).resolves.toEqual([]);
+  });
+
   it("binds only a speaker that exists in the selected transcript chunk", async () => {
     await store.write("uploads", "upload_1", { id: "upload_1" });
     await new JsonChunkCheckpointStore(store).saveTranscriptChunk(chunk());
@@ -310,7 +354,8 @@ describe("voiceprint API routes", () => {
     expect(providerBody).toMatchObject({
       user_id: "user_1",
       record_id: "audio_chunk_1",
-      speaker_id: "Alice"
+      speaker_id: "speaker_1",
+      speaker_name: "Alice"
     });
   });
 

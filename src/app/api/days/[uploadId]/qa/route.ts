@@ -10,6 +10,7 @@ import type {
 } from "@/lib/domain/types";
 import { applySpeakerAliasesToPayload, sanitizeSpeakerAliases, type StoredSpeakerAliases } from "@/lib/domain/speaker-aliases";
 import { isUnauthenticatedError, requireAuthContext, unauthorizedResponse } from "@/lib/server/auth/request-context";
+import { isDailyReflectionUpload } from "@/lib/server/daily-reflection/upload-record";
 import {
   answerQuestionWithAI,
   normalizeQaConversation,
@@ -41,6 +42,10 @@ export async function GET(_request: Request, { params }: { params: Promise<{ upl
     throw error;
   }
 
+  const upload = await authContext.store.read<unknown>("uploads", uploadId);
+  if (isDailyReflectionUpload(upload)) {
+    return NextResponse.json({ error: "upload_not_found" }, { status: 404 });
+  }
   const answers = (await authContext.store.read<QuestionAnswer[]>("answers-by-upload", uploadId)) ?? [];
 
   return NextResponse.json({ answers });
@@ -75,7 +80,7 @@ export async function POST(request: Request, { params }: { params: Promise<{ upl
   }
 
   const upload = await authContext.store.read<AudioUpload>("uploads", uploadId);
-  if (!upload) {
+  if (!upload || isDailyReflectionUpload(upload)) {
     return NextResponse.json({ error: "upload_not_found" }, { status: 404 });
   }
   if (upload.status !== "ready") {
@@ -102,6 +107,7 @@ export async function POST(request: Request, { params }: { params: Promise<{ upl
   const conversation = normalizeQaConversation(body.conversation);
   const qaPromptInstruction = qaPromptInstructionFromBody(body);
   const qaInput: AnswerQuestionWithAIInput = {
+    userId: authContext.user.id,
     uploadId,
     question: body.question.trim(),
     scope: "current",

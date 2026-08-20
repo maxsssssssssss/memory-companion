@@ -1,6 +1,7 @@
 import * as fs from "node:fs/promises";
 import type { AudioUpload, ProcessingJob } from "@/lib/domain/types";
 import { getUserScopedStore } from "@/lib/server/auth/session";
+import { isDailyReflectionUpload } from "@/lib/server/daily-reflection/upload-record";
 import { updateJob } from "@/lib/server/jobs/job-store";
 import {
   isUploadProcessingCancelled,
@@ -37,7 +38,11 @@ export type PipelineWorkerResult =
   | {
       status: "cancelled";
       uploadId: string;
-      reason: "deleted" | "upload_missing" | "job_missing";
+      reason:
+        | "deleted"
+        | "upload_missing"
+        | "job_missing"
+        | "daily_reflection_upload";
     }
   | { status: "failed"; uploadId: string; reason: "audio_missing" };
 
@@ -224,6 +229,9 @@ async function markTerminalQueueFailure(input: {
   if (deleted || !upload) {
     return;
   }
+  if (isDailyReflectionUpload(upload)) {
+    return;
+  }
 
   const productJob = indexedJob ?? input.fallbackJob;
   if (!productJob) {
@@ -290,6 +298,13 @@ export function createPipelineJobProcessor(
         status: "cancelled",
         uploadId: payload.uploadId,
         reason: "upload_missing"
+      };
+    }
+    if (isDailyReflectionUpload(upload)) {
+      return {
+        status: "cancelled",
+        uploadId: payload.uploadId,
+        reason: "daily_reflection_upload"
       };
     }
 

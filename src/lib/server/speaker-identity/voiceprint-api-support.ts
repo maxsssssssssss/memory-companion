@@ -64,3 +64,39 @@ export function buildVoiceprintTrainingAudioUrl(input: {
     input.userId
   )}/${encodeURIComponent(input.uploadId)}?token=${encodeURIComponent(accessToken)}`;
 }
+
+export function buildVoiceprintTrainingCandidateAudioUrl(input: {
+  userId: string;
+  candidateId: string;
+}) {
+  const rawBaseUrl = process.env.SPEAKER_ASR_AUDIO_BASE_URL?.trim();
+  const accessToken = process.env.SPEAKER_ASR_AUDIO_ACCESS_TOKEN?.trim();
+  if (!rawBaseUrl || !accessToken) {
+    throw new VoiceprintProviderError(
+      "invalid_configuration",
+      "speaker ASR audio delivery configuration is required for voiceprint training"
+    );
+  }
+
+  let baseUrl: URL;
+  try {
+    baseUrl = new URL(rawBaseUrl);
+  } catch {
+    throw new VoiceprintProviderError(
+      "invalid_configuration",
+      "SPEAKER_ASR_AUDIO_BASE_URL must be an absolute URL"
+    );
+  }
+  if (baseUrl.protocol !== "http:" && baseUrl.protocol !== "https:") {
+    throw new VoiceprintProviderError(
+      "invalid_configuration",
+      "SPEAKER_ASR_AUDIO_BASE_URL must use http or https"
+    );
+  }
+  baseUrl.search = "";
+  baseUrl.hash = "";
+  const normalizedBaseUrl = baseUrl.toString().replace(/\/+$/, "");
+  return `${normalizedBaseUrl}/api/internal/voiceprint-candidates/${encodeURIComponent(
+    input.userId
+  )}/${encodeURIComponent(input.candidateId)}?token=${encodeURIComponent(accessToken)}`;
+}

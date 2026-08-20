@@ -27,6 +27,8 @@ export enum VoiceEvent {
   SessionStarted = 150,
   SessionFinished = 152,
   SessionFailed = 153,
+  UpdateConfig = 201,
+  ConfigUpdated = 251,
   TaskRequest = 200,
   EndASR = 400,
   TTSSentenceStart = 350,
@@ -37,8 +39,20 @@ export enum VoiceEvent {
   ASRResponse = 451,
   ASREnded = 459,
   ChatTTSText = 500,
+  ChatRAGText = 502,
+  ConversationCreate = 510,
+  ConversationUpdate = 511,
+  ConversationRetrieve = 512,
+  ConversationTruncate = 513,
+  ConversationDelete = 514,
+  ClientInterrupt = 515,
   ChatResponse = 550,
   ChatEnded = 559,
+  ConversationCreated = 567,
+  ConversationUpdated = 568,
+  ConversationRetrieved = 569,
+  ConversationTruncated = 570,
+  ConversationDeleted = 571,
   DialogCommonError = 599,
   Error = 599
 }
@@ -54,6 +68,8 @@ const EVENT_NAMES = new Map<number, string>([
   [VoiceEvent.SessionStarted, "SessionStarted"],
   [VoiceEvent.SessionFinished, "SessionFinished"],
   [VoiceEvent.SessionFailed, "SessionFailed"],
+  [VoiceEvent.UpdateConfig, "UpdateConfig"],
+  [VoiceEvent.ConfigUpdated, "ConfigUpdated"],
   [VoiceEvent.TaskRequest, "TaskRequest"],
   [VoiceEvent.EndASR, "EndASR"],
   [VoiceEvent.TTSSentenceStart, "TTSSentenceStart"],
@@ -64,8 +80,20 @@ const EVENT_NAMES = new Map<number, string>([
   [VoiceEvent.ASRResponse, "ASRResponse"],
   [VoiceEvent.ASREnded, "ASREnded"],
   [VoiceEvent.ChatTTSText, "ChatTTSText"],
+  [VoiceEvent.ChatRAGText, "ChatRAGText"],
+  [VoiceEvent.ConversationCreate, "ConversationCreate"],
+  [VoiceEvent.ConversationUpdate, "ConversationUpdate"],
+  [VoiceEvent.ConversationRetrieve, "ConversationRetrieve"],
+  [VoiceEvent.ConversationTruncate, "ConversationTruncate"],
+  [VoiceEvent.ConversationDelete, "ConversationDelete"],
+  [VoiceEvent.ClientInterrupt, "ClientInterrupt"],
   [VoiceEvent.ChatResponse, "ChatResponse"],
   [VoiceEvent.ChatEnded, "ChatEnded"],
+  [VoiceEvent.ConversationCreated, "ConversationCreated"],
+  [VoiceEvent.ConversationUpdated, "ConversationUpdated"],
+  [VoiceEvent.ConversationRetrieved, "ConversationRetrieved"],
+  [VoiceEvent.ConversationTruncated, "ConversationTruncated"],
+  [VoiceEvent.ConversationDeleted, "ConversationDeleted"],
   [VoiceEvent.DialogCommonError, "DialogCommonError"]
 ]);
 
@@ -74,9 +102,17 @@ const CLIENT_EVENTS = new Set<number>([
   VoiceEvent.FinishConnection,
   VoiceEvent.StartSession,
   VoiceEvent.FinishSession,
+  VoiceEvent.UpdateConfig,
   VoiceEvent.TaskRequest,
   VoiceEvent.EndASR,
-  VoiceEvent.ChatTTSText
+  VoiceEvent.ChatTTSText,
+  VoiceEvent.ChatRAGText,
+  VoiceEvent.ConversationCreate,
+  VoiceEvent.ConversationUpdate,
+  VoiceEvent.ConversationRetrieve,
+  VoiceEvent.ConversationTruncate,
+  VoiceEvent.ConversationDelete,
+  VoiceEvent.ClientInterrupt
 ]);
 
 export type VoiceSerialization = "json" | "none" | "unknown";
