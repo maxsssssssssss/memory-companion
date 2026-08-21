@@ -229,6 +229,8 @@
 .sectionHeading p { margin: 0; color: var(--dr-accent); font-size: 9px; font-weight: 800; letter-spacing: .13em; }
 .sectionHeading > span { padding: 6px 9px; border-radius: 999px; background: var(--dr-surface-soft); color: var(--dr-muted); font-size: 9px; }
 .candidateList { display: grid; margin: 22px 0 0; padding: 0; gap: 11px; list-style: none; }
+.reviewToolbar { display: flex; align-items: center; justify-content: space-between; margin-top: 16px; padding: 12px 14px; gap: 12px; border-radius: 15px; background: var(--dr-surface-soft); }
+.reviewToolbar p { margin: 0; color: var(--dr-muted); font-size: 9px; line-height: 1.6; }
 .candidateCard { display: grid; padding: 17px; gap: 12px; border: 1px solid var(--dr-line); border-radius: 18px; background: rgba(249,247,242,.78); }
 .candidateCardTop { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .candidateType { color: var(--dr-warm); font-size: 9px; font-weight: 800; letter-spacing: .08em; }
@@ -236,10 +238,8 @@
 .candidateText { margin: 0; font-family: "Noto Serif SC", "Songti SC", Georgia, serif; font-size: 15px; line-height: 1.75; }
 .keptBadge { background: var(--dr-accent-soft); color: var(--dr-accent-dark); }
 .excludedBadge { background: var(--dr-surface-soft); color: var(--dr-muted); }
-.candidateEditor,
-.personField { display: grid; gap: 7px; color: var(--dr-muted); font-size: 9px; font-weight: 750; }
-.candidateEditor textarea,
-.personField select {
+.candidateEditor { display: grid; gap: 7px; color: var(--dr-muted); font-size: 9px; font-weight: 750; }
+.candidateEditor textarea {
   width: 100%;
   border: 1px solid var(--dr-line);
   border-radius: 13px;
@@ -255,31 +255,52 @@
   font-size: 14px;
   line-height: 1.7;
 }
-.personField select { min-height: 42px; padding: 0 11px; font-size: 10px; }
-.personField small { color: var(--dr-faint); font-size: 9px; font-weight: 500; line-height: 1.55; }
 .editorMeta { display: flex; align-items: center; justify-content: space-between; margin-top: -6px; gap: 10px; color: var(--dr-faint); font-size: 9px; }
 .textButton { padding: 3px 0; border: 0; background: transparent; color: var(--dr-accent-dark); font-size: 9px; font-weight: 750; }
 .candidateSource { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
 .candidateSource span { color: var(--dr-faint); font-size: 9px; }
 .sourceButton { padding: 7px 10px; border: 1px solid var(--dr-line); border-radius: 999px; background: #fff; color: var(--dr-accent-dark); font-size: 9px; font-weight: 750; }
+.evidenceList { display: grid; margin: 0; padding: 0; gap: 8px; list-style: none; }
+.evidenceList li { display: grid; padding: 11px 12px; gap: 7px; border-radius: 13px; background: var(--dr-surface-soft); }
+.evidenceList p { margin: 0; color: var(--dr-ink); font-size: 10px; line-height: 1.7; }
+.evidenceList .textButton { justify-self: start; }
+.evidenceUnavailable { margin: 0; color: var(--dr-muted); font-size: 9px; line-height: 1.65; }
+.actionClaim { display: flex; align-items: flex-start; padding: 12px; gap: 10px; border-radius: 13px; background: var(--dr-accent-soft); color: var(--dr-ink); }
+.actionClaim input { margin-top: 3px; accent-color: var(--dr-accent-dark); }
+.actionClaim span { display: grid; gap: 3px; }
+.actionClaim b { font-size: 10px; }
+.actionClaim small { color: var(--dr-muted); font-size: 9px; line-height: 1.5; }
 .candidateActions { display: flex; justify-content: flex-end; gap: 8px; }
 .candidateActions .secondaryButton,
 .candidateActions .primaryButton { min-height: 38px; padding-inline: 15px; }
-.candidateRemainder { display: flex; align-items: center; justify-content: space-between; margin-top: 13px; padding: 13px 15px; gap: 12px; border-radius: 15px; background: var(--dr-surface-soft); }
-.candidateRemainder p { margin: 0; color: var(--dr-muted); font-size: 10px; line-height: 1.55; }
+.manualCandidate { display: grid; margin-top: 14px; gap: 12px; }
+.manualCandidate > button { justify-self: start; }
+.manualCandidateForm { display: grid; padding: 15px; gap: 13px; border: 1px solid var(--dr-line); border-radius: 16px; background: var(--dr-surface-soft); }
+.manualCandidateForm > label { display: grid; gap: 7px; color: var(--dr-muted); font-size: 9px; font-weight: 750; }
+.manualCandidateForm select,
+.manualCandidateForm textarea { width: 100%; border: 1px solid var(--dr-line); border-radius: 12px; background: rgba(255,255,255,.78); color: var(--dr-ink); font: inherit; }
+.manualCandidateForm select { min-height: 40px; padding: 8px 10px; }
+.manualCandidateForm textarea { min-height: 92px; padding: 11px; resize: vertical; font-size: 12px; line-height: 1.65; }
+.manualCandidateForm fieldset { min-width: 0; margin: 0; padding: 12px; border: 1px solid var(--dr-line); border-radius: 13px; }
+.manualCandidateForm legend { padding-inline: 5px; color: var(--dr-ink); font-size: 9px; font-weight: 800; }
+.manualCandidateForm fieldset > p { margin: 0 0 10px; color: var(--dr-muted); font-size: 9px; line-height: 1.5; }
+.manualEvidenceChoices { display: grid; max-height: 180px; overflow-y: auto; gap: 7px; }
+.manualEvidenceChoices label { display: flex; align-items: flex-start; gap: 8px; color: var(--dr-ink); font-size: 9px; line-height: 1.55; }
+.manualEvidenceChoices input { margin-top: 3px; accent-color: var(--dr-accent-dark); }
+.manualCandidateForm > .primaryButton { justify-self: end; }
 .emptyCandidates,
 .emptySearch { margin: 20px 0 0; color: var(--dr-muted); font-size: 11px; line-height: 1.65; }
 .finalizePanel { display: flex; align-items: center; justify-content: space-between; margin-top: 16px; padding: 16px; gap: 16px; border: 1px solid var(--dr-line); border-radius: 17px; background: var(--dr-accent-soft); }
 .finalizePanel b { font-size: 11px; }
 .finalizePanel p { margin: 5px 0 0; color: var(--dr-muted); font-size: 9px; line-height: 1.55; }
 .finalizePanel .primaryButton { flex: none; }
+.finalizeActions { display: flex; flex: none; justify-content: flex-end; gap: 8px; }
 .outcomeSection { display: grid; align-content: start; gap: 20px; }
 .outcomeCopy { margin: 0; padding: 17px; border-radius: 16px; background: var(--dr-accent-soft); color: var(--dr-muted); font-size: 12px; line-height: 1.8; }
 .resultList { display: grid; margin: 0; padding: 0; gap: 10px; list-style: none; }
 .resultCard { display: grid; padding: 16px; gap: 11px; border: 1px solid var(--dr-line); border-radius: 17px; background: rgba(249,247,242,.78); }
 .revokedResultCard { background: rgba(245,241,235,.58); color: var(--dr-muted); }
 .resultCard > p { margin: 0; font-family: "Noto Serif SC", "Songti SC", Georgia, serif; font-size: 14px; line-height: 1.75; }
-.resultPerson { color: var(--dr-muted); font-size: 9px; }
 .resultActions { display: flex; justify-content: flex-end; padding-top: 3px; border-top: 1px solid var(--dr-line); }
 .resultActions .secondaryButton { min-height: 38px; }
 .revocationConfirmation { display: grid; padding: 15px; gap: 13px; border: 1px solid #d7b8ac; border-radius: 15px; background: var(--dr-warm-soft); }
@@ -299,8 +320,6 @@
 .historyCardTop > span { padding: 5px 8px; border-radius: 999px; background: var(--dr-accent-soft); color: var(--dr-accent-dark); font-size: 8px; font-weight: 800; }
 .historySource { color: var(--dr-muted); font-family: "Noto Serif SC", "Songti SC", Georgia, serif; font-size: 11px; line-height: 1.6; }
 .historyMeta { margin-top: auto; color: var(--dr-faint); font-size: 8px; }
-.historyPeople { display: flex; flex-wrap: wrap; gap: 6px; }
-.historyPeople > span { padding: 5px 8px; border-radius: 999px; background: var(--dr-surface-soft); color: var(--dr-muted); font-size: 8px; }
 .historyEmpty { margin: 22px 0 0; padding: 24px; border-radius: 20px; background: rgba(255,253,249,.62); color: var(--dr-muted); font-size: 11px; line-height: 1.7; }
 
 .searchField { margin-top: 20px; }
@@ -337,7 +356,13 @@
   .transcriptLine { grid-template-columns: 1fr; gap: 8px; }
   .transcriptMeta { grid-template-columns: 1fr auto; }
   .finalizePanel { align-items: stretch; flex-direction: column; }
+  .finalizeActions { width: 100%; flex-direction: column; }
+  .finalizeActions button,
   .finalizePanel .primaryButton { width: 100%; }
+  .candidateActions { flex-wrap: wrap; }
+  .candidateActions button { flex: 1 1 120px; min-height: 46px; }
+  .manualCandidate > button,
+  .manualCandidateForm > .primaryButton { width: 100%; min-height: 46px; }
   .detailToolbar,
   .deleteConfirmation { align-items: stretch; flex-direction: column; }
   .detailToolbar > span { text-align: left; }

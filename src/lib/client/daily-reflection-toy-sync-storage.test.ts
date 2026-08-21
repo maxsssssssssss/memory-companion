@@ -12,7 +12,6 @@ import {
   createBrowserToySyncRuntime,
   createIndexedDbToySyncPersistence,
   createToySyncOperationKey,
-  createToySyncUploadIdempotencyKey,
   type ToySyncPermissionDirectoryHandle
 } from "./daily-reflection-toy-sync-storage";
 
@@ -154,23 +153,6 @@ function stateWithStatus(status: ToySyncEntryStatus): ToySyncState {
 }
 
 describe("daily reflection toy sync upload identity", () => {
-  it("derives a stable bounded upload idempotency key from the duplicate key", async () => {
-    const first = await createToySyncUploadIdempotencyKey(
-      "toy-sync:v1:note.wav:1024:1723000000123"
-    );
-    const second = await createToySyncUploadIdempotencyKey(
-      "toy-sync:v1:note.wav:1024:1723000000123"
-    );
-    const other = await createToySyncUploadIdempotencyKey(
-      "toy-sync:v1:other.wav:1024:1723000000123"
-    );
-
-    expect(first).toBe(second);
-    expect(first).not.toBe(other);
-    expect(first).toMatch(/^daily-reflection-toy-v1-[a-f0-9]{64}$/u);
-    expect(first.length).toBeLessThan(512);
-  });
-
   it("derives a stable bounded operation key from account, destination and relationship", async () => {
     const input = {
       accountId: "account-secret",
@@ -187,10 +169,27 @@ describe("daily reflection toy sync upload identity", () => {
 
     expect(first).toBe(replay);
     expect(first).not.toBe(otherRelationship);
-    expect(first).toMatch(/^toyop_v1_[a-f0-9]{64}$/u);
+    expect(first).toMatch(/^toyop_v2_[a-f0-9]{64}$/u);
     expect(first).not.toContain("account-secret");
     expect(first).not.toContain("private-name");
     expect(first.length).toBeLessThanOrEqual(128);
+  });
+
+  it("derives the Daily Reflection operation key without a relationship scope", async () => {
+    const input = {
+      accountId: "account-secret",
+      destination: "daily_reflection" as const,
+      duplicateKey: "toy-sync:v1:private-name.wav:1024:1723000000123"
+    };
+    const first = await createToySyncOperationKey(input);
+    const replay = await createToySyncOperationKey(input);
+
+    expect(first).toBe(replay);
+    expect(first).toMatch(/^toyop_v2_[a-f0-9]{64}$/u);
+    await expect(createToySyncOperationKey({
+      ...input,
+      relationshipId: "relationship-must-not-leak"
+    })).rejects.toThrow("toy_sync_operation_scope_required");
   });
 
   it("does not invoke the directory picker while constructing or checking support", async () => {

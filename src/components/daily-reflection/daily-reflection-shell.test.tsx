@@ -86,6 +86,52 @@ function candidate(
   };
 }
 
+function v2Candidate(
+  ordinal: number,
+  candidateKind: "insight" | "open_question" | "decision" | "user_action",
+  sourceSegmentIds: string[] = ["segment-early"],
+  overrides: Record<string, unknown> = {}
+): DailyReflectionCandidateView {
+  const actionClaimed = Boolean(overrides.actionClaimed);
+  return {
+    contractVersion: 2,
+    id: `candidate-v2-${ordinal}`,
+    reflectionId: "reflection-1",
+    ordinal,
+    proposedText: `V2 候选 ${ordinal + 1}`,
+    userText: null,
+    status: "pending",
+    candidateKind,
+    candidateType: candidateKind === "open_question"
+      ? "question"
+      : candidateKind === "user_action" && actionClaimed
+        ? "commitment"
+        : "summary",
+    evidenceIds: sourceSegmentIds,
+    sourceSegmentIds,
+    confidence: 0.8,
+    caution: "请按你的实际感受判断。",
+    actionClaimed,
+    subjectPersonId: null,
+    subjectConfirmed: false,
+    version: 0,
+    createdAt: "2026-08-13T08:04:00.000Z",
+    updatedAt: "2026-08-13T08:04:00.000Z",
+    evidence: sourceSegmentIds.map((sourceSegmentId) => {
+      const source = SEGMENTS.find((item) => item.id === sourceSegmentId)!;
+      return {
+        sourceSegmentId,
+        uploadId: source.uploadId,
+        effectiveOrigin: "direct_conversation" as const,
+        startSeconds: source.startSeconds,
+        endSeconds: source.endSeconds,
+        text: source.text
+      };
+    }),
+    ...overrides
+  };
+}
+
 function detail(
   overrides: Partial<DailyReflectionDetailResponse> = {}
 ): DailyReflectionDetailResponse {
@@ -166,8 +212,7 @@ function session(
     selectedFile: null,
     sourceOrigin: null,
     recordingDate: "",
-    confirmedPeople: [],
-    peopleState: "idle",
+    operationReceipt: null,
     history: [],
     historyState: "ready",
     historyErrorMessage: null,
@@ -183,6 +228,10 @@ function session(
     refreshHistory: vi.fn(async () => undefined),
     startNew: vi.fn(),
     updateCandidate: vi.fn(async () => undefined),
+    updateCandidates: vi.fn(async () => undefined),
+    acceptAllCandidates: vi.fn(async () => undefined),
+    createManualCandidate: vi.fn(async () => undefined),
+    excludeCandidate: vi.fn(async () => undefined),
     finalize: vi.fn(async () => undefined),
     revokeCandidate: vi.fn(async () => undefined),
     retry: vi.fn(async () => undefined),
@@ -496,7 +545,7 @@ describe("DailyReflectionShellContent", () => {
       <DailyReflectionShellContent
         browserRecordingEnabled
         createBrowserRecorder={factory}
-        createBrowserRecordingIdempotencyKey={() => "stable-browser-key"}
+        createOperationKey={() => "stable-browser-key"}
         session={session({ uploadBrowserRecording })}
       />
     );
@@ -511,13 +560,13 @@ describe("DailyReflectionShellContent", () => {
     fireEvent.click(submitButton);
 
     expect(uploadBrowserRecording).toHaveBeenCalledTimes(1);
-    const [submittedFile, durationMs, date, idempotencyKey] = uploadBrowserRecording.mock.calls[0]!;
+    const [submittedFile, durationMs, date, operationKey] = uploadBrowserRecording.mock.calls[0]!;
     expect(submittedFile).toBeInstanceOf(File);
     expect(submittedFile.name).toMatch(/^daily-reflection-\d{4}-\d{2}-\d{2}\.webm$/u);
     expect(submittedFile.type).toBe("audio/webm;codecs=opus");
     expect(durationMs).toBe(181_000);
     expect(date).toMatch(/^\d{4}-\d{2}-\d{2}$/u);
-    expect(idempotencyKey).toBe("stable-browser-key");
+    expect(operationKey).toBe("stable-browser-key");
     expect(screen.getByText("正在整理这次复盘……")).toBeVisible();
 
     await act(async () => finishUpload());
@@ -528,11 +577,11 @@ describe("DailyReflectionShellContent", () => {
     render(<DailyReflectionShellContent session={session({ upload })} />);
 
     const choices = screen.getAllByRole("radio");
-    expect(choices).toHaveLength(3);
+    expect(choices).toHaveLength(2);
     expect(choices.every((choice) => !(choice as HTMLInputElement).checked)).toBe(true);
     expect(screen.getByText("我自己的复盘")).toBeInTheDocument();
     expect(screen.getByText("我和其他人的真实交流")).toBeInTheDocument();
-    expect(screen.getByText("其他或暂时无法确定")).toBeInTheDocument();
+    expect(screen.queryByText("其他或暂时无法确定")).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "开始上传" })).toBeDisabled();
 
     const audioFile = new File(["audio"], "reflection.m4a", { type: "audio/mp4" });
@@ -549,7 +598,10 @@ describe("DailyReflectionShellContent", () => {
 
     const recordingDate = (screen.getByLabelText("录音发生在") as HTMLInputElement).value;
     expect(recordingDate).not.toBe("");
-    expect(upload).toHaveBeenCalledWith(audioFile, "user_reflection", recordingDate);
+    expect(upload).toHaveBeenCalledWith(audioFile, "user_reflection", recordingDate, {
+      operationKey: expect.any(String),
+      inputAdapter: "file_picker"
+    });
   });
 
   it("gives friendly format and 300MB prechecks while leaving the service authoritative", () => {
@@ -568,7 +620,7 @@ describe("DailyReflectionShellContent", () => {
     expect(screen.getByRole("alert")).toHaveTextContent("文件超过 300MB");
   });
 
-  it("shows three of five full candidates first, expands all persisted candidates, and keeps source jumps", async () => {
+  it("shows all five candidates immediately, expands Evidence, and keeps canonical source jumps", async () => {
     const review = detail();
     const { container } = render(
       <DailyReflectionShellContent
@@ -583,14 +635,9 @@ describe("DailyReflectionShellContent", () => {
 
     expect(screen.getByText("周三散步.m4a")).toBeInTheDocument();
     expect(screen.getByText("我和其他人的真实交流")).toBeInTheDocument();
-    expect(screen.getByText("我先整理出了最值得记住的几件事")).toBeInTheDocument();
-    expect(screen.getAllByRole("button", { name: "查看原话" })).toHaveLength(3);
-    expect(screen.getByText("还有2件可能值得记住")).toBeVisible();
-    expect(screen.queryByDisplayValue("待确认内容 4")).not.toBeInTheDocument();
-    expect(screen.queryByDisplayValue("待确认内容 5")).not.toBeInTheDocument();
-
-    fireEvent.click(screen.getByRole("button", { name: "查看全部" }));
-    expect(screen.getAllByRole("button", { name: "查看原话" })).toHaveLength(5);
+    expect(screen.getByText("我把这次复盘整理成了几张卡片")).toBeInTheDocument();
+    expect(screen.getAllByRole("button", { name: "展开全部原话" })).toHaveLength(5);
+    expect(screen.queryByRole("button", { name: "查看全部" })).not.toBeInTheDocument();
     expect(screen.getByDisplayValue("待确认内容 4")).toBeVisible();
     expect(screen.getByDisplayValue("待确认内容 5")).toBeVisible();
     expect(screen.getByText("发生的事")).toBeInTheDocument();
@@ -614,7 +661,9 @@ describe("DailyReflectionShellContent", () => {
     expect(within(transcript).getAllByRole("listitem")).toHaveLength(1);
     expect(within(transcript).getByText("第二段提到散步。")).toBeInTheDocument();
 
-    fireEvent.click(screen.getAllByRole("button", { name: "查看原话" })[4]);
+    fireEvent.click(screen.getAllByRole("button", { name: "展开全部原话" })[4]);
+    expect(screen.getByText("第五段补充完整想法。")).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "在完整文字稿中查看" }));
     await waitFor(() => {
       const source = container.querySelector('[data-segment-id="segment-fifth"]');
       expect(source).toHaveAttribute("data-highlighted", "true");
@@ -640,21 +689,31 @@ describe("DailyReflectionShellContent", () => {
     }
   });
 
-  it("keeps every candidate pending by default and requires an explicit remember or exclude choice", () => {
+  it("keeps every candidate pending, supports batch accept, and preserves individual edits", () => {
     const updateCandidate = vi.fn(async () => undefined);
+    const acceptAllCandidates = vi.fn(async () => undefined);
+    const finalize = vi.fn(async () => undefined);
     render(<DailyReflectionShellContent session={session({
       state: "review_pending",
       reflectionId: "reflection-1",
       detail: detail({ candidates: [candidate(0, "event", "segment-early")] }),
-      updateCandidate
+      updateCandidate,
+      acceptAllCandidates,
+      finalize
     })} />);
 
-    const finalizeButton = screen.getByRole("button", { name: "确认并完成这次复盘" });
-    expect(finalizeButton).toBeDisabled();
-    expect(screen.getByText("还有 1 条待选择")).toBeVisible();
+    expect(screen.getByRole("button", { name: "只保存这次复盘" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "保存复盘并长期保留所选" })).toBeDisabled();
+    expect(screen.getByText(/还有 1 条没有特别选择/u)).toBeVisible();
     expect(screen.getByRole("button", { name: "记住" })).toHaveAttribute("aria-pressed", "false");
     expect(screen.getByRole("button", { name: "不记" })).toHaveAttribute("aria-pressed", "false");
     expect(screen.queryByRole("combobox")).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "全部接受" }));
+    expect(acceptAllCandidates).toHaveBeenCalledOnce();
+
+    fireEvent.click(screen.getByRole("button", { name: "只保存这次复盘" }));
+    expect(finalize).toHaveBeenCalledWith("recap_only");
 
     fireEvent.change(screen.getByLabelText("编辑发生的事"), { target: { value: "我重新写过的内容" } });
     fireEvent.click(screen.getByRole("button", { name: "记住" }));
@@ -675,7 +734,7 @@ describe("DailyReflectionShellContent", () => {
     });
   });
 
-  it("allows only kept candidates to restore text and select a confirmed person", () => {
+  it("restores the proposed text without exposing any Person selector", () => {
     const keptCandidate: DailyReflectionCandidateView = {
       ...candidate(0, "event", "segment-early", "AI 原文内容"),
       userText: "我改过的内容",
@@ -688,26 +747,6 @@ describe("DailyReflectionShellContent", () => {
       state: "review_pending",
       reflectionId: "reflection-1",
       detail: detail({ candidates: [keptCandidate] }),
-      confirmedPeople: [{
-        id: "person-alpha-001",
-        displayName: "林澄",
-        status: "confirmed",
-        version: 1,
-        explicitlyConfirmed: true,
-        confirmedAt: "2026-08-13T08:00:00.000Z",
-        createdAt: "2026-08-13T08:00:00.000Z",
-        updatedAt: "2026-08-13T08:00:00.000Z"
-      }, {
-        id: "person-beta-002",
-        displayName: "林澄",
-        status: "confirmed",
-        version: 1,
-        explicitlyConfirmed: true,
-        confirmedAt: "2026-08-13T08:00:00.000Z",
-        createdAt: "2026-08-13T08:00:00.000Z",
-        updatedAt: "2026-08-13T08:00:00.000Z"
-      }],
-      peopleState: "ready",
       updateCandidate
     })} />);
 
@@ -716,23 +755,106 @@ describe("DailyReflectionShellContent", () => {
     fireEvent.click(screen.getByRole("button", { name: "恢复最初整理" }));
     expect(editor).toHaveValue("AI 原文内容");
 
-    const select = screen.getByRole("combobox", { name: "为发生的事选择人物" });
-    const options = within(select).getAllByRole("option").map((option) => option.textContent);
-    expect(options).toEqual([
-      "暂不关联人物",
-      "林澄 · ha-001",
-      "林澄 · ta-002"
-    ]);
-    expect(within(select).queryByRole("option", { name: "我" })).not.toBeInTheDocument();
-    fireEvent.change(select, { target: { value: "person-beta-002" } });
+    expect(screen.queryByRole("combobox")).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "保存修改" }));
 
     expect(updateCandidate).toHaveBeenCalledWith({
       candidateId: "candidate-0",
       status: "kept",
       userText: null,
-      subjectPersonId: "person-beta-002"
+      subjectPersonId: null
     });
+  });
+
+  it("expands every Evidence item, explicitly claims an action, deletes one card, and creates a manual card", () => {
+    const updateCandidate = vi.fn(async () => undefined);
+    const excludeCandidate = vi.fn(async () => undefined);
+    const createManualCandidate = vi.fn(async () => undefined);
+    const action = v2Candidate(0, "user_action", ["segment-early", "segment-second"]);
+    render(<DailyReflectionShellContent session={session({
+      state: "review_pending",
+      reflectionId: "reflection-1",
+      detail: detail({ candidates: [action] }),
+      updateCandidate,
+      excludeCandidate,
+      createManualCandidate
+    })} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "展开全部原话" }));
+    expect(screen.getAllByText("第一段真实原话。")).toHaveLength(2);
+    expect(screen.getAllByText("第二段提到散步。")).toHaveLength(2);
+
+    fireEvent.click(screen.getByRole("checkbox", { name: /这是我要做的/u }));
+    expect(updateCandidate).toHaveBeenCalledWith(expect.objectContaining({
+      candidateId: action.id,
+      actionClaimed: true
+    }));
+
+    fireEvent.click(screen.getByRole("button", { name: "删除这张卡" }));
+    expect(excludeCandidate).toHaveBeenCalledWith(action.id);
+
+    fireEvent.click(screen.getByRole("button", { name: "手写补充一张卡片" }));
+    fireEvent.change(screen.getByLabelText("这张卡片是什么"), {
+      target: { value: "user_action" }
+    });
+    fireEvent.change(screen.getByLabelText("手写卡片内容"), {
+      target: { value: "  明天散步十分钟  " }
+    });
+    fireEvent.click(screen.getByRole("checkbox", { name: "第一段真实原话。" }));
+    fireEvent.click(screen.getAllByRole("checkbox", { name: /这是我要做的/u })[1]);
+    fireEvent.click(screen.getByRole("button", { name: "保存这张手写卡" }));
+
+    expect(createManualCandidate).toHaveBeenCalledWith({
+      candidateKind: "user_action",
+      proposedText: "明天散步十分钟",
+      evidenceIds: ["segment-early"],
+      confidence: 1,
+      caution: "这是你手写补充的内容，请按原话核对。",
+      actionClaimed: true
+    });
+    expect(screen.queryByRole("combobox", { name: /人物/u })).not.toBeInTheDocument();
+  });
+
+  it("keeps an Evidence-free manual card recap-only", () => {
+    const manual = v2Candidate(0, "insight", [], {
+      id: "manual-no-evidence",
+      status: "kept",
+      proposedText: "只留在这次复盘。"
+    });
+    render(<DailyReflectionShellContent session={session({
+      state: "review_pending",
+      reflectionId: "reflection-1",
+      detail: detail({ candidates: [manual] })
+    })} />);
+
+    expect(screen.getByText("有 1 条手写内容没有原话，只能随本次复盘保存。")).toBeVisible();
+    expect(screen.getByRole("button", { name: "只保存这次复盘" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "保存复盘并长期保留所选" })).toBeDisabled();
+  });
+
+  it("requires an explicit action claim before a kept action can be retained", () => {
+    const action = v2Candidate(0, "user_action", ["segment-early"], {
+      status: "kept",
+      actionClaimed: false
+    });
+    const { rerender } = render(<DailyReflectionShellContent session={session({
+      state: "review_pending",
+      reflectionId: "reflection-1",
+      detail: detail({ candidates: [action] })
+    })} />);
+
+    expect(screen.getByText("有 1 条行动还没有由你认领，只能随本次复盘保存。")).toBeVisible();
+    expect(screen.getByRole("button", { name: "保存复盘并长期保留所选" })).toBeDisabled();
+
+    rerender(<DailyReflectionShellContent session={session({
+      state: "review_pending",
+      reflectionId: "reflection-1",
+      detail: detail({
+        candidates: [{ ...action, actionClaimed: true, candidateType: "commitment" }]
+      })
+    })} />);
+    expect(screen.queryByText(/行动还没有由你认领/u)).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "保存复盘并长期保留所选" })).toBeEnabled();
   });
 
   it("shows completed counts in user language without internal admission terms", () => {
@@ -847,12 +969,12 @@ describe("DailyReflectionShellContent", () => {
       finalize
     })} />);
 
-    fireEvent.click(screen.getByRole("button", { name: "重新安全保存" }));
+    fireEvent.click(screen.getByRole("button", { name: "重新保存" }));
     expect(finalize).toHaveBeenCalledOnce();
     expect(container.textContent).not.toContain("internal-safe-code");
   });
 
-  it("uses the server-selected quick review copy and never presents more than three candidates", () => {
+  it("shows every server-selected quick-review candidate without a hidden remainder", () => {
     const quickDetail = detail({
       reflection: {
         ...detail().reflection,
@@ -874,11 +996,11 @@ describe("DailyReflectionShellContent", () => {
       detail: quickDetail
     })} />);
 
-    expect(screen.getByText("我整理出了最多3件可能值得记住的事")).toBeVisible();
-    expect(screen.getAllByRole("button", { name: "查看原话" })).toHaveLength(3);
+    expect(screen.getByText("我把这次复盘整理成了几张卡片")).toBeVisible();
+    expect(screen.getAllByRole("button", { name: "展开全部原话" })).toHaveLength(5);
     expect(screen.queryByRole("button", { name: "查看全部" })).not.toBeInTheDocument();
-    expect(screen.queryByDisplayValue("待确认内容 4")).not.toBeInTheDocument();
-    expect(screen.queryByDisplayValue("待确认内容 5")).not.toBeInTheDocument();
+    expect(screen.getByDisplayValue("待确认内容 4")).toBeVisible();
+    expect(screen.getByDisplayValue("待确认内容 5")).toBeVisible();
   });
 
   it("shows real progress and only the actions allowed while processing", () => {
@@ -932,6 +1054,31 @@ describe("DailyReflectionShellContent", () => {
     expect(retry).toHaveBeenCalledTimes(1);
   });
 
+  it("keeps the transcript available and offers retry or a manual card after candidate generation fails", () => {
+    const base = detail();
+    const failedDetail = {
+      ...base,
+      reflection: {
+        ...base.reflection,
+        status: "failed" as const,
+        errorCode: "daily_reflection_candidate_provider_failed",
+        errorMessage: "internal provider detail"
+      },
+      job: base.job ? { ...base.job, status: "failed" as const } : null
+    };
+    render(<DailyReflectionShellContent session={session({
+      state: "failed",
+      reflectionId: "reflection-1",
+      detail: failedDetail
+    })} />);
+
+    expect(screen.getByText("这次整理还不完整")).toBeVisible();
+    expect(screen.getByRole("button", { name: "重新整理候选卡" })).toBeVisible();
+    expect(screen.getByRole("button", { name: "手写补充一张卡片" })).toBeVisible();
+    expect(screen.getByLabelText("完整文字稿")).toBeVisible();
+    expect(screen.getByText("第一段真实原话。")).toBeVisible();
+  });
+
   it("does not invent source or recording date while a recovered record is loading", () => {
     render(<DailyReflectionShellContent initialReflectionId="reflection-1" session={session({
       state: "loading",
@@ -982,16 +1129,6 @@ describe("DailyReflectionShellContent", () => {
       browserRecordingEnabled
       createBrowserRecorder={factory}
       session={session({
-        confirmedPeople: [{
-          id: "person-1",
-          displayName: "林澄",
-          status: "confirmed",
-          version: 1,
-          explicitlyConfirmed: true,
-          confirmedAt: "2026-08-13T08:00:00.000Z",
-          createdAt: "2026-08-13T08:00:00.000Z",
-          updatedAt: "2026-08-13T08:00:00.000Z"
-        }],
         history: [{
           id: "reflection-history-1",
           status: "completed",
@@ -1020,7 +1157,7 @@ describe("DailyReflectionShellContent", () => {
     expect(screen.getByRole("navigation", { name: "产品空间" })).toHaveTextContent("约会陪伴日常复盘");
     expect(screen.getByText("你在 2026-08-12 的复盘中提到……")).toBeVisible();
     expect(screen.getByText("记住 1 · 未保存 1")).toBeVisible();
-    expect(screen.getByText("林澄")).toBeVisible();
+    expect(screen.queryByText("林澄")).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: /2026-08-12/u }));
     expect(reload).toHaveBeenCalledWith("reflection-history-1");
     fireEvent.click(screen.getByRole("button", { name: "刷新" }));
@@ -1072,23 +1209,13 @@ describe("DailyReflectionShellContent", () => {
       state: "completed",
       reflectionId: "reflection-1",
       detail: completed,
-      revokeCandidate,
-      confirmedPeople: [{
-        id: "person-1",
-        displayName: "林澄",
-        status: "confirmed",
-        version: 1,
-        explicitlyConfirmed: true,
-        confirmedAt: "2026-08-13T08:00:00.000Z",
-        createdAt: "2026-08-13T08:00:00.000Z",
-        updatedAt: "2026-08-13T08:00:00.000Z"
-      }]
+      revokeCandidate
     })} />);
 
     expect(screen.getByText("在 2026-08-13 的交流中提到……")).toBeVisible();
     expect(screen.getByText("已经记住")).toBeVisible();
     expect(screen.getByText("你选择不保存")).toBeVisible();
-    expect(screen.getByText("关联人物：林澄")).toBeVisible();
+    expect(screen.queryByText(/关联人物/u)).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "撤销保存" })).toBeVisible();
     fireEvent.click(screen.getByRole("button", { name: "撤销保存" }));
     expect(screen.getByRole("alertdialog", { name: "只撤销这一条保存？" })).toHaveTextContent(
@@ -1239,6 +1366,9 @@ describe("DailyReflectionShellContent", () => {
     expect(css).toMatch(/\.historyList\s*\{\s*grid-template-columns:\s*1fr;/u);
     expect(css).toMatch(/\.candidateEditor textarea\s*\{\s*min-height:\s*150px;/u);
     expect(css).toContain("min-height: 46px");
+    expect(css).toMatch(/\.finalizeActions\s*\{[^}]*flex-direction:\s*column;/u);
+    expect(css).toMatch(/\.candidateActions button\s*\{[^}]*min-height:\s*46px;/u);
+    expect(css).toMatch(/\.manualCandidateForm > \.primaryButton\s*\{[^}]*min-height:\s*46px;/u);
     expect(css).toMatch(/\.revocationConfirmation > div:last-child\s*\{[^}]*flex-direction:\s*column;/u);
   });
 });

@@ -1,6 +1,9 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import type { DailyReflectionDetailResponse } from "@/lib/domain/daily-reflection-api";
+import type {
+  DailyReflectionCandidateView,
+  DailyReflectionDetailResponse
+} from "@/lib/domain/daily-reflection-api";
 import type { DailyReflectionStatus } from "@/lib/domain/daily-reflection";
 
 import {
@@ -12,6 +15,35 @@ import {
 import { DailyReflectionSessionController } from "./daily-reflection-session";
 
 const NOW = "2026-08-13T08:00:00.000Z";
+
+function operationReceipt(
+  reflectionId = "reflection_1",
+  inputAdapter: "file_picker" | "browser_recorder" | "toy_sync" = "file_picker"
+) {
+  return {
+    reflectionId,
+    uploadId: `upload_${reflectionId}`,
+    jobId: `job_${reflectionId}`,
+    operationKey: `operation_${reflectionId}`,
+    contentHash: "a".repeat(64),
+    capturePurpose: "inspiration_capture" as const,
+    status: "uploading" as const,
+    executionMode: "queue" as const,
+    inputAdapter,
+    sourceOrigin: "user_reflection" as const,
+    recordingDate: "2026-08-13"
+  };
+}
+
+function storeOperationReceipt(
+  values: Map<string, string>,
+  receipt = operationReceipt()
+) {
+  values.set(
+    `daily-reflection:operation-receipt:v2:user_1:${receipt.reflectionId}`,
+    JSON.stringify(receipt)
+  );
+}
 
 function detail(
   reflectionId: string,
@@ -123,9 +155,45 @@ function reviewCandidate(
   };
 }
 
+function reviewCandidateV2(
+  status: "pending" | "kept" | "excluded" = "pending",
+  overrides: Record<string, unknown> = {}
+) {
+  return {
+    contractVersion: 2 as const,
+    id: "candidate_v2_1",
+    reflectionId: "reflection_1",
+    ordinal: 0,
+    proposedText: "我准备明天把这件事做完。",
+    userText: null,
+    status,
+    candidateKind: "user_action" as const,
+    candidateType: "summary" as const,
+    evidenceIds: ["segment_reflection_1"],
+    sourceSegmentIds: ["segment_reflection_1"],
+    confidence: 0.8,
+    caution: "请按你的实际计划确认。",
+    actionClaimed: false,
+    subjectPersonId: null,
+    subjectConfirmed: false as const,
+    version: 0,
+    createdAt: NOW,
+    updatedAt: NOW,
+    evidence: [{
+      sourceSegmentId: "segment_reflection_1",
+      uploadId: "upload_reflection_1",
+      effectiveOrigin: "user_reflection" as const,
+      startSeconds: 0,
+      endSeconds: 5,
+      text: "我准备明天把这件事做完。"
+    }],
+    ...overrides
+  };
+}
+
 function reviewDetail(
   version: number,
-  candidates = [reviewCandidate("pending")]
+  candidates: DailyReflectionCandidateView[] = [reviewCandidate("pending")]
 ): DailyReflectionDetailResponse {
   const base = detail("reflection_1", "review_pending");
   return {
@@ -137,28 +205,40 @@ function reviewDetail(
 
 function confirmedDetail(
   status: "confirmation_ready" | "admitting" | "completed" | "admission_failed",
-  candidate = reviewCandidate("kept")
+  candidate: DailyReflectionCandidateView = reviewCandidate("kept")
 ): DailyReflectionDetailResponse {
   const base = detail("reflection_1", status);
   const confirmation = {
+    contractVersion: 2 as const,
     id: "confirmation_1",
     reflectionId: "reflection_1",
     accountId: "user_1",
     fingerprint: "a".repeat(64),
     requestFingerprint: "b".repeat(64),
-    idempotencyKey: "stable-finalize-key",
+    idempotencyKey: "operation_reflection_1",
+    operationKey: "operation_reflection_1",
     sourceOrigin: "user_reflection" as const,
     inputMethod: "file_upload" as const,
     processingProfile: "full_recording" as const,
+    inputAdapter: "file_picker" as const,
+    capturePurpose: "inspiration_capture" as const,
+    recordingDate: "2026-08-13",
+    saveIntent: "retain_selected" as const,
     candidateSnapshots: [{
+      contractVersion: 2 as const,
       candidateId: candidate.id,
       proposedText: candidate.proposedText,
       userText: candidate.userText,
       finalText: candidate.userText ?? candidate.proposedText,
       status: "kept" as const,
-      candidateType: candidate.candidateType,
+      candidateKind: "insight" as const,
+      candidateType: "summary" as const,
+      evidenceIds: candidate.sourceSegmentIds,
       sourceSegmentIds: candidate.sourceSegmentIds,
       evidenceSnapshots: candidate.evidence,
+      confidence: 0.8,
+      caution: "请按你的实际感受判断。",
+      actionClaimed: false,
       subjectPersonId: candidate.subjectPersonId
     }],
     createdAt: NOW
@@ -186,6 +266,23 @@ function confirmedDetail(
   };
 }
 
+function recapOnlyCompletedDetail(
+  candidate: DailyReflectionCandidateView
+): DailyReflectionDetailResponse {
+  const base = confirmedDetail("completed", candidate);
+  if (!base.confirmation || !("contractVersion" in base.confirmation)) {
+    throw new Error("expected a V2 confirmation fixture");
+  }
+  return {
+    ...base,
+    confirmation: { ...base.confirmation, saveIntent: "recap_only" },
+    admissionOperation: null,
+    admissionResults: [],
+    rememberedCount: 0,
+    revokedCandidateIds: []
+  };
+}
+
 function revocableDetail(version = 10, revoked = false): DailyReflectionDetailResponse {
   const kept = reviewCandidate("kept", { version: 1 });
   const base = confirmedDetail("completed", kept);
@@ -210,27 +307,20 @@ function fakeApi(overrides: Partial<DailyReflectionApi> = {}): DailyReflectionAp
   return {
     getCurrentUser: async () => ({ id: "user_1", email: "user@example.com" }),
     logout: async () => undefined,
-    listConfirmedPeople: async () => [],
     list: async () => [],
-    upload: async () => ({
-      reflectionId: "reflection_1",
-      uploadId: "upload_reflection_1",
-      jobId: "job_reflection_1",
-      status: "uploading",
-      executionMode: "queue"
-    }),
-    uploadBrowserRecording: async () => ({
-      reflectionId: "reflection_1",
-      uploadId: "upload_reflection_1",
-      jobId: "job_reflection_1",
-      status: "uploading",
-      executionMode: "queue"
-    }),
+    upload: async () => operationReceipt(),
+    uploadBrowserRecording: async () => operationReceipt("reflection_1", "browser_recorder"),
     get: async (reflectionId) => detail(reflectionId, "review_pending"),
     updateCandidates: async (_reflectionId, input) => ({
       reflection: { ...detail("reflection_1", "review_pending").reflection, version: input.expectedVersion + 1 },
       candidates: []
     }),
+    createManualCandidate: async () => {
+      throw new Error("manual candidate creation is not configured for this test");
+    },
+    excludeCandidate: async () => {
+      throw new Error("candidate exclusion is not configured for this test");
+    },
     finalize: async () => {
       throw new Error("finalize is not configured for this test");
     },
@@ -311,13 +401,7 @@ describe("DailyReflectionSessionController", () => {
       detail: null,
       reflectionId: null
     });
-    uploadRequest.resolve({
-      reflectionId: "reflection_1",
-      uploadId: "upload_reflection_1",
-      jobId: "job_reflection_1",
-      status: "uploading",
-      executionMode: "queue"
-    });
+    uploadRequest.resolve({ ...operationReceipt(), operationKey: "stable-key" });
 
     await vi.waitFor(() => {
       expect(controller.getSnapshot().state).toBe("transcribing");
@@ -329,8 +413,14 @@ describe("DailyReflectionSessionController", () => {
       file,
       sourceOrigin: "user_reflection",
       recordingDate: "2026-08-13",
-      idempotencyKey: "stable-key"
+      operationKey: "stable-key",
+      inputAdapter: "file_picker",
+      capturePurpose: "inspiration_capture"
     }, expect.any(AbortSignal));
+    expect(controller.getSnapshot().operationReceipt).toMatchObject({
+      reflectionId: "reflection_1",
+      operationKey: "stable-key"
+    });
 
     finalDetail.resolve(detail("reflection_1", "review_pending", 100));
     await pending;
@@ -400,16 +490,15 @@ describe("DailyReflectionSessionController", () => {
       file,
       clientReportedDurationMs: 181_000,
       recordingDate: "2026-08-13",
-      idempotencyKey: "stable-browser-key"
+      operationKey: "stable-browser-key",
+      inputAdapter: "browser_recorder",
+      sourceOrigin: "user_reflection",
+      capturePurpose: "inspiration_capture"
     }, expect.any(AbortSignal));
-    expect(uploadBrowserRecording.mock.calls[0]?.[0]).not.toHaveProperty("sourceOrigin");
 
     uploadRequest.resolve({
-      reflectionId: "reflection_browser_1",
-      uploadId: "upload_reflection_browser_1",
-      jobId: "job_reflection_browser_1",
-      status: "uploading",
-      executionMode: "queue"
+      ...operationReceipt("reflection_browser_1", "browser_recorder"),
+      operationKey: "stable-browser-key"
     });
     await pending;
 
@@ -453,7 +542,10 @@ describe("DailyReflectionSessionController", () => {
     expect(uploadBrowserRecording).toHaveBeenCalledWith({
       file,
       recordingDate: "2026-08-13",
-      idempotencyKey: "stable-browser-key"
+      operationKey: "stable-browser-key",
+      inputAdapter: "browser_recorder",
+      sourceOrigin: "user_reflection",
+      capturePurpose: "inspiration_capture"
     }, expect.any(AbortSignal));
     expect(get).not.toHaveBeenCalled();
     expect(controller.getSnapshot()).toMatchObject({
@@ -533,11 +625,10 @@ describe("DailyReflectionSessionController", () => {
 
   it("reuses a caller-provided toy key and reports whether the upload receipt arrived", async () => {
     const upload = vi.fn(async () => ({
-      reflectionId: "reflection_toy_1",
-      uploadId: "upload_toy_1",
-      jobId: "job_toy_1",
-      status: "uploading" as const,
-      executionMode: "inline" as const
+      ...operationReceipt("reflection_toy_1", "toy_sync"),
+      operationKey: "daily-reflection-toy-stable",
+      executionMode: "inline" as const,
+      recordingDate: "2026-08-18"
     }));
     const get = vi.fn(async () => detail("reflection_toy_1", "review_pending", 100));
     const controller = new DailyReflectionSessionController({
@@ -549,15 +640,16 @@ describe("DailyReflectionSessionController", () => {
     const file = new File(["toy audio"], "toy.wav", { type: "audio/wav" });
 
     await expect(controller.upload(file, "user_reflection", "2026-08-18", {
-      idempotencyKey: "daily-reflection-toy-stable",
+      operationKey: "daily-reflection-toy-stable",
       inputAdapter: "toy_sync"
     })).resolves.toBe(true);
     expect(upload).toHaveBeenCalledWith({
       file,
       sourceOrigin: "user_reflection",
       recordingDate: "2026-08-18",
-      idempotencyKey: "daily-reflection-toy-stable",
-      inputAdapter: "toy_sync"
+      operationKey: "daily-reflection-toy-stable",
+      inputAdapter: "toy_sync",
+      capturePurpose: "inspiration_capture"
     }, expect.any(AbortSignal));
   });
 
@@ -575,18 +667,17 @@ describe("DailyReflectionSessionController", () => {
       new File(["toy audio"], "toy.wav", { type: "audio/wav" }),
       "user_reflection",
       "2026-08-18",
-      { idempotencyKey: "daily-reflection-toy-stable", inputAdapter: "toy_sync" }
+      { operationKey: "daily-reflection-toy-stable", inputAdapter: "toy_sync" }
     )).resolves.toBe(false);
     expect(controller.getSnapshot().state).toBe("error");
   });
 
   it("keeps the upload receipt true when later processing status refresh fails", async () => {
     const upload = vi.fn(async () => ({
-      reflectionId: "reflection_toy_receipt",
-      uploadId: "upload_toy_receipt",
-      jobId: "job_toy_receipt",
-      status: "uploading" as const,
-      executionMode: "inline" as const
+      ...operationReceipt("reflection_toy_receipt", "toy_sync"),
+      operationKey: "daily-reflection-toy-stable",
+      executionMode: "inline" as const,
+      recordingDate: "2026-08-18"
     }));
     const controller = new DailyReflectionSessionController({
       api: fakeApi({
@@ -603,7 +694,7 @@ describe("DailyReflectionSessionController", () => {
       new File(["toy audio"], "toy.wav", { type: "audio/wav" }),
       "user_reflection",
       "2026-08-18",
-      { idempotencyKey: "daily-reflection-toy-stable", inputAdapter: "toy_sync" }
+      { operationKey: "daily-reflection-toy-stable", inputAdapter: "toy_sync" }
     )).resolves.toBe(true);
     expect(upload).toHaveBeenCalledTimes(1);
     expect(controller.getSnapshot()).toMatchObject({
@@ -612,34 +703,24 @@ describe("DailyReflectionSessionController", () => {
     });
   });
 
-  it("saves one candidate decision, reloads server truth, and exposes confirmed people", async () => {
+  it("saves one candidate decision, reloads server truth, and never writes a Person", async () => {
     const pending = reviewDetail(3);
     const keptCandidate = reviewCandidate("kept", {
       userText: "今天做出了重要决定。",
-      subjectPersonId: "person_1",
-      subjectConfirmed: true,
+      subjectPersonId: null,
+      subjectConfirmed: false,
       version: 1
     });
     const kept = reviewDetail(4, [keptCandidate]);
     const get = vi.fn()
       .mockResolvedValueOnce(pending)
       .mockResolvedValueOnce(kept);
-    const listConfirmedPeople = vi.fn(async () => [{
-      id: "person_1",
-      displayName: "林澄",
-      status: "confirmed" as const,
-      version: 1,
-      explicitlyConfirmed: true as const,
-      confirmedAt: NOW,
-      createdAt: NOW,
-      updatedAt: NOW
-    }]);
     const updateCandidates = vi.fn(async () => ({
       reflection: kept.reflection,
       candidates: []
     }));
     const controller = new DailyReflectionSessionController({
-      api: fakeApi({ get, listConfirmedPeople, updateCandidates })
+      api: fakeApi({ get, updateCandidates })
     });
     await controller.initialize("reflection_1");
 
@@ -647,7 +728,7 @@ describe("DailyReflectionSessionController", () => {
       candidateId: "candidate_1",
       status: "kept",
       userText: "今天做出了重要决定。",
-      subjectPersonId: "person_1"
+      subjectPersonId: null
     });
 
     expect(updateCandidates).toHaveBeenCalledWith("reflection_1", {
@@ -656,17 +737,55 @@ describe("DailyReflectionSessionController", () => {
         candidateId: "candidate_1",
         status: "kept",
         userText: "今天做出了重要决定。",
-        subjectPersonId: "person_1"
+        subjectPersonId: null
       }]
     }, expect.any(AbortSignal));
     expect(get).toHaveBeenCalledTimes(2);
     expect(controller.getSnapshot()).toMatchObject({
       state: "review_pending",
       operation: "idle",
-      peopleState: "ready",
-      confirmedPeople: [{ id: "person_1" }],
       detail: { reflection: { version: 4 } }
     });
+  });
+
+  it("accepts all candidates in one versioned mutation and preserves an unclaimed action", async () => {
+    const ordinary = reviewCandidate("pending");
+    const action = reviewCandidateV2();
+    const ready = reviewDetail(3, [ordinary, action]);
+    const accepted = reviewDetail(4, [
+      { ...ordinary, status: "kept" as const, version: 1 },
+      { ...action, status: "kept" as const, version: 1 }
+    ]);
+    const get = vi.fn()
+      .mockResolvedValueOnce(ready)
+      .mockResolvedValueOnce(accepted);
+    const updateCandidates = vi.fn(async () => ({
+      reflection: accepted.reflection,
+      candidates: []
+    }));
+    const controller = new DailyReflectionSessionController({
+      api: fakeApi({ get, updateCandidates })
+    });
+    await controller.initialize("reflection_1");
+
+    await controller.acceptAllCandidates();
+
+    expect(updateCandidates).toHaveBeenCalledWith("reflection_1", {
+      expectedVersion: 3,
+      candidates: [{
+        candidateId: ordinary.id,
+        status: "kept",
+        userText: null,
+        subjectPersonId: null
+      }, {
+        candidateId: action.id,
+        status: "kept",
+        userText: null,
+        subjectPersonId: null,
+        actionClaimed: false
+      }]
+    }, expect.any(AbortSignal));
+    expect(controller.getSnapshot().detail?.candidates).toEqual(accepted.candidates);
   });
 
   it("reloads authoritative truth and shows the exact safe message after a stale update", async () => {
@@ -697,6 +816,191 @@ describe("DailyReflectionSessionController", () => {
     });
   });
 
+  it("persists an explicit action claim without inferring it from candidate kind", async () => {
+    const pendingAction = reviewCandidateV2();
+    const claimedAction = reviewCandidateV2("pending", {
+      actionClaimed: true,
+      candidateType: "commitment",
+      version: 1
+    });
+    const get = vi.fn()
+      .mockResolvedValueOnce(reviewDetail(4, [pendingAction]))
+      .mockResolvedValueOnce(reviewDetail(5, [claimedAction]));
+    const updateCandidates = vi.fn(async () => ({
+      reflection: reviewDetail(5, [claimedAction]).reflection,
+      candidates: []
+    }));
+    const controller = new DailyReflectionSessionController({
+      api: fakeApi({ get, updateCandidates })
+    });
+    await controller.initialize("reflection_1");
+
+    await controller.updateCandidate({
+      candidateId: pendingAction.id,
+      status: "pending",
+      userText: null,
+      subjectPersonId: null,
+      actionClaimed: true
+    });
+
+    expect(updateCandidates).toHaveBeenCalledWith("reflection_1", {
+      expectedVersion: 4,
+      candidates: [expect.objectContaining({ actionClaimed: true })]
+    }, expect.any(AbortSignal));
+    expect(controller.getSnapshot().detail?.candidates[0]).toMatchObject({
+      actionClaimed: true,
+      candidateType: "commitment"
+    });
+  });
+
+  it("creates an Evidence-free manual card for recap only, then reloads server truth", async () => {
+    const failed = detail("reflection_1", "failed");
+    const manual = reviewCandidateV2("pending", {
+      id: "manual_candidate",
+      candidateKind: "insight",
+      proposedText: "这是我手写补充的一点。",
+      candidateType: "summary",
+      evidenceIds: [],
+      sourceSegmentIds: [],
+      evidence: [],
+      confidence: 1,
+      caution: "这是你手写补充的内容，请按原话核对。"
+    });
+    const recovered = reviewDetail(5, [manual]);
+    const get = vi.fn()
+      .mockResolvedValueOnce(failed)
+      .mockResolvedValueOnce(recovered);
+    const { evidence: _evidence, ...manualCandidate } = manual;
+    const createManualCandidate = vi.fn(async () => ({
+      reflection: recovered.reflection,
+      candidate: manualCandidate,
+      retentionEligibility: "recap_only" as const
+    }));
+    const controller = new DailyReflectionSessionController({
+      api: fakeApi({ get, createManualCandidate })
+    });
+    await controller.initialize("reflection_1");
+
+    await controller.createManualCandidate({
+      candidateKind: "insight",
+      proposedText: "这是我手写补充的一点。",
+      evidenceIds: [],
+      confidence: 1,
+      caution: "这是你手写补充的内容，请按原话核对。",
+      actionClaimed: false
+    });
+
+    expect(createManualCandidate).toHaveBeenCalledWith("reflection_1", {
+      expectedVersion: 1,
+      candidateKind: "insight",
+      proposedText: "这是我手写补充的一点。",
+      evidenceIds: [],
+      confidence: 1,
+      caution: "这是你手写补充的内容，请按原话核对。",
+      actionClaimed: false
+    }, expect.any(AbortSignal));
+    expect(controller.getSnapshot()).toMatchObject({
+      state: "review_pending",
+      operation: "idle",
+      detail: { candidates: [{ id: "manual_candidate", evidence: [] }] }
+    });
+  });
+
+  it("excludes one V2 card through DELETE and reloads the recoverable result", async () => {
+    const candidate = reviewCandidateV2("kept");
+    const excluded = reviewCandidateV2("excluded", { version: 1 });
+    const current = reviewDetail(6, [candidate]);
+    const refreshed = reviewDetail(7, [excluded]);
+    const get = vi.fn()
+      .mockResolvedValueOnce(current)
+      .mockResolvedValueOnce(refreshed);
+    const { evidence: _evidence, ...excludedCandidate } = excluded;
+    const excludeCandidate = vi.fn(async () => ({
+      reflection: refreshed.reflection,
+      candidate: excludedCandidate,
+      disposition: "excluded" as const,
+      recoverable: true as const
+    }));
+    const controller = new DailyReflectionSessionController({
+      api: fakeApi({ get, excludeCandidate })
+    });
+    await controller.initialize("reflection_1");
+
+    await controller.excludeCandidate(candidate.id);
+
+    expect(excludeCandidate).toHaveBeenCalledWith("reflection_1", candidate.id, {
+      expectedVersion: 6
+    }, expect.any(AbortSignal));
+    expect(controller.getSnapshot()).toMatchObject({
+      operation: "idle",
+      detail: { candidates: [{ status: "excluded" }] }
+    });
+  });
+
+  it("records recap-only as its own intent and keeps pending cards inside the recap", async () => {
+    const storageValues = new Map<string, string>();
+    const storage = {
+      getItem: (key: string) => storageValues.get(key) ?? null,
+      setItem: (key: string, value: string) => { storageValues.set(key, value); },
+      removeItem: (key: string) => { storageValues.delete(key); }
+    };
+    storeOperationReceipt(storageValues);
+    const pending = reviewCandidateV2();
+    const ready = reviewDetail(1, [pending]);
+    const kept = { ...pending, status: "kept" as const, version: 1 };
+    const updated = reviewDetail(2, [kept]);
+    const completed = recapOnlyCompletedDetail(kept);
+    const confirmation = completed.confirmation;
+    if (!confirmation || !("contractVersion" in confirmation)) {
+      throw new Error("expected a V2 confirmation fixture");
+    }
+    const get = vi.fn()
+      .mockResolvedValueOnce(ready)
+      .mockResolvedValueOnce(updated)
+      .mockResolvedValueOnce(completed);
+    const updateCandidates = vi.fn(async () => ({
+      reflection: updated.reflection,
+      candidates: []
+    }));
+    const finalize = vi.fn(async () => ({
+      reflection: completed.reflection,
+      confirmation,
+      admission: { exists: false as const },
+      reused: false
+    }));
+    const controller = new DailyReflectionSessionController({
+      api: fakeApi({ get, updateCandidates, finalize }),
+      pollIntervalMs: 0,
+      storage
+    });
+    await controller.initialize("reflection_1");
+
+    await controller.finalize("recap_only");
+
+    expect(updateCandidates).toHaveBeenCalledWith("reflection_1", {
+      expectedVersion: 1,
+      candidates: [{
+        candidateId: pending.id,
+        status: "kept",
+        userText: null,
+        subjectPersonId: null,
+        actionClaimed: false
+      }]
+    }, expect.any(AbortSignal));
+    expect(finalize).toHaveBeenCalledWith("reflection_1", {
+      expectedVersion: 2,
+      operationKey: "operation_reflection_1",
+      saveIntent: "recap_only"
+    }, expect.any(AbortSignal));
+    expect(controller.getSnapshot()).toMatchObject({
+      state: "completed",
+      detail: {
+        confirmation: { saveIntent: "recap_only" },
+        admissionOperation: null
+      }
+    });
+  });
+
   it("reuses the same finalize key and expected version after response loss and refresh", async () => {
     const storageValues = new Map<string, string>();
     const storage = {
@@ -704,6 +1008,7 @@ describe("DailyReflectionSessionController", () => {
       setItem: (key: string, value: string) => { storageValues.set(key, value); },
       removeItem: (key: string) => { storageValues.delete(key); }
     };
+    storeOperationReceipt(storageValues);
     const keptCandidate = reviewCandidate("kept", { version: 1 });
     const ready = reviewDetail(7, [keptCandidate]);
     const firstFinalize = vi.fn(async () => {
@@ -711,108 +1016,72 @@ describe("DailyReflectionSessionController", () => {
     });
     const first = new DailyReflectionSessionController({
       api: fakeApi({ get: async () => ready, finalize: firstFinalize }),
-      createFinalizeIdempotencyKey: () => "stable-finalize-key",
       storage
     });
     await first.initialize("reflection_1");
-    await first.finalize();
+    await first.finalize("retain_selected");
     expect(first.getSnapshot()).toMatchObject({
       state: "review_pending",
       operation: "idle",
       errorMessage: "网络连接失败，请检查网络后重试。"
     });
+    await first.finalize("recap_only");
+    expect(firstFinalize).toHaveBeenCalledTimes(1);
+    expect(first.getSnapshot().errorMessage).toBe(
+      "上一次“保存并长期保留”的请求仍待确认，请继续使用原来的保存方式。"
+    );
     first.dispose();
 
-    const confirmation = {
-      id: "confirmation_1",
-      reflectionId: "reflection_1",
-      accountId: "user_1",
-      fingerprint: "a".repeat(64),
-      requestFingerprint: "b".repeat(64),
-      idempotencyKey: "stable-finalize-key",
-      sourceOrigin: "user_reflection" as const,
-      inputMethod: "file_upload" as const,
-      processingProfile: "full_recording" as const,
-      candidateSnapshots: [{
-        candidateId: "candidate_1",
-        proposedText: keptCandidate.proposedText,
-        userText: null,
-        finalText: keptCandidate.proposedText,
-        status: "kept" as const,
-        candidateType: "event" as const,
-        sourceSegmentIds: ["segment_reflection_1"],
-        evidenceSnapshots: [{
-          sourceSegmentId: "segment_reflection_1",
-          uploadId: "upload_reflection_1",
-          startSeconds: 0,
-          endSeconds: 5,
-          text: "今天完成了一个重要决定。",
-          effectiveOrigin: "user_reflection" as const
-        }],
-        subjectPersonId: null
-      }],
-      createdAt: NOW
-    };
-    const admissionOperation = {
-      id: "operation_1",
-      reflectionId: "reflection_1",
-      confirmationId: "confirmation_1",
-      accountId: "user_1",
-      status: "completed" as const,
-      admittedCount: 1,
-      rejectedCount: 0,
-      excludedCount: 0,
-      errorCode: null,
-      createdAt: NOW,
-      updatedAt: NOW,
-      completedAt: NOW
-    };
-    const completedBase = detail("reflection_1", "completed");
-    const completed: DailyReflectionDetailResponse = {
-      ...completedBase,
-      reflection: { ...completedBase.reflection, version: 8 },
-      candidates: [keptCandidate],
-      confirmation,
-      admissionOperation,
-      admissionResults: []
-    };
+    const completed = confirmedDetail("completed", keptCandidate);
+    const confirmation = completed.confirmation;
+    if (!confirmation || !("contractVersion" in confirmation)) {
+      throw new Error("expected a V2 confirmation fixture");
+    }
+    const admissionOperation = completed.admissionOperation!;
     const get = vi.fn()
       .mockResolvedValueOnce(ready)
       .mockResolvedValueOnce(completed);
     const secondFinalize = vi.fn(async () => ({
       reflection: completed.reflection,
       confirmation,
-      admissionOperation,
-      admissionResults: [],
+      admission: { exists: true as const, operation: admissionOperation, results: [] },
       reused: true
     }));
-    const secondKeyFactory = vi.fn(() => "must-not-be-used");
     const second = new DailyReflectionSessionController({
       api: fakeApi({ get, finalize: secondFinalize }),
-      createFinalizeIdempotencyKey: secondKeyFactory,
       storage
     });
     await second.initialize("reflection_1");
-    await second.finalize();
+    await second.finalize("retain_selected");
 
     expect(firstFinalize).toHaveBeenCalledWith("reflection_1", {
       expectedVersion: 7,
-      idempotencyKey: "stable-finalize-key"
+      operationKey: "operation_reflection_1",
+      saveIntent: "retain_selected"
     }, expect.any(AbortSignal));
     expect(secondFinalize).toHaveBeenCalledWith("reflection_1", {
       expectedVersion: 7,
-      idempotencyKey: "stable-finalize-key"
+      operationKey: "operation_reflection_1",
+      saveIntent: "retain_selected"
     }, expect.any(AbortSignal));
-    expect(secondKeyFactory).not.toHaveBeenCalled();
     expect(second.getSnapshot()).toMatchObject({
       state: "completed",
       operation: "idle",
       detail: { admissionOperation: { admittedCount: 1 } }
     });
-    expect(storageValues.size).toBe(0);
+    expect([...storageValues.keys()]).toEqual([
+      "daily-reflection:operation-receipt:v2:user_1:reflection_1"
+    ]);
   });
 
   it("keeps polling confirmation and admission phases until completion", async () => {
+    const storageValues = new Map<string, string>();
+    storeOperationReceipt(storageValues);
+    const storage = {
+      getItem: (key: string) => storageValues.get(key) ?? null,
+      setItem: (key: string, value: string) => { storageValues.set(key, value); },
+      removeItem: (key: string) => { storageValues.delete(key); }
+    };
     const keptCandidate = reviewCandidate("kept", { version: 1 });
     const ready = reviewDetail(7, [keptCandidate]);
     const confirmationReady = confirmedDetail("confirmation_ready", keptCandidate);
@@ -823,21 +1092,28 @@ describe("DailyReflectionSessionController", () => {
       .mockResolvedValueOnce(confirmationReady)
       .mockResolvedValueOnce(admitting)
       .mockResolvedValueOnce(completed);
+    const confirmation = confirmationReady.confirmation;
+    if (!confirmation || !("contractVersion" in confirmation)) {
+      throw new Error("expected a V2 confirmation fixture");
+    }
     const finalize = vi.fn(async () => ({
       reflection: confirmationReady.reflection,
-      confirmation: confirmationReady.confirmation!,
-      admissionOperation: confirmationReady.admissionOperation!,
-      admissionResults: [],
+      confirmation,
+      admission: {
+        exists: true as const,
+        operation: confirmationReady.admissionOperation!,
+        results: []
+      },
       reused: false
     }));
     const controller = new DailyReflectionSessionController({
       api: fakeApi({ get, finalize }),
-      createFinalizeIdempotencyKey: () => "stable-finalize-key",
-      pollIntervalMs: 0
+      pollIntervalMs: 0,
+      storage
     });
     await controller.initialize("reflection_1");
 
-    await controller.finalize();
+    await controller.finalize("retain_selected");
 
     expect(get).toHaveBeenCalledTimes(4);
     expect(controller.getSnapshot()).toMatchObject({
@@ -854,6 +1130,7 @@ describe("DailyReflectionSessionController", () => {
       setItem: (key: string, value: string) => { storageValues.set(key, value); },
       removeItem: (key: string) => { storageValues.delete(key); }
     };
+    storeOperationReceipt(storageValues);
     const keptCandidate = reviewCandidate("kept", { version: 1 });
     const ready = reviewDetail(7, [keptCandidate]);
     const failed = confirmedDetail("admission_failed", keptCandidate);
@@ -870,36 +1147,48 @@ describe("DailyReflectionSessionController", () => {
       .mockResolvedValueOnce({
         reflection: completed.reflection,
         confirmation: completed.confirmation!,
-        admissionOperation: completed.admissionOperation!,
-        admissionResults: [],
+        admission: {
+          exists: true as const,
+          operation: completed.admissionOperation!,
+          results: []
+        },
         reused: true
       });
     const controller = new DailyReflectionSessionController({
       api: fakeApi({ get, finalize }),
-      createFinalizeIdempotencyKey: () => "stable-finalize-key",
       pollIntervalMs: 0,
       storage
     });
     await controller.initialize("reflection_1");
 
-    await controller.finalize();
+    await controller.finalize("retain_selected");
     expect(controller.getSnapshot()).toMatchObject({
       state: "admission_failed",
       operation: "idle"
     });
-    expect(storageValues.size).toBe(1);
+    expect(storageValues.size).toBe(2);
 
-    await controller.finalize();
+    await controller.finalize("retain_selected");
     expect(finalize).toHaveBeenCalledTimes(2);
     expect(finalize.mock.calls.map((call) => call[1])).toEqual([
-      { expectedVersion: 7, idempotencyKey: "stable-finalize-key" },
-      { expectedVersion: 7, idempotencyKey: "stable-finalize-key" }
+      {
+        expectedVersion: 7,
+        operationKey: "operation_reflection_1",
+        saveIntent: "retain_selected"
+      },
+      {
+        expectedVersion: 7,
+        operationKey: "operation_reflection_1",
+        saveIntent: "retain_selected"
+      }
     ]);
     expect(controller.getSnapshot()).toMatchObject({
       state: "completed",
       operation: "idle"
     });
-    expect(storageValues.size).toBe(0);
+    expect([...storageValues.keys()]).toEqual([
+      "daily-reflection:operation-receipt:v2:user_1:reflection_1"
+    ]);
   });
 
   it("reuses one persisted candidate revocation request after refresh and a 503", async () => {

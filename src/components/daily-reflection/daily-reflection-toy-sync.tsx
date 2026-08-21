@@ -19,7 +19,6 @@ import {
 import {
   createBrowserToySyncRuntime,
   createToySyncOperationKey,
-  createToySyncUploadIdempotencyKey,
   type ToySyncRuntime,
   type ToySyncPermissionDirectoryHandle
 } from "@/lib/client/daily-reflection-toy-sync-storage";
@@ -43,12 +42,13 @@ export type DailyReflectionToySyncProps = Readonly<{
   onUpload(
     file: File,
     recordingDate: string,
-    idempotencyKey: string
+    operationKey: string
   ): Promise<boolean>;
   runtime?: ToySyncRuntime;
 }>;
 
 export type ToySyncUploadAttempt = Readonly<{
+  operationKey: string;
   operation?: ToySyncUploadOperation;
   acceptReceipt(receipt: ToyIngestionReceipt): Promise<boolean>;
   finish(receiptReceived: boolean): Promise<void>;
@@ -83,7 +83,7 @@ export type ToyAudioSyncProps = Readonly<{
   onUpload?: (
     file: File,
     recordingDate: string,
-    idempotencyKey: string
+    operationKey: string
   ) => Promise<boolean>;
   runtime?: ToySyncRuntime;
   selectedDuplicateKey?: string | null;
@@ -476,30 +476,37 @@ export function ToyAudioSync({
       || !["new", "failed"].includes(currentRecord.status)
       || inFlightUploadsRef.current.size > 0
     ) throw new Error("toy_sync_upload_unavailable");
-    let operation: ToySyncUploadOperation | undefined;
-    if (destination === "date_companion") {
-      const scopedRelationshipId = relationshipId?.normalize("NFKC").trim();
-      if (!scopedRelationshipId || currentRecord.relationshipId !== scopedRelationshipId) {
-        throw new Error("toy_sync_relationship_scope_required");
-      }
-      const operationKey = currentRecord.operationKey ?? await createToySyncOperationKey({
-        accountId,
-        destination,
-        relationshipId: scopedRelationshipId,
-        duplicateKey: recording.duplicateKey
-      });
-      operation = {
-        operationKey,
-        destination,
-        relationshipId: scopedRelationshipId
-      };
-    }
     inFlightUploadsRef.current.add(uploadLatchKey);
+    let operation: ToySyncUploadOperation | undefined;
+    let operationKey: string;
     let workingState: ToySyncState;
     try {
+      if (destination === "date_companion") {
+        const scopedRelationshipId = relationshipId?.normalize("NFKC").trim();
+        if (!scopedRelationshipId || currentRecord.relationshipId !== scopedRelationshipId) {
+          throw new Error("toy_sync_relationship_scope_required");
+        }
+        operationKey = currentRecord.operationKey ?? await createToySyncOperationKey({
+          accountId,
+          destination,
+          relationshipId: scopedRelationshipId,
+          duplicateKey: recording.duplicateKey
+        });
+        operation = {
+          operationKey,
+          destination,
+          relationshipId: scopedRelationshipId
+        };
+      } else {
+        operationKey = currentRecord.operationKey ?? await createToySyncOperationKey({
+          accountId,
+          destination,
+          duplicateKey: recording.duplicateKey
+        });
+      }
       const nextState = await updateRecord(recording, "uploading", {
         recordingDate,
-        ...(operation ? { operationKey: operation.operationKey } : {})
+        operationKey
       });
       if (!nextState) throw new Error("toy_sync_state_unavailable");
       workingState = nextState;
@@ -510,6 +517,7 @@ export function ToyAudioSync({
     let finished = false;
     let finishPromise: Promise<void> | null = null;
     return {
+      operationKey,
       ...(operation ? { operation } : {}),
       async acceptReceipt(receipt) {
         workingState = applyToySyncReceipt(
@@ -593,8 +601,11 @@ export function ToyAudioSync({
     let attempt: ToySyncUploadAttempt | null = null;
     try {
       attempt = await beginUpload(recording, recordingDate);
-      const idempotencyKey = await createToySyncUploadIdempotencyKey(recording.duplicateKey);
-      const receiptReceived = await onUpload(recording.file, recordingDate, idempotencyKey);
+      const receiptReceived = await onUpload(
+        recording.file,
+        recordingDate,
+        attempt.operationKey
+      );
       await attempt.finish(receiptReceived);
     } catch {
       await attempt?.finish(false).catch(() => undefined);

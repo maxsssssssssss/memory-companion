@@ -52,8 +52,10 @@ function uploadInput(overrides: Partial<DailyReflectionUploadInput> = {}) {
     file: new File([new Uint8Array([1, 2, 3])], "reflection.wav", {
       type: "audio/wav"
     }),
+    operationKey: "upload_request_1",
+    inputAdapter: "file_picker" as const,
     sourceOrigin: "user_reflection" as const,
-    idempotencyKey: "upload_request_1",
+    capturePurpose: "inspiration_capture" as const,
     recordingDate: "2026-08-13",
     ...overrides
   };
@@ -66,7 +68,10 @@ function browserRecordingInput(
     file: new File([new Uint8Array([1, 2, 3])], "reflection.webm", {
       type: "audio/webm"
     }),
-    idempotencyKey: "browser_request_1",
+    operationKey: "browser_request_1",
+    inputAdapter: "browser_recorder" as const,
+    sourceOrigin: "user_reflection" as const,
+    capturePurpose: "inspiration_capture" as const,
     recordingDate: "2026-08-13",
     clientReportedDurationMs: 61_250,
     ...overrides
@@ -117,11 +122,14 @@ describe("createDailyReflectionApi", () => {
       .resolves.toBeNull();
   });
 
-  it("posts the four required multipart fields without setting Content-Type", async () => {
+  it("posts the complete V2 file input and validates the formal operation receipt", async () => {
     const fetcher = vi.fn<typeof fetch>().mockResolvedValue(jsonResponse({
       reflectionId: "reflection_1",
       uploadId: "upload_1",
       jobId: "job_1",
+      operationKey: "upload_request_1",
+      contentHash: "a".repeat(64),
+      capturePurpose: "inspiration_capture",
       status: "uploading",
       executionMode: "inline"
     }, 201));
@@ -140,21 +148,30 @@ describe("createDailyReflectionApi", () => {
     const body = init?.body as FormData;
     expect(body.get("file")).toBe(input.file);
     expect(body.get("sourceOrigin")).toBe("direct_conversation");
+    expect(body.get("operationKey")).toBe("upload_request_1");
     expect(body.get("idempotencyKey")).toBe("upload_request_1");
+    expect(body.get("inputAdapter")).toBe("file_picker");
+    expect(body.get("capturePurpose")).toBe("inspiration_capture");
     expect(body.get("recordingDate")).toBe("2026-08-13");
     expect([...body.keys()].sort()).toEqual([
+      "capturePurpose",
       "file",
       "idempotencyKey",
+      "inputAdapter",
+      "operationKey",
       "recordingDate",
       "sourceOrigin"
     ]);
   });
 
-  it("posts a browser recording without client-selected provenance or profile", async () => {
+  it("posts the complete V2 browser input without client-selected processing profile", async () => {
     const fetcher = vi.fn<typeof fetch>().mockResolvedValue(jsonResponse({
       reflectionId: "reflection_browser_1",
       uploadId: "upload_browser_1",
       jobId: "job_browser_1",
+      operationKey: "browser_request_1",
+      contentHash: "b".repeat(64),
+      capturePurpose: "inspiration_capture",
       status: "uploading",
       executionMode: "inline"
     }, 201));
@@ -171,17 +188,24 @@ describe("createDailyReflectionApi", () => {
     const body = init?.body as FormData;
     expect(body.get("file")).toBe(input.file);
     expect(body.get("inputMethod")).toBe("browser_recording");
+    expect(body.get("operationKey")).toBe("browser_request_1");
     expect(body.get("idempotencyKey")).toBe("browser_request_1");
+    expect(body.get("inputAdapter")).toBe("browser_recorder");
+    expect(body.get("sourceOrigin")).toBe("user_reflection");
+    expect(body.get("capturePurpose")).toBe("inspiration_capture");
     expect(body.get("recordingDate")).toBe("2026-08-13");
     expect(body.get("clientReportedDurationMs")).toBe("61250");
-    expect(body.has("sourceOrigin")).toBe(false);
     expect(body.has("processingProfile")).toBe(false);
     expect([...body.keys()].sort()).toEqual([
+      "capturePurpose",
       "clientReportedDurationMs",
       "file",
       "idempotencyKey",
+      "inputAdapter",
       "inputMethod",
-      "recordingDate"
+      "operationKey",
+      "recordingDate",
+      "sourceOrigin"
     ]);
   });
 
@@ -190,6 +214,9 @@ describe("createDailyReflectionApi", () => {
       reflectionId: "reflection_browser_1",
       uploadId: "upload_browser_1",
       jobId: "job_browser_1",
+      operationKey: "browser_request_1",
+      contentHash: "b".repeat(64),
+      capturePurpose: "inspiration_capture",
       status: "uploading",
       executionMode: "inline"
     }, 201));
@@ -272,6 +299,9 @@ describe("createDailyReflectionApi", () => {
       reflectionId: "reflection_toy_1",
       uploadId: "upload_toy_1",
       jobId: "job_toy_1",
+      operationKey: "upload_request_1",
+      contentHash: "c".repeat(64),
+      capturePurpose: "inspiration_capture",
       status: "uploading",
       executionMode: "inline"
     }, 201));
@@ -283,39 +313,6 @@ describe("createDailyReflectionApi", () => {
     expect(body.get("inputAdapter")).toBe("toy_sync");
     expect(body.get("sourceOrigin")).toBe("user_reflection");
     expect(body.has("inputMethod")).toBe(false);
-  });
-
-  it("loads only strictly parsed confirmed people from the current account endpoint", async () => {
-    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(jsonResponse({
-      people: [{
-        id: "person_1",
-        displayName: "林澄",
-        status: "confirmed",
-        version: 2,
-        explicitlyConfirmed: true,
-        confirmedAt: "2026-08-13T08:00:00.000Z",
-        createdAt: "2026-08-13T08:00:00.000Z",
-        updatedAt: "2026-08-13T08:00:00.000Z",
-        accountId: "server-owned-extra"
-      }]
-    }));
-
-    await expect(createDailyReflectionApi(fetcher).listConfirmedPeople()).resolves.toEqual([{
-      id: "person_1",
-      displayName: "林澄",
-      status: "confirmed",
-      version: 2,
-      explicitlyConfirmed: true,
-      confirmedAt: "2026-08-13T08:00:00.000Z",
-      createdAt: "2026-08-13T08:00:00.000Z",
-      updatedAt: "2026-08-13T08:00:00.000Z",
-      accountId: "server-owned-extra"
-    }]);
-    expect(fetcher).toHaveBeenCalledWith("/api/people", {
-      method: "GET",
-      signal: undefined,
-      credentials: "same-origin"
-    });
   });
 
   it("loads a strict source-aware recent Reflection list without accepting extra fields", async () => {
@@ -355,7 +352,7 @@ describe("createDailyReflectionApi", () => {
       .rejects.toMatchObject({ code: "invalid_response" });
   });
 
-  it("sends candidate decisions and final confirmation through their strict contracts", async () => {
+  it("sends candidate decisions and the discriminated V2 finalize contract", async () => {
     const reviewedReflection = { ...reflection("review_pending"), version: 4 };
     const candidate = {
       id: "candidate_1",
@@ -366,29 +363,38 @@ describe("createDailyReflectionApi", () => {
       status: "kept",
       candidateType: "event",
       sourceSegmentIds: ["segment_1"],
-      subjectPersonId: "person_1",
-      subjectConfirmed: true,
+      subjectPersonId: null,
+      subjectConfirmed: false,
       version: 1,
       createdAt: "2026-08-13T08:00:00.000Z",
       updatedAt: "2026-08-13T08:00:00.000Z"
     };
     const confirmation = {
+      contractVersion: 2,
       id: "confirmation_1",
       reflectionId: "reflection_1",
       accountId: "user_1",
       fingerprint: "a".repeat(64),
       requestFingerprint: "b".repeat(64),
       idempotencyKey: "finalize-key-1",
+      operationKey: "upload_request_1",
       sourceOrigin: "user_reflection",
       inputMethod: "file_upload",
       processingProfile: "full_recording",
+      inputAdapter: "file_picker",
+      capturePurpose: "inspiration_capture",
+      recordingDate: "2026-08-13",
+      saveIntent: "retain_selected",
       candidateSnapshots: [{
+        contractVersion: 2,
         candidateId: "candidate_1",
         proposedText: "今天完成了重要决定。",
         userText: "今天完成了决定。",
         finalText: "今天完成了决定。",
         status: "kept",
-        candidateType: "event",
+        candidateKind: "insight",
+        candidateType: "summary",
+        evidenceIds: ["segment_1"],
         sourceSegmentIds: ["segment_1"],
         evidenceSnapshots: [{
           sourceSegmentId: "segment_1",
@@ -398,7 +404,10 @@ describe("createDailyReflectionApi", () => {
           text: "今天完成了一个重要决定。",
           effectiveOrigin: "user_reflection"
         }],
-        subjectPersonId: "person_1"
+        confidence: 0.8,
+        caution: "请按你的实际感受判断。",
+        actionClaimed: false,
+        subjectPersonId: null
       }],
       createdAt: "2026-08-13T08:00:00.000Z"
     };
@@ -421,8 +430,7 @@ describe("createDailyReflectionApi", () => {
       .mockResolvedValueOnce(jsonResponse({
         reflection: { ...reviewedReflection, status: "confirmation_ready", version: 5 },
         confirmation,
-        admissionOperation: operation,
-        admissionResults: [],
+        admission: { exists: true, operation, results: [] },
         reused: false
       }));
     const api = createDailyReflectionApi(fetcher);
@@ -433,12 +441,14 @@ describe("createDailyReflectionApi", () => {
         candidateId: "candidate_1",
         status: "kept",
         userText: "  今天完成了决定。  ",
-        subjectPersonId: "person_1"
+        subjectPersonId: null,
+        actionClaimed: false
       }]
     });
     await api.finalize("reflection/1", {
       expectedVersion: 4,
-      idempotencyKey: "finalize-key-1"
+      operationKey: "upload_request_1",
+      saveIntent: "retain_selected"
     });
 
     expect(fetcher.mock.calls.map(([url, init]) => [url, init?.method])).toEqual([
@@ -451,13 +461,140 @@ describe("createDailyReflectionApi", () => {
         candidateId: "candidate_1",
         status: "kept",
         userText: "今天完成了决定。",
-        subjectPersonId: "person_1"
+        subjectPersonId: null,
+        actionClaimed: false
       }]
     });
     expect(JSON.parse(String(fetcher.mock.calls[1][1]?.body))).toEqual({
       expectedVersion: 4,
-      idempotencyKey: "finalize-key-1"
+      operationKey: "upload_request_1",
+      saveIntent: "retain_selected"
     });
+  });
+
+  it("parses recap-only as a finalize result without a long-term operation", async () => {
+    const base = reflection("completed");
+    const confirmation = {
+      contractVersion: 2,
+      id: "confirmation_recap",
+      reflectionId: "reflection_1",
+      accountId: "user_1",
+      fingerprint: "c".repeat(64),
+      requestFingerprint: "d".repeat(64),
+      idempotencyKey: "upload_request_1",
+      operationKey: "upload_request_1",
+      sourceOrigin: "user_reflection",
+      inputMethod: "file_upload",
+      processingProfile: "full_recording",
+      inputAdapter: "file_picker",
+      capturePurpose: "inspiration_capture",
+      recordingDate: "2026-08-13",
+      saveIntent: "recap_only",
+      candidateSnapshots: [{
+        contractVersion: 2,
+        candidateId: "candidate_1",
+        proposedText: "今天想慢一点。",
+        userText: null,
+        finalText: "今天想慢一点。",
+        status: "kept",
+        candidateKind: "insight",
+        candidateType: "summary",
+        evidenceIds: [],
+        sourceSegmentIds: [],
+        evidenceSnapshots: [],
+        confidence: 0.7,
+        caution: "这是一次简短整理。",
+        actionClaimed: false,
+        subjectPersonId: null
+      }],
+      createdAt: "2026-08-13T08:00:00.000Z"
+    };
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(jsonResponse({
+      reflection: base,
+      confirmation,
+      admission: { exists: false },
+      reused: false
+    }));
+
+    await expect(createDailyReflectionApi(fetcher).finalize("reflection_1", {
+      expectedVersion: 4,
+      operationKey: "upload_request_1",
+      saveIntent: "recap_only"
+    })).resolves.toMatchObject({ admission: { exists: false } });
+  });
+
+  it("creates a manual V2 candidate and excludes one card through strict minimal contracts", async () => {
+    const candidate = {
+      contractVersion: 2,
+      id: "candidate_2",
+      reflectionId: "reflection_1",
+      ordinal: 1,
+      proposedText: "我想继续练习慢下来。",
+      userText: null,
+      status: "pending",
+      candidateKind: "user_action",
+      candidateType: "commitment",
+      evidenceIds: ["segment_1"],
+      sourceSegmentIds: ["segment_1"],
+      confidence: 1,
+      caution: "这是你手写补充的内容，请按原话核对。",
+      actionClaimed: true,
+      subjectPersonId: null,
+      subjectConfirmed: false,
+      version: 0,
+      createdAt: "2026-08-13T08:00:00.000Z",
+      updatedAt: "2026-08-13T08:00:00.000Z"
+    };
+    const reviewed = { ...reflection("review_pending"), version: 5 };
+    const fetcher = vi.fn<typeof fetch>()
+      .mockResolvedValueOnce(jsonResponse({
+        reflection: reviewed,
+        candidate,
+        retentionEligibility: "retain_selected"
+      }, 201))
+      .mockResolvedValueOnce(jsonResponse({
+        reflection: { ...reviewed, version: 6 },
+        candidate: { ...candidate, status: "excluded", version: 1 },
+        disposition: "excluded",
+        recoverable: true
+      }));
+    const api = createDailyReflectionApi(fetcher);
+
+    await api.createManualCandidate("reflection/1", {
+      expectedVersion: 4,
+      candidateKind: "user_action",
+      proposedText: " 我想继续练习慢下来。 ",
+      evidenceIds: ["segment_1"],
+      confidence: 1,
+      caution: "这是你手写补充的内容，请按原话核对。",
+      actionClaimed: true
+    });
+    await api.excludeCandidate("reflection/1", "candidate/2", { expectedVersion: 5 });
+
+    expect(fetcher.mock.calls.map(([url, init]) => [url, init?.method])).toEqual([
+      ["/api/daily-reflections/reflection%2F1/candidates", "POST"],
+      ["/api/daily-reflections/reflection%2F1/candidates/candidate%2F2", "DELETE"]
+    ]);
+    expect(JSON.parse(String(fetcher.mock.calls[0][1]?.body))).toMatchObject({
+      proposedText: "我想继续练习慢下来。",
+      evidenceIds: ["segment_1"],
+      actionClaimed: true
+    });
+    expect(JSON.parse(String(fetcher.mock.calls[1][1]?.body))).toEqual({ expectedVersion: 5 });
+  });
+
+  it("rejects a claimed manual action without canonical Evidence before sending", async () => {
+    const fetcher = vi.fn<typeof fetch>();
+    await expect(createDailyReflectionApi(fetcher).createManualCandidate("reflection_1", {
+      expectedVersion: 4,
+      candidateKind: "user_action",
+      proposedText: "我要做这件事。",
+      evidenceIds: [],
+      confidence: 1,
+      caution: "这是你手写补充的内容，请按原话核对。",
+      actionClaimed: true
+    })).rejects.toMatchObject({ code: "invalid_manual_candidate_v2" });
+    expect(fetcher).not.toHaveBeenCalled();
   });
 
   it("revokes one saved candidate through a strict minimal contract", async () => {

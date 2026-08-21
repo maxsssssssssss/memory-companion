@@ -2,26 +2,31 @@
 
 import { useEffect, useState, useSyncExternalStore } from "react";
 
-import type {
-  AuthState,
-  DateCompanionConfirmedPerson
-} from "@/lib/domain/date-companion";
+import type { AuthState } from "@/lib/domain/date-companion";
 import type {
   DailyReflectionCandidateDecision,
   DailyReflectionDetailResponse,
   DailyReflectionHistoryItem
 } from "@/lib/domain/daily-reflection-api";
-import type { DailyReflectionStatus, SourceOrigin } from "@/lib/domain/daily-reflection";
+import type {
+  DailyReflectionStatus,
+  DailyReflectionV2Input
+} from "@/lib/domain/daily-reflection";
 
 import {
   DailyReflectionApiError,
+  DailyReflectionOperationReceiptSchema,
   createDailyReflectionApi,
-  type DailyReflectionApi
+  type DailyReflectionApi,
+  type DailyReflectionManualCandidateInput,
+  type DailyReflectionUploadReceipt
 } from "./daily-reflection-api";
 
-export type DailyReflectionUploadSource = Extract<
-  SourceOrigin,
-  "user_reflection" | "direct_conversation" | "unknown"
+export type DailyReflectionUploadSource = DailyReflectionV2Input["sourceOrigin"];
+export type DailyReflectionSaveIntent = "recap_only" | "retain_selected";
+export type DailyReflectionManualCandidateDraft = Omit<
+  DailyReflectionManualCandidateInput,
+  "expectedVersion"
 >;
 
 export type DailyReflectionSessionState =
@@ -38,15 +43,16 @@ export type DailyReflectionSessionOperation =
   | "cancelling"
   | "deleting"
   | "saving_candidate"
+  | "creating_candidate"
+  | "excluding_candidate"
   | "finalizing"
   | "revoking_candidate";
 
 export type DailyReflectionUploadOptions = Readonly<{
-  idempotencyKey?: string;
-  inputAdapter?: "toy_sync";
+  operationKey?: string;
+  inputAdapter?: DailyReflectionV2Input["inputAdapter"];
 }>;
 
-export type DailyReflectionPeopleState = "idle" | "loading" | "ready" | "error";
 export type DailyReflectionHistoryState = "idle" | "loading" | "ready" | "error";
 
 export type DailyReflectionSessionSnapshot = {
@@ -58,8 +64,7 @@ export type DailyReflectionSessionSnapshot = {
   selectedFile: File | null;
   sourceOrigin: DailyReflectionUploadSource | null;
   recordingDate: string;
-  confirmedPeople: DateCompanionConfirmedPerson[];
-  peopleState: DailyReflectionPeopleState;
+  operationReceipt: DailyReflectionUploadReceipt | null;
   history: DailyReflectionHistoryItem[];
   historyState: DailyReflectionHistoryState;
   historyErrorMessage: string | null;
@@ -71,7 +76,6 @@ export type DailyReflectionSessionOptions = {
   api?: DailyReflectionApi;
   pollIntervalMs?: number;
   createIdempotencyKey?: () => string;
-  createFinalizeIdempotencyKey?: () => string;
   createRevocationIdempotencyKey?: () => string;
   storage?: Pick<Storage, "getItem" | "setItem" | "removeItem"> | null;
   onReflectionIdChange?: (reflectionId: string | null) => void;
@@ -96,13 +100,17 @@ export type DailyReflectionSessionValue = DailyReflectionSessionSnapshot & {
     file: File,
     clientReportedDurationMs: number | undefined,
     recordingDate: string,
-    idempotencyKey: string
+    operationKey: string
   ): Promise<void>;
   reload(reflectionId?: string | null): Promise<void>;
   refreshHistory(): Promise<void>;
   startNew(): void;
   updateCandidate(decision: DailyReflectionCandidateDecision): Promise<void>;
-  finalize(): Promise<void>;
+  updateCandidates(decisions: readonly DailyReflectionCandidateDecision[]): Promise<void>;
+  acceptAllCandidates(): Promise<void>;
+  createManualCandidate(candidate: DailyReflectionManualCandidateDraft): Promise<void>;
+  excludeCandidate(candidateId: string): Promise<void>;
+  finalize(saveIntent: DailyReflectionSaveIntent): Promise<void>;
   revokeCandidate(candidateId: string): Promise<void>;
   retry(): Promise<void>;
   cancel(): Promise<void>;
@@ -120,8 +128,7 @@ const INITIAL_SNAPSHOT: DailyReflectionSessionSnapshot = {
   selectedFile: null,
   sourceOrigin: null,
   recordingDate: "",
-  confirmedPeople: [],
-  peopleState: "idle",
+  operationReceipt: null,
   history: [],
   historyState: "idle",
   historyErrorMessage: null,
@@ -184,12 +191,6 @@ function defaultIdempotencyKey(): string {
   return `daily-reflection-${id}`;
 }
 
-function defaultFinalizeIdempotencyKey(): string {
-  const id = globalThis.crypto?.randomUUID?.()
-    ?? `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
-  return `daily-reflection-finalize-${id}`;
-}
-
 function defaultRevocationIdempotencyKey(): string {
   const id = globalThis.crypto?.randomUUID?.()
     ?? `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
@@ -200,7 +201,8 @@ type FinalizeAttempt = Readonly<{
   reflectionId: string;
   accountId: string;
   expectedVersion: number;
-  idempotencyKey: string;
+  operationKey: string;
+  saveIntent: DailyReflectionSaveIntent;
 }>;
 
 type RevocationAttempt = Readonly<{
@@ -211,12 +213,17 @@ type RevocationAttempt = Readonly<{
   idempotencyKey: string;
 }>;
 
-const FINALIZE_ATTEMPT_STORAGE_PREFIX = "daily-reflection:finalize:v1";
+const FINALIZE_ATTEMPT_STORAGE_PREFIX = "daily-reflection:finalize:v2";
+const OPERATION_RECEIPT_STORAGE_PREFIX = "daily-reflection:operation-receipt:v2";
 const REVOCATION_ATTEMPT_STORAGE_PREFIX = "daily-reflection:revoke:v1";
 const STALE_MESSAGE = "这份复盘已经在其他页面更新，请重新加载最新内容。";
 
 function finalizeAttemptStorageKey(accountId: string, reflectionId: string): string {
   return `${FINALIZE_ATTEMPT_STORAGE_PREFIX}:${encodeURIComponent(accountId)}:${encodeURIComponent(reflectionId)}`;
+}
+
+function operationReceiptStorageKey(accountId: string, reflectionId: string): string {
+  return `${OPERATION_RECEIPT_STORAGE_PREFIX}:${encodeURIComponent(accountId)}:${encodeURIComponent(reflectionId)}`;
 }
 
 function parseFinalizeAttempt(value: string | null): FinalizeAttempt | null {
@@ -228,8 +235,9 @@ function parseFinalizeAttempt(value: string | null): FinalizeAttempt | null {
       || typeof parsed.accountId !== "string"
       || !Number.isInteger(parsed.expectedVersion)
       || (parsed.expectedVersion ?? -1) < 0
-      || typeof parsed.idempotencyKey !== "string"
-      || !parsed.idempotencyKey.trim()
+      || typeof parsed.operationKey !== "string"
+      || !parsed.operationKey.trim()
+      || (parsed.saveIntent !== "recap_only" && parsed.saveIntent !== "retain_selected")
     ) return null;
     return parsed as FinalizeAttempt;
   } catch {
@@ -268,7 +276,6 @@ export class DailyReflectionSessionController {
   private readonly api: DailyReflectionApi;
   private readonly pollIntervalMs: number;
   private readonly createIdempotencyKey: () => string;
-  private readonly createFinalizeIdempotencyKey: () => string;
   private readonly createRevocationIdempotencyKey: () => string;
   private readonly storage: Pick<Storage, "getItem" | "setItem" | "removeItem"> | null;
   private readonly onReflectionIdChange?: (reflectionId: string | null) => void;
@@ -276,11 +283,9 @@ export class DailyReflectionSessionController {
   private snapshot: DailyReflectionSessionSnapshot = { ...INITIAL_SNAPSHOT };
   private authController: AbortController | null = null;
   private workController: AbortController | null = null;
-  private peopleController: AbortController | null = null;
   private historyController: AbortController | null = null;
   private authGeneration = 0;
   private workGeneration = 0;
-  private peopleGeneration = 0;
   private historyGeneration = 0;
   private finalizeAttempt: FinalizeAttempt | null = null;
   private revocationAttempt: RevocationAttempt | null = null;
@@ -290,8 +295,6 @@ export class DailyReflectionSessionController {
     this.api = options.api ?? createDailyReflectionApi();
     this.pollIntervalMs = Math.max(0, options.pollIntervalMs ?? 1_200);
     this.createIdempotencyKey = options.createIdempotencyKey ?? defaultIdempotencyKey;
-    this.createFinalizeIdempotencyKey = options.createFinalizeIdempotencyKey
-      ?? defaultFinalizeIdempotencyKey;
     this.createRevocationIdempotencyKey = options.createRevocationIdempotencyKey
       ?? defaultRevocationIdempotencyKey;
     this.storage = options.storage === undefined
@@ -329,10 +332,9 @@ export class DailyReflectionSessionController {
       operation: "idle",
       reflectionId: null,
       detail: null,
+      operationReceipt: null,
       ...(clearAccountData
         ? {
-            confirmedPeople: [],
-            peopleState: "idle" as const,
             history: [],
             historyState: "idle" as const,
             historyErrorMessage: null
@@ -360,12 +362,6 @@ export class DailyReflectionSessionController {
     this.workGeneration += 1;
   }
 
-  private abortPeople() {
-    this.peopleController?.abort();
-    this.peopleController = null;
-    this.peopleGeneration += 1;
-  }
-
   private abortHistory() {
     this.historyController?.abort();
     this.historyController = null;
@@ -378,7 +374,6 @@ export class DailyReflectionSessionController {
   } {
     this.abortAuthentication();
     this.abortWork();
-    this.abortPeople();
     this.abortHistory();
     const controller = new AbortController();
     const generation = this.authGeneration;
@@ -391,14 +386,6 @@ export class DailyReflectionSessionController {
     const controller = new AbortController();
     const generation = this.workGeneration;
     this.workController = controller;
-    return { controller, generation };
-  }
-
-  private beginPeople(): { controller: AbortController; generation: number } {
-    this.abortPeople();
-    const controller = new AbortController();
-    const generation = this.peopleGeneration;
-    this.peopleController = controller;
     return { controller, generation };
   }
 
@@ -424,13 +411,6 @@ export class DailyReflectionSessionController {
       && !controller.signal.aborted;
   }
 
-  private isCurrentPeople(controller: AbortController, generation: number): boolean {
-    return !this.disposed
-      && this.peopleController === controller
-      && this.peopleGeneration === generation
-      && !controller.signal.aborted;
-  }
-
   private isCurrentHistory(controller: AbortController, generation: number): boolean {
     return !this.disposed
       && this.historyController === controller
@@ -441,7 +421,6 @@ export class DailyReflectionSessionController {
   private expireAuthentication() {
     this.abortAuthentication();
     this.abortWork();
-    this.abortPeople();
     this.abortHistory();
     this.resetWorkflow(true);
     this.update({ auth: { status: "anonymous" } });
@@ -451,6 +430,60 @@ export class DailyReflectionSessionController {
     return this.snapshot.auth.status === "authenticated"
       ? this.snapshot.auth.user.id
       : null;
+  }
+
+  private readOperationReceipt(reflectionId: string): DailyReflectionUploadReceipt | null {
+    const accountId = this.authenticatedAccountId();
+    if (this.snapshot.operationReceipt?.reflectionId === reflectionId) {
+      return this.snapshot.operationReceipt;
+    }
+    if (!accountId || !this.storage) return null;
+    const key = operationReceiptStorageKey(accountId, reflectionId);
+    try {
+      const parsed = DailyReflectionOperationReceiptSchema.safeParse(
+        JSON.parse(this.storage.getItem(key) ?? "null")
+      );
+      if (!parsed.success || parsed.data.reflectionId !== reflectionId) {
+        this.storage.removeItem(key);
+        return null;
+      }
+      return parsed.data;
+    } catch {
+      try {
+        this.storage.removeItem(key);
+      } catch {
+        // Storage availability must not alter server truth.
+      }
+      return null;
+    }
+  }
+
+  private writeOperationReceipt(receipt: DailyReflectionUploadReceipt) {
+    const accountId = this.authenticatedAccountId();
+    if (!accountId) return;
+    this.update({ operationReceipt: receipt });
+    if (!this.storage) return;
+    try {
+      this.storage.setItem(
+        operationReceiptStorageKey(accountId, receipt.reflectionId),
+        JSON.stringify(receipt)
+      );
+    } catch {
+      // The in-memory receipt still keeps this tab recoverable.
+    }
+  }
+
+  private clearOperationReceipt(reflectionId: string) {
+    const accountId = this.authenticatedAccountId();
+    if (this.snapshot.operationReceipt?.reflectionId === reflectionId) {
+      this.update({ operationReceipt: null });
+    }
+    if (!accountId || !this.storage) return;
+    try {
+      this.storage.removeItem(operationReceiptStorageKey(accountId, reflectionId));
+    } catch {
+      // Storage availability must not alter server truth.
+    }
   }
 
   private readFinalizeAttempt(reflectionId: string): FinalizeAttempt | null {
@@ -566,7 +599,12 @@ export class DailyReflectionSessionController {
   private reconcileFinalizeAttempt(detail: DailyReflectionDetailResponse) {
     const attempt = this.readFinalizeAttempt(detail.reflection.id);
     if (!attempt) return;
-    if (detail.confirmation?.idempotencyKey === attempt.idempotencyKey) {
+    if (
+      detail.confirmation
+      && "contractVersion" in detail.confirmation
+      && detail.confirmation.operationKey === attempt.operationKey
+      && detail.confirmation.saveIntent === attempt.saveIntent
+    ) {
       if (detail.reflection.status === "completed") {
         this.clearFinalizeAttempt(detail.reflection.id);
       }
@@ -577,26 +615,6 @@ export class DailyReflectionSessionController {
       || detail.reflection.version !== attempt.expectedVersion
     ) {
       this.clearFinalizeAttempt(detail.reflection.id);
-    }
-  }
-
-  private async loadConfirmedPeople(): Promise<void> {
-    if (this.snapshot.auth.status !== "authenticated") return;
-    const { controller, generation } = this.beginPeople();
-    this.update({ peopleState: "loading" });
-    try {
-      const people = await this.api.listConfirmedPeople(controller.signal);
-      if (!this.isCurrentPeople(controller, generation)) return;
-      this.update({ confirmedPeople: people, peopleState: "ready" });
-    } catch (error) {
-      if (isAbortError(error) || !this.isCurrentPeople(controller, generation)) return;
-      if (isUnauthorized(error)) {
-        this.expireAuthentication();
-        return;
-      }
-      this.update({ confirmedPeople: [], peopleState: "error" });
-    } finally {
-      if (this.peopleController === controller) this.peopleController = null;
     }
   }
 
@@ -642,6 +660,7 @@ export class DailyReflectionSessionController {
       operation: "idle",
       activeCandidateId,
       detail,
+      operationReceipt: this.readOperationReceipt(detail.reflection.id),
       errorMessage: null
     });
   }
@@ -657,9 +676,6 @@ export class DailyReflectionSessionController {
       throw new Error("Daily Reflection response ID mismatch");
     }
     this.applyDetail(detail);
-    if (detail.reflection.status === "review_pending") {
-      await this.loadConfirmedPeople();
-    }
     return detail;
   }
 
@@ -712,7 +728,6 @@ export class DailyReflectionSessionController {
       const reflectionId = normalizeReflectionId(initialReflectionId);
       await Promise.all([
         this.refreshHistory(),
-        this.loadConfirmedPeople(),
         reflectionId ? this.reload(reflectionId) : Promise.resolve()
       ]);
     } catch (error) {
@@ -762,18 +777,22 @@ export class DailyReflectionSessionController {
       selectedFile: file,
       sourceOrigin,
       recordingDate,
+      operationReceipt: null,
       errorMessage: null
     });
     try {
+      const operationKey = options.operationKey ?? this.createIdempotencyKey();
       const receipt = await this.api.upload({
         file,
         sourceOrigin,
         recordingDate,
-        idempotencyKey: options.idempotencyKey ?? this.createIdempotencyKey(),
-        ...(options.inputAdapter ? { inputAdapter: options.inputAdapter } : {})
+        operationKey,
+        inputAdapter: options.inputAdapter ?? "file_picker",
+        capturePurpose: "inspiration_capture"
       }, controller.signal);
       receiptReceived = true;
       if (!this.isCurrentWork(controller, generation)) return receiptReceived;
+      this.writeOperationReceipt(receipt);
       this.updateReflectionId(receipt.reflectionId);
       this.update({
         state: receipt.status,
@@ -795,7 +814,7 @@ export class DailyReflectionSessionController {
     file: File,
     clientReportedDurationMs: number | undefined,
     recordingDate: string,
-    idempotencyKey: string
+    operationKey: string
   ): Promise<void> => {
     if (this.snapshot.auth.status !== "authenticated") return;
     const { controller, generation } = this.beginWork();
@@ -807,18 +826,23 @@ export class DailyReflectionSessionController {
       selectedFile: file,
       sourceOrigin: "user_reflection",
       recordingDate,
+      operationReceipt: null,
       errorMessage: null
     });
     try {
       const receipt = await this.api.uploadBrowserRecording({
         file,
-        idempotencyKey,
+        operationKey,
         recordingDate,
+        inputAdapter: "browser_recorder",
+        sourceOrigin: "user_reflection",
+        capturePurpose: "inspiration_capture",
         ...(clientReportedDurationMs === undefined || clientReportedDurationMs === 0
           ? {}
           : { clientReportedDurationMs })
       }, controller.signal);
       if (!this.isCurrentWork(controller, generation)) return;
+      this.writeOperationReceipt(receipt);
       this.updateReflectionId(receipt.reflectionId);
       this.update({
         state: receipt.status,
@@ -868,8 +892,8 @@ export class DailyReflectionSessionController {
     this.resetWorkflow(true, false);
   };
 
-  readonly updateCandidate = async (
-    decision: DailyReflectionCandidateDecision
+  readonly updateCandidates = async (
+    decisions: readonly DailyReflectionCandidateDecision[]
   ): Promise<void> => {
     const detail = this.snapshot.detail;
     if (
@@ -878,22 +902,23 @@ export class DailyReflectionSessionController {
       || !detail
       || detail.reflection.status !== "review_pending"
       || this.snapshot.operation !== "idle"
+      || decisions.length === 0
     ) return;
-    if (decision.status !== "kept" && decision.subjectPersonId !== null) {
-      this.update({ errorMessage: "只有选择记住的内容才能关联人物。" });
+    if (decisions.some((decision) => decision.subjectPersonId !== null)) {
+      this.update({ errorMessage: "日常复盘不会在这里关联人物。" });
       return;
     }
     const reflectionId = this.snapshot.reflectionId;
     const { controller, generation } = this.beginWork();
     this.update({
       operation: "saving_candidate",
-      activeCandidateId: decision.candidateId,
+      activeCandidateId: decisions.length === 1 ? decisions[0]?.candidateId ?? null : null,
       errorMessage: null
     });
     try {
       await this.api.updateCandidates(reflectionId, {
         expectedVersion: detail.reflection.version,
-        candidates: [decision]
+        candidates: [...decisions]
       }, controller.signal);
       if (!this.isCurrentWork(controller, generation)) return;
       await this.readServerTruth(reflectionId, controller, generation);
@@ -925,17 +950,21 @@ export class DailyReflectionSessionController {
       try {
         const current = await this.readServerTruth(reflectionId, controller, generation);
         if (!current || !this.isCurrentWork(controller, generation)) return;
-        const saved = current.candidates.find((candidate) => candidate.id === decision.candidateId);
-        const savedText = saved?.userText ?? null;
-        if (
-          saved?.status === decision.status
-          && savedText === decision.userText
-          && saved.subjectPersonId === decision.subjectPersonId
-        ) return;
+        const allSaved = decisions.every((decision) => {
+          const saved = current.candidates.find((candidate) => candidate.id === decision.candidateId);
+          return saved?.status === decision.status
+            && (saved.userText ?? null) === decision.userText
+            && saved.subjectPersonId === null
+            && (
+              decision.actionClaimed === undefined
+              || ("contractVersion" in saved && saved.actionClaimed === decision.actionClaimed)
+            );
+        });
+        if (allSaved) return;
         this.update({
           operation: "idle",
           activeCandidateId: null,
-          errorMessage: friendlyError(error, "这条内容没有保存成功，请稍后再试。")
+          errorMessage: friendlyError(error, "这些选择没有保存成功，请稍后再试。")
         });
       } catch (refreshError) {
         if (isUnauthorized(refreshError)) this.expireAuthentication();
@@ -943,7 +972,7 @@ export class DailyReflectionSessionController {
           this.update({
             operation: "idle",
             activeCandidateId: null,
-            errorMessage: friendlyError(error, "这条内容没有保存成功，请稍后再试。")
+            errorMessage: friendlyError(error, "这些选择没有保存成功，请稍后再试。")
           });
         }
       }
@@ -952,8 +981,134 @@ export class DailyReflectionSessionController {
     }
   };
 
-  readonly finalize = async (): Promise<void> => {
+  readonly updateCandidate = async (
+    decision: DailyReflectionCandidateDecision
+  ): Promise<void> => this.updateCandidates([decision]);
+
+  readonly acceptAllCandidates = async (): Promise<void> => {
+    const candidates = this.snapshot.detail?.candidates ?? [];
+    await this.updateCandidates(candidates.map((candidate) => ({
+      candidateId: candidate.id,
+      status: "kept" as const,
+      userText: candidate.userText,
+      subjectPersonId: null,
+      ...("contractVersion" in candidate ? { actionClaimed: candidate.actionClaimed } : {})
+    })));
+  };
+
+  readonly createManualCandidate = async (
+    candidate: DailyReflectionManualCandidateDraft
+  ): Promise<void> => {
     const detail = this.snapshot.detail;
+    if (
+      this.snapshot.auth.status !== "authenticated"
+      || !this.snapshot.reflectionId
+      || !detail
+      || (detail.reflection.status !== "review_pending" && detail.reflection.status !== "failed")
+      || this.snapshot.operation !== "idle"
+    ) return;
+    const reflectionId = this.snapshot.reflectionId;
+    const { controller, generation } = this.beginWork();
+    this.update({ operation: "creating_candidate", activeCandidateId: null, errorMessage: null });
+    try {
+      await this.api.createManualCandidate(reflectionId, {
+        expectedVersion: detail.reflection.version,
+        ...candidate
+      }, controller.signal);
+      if (!this.isCurrentWork(controller, generation)) return;
+      await this.readServerTruth(reflectionId, controller, generation);
+      await this.refreshHistory();
+    } catch (error) {
+      if (isAbortError(error) || !this.isCurrentWork(controller, generation)) return;
+      if (isUnauthorized(error)) {
+        this.expireAuthentication();
+        return;
+      }
+      if (error instanceof DailyReflectionApiError && error.status === 409) {
+        try {
+          await this.readServerTruth(reflectionId, controller, generation);
+          if (this.isCurrentWork(controller, generation)) {
+            this.update({ operation: "idle", errorMessage: STALE_MESSAGE });
+          }
+        } catch (refreshError) {
+          if (isUnauthorized(refreshError)) this.expireAuthentication();
+          else if (!isAbortError(refreshError) && this.isCurrentWork(controller, generation)) {
+            this.update({
+              operation: "idle",
+              errorMessage: friendlyError(refreshError, "暂时无法读取最新内容，请稍后重试。")
+            });
+          }
+        }
+        return;
+      }
+      this.update({
+        operation: "idle",
+        errorMessage: friendlyError(error, "手写内容没有保存成功，请稍后重试。")
+      });
+    } finally {
+      if (this.workController === controller) this.workController = null;
+    }
+  };
+
+  readonly excludeCandidate = async (candidateId: string): Promise<void> => {
+    const detail = this.snapshot.detail;
+    if (
+      this.snapshot.auth.status !== "authenticated"
+      || !this.snapshot.reflectionId
+      || !detail
+      || detail.reflection.status !== "review_pending"
+      || this.snapshot.operation !== "idle"
+    ) return;
+    const reflectionId = this.snapshot.reflectionId;
+    const { controller, generation } = this.beginWork();
+    this.update({
+      operation: "excluding_candidate",
+      activeCandidateId: candidateId,
+      errorMessage: null
+    });
+    try {
+      await this.api.excludeCandidate(reflectionId, candidateId, {
+        expectedVersion: detail.reflection.version
+      }, controller.signal);
+      if (!this.isCurrentWork(controller, generation)) return;
+      await this.readServerTruth(reflectionId, controller, generation);
+      await this.refreshHistory();
+    } catch (error) {
+      if (isAbortError(error) || !this.isCurrentWork(controller, generation)) return;
+      if (isUnauthorized(error)) {
+        this.expireAuthentication();
+        return;
+      }
+      if (error instanceof DailyReflectionApiError && error.status === 409) {
+        try {
+          await this.readServerTruth(reflectionId, controller, generation);
+          if (this.isCurrentWork(controller, generation)) {
+            this.update({ operation: "idle", activeCandidateId: null, errorMessage: STALE_MESSAGE });
+          }
+        } catch (refreshError) {
+          if (isUnauthorized(refreshError)) this.expireAuthentication();
+          else if (!isAbortError(refreshError) && this.isCurrentWork(controller, generation)) {
+            this.update({
+              operation: "idle",
+              activeCandidateId: null,
+              errorMessage: friendlyError(refreshError, "暂时无法读取最新内容，请稍后重试。")
+            });
+          }
+        }
+        return;
+      }
+      this.update({
+        operation: "idle",
+        activeCandidateId: null,
+        errorMessage: friendlyError(error, "这张卡片没有删除成功，请稍后重试。")
+      });
+    } finally {
+      if (this.workController === controller) this.workController = null;
+    }
+  };
+
+  readonly finalize = async (saveIntent: DailyReflectionSaveIntent): Promise<void> => {
+    let detail = this.snapshot.detail;
     const accountId = this.authenticatedAccountId();
     if (
       !accountId
@@ -965,18 +1120,51 @@ export class DailyReflectionSessionController {
       )
       || this.snapshot.operation !== "idle"
     ) return;
-    if (
-      detail.reflection.status === "review_pending"
-      && detail.candidates.some((candidate) => candidate.status === "pending")
-    ) {
-      this.update({ errorMessage: "还有内容没有选择是否记住，请先完成确认。" });
-      return;
+    if (detail.reflection.status === "review_pending") {
+      const pending = detail.candidates.filter((candidate) => candidate.status === "pending");
+      if (pending.length > 0) {
+        await this.updateCandidates(pending.map((candidate) => ({
+          candidateId: candidate.id,
+          status: saveIntent === "recap_only" ? "kept" as const : "excluded" as const,
+          userText: candidate.userText,
+          subjectPersonId: null,
+          ...("contractVersion" in candidate ? { actionClaimed: candidate.actionClaimed } : {})
+        })));
+        detail = this.snapshot.detail;
+        if (
+          !detail
+          || detail.reflection.status !== "review_pending"
+          || detail.candidates.some((candidate) => candidate.status === "pending")
+          || this.snapshot.errorMessage
+        ) return;
+      }
     }
     const reflectionId = this.snapshot.reflectionId;
     const existingAttempt = this.readFinalizeAttempt(reflectionId);
+    if (existingAttempt && existingAttempt.saveIntent !== saveIntent) {
+      this.update({
+        errorMessage: existingAttempt.saveIntent === "recap_only"
+          ? "上一次“只保存这次复盘”的请求仍待确认，请继续使用原来的保存方式。"
+          : "上一次“保存并长期保留”的请求仍待确认，请继续使用原来的保存方式。"
+      });
+      return;
+    }
     if (detail.reflection.status === "admission_failed" && !existingAttempt) {
       this.update({
         errorMessage: "这次确认的安全重试信息已失效，请保留这条复盘并稍后再试。"
+      });
+      return;
+    }
+    const confirmedOperationKey = detail.confirmation
+      && "contractVersion" in detail.confirmation
+      ? detail.confirmation.operationKey
+      : null;
+    const operationKey = existingAttempt?.operationKey
+      ?? this.readOperationReceipt(reflectionId)?.operationKey
+      ?? confirmedOperationKey;
+    if (!operationKey) {
+      this.update({
+        errorMessage: "这次提交凭据还没有恢复，请重新打开这条复盘后再试。"
       });
       return;
     }
@@ -984,7 +1172,8 @@ export class DailyReflectionSessionController {
       reflectionId,
       accountId,
       expectedVersion: detail.reflection.version,
-      idempotencyKey: this.createFinalizeIdempotencyKey()
+      operationKey,
+      saveIntent
     };
     this.writeFinalizeAttempt(attempt);
     const { controller, generation } = this.beginWork();
@@ -992,7 +1181,8 @@ export class DailyReflectionSessionController {
     try {
       await this.api.finalize(reflectionId, {
         expectedVersion: attempt.expectedVersion,
-        idempotencyKey: attempt.idempotencyKey
+        operationKey: attempt.operationKey,
+        saveIntent: attempt.saveIntent
       }, controller.signal);
       if (!this.isCurrentWork(controller, generation)) return;
       await this.pollReflection(reflectionId, controller, generation);
@@ -1007,7 +1197,12 @@ export class DailyReflectionSessionController {
         try {
           const current = await this.readServerTruth(reflectionId, controller, generation);
           if (!current || !this.isCurrentWork(controller, generation)) return;
-          if (current.confirmation?.idempotencyKey === attempt.idempotencyKey) {
+          if (
+            current.confirmation
+            && "contractVersion" in current.confirmation
+            && current.confirmation.operationKey === attempt.operationKey
+            && current.confirmation.saveIntent === attempt.saveIntent
+          ) {
             if (shouldKeepPolling(current.reflection.status)) {
               await this.pollReflection(reflectionId, controller, generation);
             }
@@ -1028,7 +1223,12 @@ export class DailyReflectionSessionController {
       try {
         const current = await this.readServerTruth(reflectionId, controller, generation);
         if (!current || !this.isCurrentWork(controller, generation)) return;
-        if (current.confirmation?.idempotencyKey === attempt.idempotencyKey) {
+        if (
+          current.confirmation
+          && "contractVersion" in current.confirmation
+          && current.confirmation.operationKey === attempt.operationKey
+          && current.confirmation.saveIntent === attempt.saveIntent
+        ) {
           if (shouldKeepPolling(current.reflection.status)) {
             await this.pollReflection(reflectionId, controller, generation);
           }
@@ -1206,6 +1406,7 @@ export class DailyReflectionSessionController {
       await this.api.delete(reflectionId, controller.signal);
       if (!this.isCurrentWork(controller, generation)) return;
       this.clearFinalizeAttempt(reflectionId);
+      this.clearOperationReceipt(reflectionId);
       for (const candidate of this.snapshot.detail?.candidates ?? []) {
         this.clearRevocationAttempt(reflectionId, candidate.id);
       }
@@ -1246,7 +1447,6 @@ export class DailyReflectionSessionController {
     this.disposed = true;
     this.abortAuthentication();
     this.abortWork();
-    this.abortPeople();
     this.abortHistory();
     this.listeners.clear();
   }
@@ -1281,6 +1481,10 @@ export function useDailyReflectionSession(
     refreshHistory: controller.refreshHistory,
     startNew: controller.startNew,
     updateCandidate: controller.updateCandidate,
+    updateCandidates: controller.updateCandidates,
+    acceptAllCandidates: controller.acceptAllCandidates,
+    createManualCandidate: controller.createManualCandidate,
+    excludeCandidate: controller.excludeCandidate,
     finalize: controller.finalize,
     revokeCandidate: controller.revokeCandidate,
     retry: controller.retry,

@@ -8,28 +8,37 @@ import {
 import {
   DailyReflectionCandidateUpdateRequestSchema,
   DailyReflectionCandidateUpdateResponseSchema,
+  DailyReflectionCandidateExcludeRequestSchema,
+  DailyReflectionCandidateExcludeResponseSchema,
+  DailyReflectionManualCandidateV2CreateRequestSchema,
+  DailyReflectionManualCandidateV2CreateResponseSchema,
   DailyReflectionCandidateRevocationRequestSchema,
   DailyReflectionCandidateRevocationResponseSchema,
   DailyReflectionDetailResponseSchema,
-  DailyReflectionFinalizeRequestSchema,
-  DailyReflectionFinalizeResponseSchema,
   DailyReflectionHistoryResponseSchema,
   DailyReflectionUploadSourceSchema,
+  DailyReflectionV2FinalizeRequestSchema,
+  DailyReflectionV2FinalizeResponseSchema,
   type DailyReflectionCandidateUpdateRequest,
   type DailyReflectionCandidateUpdateResponse,
   type DailyReflectionCandidateRevocationRequest,
   type DailyReflectionCandidateRevocationResponse,
   type DailyReflectionDetailResponse,
-  type DailyReflectionFinalizeRequest,
-  type DailyReflectionFinalizeResponse,
   type DailyReflectionHistoryItem,
-  type DailyReflectionUploadSource
+  type DailyReflectionUploadSource,
+  type DailyReflectionV2FinalizeRequest,
+  type DailyReflectionV2FinalizeResponse
 } from "@/lib/domain/daily-reflection-api";
 import {
   DailyReflectionIdSchema,
-  DailyReflectionStatusSchema
+  DailyReflectionStatusSchema,
+  DailyReflectionV2CapturePurposeSchema,
+  DailyReflectionV2InputAdapterSchema,
+  DailyReflectionV2InputSchema,
+  DailyReflectionV2SourceOriginSchema,
+  type DailyReflectionV2Input
 } from "@/lib/domain/daily-reflection";
-import type { AuthUser, DateCompanionConfirmedPerson } from "@/lib/domain/date-companion";
+import type { AuthUser } from "@/lib/domain/date-companion";
 import { PipelineExecutionModeSchema } from "@/lib/domain/types";
 
 export {
@@ -39,28 +48,23 @@ export {
 
 export type DailyReflectionUploadInput = Readonly<{
   file: File;
-  sourceOrigin: DailyReflectionUploadSource;
-  idempotencyKey: string;
-  recordingDate: string;
-  inputAdapter?: "toy_sync";
-}>;
+}> & DailyReflectionV2Input;
 
 export type DailyReflectionBrowserRecordingInput = Readonly<{
   file: File;
-  idempotencyKey: string;
-  recordingDate: string;
   clientReportedDurationMs?: number;
-}>;
+}> & DailyReflectionV2Input;
 
 const DailyReflectionUploadInputSchema = z.object({
   file: z.custom<File>(
     (value) => typeof File !== "undefined" && value instanceof File,
     "A recording file is required"
   ),
-  sourceOrigin: DailyReflectionUploadSourceSchema,
-  idempotencyKey: z.string().trim().min(1).max(512),
+  operationKey: z.string().trim().min(1).max(512),
+  inputAdapter: DailyReflectionV2InputAdapterSchema,
+  sourceOrigin: DailyReflectionV2SourceOriginSchema,
+  capturePurpose: DailyReflectionV2CapturePurposeSchema,
   recordingDate: RecordingDateSchema,
-  inputAdapter: z.literal("toy_sync").optional()
 }).strict();
 
 const DailyReflectionBrowserRecordingInputSchema = z.object({
@@ -68,31 +72,23 @@ const DailyReflectionBrowserRecordingInputSchema = z.object({
     (value) => typeof File !== "undefined" && value instanceof File,
     "A browser recording file is required"
   ),
-  idempotencyKey: z.string().trim().min(1).max(512),
+  operationKey: z.string().trim().min(1).max(512),
+  inputAdapter: z.literal("browser_recorder"),
+  sourceOrigin: z.literal("user_reflection"),
+  capturePurpose: DailyReflectionV2CapturePurposeSchema,
   recordingDate: RecordingDateSchema,
   clientReportedDurationMs: DailyReflectionClientReportedDurationMsSchema.optional()
 }).strict();
 
 const AuthResponseSchema = z.object({ user: AuthUserSchema }).strict();
 const LogoutResponseSchema = z.object({ ok: z.literal(true) }).strict();
-const ConfirmedPersonSchema = z.object({
-  id: z.string().trim().min(1),
-  displayName: z.string().trim().min(1).max(200).nullable(),
-  status: z.literal("confirmed"),
-  version: z.number().int().positive(),
-  explicitlyConfirmed: z.literal(true),
-  confirmedAt: z.string().datetime(),
-  createdAt: z.string().datetime(),
-  updatedAt: z.string().datetime()
-}).passthrough();
-const ConfirmedPeopleResponseSchema = z.object({
-  people: z.array(ConfirmedPersonSchema)
-}).strict();
-
 const DailyReflectionUploadReceiptSchema = z.object({
   reflectionId: DailyReflectionIdSchema,
   uploadId: DailyReflectionIdSchema,
   jobId: DailyReflectionIdSchema,
+  operationKey: z.string().trim().min(1).max(512),
+  contentHash: z.string().regex(/^[a-f0-9]{64}$/u),
+  capturePurpose: DailyReflectionV2CapturePurposeSchema,
   status: DailyReflectionStatusSchema,
   executionMode: PipelineExecutionModeSchema,
   queueJobId: DailyReflectionIdSchema.optional(),
@@ -101,6 +97,10 @@ const DailyReflectionUploadReceiptSchema = z.object({
   warning: z.literal("pipeline_queue_unavailable").optional(),
   reused: z.boolean().optional()
 }).strict();
+
+export const DailyReflectionOperationReceiptSchema = DailyReflectionUploadReceiptSchema.extend(
+  DailyReflectionV2InputSchema.shape
+).strict();
 
 const DailyReflectionActionReceiptSchema = z.object({
   reflectionId: DailyReflectionIdSchema,
@@ -128,7 +128,19 @@ const ErrorCodeResponseSchema = z.object({
 }).strict();
 
 export type DailyReflectionUploadReceipt = z.infer<
-  typeof DailyReflectionUploadReceiptSchema
+  typeof DailyReflectionOperationReceiptSchema
+>;
+export type DailyReflectionManualCandidateInput = z.infer<
+  typeof DailyReflectionManualCandidateV2CreateRequestSchema
+>;
+export type DailyReflectionManualCandidateResponse = z.infer<
+  typeof DailyReflectionManualCandidateV2CreateResponseSchema
+>;
+export type DailyReflectionCandidateExcludeInput = z.infer<
+  typeof DailyReflectionCandidateExcludeRequestSchema
+>;
+export type DailyReflectionCandidateExcludeResponse = z.infer<
+  typeof DailyReflectionCandidateExcludeResponseSchema
 >;
 export type DailyReflectionActionReceipt = z.infer<
   typeof DailyReflectionActionReceiptSchema
@@ -140,7 +152,6 @@ export type DailyReflectionCancelReceipt = z.infer<
 export interface DailyReflectionApi {
   getCurrentUser(signal?: AbortSignal): Promise<AuthUser | null>;
   logout(signal?: AbortSignal): Promise<void>;
-  listConfirmedPeople(signal?: AbortSignal): Promise<DateCompanionConfirmedPerson[]>;
   list(signal?: AbortSignal): Promise<DailyReflectionHistoryItem[]>;
   upload(
     input: DailyReflectionUploadInput,
@@ -159,11 +170,22 @@ export interface DailyReflectionApi {
     input: DailyReflectionCandidateUpdateRequest,
     signal?: AbortSignal
   ): Promise<DailyReflectionCandidateUpdateResponse>;
+  createManualCandidate(
+    reflectionId: string,
+    input: DailyReflectionManualCandidateInput,
+    signal?: AbortSignal
+  ): Promise<DailyReflectionManualCandidateResponse>;
+  excludeCandidate(
+    reflectionId: string,
+    candidateId: string,
+    input: DailyReflectionCandidateExcludeInput,
+    signal?: AbortSignal
+  ): Promise<DailyReflectionCandidateExcludeResponse>;
   finalize(
     reflectionId: string,
-    input: DailyReflectionFinalizeRequest,
+    input: DailyReflectionV2FinalizeRequest,
     signal?: AbortSignal
-  ): Promise<DailyReflectionFinalizeResponse>;
+  ): Promise<DailyReflectionV2FinalizeResponse>;
   revokeCandidate(
     reflectionId: string,
     candidateId: string,
@@ -206,6 +228,11 @@ const ERROR_MESSAGES: Readonly<Record<string, string>> = {
   daily_reflection_delete_conflict: "删除未完成，请刷新后重试。",
   daily_reflection_cleanup_failed: "清理录音未完成，请稍后重试。",
   invalid_candidate_update: "这条内容的选择无法保存，请重新检查后再试。",
+  invalid_manual_candidate_v2: "手写内容还不完整，请检查后再试。",
+  invalid_candidate_exclusion: "这张卡片暂时无法删除，请重新加载后再试。",
+  daily_reflection_candidate_limit_exceeded: "这次复盘已经有足够多的卡片了。",
+  daily_reflection_candidate_already_excluded: "这张卡片已经移出本次选择。",
+  daily_reflection_confirmation_evidence_unavailable: "可核对的原话暂时不可用，请重新加载后再试。",
   invalid_finalize_input: "这次确认无法提交，请重新加载后再试。",
   version_conflict: "这份复盘已经在其他页面更新，请重新加载最新内容。",
   daily_reflection_subject_invalid: "所选人物已经不可用，请重新加载最新内容。",
@@ -354,11 +381,6 @@ export function createDailyReflectionApi(
       await parseJsonResponse(response, LogoutResponseSchema);
     },
 
-    async listConfirmedPeople(signal) {
-      const response = await sameOrigin("/api/people", { method: "GET", signal });
-      return (await parseJsonResponse(response, ConfirmedPeopleResponseSchema)).people;
-    },
-
     async list(signal) {
       const response = await sameOrigin("/api/daily-reflections", {
         method: "GET",
@@ -380,17 +402,31 @@ export function createDailyReflectionApi(
       const body = new FormData();
       body.set("file", parsedInput.data.file);
       body.set("sourceOrigin", parsedInput.data.sourceOrigin);
-      body.set("idempotencyKey", parsedInput.data.idempotencyKey);
+      body.set("operationKey", parsedInput.data.operationKey);
+      body.set("idempotencyKey", parsedInput.data.operationKey);
       body.set("recordingDate", parsedInput.data.recordingDate);
-      if (parsedInput.data.inputAdapter) {
-        body.set("inputAdapter", parsedInput.data.inputAdapter);
-      }
+      body.set("inputAdapter", parsedInput.data.inputAdapter);
+      body.set("capturePurpose", parsedInput.data.capturePurpose);
       const response = await sameOrigin("/api/daily-reflections", {
         method: "POST",
         body,
         signal
       });
-      return parseJsonResponse(response, DailyReflectionUploadReceiptSchema);
+      const serverReceipt = await parseJsonResponse(response, DailyReflectionUploadReceiptSchema);
+      if (
+        serverReceipt.operationKey !== parsedInput.data.operationKey
+        || serverReceipt.capturePurpose !== parsedInput.data.capturePurpose
+      ) {
+        throw new DailyReflectionApiError(response.status, "invalid_response");
+      }
+      return DailyReflectionOperationReceiptSchema.parse({
+        ...serverReceipt,
+        operationKey: parsedInput.data.operationKey,
+        inputAdapter: parsedInput.data.inputAdapter,
+        sourceOrigin: parsedInput.data.sourceOrigin,
+        capturePurpose: parsedInput.data.capturePurpose,
+        recordingDate: parsedInput.data.recordingDate
+      });
     },
 
     async uploadBrowserRecording(input, signal) {
@@ -406,8 +442,12 @@ export function createDailyReflectionApi(
       const body = new FormData();
       body.set("file", parsedInput.data.file);
       body.set("inputMethod", "browser_recording");
-      body.set("idempotencyKey", parsedInput.data.idempotencyKey);
+      body.set("operationKey", parsedInput.data.operationKey);
+      body.set("idempotencyKey", parsedInput.data.operationKey);
       body.set("recordingDate", parsedInput.data.recordingDate);
+      body.set("inputAdapter", parsedInput.data.inputAdapter);
+      body.set("sourceOrigin", parsedInput.data.sourceOrigin);
+      body.set("capturePurpose", parsedInput.data.capturePurpose);
       if (parsedInput.data.clientReportedDurationMs !== undefined) {
         body.set(
           "clientReportedDurationMs",
@@ -419,7 +459,21 @@ export function createDailyReflectionApi(
         body,
         signal
       });
-      return parseJsonResponse(response, DailyReflectionUploadReceiptSchema);
+      const serverReceipt = await parseJsonResponse(response, DailyReflectionUploadReceiptSchema);
+      if (
+        serverReceipt.operationKey !== parsedInput.data.operationKey
+        || serverReceipt.capturePurpose !== parsedInput.data.capturePurpose
+      ) {
+        throw new DailyReflectionApiError(response.status, "invalid_response");
+      }
+      return DailyReflectionOperationReceiptSchema.parse({
+        ...serverReceipt,
+        operationKey: parsedInput.data.operationKey,
+        inputAdapter: parsedInput.data.inputAdapter,
+        sourceOrigin: parsedInput.data.sourceOrigin,
+        capturePurpose: parsedInput.data.capturePurpose,
+        recordingDate: parsedInput.data.recordingDate
+      });
     },
 
     async get(reflectionId, signal) {
@@ -449,8 +503,46 @@ export function createDailyReflectionApi(
       return parseJsonResponse(response, DailyReflectionCandidateUpdateResponseSchema);
     },
 
+    async createManualCandidate(reflectionId, input, signal) {
+      const parsedInput = DailyReflectionManualCandidateV2CreateRequestSchema.safeParse(input);
+      if (!parsedInput.success) {
+        throw new DailyReflectionApiError(
+          400,
+          "invalid_manual_candidate_v2",
+          errorMessage(400, "invalid_manual_candidate_v2"),
+          { cause: parsedInput.error }
+        );
+      }
+      const response = await sameOrigin(`${reflectionPath(reflectionId)}/candidates`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(parsedInput.data),
+        signal
+      });
+      return parseJsonResponse(response, DailyReflectionManualCandidateV2CreateResponseSchema);
+    },
+
+    async excludeCandidate(reflectionId, candidateId, input, signal) {
+      const parsedInput = DailyReflectionCandidateExcludeRequestSchema.safeParse(input);
+      if (!parsedInput.success) {
+        throw new DailyReflectionApiError(
+          400,
+          "invalid_candidate_exclusion",
+          errorMessage(400, "invalid_candidate_exclusion"),
+          { cause: parsedInput.error }
+        );
+      }
+      const response = await sameOrigin(candidatePath(reflectionId, candidateId), {
+        method: "DELETE",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(parsedInput.data),
+        signal
+      });
+      return parseJsonResponse(response, DailyReflectionCandidateExcludeResponseSchema);
+    },
+
     async finalize(reflectionId, input, signal) {
-      const parsedInput = DailyReflectionFinalizeRequestSchema.safeParse(input);
+      const parsedInput = DailyReflectionV2FinalizeRequestSchema.safeParse(input);
       if (!parsedInput.success) {
         throw new DailyReflectionApiError(
           400,
@@ -465,7 +557,7 @@ export function createDailyReflectionApi(
         body: JSON.stringify(parsedInput.data),
         signal
       });
-      return parseJsonResponse(response, DailyReflectionFinalizeResponseSchema);
+      return parseJsonResponse(response, DailyReflectionV2FinalizeResponseSchema);
     },
 
     async revokeCandidate(reflectionId, candidateId, input, signal) {

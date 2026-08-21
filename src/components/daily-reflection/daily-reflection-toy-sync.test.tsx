@@ -159,7 +159,7 @@ describe("DailyReflectionToySync", () => {
     const onUpload = vi.fn(async (
       _file: File,
       _recordingDate: string,
-      _idempotencyKey: string
+      _operationKey: string
     ) => true);
     render(
       <DailyReflectionToySync
@@ -191,7 +191,7 @@ describe("DailyReflectionToySync", () => {
     await waitFor(() => expect(onUpload).toHaveBeenCalledTimes(1));
     expect(onUpload.mock.calls[0]?.[0]).toBeInstanceOf(File);
     expect(onUpload.mock.calls[0]?.[1]).toBe("2026-08-15");
-    expect(onUpload.mock.calls[0]?.[2]).toMatch(/^daily-reflection-toy-v1-[a-f0-9]{64}$/u);
+    expect(onUpload.mock.calls[0]?.[2]).toMatch(/^toyop_v2_[a-f0-9]{64}$/u);
     expect(await within(latestCard!).findByText("录音已收到")).toBeInTheDocument();
     expect(fixture.runtime.pickDirectory).toHaveBeenCalledTimes(1);
   });
@@ -268,7 +268,7 @@ describe("DailyReflectionToySync", () => {
     const onUpload = vi.fn((
       _file: File,
       _recordingDate: string,
-      _idempotencyKey: string
+      _operationKey: string
     ) => new Promise<boolean>((resolve) => {
       finishUpload = resolve;
     }));
@@ -497,7 +497,7 @@ describe("DailyReflectionToySync", () => {
     expect(attempt!.operation).toEqual(expect.objectContaining({
       destination: "date_companion",
       relationshipId: "relationship_1",
-      operationKey: expect.stringMatching(/^toyop_v1_[a-f0-9]{64}$/u)
+      operationKey: expect.stringMatching(/^toyop_v2_[a-f0-9]{64}$/u)
     }));
     expect(await within(latestCard).findByText("正在上传…")).toBeInTheDocument();
     await act(async () => {

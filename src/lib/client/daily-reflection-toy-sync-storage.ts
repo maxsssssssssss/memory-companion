@@ -291,26 +291,11 @@ export function createBrowserToySyncRuntime(
   };
 }
 
-export async function createToySyncUploadIdempotencyKey(
-  duplicateKey: string,
-  cryptoImpl: Crypto = globalThis.crypto
-): Promise<string> {
-  if (!cryptoImpl?.subtle) throw new Error("toy_sync_crypto_unavailable");
-  const digest = await cryptoImpl.subtle.digest(
-    "SHA-256",
-    new TextEncoder().encode(duplicateKey)
-  );
-  const hex = [...new Uint8Array(digest)]
-    .map((byte) => byte.toString(16).padStart(2, "0"))
-    .join("");
-  return `daily-reflection-toy-v1-${hex}`;
-}
-
 export async function createToySyncOperationKey(
   input: Readonly<{
     accountId: string;
     destination: ToySyncDestination;
-    relationshipId: string;
+    relationshipId?: string;
     duplicateKey: string;
   }>,
   cryptoImpl: Crypto = globalThis.crypto
@@ -318,9 +303,14 @@ export async function createToySyncOperationKey(
   if (!cryptoImpl?.subtle) throw new Error("toy_sync_crypto_unavailable");
   const destination = requireDestination(input.destination);
   const accountId = input.accountId.normalize("NFKC").trim();
-  const relationshipId = input.relationshipId.normalize("NFKC").trim();
+  const relationshipId = input.relationshipId?.normalize("NFKC").trim() ?? "";
   const duplicateKey = input.duplicateKey.trim();
-  if (!accountId || !relationshipId || !duplicateKey) {
+  if (
+    !accountId
+    || !duplicateKey
+    || (destination === "date_companion" && !relationshipId)
+    || (destination === "daily_reflection" && relationshipId)
+  ) {
     throw new Error("toy_sync_operation_scope_required");
   }
   const digest = await cryptoImpl.subtle.digest(
@@ -335,5 +325,5 @@ export async function createToySyncOperationKey(
   const hex = [...new Uint8Array(digest)]
     .map((byte) => byte.toString(16).padStart(2, "0"))
     .join("");
-  return `toyop_v1_${hex}`;
+  return `toyop_v2_${hex}`;
 }
