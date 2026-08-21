@@ -5,11 +5,7 @@ import {
   DailyReflectionDurationPolicyError,
   normalizeDailyReflectionClientReportedDurationMs
 } from "@/lib/domain/daily-reflection-duration";
-import {
-  DailyReflectionHistoryResponseSchema,
-  DailyReflectionUploadSourceSchema,
-  type DailyReflectionUploadSource
-} from "@/lib/domain/daily-reflection-api";
+import { DailyReflectionHistoryResponseSchema } from "@/lib/domain/daily-reflection-api";
 import { InputMethodSchema, type InputMethod } from "@/lib/domain/daily-reflection";
 import { AudioUploadSchema } from "@/lib/domain/types";
 import {
@@ -18,13 +14,12 @@ import {
   unauthorizedResponse
 } from "@/lib/server/auth/request-context";
 import {
-  buildDailyReflectionProductJobId,
-  buildDailyReflectionUploadId,
   cleanupDailyReflectionUploadPersistenceFailure,
-  createDailyReflectionJob,
   DailyReflectionConflictError,
   DailyReflectionDurationProbeError,
   DailyReflectionLeaseLostError,
+  DailyReflectionInputContractError,
+  DailyReflectionInputOrchestrator,
   DailyReflectionService,
   DailyReflectionTransitionError,
   DailyReflectionVersionConflictError,
@@ -40,6 +35,8 @@ import {
   readDailyReflectionPublishedAsset,
   readDailyReflectionJob,
   resolveDailyReflectionAuthoritativeDuration,
+  resolveDailyReflectionInputContract,
+  type DailyReflectionInputReceiptV2,
 } from "@/lib/server/daily-reflection";
 import { resolvePipelineExecutionMode } from "@/lib/server/queue/config";
 import { enqueueDailyReflectionJob } from "@/lib/server/queue/producer";
@@ -77,18 +74,19 @@ function clientReportedDurationMs(formData: FormData) {
 }
 
 function receipt(input: {
-  reflectionId: string;
-  uploadId: string;
-  jobId: string;
+  operation: DailyReflectionInputReceiptV2;
   status: string;
   executionMode: "inline" | "queue";
   queueJobId?: string;
   reused?: boolean;
 }) {
   return {
-    reflectionId: input.reflectionId,
-    uploadId: input.uploadId,
-    jobId: input.jobId,
+    reflectionId: input.operation.reflectionId,
+    uploadId: input.operation.uploadId,
+    jobId: input.operation.jobId,
+    operationKey: input.operation.operationKey,
+    contentHash: input.operation.contentHash,
+    capturePurpose: input.operation.capturePurpose,
     status: input.status,
     executionMode: input.executionMode,
     ...(input.queueJobId ? { queueJobId: input.queueJobId } : {}),
@@ -214,22 +212,6 @@ export async function POST(request: Request) {
   if (!inputMethod) {
     return NextResponse.json({ error: "invalid_input_method" }, { status: 400 });
   }
-  if (
-    inputMethod === "browser_recording"
-    && !isDailyReflectionBrowserRecordingEnabled()
-  ) {
-    return featureDisabled();
-  }
-  const inputAdapter = formString(formData, "inputAdapter");
-  if (inputAdapter && inputAdapter !== "toy_sync") {
-    return NextResponse.json({ error: "invalid_input_adapter" }, { status: 400 });
-  }
-  if (inputAdapter === "toy_sync") {
-    if (inputMethod !== "file_upload") {
-      return NextResponse.json({ error: "invalid_input_adapter" }, { status: 400 });
-    }
-    if (!isDailyReflectionToySyncEnabled()) return featureDisabled();
-  }
   const file = formData.get("file");
   if (!(file instanceof File)) {
     return NextResponse.json({ error: "missing_file" }, { status: 400 });
@@ -241,26 +223,37 @@ export async function POST(request: Request) {
       message: validation.message
     }, { status: 400 });
   }
-  let authoritativeSourceOrigin: DailyReflectionUploadSource;
-  if (inputMethod === "browser_recording" || inputAdapter === "toy_sync") {
-    authoritativeSourceOrigin = "user_reflection";
-  } else {
-    const parsedOrigin = DailyReflectionUploadSourceSchema.safeParse(
-      formString(formData, "sourceOrigin")
-    );
-    if (!parsedOrigin.success) {
-      return NextResponse.json({ error: "invalid_source_origin" }, { status: 400 });
-    }
-    authoritativeSourceOrigin = parsedOrigin.data;
-  }
-  const reportedDurationMs = inputMethod === "browser_recording"
-    ? clientReportedDurationMs(formData)
-    : null;
-  const idempotencyKey = formString(formData, "idempotencyKey");
-  if (!idempotencyKey || idempotencyKey.length > 512) {
-    return NextResponse.json({ error: "invalid_idempotency_key" }, { status: 400 });
-  }
   const recordingDate = normalizeUploadRecordingDate(formData.get("recordingDate"));
+  let inputContract;
+  try {
+    inputContract = resolveDailyReflectionInputContract({
+      inputMethod,
+      inputAdapter: formString(formData, "inputAdapter"),
+      sourceOrigin: formString(formData, "sourceOrigin"),
+      capturePurpose: formString(formData, "capturePurpose"),
+      operationKey: formString(formData, "operationKey")
+        || formString(formData, "idempotencyKey"),
+      recordingDate
+    });
+  } catch (error) {
+    if (error instanceof DailyReflectionInputContractError) {
+      return NextResponse.json({ error: error.code }, { status: 400 });
+    }
+    throw error;
+  }
+  if (
+    inputContract.inputAdapter === "browser_recorder"
+    && !isDailyReflectionBrowserRecordingEnabled()
+  ) {
+    return featureDisabled();
+  }
+  if (
+    inputContract.inputAdapter === "toy_sync"
+    && !isDailyReflectionToySyncEnabled()
+  ) {
+    return featureDisabled();
+  }
+  const reportedDurationMs = clientReportedDurationMs(formData);
   let uploadFingerprint: string;
   try {
     uploadFingerprint = createHash("sha256")
@@ -272,16 +265,13 @@ export async function POST(request: Request) {
 
   const repository = getDailyReflectionRepository();
   const service = new DailyReflectionService(repository);
+  const orchestrator = new DailyReflectionInputOrchestrator(repository);
   let created;
   try {
-    created = service.createReflection({
+    created = orchestrator.reserve({
       accountId: authContext.user.id,
-      uploadId: null,
-      inputMethod,
-      sourceOrigin: authoritativeSourceOrigin,
-      processingProfile: "full_recording",
-      ingestionContext: "daily_reflection",
-      idempotencyKey
+      ...inputContract,
+      contentHash: uploadFingerprint
     });
   } catch (error) {
     if (error instanceof DailyReflectionConflictError) {
@@ -297,26 +287,8 @@ export async function POST(request: Request) {
 
   const executionMode = resolvePipelineExecutionMode();
   let view = service.get(authContext.user.id, created.reflection.id);
-  let uploadId = view.processingPlan?.uploadId ?? view.reflection.uploadId;
-
-  if (!uploadId) {
-    uploadId = buildDailyReflectionUploadId(created.reflection.id);
-    if (inputMethod === "file_upload") {
-      try {
-        service.bindUpload({
-          accountId: authContext.user.id,
-          reflectionId: created.reflection.id,
-          expectedVersion: created.reflection.version,
-          uploadId
-        });
-      } catch (error) {
-        if (!(error instanceof DailyReflectionVersionConflictError)) throw error;
-        const rebound = service.get(authContext.user.id, created.reflection.id);
-        if (rebound.processingPlan?.uploadId !== uploadId) throw error;
-      }
-      view = service.get(authContext.user.id, created.reflection.id);
-    }
-  }
+  const operationReceipt = created.receipt;
+  const uploadId = operationReceipt.uploadId;
 
   const persistenceKey = `${authContext.user.id}\u0000${created.reflection.id}`;
   const persistedFingerprint = repository.getUploadFingerprint(
@@ -394,16 +366,10 @@ export async function POST(request: Request) {
   if (!uploadAvailable && view.reflection.status === "uploading") {
     let fence;
     try {
-      fence = repository.claimExecutionLease({
-        accountId: authContext.user.id,
-        reflectionId: created.reflection.id,
+      fence = orchestrator.claimStaging({
+        receipt: operationReceipt,
         leaseOwner: `daily-reflection-upload-${randomUUID()}`,
-        leaseDurationMs: UPLOAD_PERSISTENCE_LEASE_MS,
-        uploadFingerprint,
-        ...(inputMethod === "browser_recording" && view.processingPlan === null
-          ? { provisionalUploadId: uploadId }
-          : {}),
-        allowedStatuses: ["uploading"]
+        leaseDurationMs: UPLOAD_PERSISTENCE_LEASE_MS
       });
     } catch (error) {
       if (error instanceof DailyReflectionConflictError) {
@@ -433,44 +399,22 @@ export async function POST(request: Request) {
           attemptSuffix: `attempt-${fence.attemptVersion}`,
           assertWritable: assertPersistenceFence,
           publishUpload: async (upload) => {
-            if (inputMethod === "browser_recording") {
-              const duration = await resolveDailyReflectionAuthoritativeDuration({
-                filePath: upload.filePath,
-                inputMethod,
-                clientReportedDurationMs: reportedDurationMs
-              });
-              const current = service.get(
-                authContext.user.id,
-                created.reflection.id
-              );
-              service.bindUpload({
-                accountId: authContext.user.id,
-                reflectionId: created.reflection.id,
-                expectedVersion: current.reflection.version,
-                uploadId,
-                processingProfile: duration.processingProfile,
-                leaseOwner: fence.leaseOwner,
-                attemptVersion: fence.attemptVersion
-              });
-              await publishDailyReflectionAsset({
-                repository,
-                store: authContext.store,
-                accountId: authContext.user.id,
-                reflectionId: created.reflection.id,
-                uploadId,
-                assetKind: "upload",
-                fence,
-                payload: {
-                  ...upload,
-                  durationSeconds: duration.effectiveDurationMs / 1_000,
-                  effectiveDurationMs: duration.effectiveDurationMs,
-                  clientReportedDurationMs: duration.clientReportedDurationMs,
-                  durationSource: duration.durationSource,
-                  processingProfile: duration.processingProfile
-                }
-              });
-              return;
-            }
+            const duration = await resolveDailyReflectionAuthoritativeDuration({
+              filePath: upload.filePath,
+              inputMethod: inputContract.inputMethod,
+              inputAdapter: inputContract.inputAdapter,
+              clientReportedDurationMs: reportedDurationMs
+            });
+            const current = service.get(
+              authContext.user.id,
+              created.reflection.id
+            );
+            orchestrator.bindAuthoritativePlan({
+              receipt: operationReceipt,
+              expectedVersion: current.reflection.version,
+              duration,
+              fence
+            });
             await publishDailyReflectionAsset({
               repository,
               store: authContext.store,
@@ -479,7 +423,14 @@ export async function POST(request: Request) {
               uploadId,
               assetKind: "upload",
               fence,
-              payload: upload
+              payload: {
+                ...upload,
+                durationSeconds: duration.effectiveDurationMs / 1_000,
+                effectiveDurationMs: duration.effectiveDurationMs,
+                clientReportedDurationMs: duration.clientReportedDurationMs,
+                durationSource: duration.durationSource,
+                processingProfile: duration.processingProfile
+              }
             });
           },
           extra: {
@@ -507,15 +458,12 @@ export async function POST(request: Request) {
           }
           if (!stillOwnsFence) {
             return NextResponse.json({
-              reflectionId: created.reflection.id,
-              uploadId,
-              jobId: buildDailyReflectionProductJobId({
-                accountId: authContext.user.id,
-                reflectionId: created.reflection.id
+              ...receipt({
+                operation: operationReceipt,
+                status: service.get(authContext.user.id, created.reflection.id)
+                  .reflection.status,
+                executionMode
               }),
-              status: service.get(authContext.user.id, created.reflection.id)
-                .reflection.status,
-              executionMode,
               persistencePending: true
             }, { status: 202 });
           }
@@ -549,7 +497,7 @@ export async function POST(request: Request) {
                 status: 503
               };
           const current = service.get(authContext.user.id, created.reflection.id);
-          // Any retryable failure before a browser plan exists (including a
+          // Any retryable failure before a V2 plan exists (including a
           // raw-file write failure before ffprobe starts) must leave the
           // idempotent workflow replayable. Once the immutable plan exists,
           // the explicit retry contract can safely resume it from `failed`.
@@ -619,14 +567,11 @@ export async function POST(request: Request) {
   view = service.get(authContext.user.id, created.reflection.id);
   if (!uploadAvailable) {
     return NextResponse.json({
-      reflectionId: created.reflection.id,
-      uploadId,
-      jobId: buildDailyReflectionProductJobId({
-        accountId: authContext.user.id,
-        reflectionId: created.reflection.id
+      ...receipt({
+        operation: operationReceipt,
+        status: view.reflection.status,
+        executionMode
       }),
-      status: view.reflection.status,
-      executionMode,
       persistencePending: view.reflection.status === "uploading"
     }, { status: view.reflection.status === "uploading" ? 202 : 409 });
   }
@@ -659,11 +604,9 @@ export async function POST(request: Request) {
   const queueJobId = executionMode === "queue"
     ? buildDailyReflectionQueueJobId(payload)
     : undefined;
-  job ??= await createDailyReflectionJob({
+  job ??= await orchestrator.ensureDurableJob({
     store: authContext.store,
-    accountId: authContext.user.id,
-    reflectionId: created.reflection.id,
-    uploadId,
+    receipt: operationReceipt,
     executionMode,
     ...(queueJobId ? { queueJobId, queuedAt } : {})
   });
@@ -678,9 +621,7 @@ export async function POST(request: Request) {
       );
       return NextResponse.json({
         ...receipt({
-          reflectionId: created.reflection.id,
-          uploadId,
-          jobId: job.id,
+          operation: operationReceipt,
           status: view.reflection.status,
           executionMode,
           queueJobId
@@ -707,9 +648,7 @@ export async function POST(request: Request) {
   }
 
   return NextResponse.json(receipt({
-    reflectionId: created.reflection.id,
-    uploadId,
-    jobId: job.id,
+    operation: operationReceipt,
     status: view.reflection.status,
     executionMode,
     queueJobId,

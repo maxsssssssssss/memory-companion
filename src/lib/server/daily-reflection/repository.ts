@@ -4,6 +4,7 @@ import { z } from "zod";
 
 import {
   CandidateSchema,
+  CandidateKindV2Schema,
   CandidateV2Schema,
   CandidateAdmissionResultSchema,
   CandidateStatusSchema,
@@ -11,6 +12,7 @@ import {
   CreateDailyReflectionInputSchema,
   CreateDailyReflectionV2InputSchema,
   DAILY_REFLECTION_PROCESSING_PLAN_VERSION,
+  DAILY_REFLECTION_PROCESSING_PLAN_V2_VERSION,
   DailyReflectionAdmissionOperationSchema,
   DailyReflectionIdSchema,
   DailyReflectionSchema,
@@ -19,10 +21,12 @@ import {
   PendingCandidateV2InputSchema,
   ProcessingProfileSchema,
   ProcessingPlanSchema,
+  ProcessingPlanV2Schema,
   ReflectionConfirmationSchema,
   ReflectionConfirmationV2Schema,
   DailyReflectionSaveIntentSchema,
   DailyReflectionV2InputSchema,
+  DailyReflectionV2InputAdapterSchema,
   ReviewPolicySchema,
   legacyCandidateKindForV2,
   type Candidate,
@@ -32,6 +36,7 @@ import {
   type DailyReflectionAdmissionOperation,
   type DailyReflection,
   type DailyReflectionStatus,
+  type DailyReflectionV2InputAdapter,
   type PendingCandidateInput,
   type PendingCandidateV2Input,
   type ProcessingProfile,
@@ -43,6 +48,7 @@ import {
   type ReviewPolicy
 } from "@/lib/domain/daily-reflection";
 import {
+  DAILY_REFLECTION_FULL_CANDIDATE_LIMIT,
   DAILY_REFLECTION_QUICK_CANDIDATE_LIMIT
 } from "@/lib/domain/daily-reflection-duration";
 
@@ -58,6 +64,7 @@ import {
   buildDailyReflectionUploadId,
   isDailyReflectionUploadRecord
 } from "./upload-record";
+import { buildDailyReflectionProductJobId } from "./job-store";
 
 type ReflectionRow = {
   id: string;
@@ -110,6 +117,18 @@ type CandidateRow = {
   updated_at: string;
 };
 
+type ProcessingPlanV2Row = {
+  account_id: string;
+  reflection_id: string;
+  plan_version: 2;
+  input_adapter: "file_picker" | "browser_recorder" | "toy_sync";
+  capture_purpose: "inspiration_capture";
+  effective_duration_ms: number;
+  duration_source: "server_ffprobe";
+  candidate_limit: number;
+  created_at: string;
+};
+
 type CandidateV2MetadataRow = {
   candidate_kind: "insight" | "open_question" | "decision" | "user_action";
   evidence_ids_json: string;
@@ -129,6 +148,28 @@ type ReflectionV2InputRow = {
   recording_date: string;
   created_at: string;
   updated_at: string;
+};
+
+type InputReceiptV2Row = {
+  account_id: string;
+  reflection_id: string;
+  operation_key: string;
+  capture_purpose: "inspiration_capture";
+  content_hash: string;
+  upload_id: string;
+  job_id: string;
+  created_at: string;
+};
+
+export type DailyReflectionInputReceiptV2 = {
+  accountId: string;
+  reflectionId: string;
+  operationKey: string;
+  capturePurpose: "inspiration_capture";
+  contentHash: string;
+  uploadId: string;
+  jobId: string;
+  createdAt: string;
 };
 
 type ConfirmationRow = {
@@ -276,6 +317,31 @@ const BindUploadInputSchema = z.object({
   { message: "leaseOwner and attemptVersion must be provided together" }
 );
 
+const BindUploadV2InputSchema = z.object({
+  accountId: DailyReflectionIdSchema,
+  reflectionId: DailyReflectionIdSchema,
+  expectedVersion: z.number().int().nonnegative(),
+  uploadId: DailyReflectionIdSchema,
+  inputAdapter: DailyReflectionV2InputAdapterSchema,
+  processingProfile: ProcessingProfileSchema,
+  effectiveDurationMs: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
+  durationSource: z.literal("server_ffprobe"),
+  candidateLimit: z.number().int().min(1).max(DAILY_REFLECTION_FULL_CANDIDATE_LIMIT),
+  leaseOwner: z.string().trim().min(1).max(512),
+  attemptVersion: z.number().int().positive()
+}).strict().superRefine((input, context) => {
+  if (
+    input.processingProfile === "quick_reflection"
+    && input.candidateLimit > DAILY_REFLECTION_QUICK_CANDIDATE_LIMIT
+  ) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["candidateLimit"],
+      message: "quick_reflection candidateLimit cannot exceed 3"
+    });
+  }
+});
+
 const RetryFailedInputSchema = z.object({
   accountId: DailyReflectionIdSchema,
   reflectionId: DailyReflectionIdSchema,
@@ -319,7 +385,9 @@ const SaveCandidatesV2InputSchema = z.object({
   accountId: DailyReflectionIdSchema,
   reflectionId: DailyReflectionIdSchema,
   expectedVersion: z.number().int().nonnegative(),
-  candidates: z.array(PendingCandidateV2InputSchema).min(1).max(3),
+  candidates: z.array(PendingCandidateV2InputSchema)
+    .min(1)
+    .max(DAILY_REFLECTION_FULL_CANDIDATE_LIMIT),
   leaseOwner: z.string().trim().min(1).max(512).optional(),
   attemptVersion: z.number().int().positive().optional()
 }).strict().superRefine((input, context) => {
@@ -343,7 +411,8 @@ const CandidateDecisionInputSchema = z.object({
   candidateId: DailyReflectionIdSchema,
   status: CandidateStatusSchema,
   userText: CandidateUserTextInputSchema,
-  subjectPersonId: DailyReflectionIdSchema.nullable()
+  subjectPersonId: DailyReflectionIdSchema.nullable(),
+  actionClaimed: z.boolean().optional()
 }).strict().superRefine((candidate, context) => {
   if (candidate.status !== "kept" && candidate.subjectPersonId !== null) {
     context.addIssue({
@@ -369,6 +438,47 @@ const UpdateCandidateDecisionsInputSchema = z.object({
     });
   }
 });
+
+const CreateManualCandidateV2InputSchema = z.object({
+  accountId: DailyReflectionIdSchema,
+  reflectionId: DailyReflectionIdSchema,
+  expectedVersion: z.number().int().nonnegative(),
+  candidateKind: CandidateKindV2Schema,
+  proposedText: z.string().trim().min(1).max(20_000),
+  evidenceIds: z.array(DailyReflectionIdSchema).max(64),
+  confidence: z.number().min(0).max(1),
+  caution: z.string().trim().min(1).max(4_000),
+  actionClaimed: z.boolean()
+}).strict().superRefine((candidate, context) => {
+  if (new Set(candidate.evidenceIds).size !== candidate.evidenceIds.length) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["evidenceIds"],
+      message: "evidenceIds must be unique"
+    });
+  }
+  if (candidate.candidateKind !== "user_action" && candidate.actionClaimed) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["actionClaimed"],
+      message: "only user_action may claim an action"
+    });
+  }
+  if (candidate.actionClaimed && candidate.evidenceIds.length === 0) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["evidenceIds"],
+      message: "claimed actions require canonical Evidence"
+    });
+  }
+});
+
+const ExcludeCandidateV2InputSchema = z.object({
+  accountId: DailyReflectionIdSchema,
+  reflectionId: DailyReflectionIdSchema,
+  candidateId: DailyReflectionIdSchema,
+  expectedVersion: z.number().int().nonnegative()
+}).strict();
 
 const FinalizeReflectionInputSchema = z.object({
   accountId: DailyReflectionIdSchema,
@@ -602,6 +712,27 @@ function stableFingerprint(value: unknown) {
   return createHash("sha256").update(JSON.stringify(value)).digest("hex");
 }
 
+function planV2FromRows(
+  plan: ProcessingPlanRow,
+  extension: ProcessingPlanV2Row
+): ProcessingPlan {
+  return ProcessingPlanV2Schema.parse({
+    planVersion: extension.plan_version,
+    reflectionId: plan.reflection_id,
+    uploadId: plan.upload_id,
+    inputMethod: plan.input_method,
+    sourceOrigin: plan.source_origin,
+    processingProfile: plan.processing_profile,
+    ingestionContext: plan.ingestion_context,
+    reviewPolicy: plan.review_policy,
+    inputAdapter: extension.input_adapter,
+    capturePurpose: extension.capture_purpose,
+    effectiveDurationMs: extension.effective_duration_ms,
+    durationSource: extension.duration_source,
+    candidateLimit: extension.candidate_limit
+  });
+}
+
 function reflectionV2InputFromRow(row: ReflectionV2InputRow) {
   return DailyReflectionV2InputSchema.parse({
     operationKey: row.operation_key,
@@ -610,6 +741,19 @@ function reflectionV2InputFromRow(row: ReflectionV2InputRow) {
     capturePurpose: row.capture_purpose,
     recordingDate: row.recording_date
   });
+}
+
+function inputReceiptV2FromRow(row: InputReceiptV2Row): DailyReflectionInputReceiptV2 {
+  return {
+    accountId: row.account_id,
+    reflectionId: row.reflection_id,
+    operationKey: row.operation_key,
+    capturePurpose: row.capture_purpose,
+    contentHash: row.content_hash,
+    uploadId: row.upload_id,
+    jobId: row.job_id,
+    createdAt: row.created_at
+  };
 }
 
 export class DailyReflectionRepository {
@@ -683,6 +827,16 @@ export class DailyReflectionRepository {
     `).get(reflectionId, accountId) as ProcessingPlanRow | undefined;
   }
 
+  private findPlanV2Row(accountId: string, reflectionId: string) {
+    return this.database.prepare(`
+      SELECT account_id, reflection_id, plan_version, input_adapter,
+             capture_purpose, effective_duration_ms, duration_source,
+             candidate_limit, created_at
+      FROM dr_processing_plans_v2
+      WHERE account_id = ? AND reflection_id = ?
+    `).get(accountId, reflectionId) as ProcessingPlanV2Row | undefined;
+  }
+
   private findV2InputRow(accountId: string, reflectionId: string) {
     return this.database.prepare(`
       SELECT account_id, reflection_id, operation_key, contract_fingerprint,
@@ -691,6 +845,59 @@ export class DailyReflectionRepository {
       FROM dr_v2_reflection_inputs
       WHERE account_id = ? AND reflection_id = ?
     `).get(accountId, reflectionId) as ReflectionV2InputRow | undefined;
+  }
+
+  private findInputReceiptV2Row(accountId: string, operationKey: string) {
+    return this.database.prepare(`
+      SELECT account_id, reflection_id, operation_key, capture_purpose,
+             content_hash, upload_id, job_id, created_at
+      FROM dr_v2_input_receipts
+      WHERE account_id = ? AND operation_key = ?
+    `).get(accountId, operationKey) as InputReceiptV2Row | undefined;
+  }
+
+  private ensureInputReceiptV2(input: {
+    accountId: string;
+    reflectionId: string;
+    operationKey: string;
+    capturePurpose: "inspiration_capture";
+    contentHash?: string;
+  }) {
+    if (!input.contentHash) return null;
+    const uploadId = buildDailyReflectionUploadId(input.reflectionId);
+    const jobId = buildDailyReflectionProductJobId(input);
+    const existing = this.findInputReceiptV2Row(input.accountId, input.operationKey);
+    if (existing) {
+      if (
+        existing.reflection_id !== input.reflectionId
+        || existing.capture_purpose !== input.capturePurpose
+        || existing.content_hash !== input.contentHash
+        || existing.upload_id !== uploadId
+        || existing.job_id !== jobId
+      ) {
+        throw new DailyReflectionConflictError("daily_reflection_idempotency_conflict");
+      }
+      return inputReceiptV2FromRow(existing);
+    }
+    const now = this.now();
+    this.database.prepare(`
+      INSERT INTO dr_v2_input_receipts (
+        account_id, reflection_id, operation_key, capture_purpose,
+        content_hash, upload_id, job_id, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      input.accountId,
+      input.reflectionId,
+      input.operationKey,
+      input.capturePurpose,
+      input.contentHash,
+      uploadId,
+      jobId,
+      now
+    );
+    return inputReceiptV2FromRow(
+      this.findInputReceiptV2Row(input.accountId, input.operationKey)!
+    );
   }
 
   private candidateFromRow(accountId: string, row: CandidateRow) {
@@ -927,6 +1134,44 @@ export class DailyReflectionRepository {
     return run();
   }
 
+  private isCandidateReviewDeleted(
+    accountId: string,
+    reflectionId: string,
+    candidateId: string
+  ) {
+    const row = this.database.prepare(`
+      SELECT event_kind
+      FROM dr_candidate_v2_review_exclusion_events
+      WHERE account_id = ? AND reflection_id = ? AND candidate_id = ?
+      ORDER BY rowid DESC
+      LIMIT 1
+    `).get(accountId, reflectionId, candidateId) as {
+      event_kind: "excluded" | "restored";
+    } | undefined;
+    return row?.event_kind === "excluded";
+  }
+
+  private appendCandidateReviewExclusionEvent(input: {
+    accountId: string;
+    reflectionId: string;
+    candidateId: string;
+    eventKind: "excluded" | "restored";
+    now: string;
+  }) {
+    this.database.prepare(`
+      INSERT INTO dr_candidate_v2_review_exclusion_events (
+        id, account_id, reflection_id, candidate_id, event_kind, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?)
+    `).run(
+      this.idFactory(),
+      input.accountId,
+      input.reflectionId,
+      input.candidateId,
+      input.eventKind,
+      input.now
+    );
+  }
+
   createReflectionV2(rawInput: CreateDailyReflectionV2Input) {
     const input = CreateDailyReflectionV2InputSchema.parse(rawInput);
     const inputMethod = input.inputAdapter === "browser_recorder"
@@ -946,7 +1191,8 @@ export class DailyReflectionRepository {
       inputAdapter: input.inputAdapter,
       sourceOrigin: input.sourceOrigin,
       capturePurpose: input.capturePurpose,
-      recordingDate: input.recordingDate
+      recordingDate: input.recordingDate,
+      contentHash: input.contentHash ?? null
     });
     const run = this.database.transaction(() => {
       const existing = this.database.prepare(`
@@ -960,10 +1206,18 @@ export class DailyReflectionRepository {
         if (existing.contract_fingerprint !== contractFingerprint) {
           throw new DailyReflectionConflictError("daily_reflection_idempotency_conflict");
         }
+        const receipt = this.ensureInputReceiptV2({
+          accountId: input.accountId,
+          reflectionId: existing.reflection_id,
+          operationKey: input.operationKey,
+          capturePurpose: input.capturePurpose,
+          ...(input.contentHash ? { contentHash: input.contentHash } : {})
+        });
         return {
           reflection: this.getReflection(input.accountId, existing.reflection_id),
           processingPlan: this.getProcessingPlan(input.accountId, existing.reflection_id),
           input: reflectionV2InputFromRow(existing),
+          receipt,
           reused: true
         };
       }
@@ -1002,9 +1256,17 @@ export class DailyReflectionRepository {
         now,
         now
       );
+      const receipt = this.ensureInputReceiptV2({
+        accountId: input.accountId,
+        reflectionId: created.reflection.id,
+        operationKey: input.operationKey,
+        capturePurpose: input.capturePurpose,
+        ...(input.contentHash ? { contentHash: input.contentHash } : {})
+      });
       return {
         ...created,
         input: this.getReflectionV2Input(input.accountId, created.reflection.id)!,
+        receipt,
         reused: false
       };
     });
@@ -1081,6 +1343,13 @@ export class DailyReflectionRepository {
     return row ? reflectionV2InputFromRow(row) : null;
   }
 
+  getInputReceiptV2(accountId: string, operationKey: string) {
+    const parsedAccountId = DailyReflectionIdSchema.parse(accountId);
+    const parsedOperationKey = z.string().trim().min(1).max(512).parse(operationKey);
+    const row = this.findInputReceiptV2Row(parsedAccountId, parsedOperationKey);
+    return row ? inputReceiptV2FromRow(row) : null;
+  }
+
   listAccountReflections(accountId: string, limit = 24) {
     const parsedAccountId = DailyReflectionIdSchema.parse(accountId);
     const parsedLimit = z.number().int().min(1).max(24).parse(limit);
@@ -1101,7 +1370,9 @@ export class DailyReflectionRepository {
     const parsedAccountId = DailyReflectionIdSchema.parse(accountId);
     const parsedReflectionId = DailyReflectionIdSchema.parse(reflectionId);
     const row = this.findPlanRow(parsedAccountId, parsedReflectionId);
-    return row ? planFromRow(row) : null;
+    if (!row) return null;
+    const extension = this.findPlanV2Row(parsedAccountId, parsedReflectionId);
+    return extension ? planV2FromRows(row, extension) : planFromRow(row);
   }
 
   listRecoverableReflections() {
@@ -1132,7 +1403,14 @@ export class DailyReflectionRepository {
              lease_owner, lease_until, status, version, updated_at
       FROM dr_reflections
       WHERE account_id = ? AND id = ?
-        AND input_method = 'browser_recording'
+        AND (
+          input_method = 'browser_recording'
+          OR EXISTS (
+            SELECT 1 FROM dr_v2_reflection_inputs
+            WHERE account_id = dr_reflections.account_id
+              AND reflection_id = dr_reflections.id
+          )
+        )
         AND status IN ('created', 'uploading', 'failed', 'cancelled', 'deleted')
         AND upload_fingerprint IS NOT NULL
         AND attempt_version > 0
@@ -1179,7 +1457,14 @@ export class DailyReflectionRepository {
     const rows = this.database.prepare(`
       SELECT account_id, id
       FROM dr_reflections
-      WHERE input_method = 'browser_recording'
+      WHERE (
+          input_method = 'browser_recording'
+          OR EXISTS (
+            SELECT 1 FROM dr_v2_reflection_inputs
+            WHERE account_id = dr_reflections.account_id
+              AND reflection_id = dr_reflections.id
+          )
+        )
         AND status IN ('created', 'uploading', 'failed', 'cancelled', 'deleted')
         AND upload_fingerprint IS NOT NULL
         AND attempt_version > 0
@@ -1337,6 +1622,151 @@ export class DailyReflectionRepository {
     return run.immediate();
   }
 
+  bindUploadAndPlanV2(rawInput: {
+    accountId: string;
+    reflectionId: string;
+    expectedVersion: number;
+    uploadId: string;
+    inputAdapter: DailyReflectionV2InputAdapter;
+    processingProfile: ProcessingProfile;
+    effectiveDurationMs: number;
+    durationSource: "server_ffprobe";
+    candidateLimit: number;
+    leaseOwner: string;
+    attemptVersion: number;
+  }) {
+    const input = BindUploadV2InputSchema.parse(rawInput);
+    const run = this.database.transaction(() => {
+      const row = this.requireReflectionRow(input.accountId, input.reflectionId);
+      if (isDailyReflectionTombstone(row.status)) {
+        throw new DailyReflectionConflictError("daily_reflection_tombstoned");
+      }
+      const v2Input = this.findV2InputRow(input.accountId, input.reflectionId);
+      const receipt = v2Input
+        ? this.findInputReceiptV2Row(input.accountId, v2Input.operation_key)
+        : undefined;
+      if (!v2Input || !receipt) {
+        throw new DailyReflectionConflictError("daily_reflection_v2_input_receipt_missing");
+      }
+      if (v2Input.input_adapter !== input.inputAdapter) {
+        throw new DailyReflectionConflictError("daily_reflection_input_adapter_mismatch");
+      }
+      if (receipt.upload_id !== input.uploadId) {
+        throw new DailyReflectionConflictError("daily_reflection_upload_binding_conflict");
+      }
+      if (row.version !== input.expectedVersion) {
+        throw new DailyReflectionVersionConflictError(row.version);
+      }
+      this.assertLeaseFence(input);
+      const existingPlan = this.findPlanRow(input.accountId, input.reflectionId);
+      const existingV2 = this.findPlanV2Row(input.accountId, input.reflectionId);
+      if (existingPlan || existingV2) {
+        if (
+          existingPlan
+          && existingV2
+          && row.upload_id === input.uploadId
+          && existingPlan.upload_id === input.uploadId
+          && existingPlan.input_method === row.input_method
+          && existingPlan.source_origin === v2Input.source_origin
+          && existingPlan.processing_profile === input.processingProfile
+          && existingPlan.ingestion_context === "daily_reflection"
+          && existingV2.plan_version === DAILY_REFLECTION_PROCESSING_PLAN_V2_VERSION
+          && existingV2.input_adapter === v2Input.input_adapter
+          && existingV2.capture_purpose === v2Input.capture_purpose
+          && existingV2.effective_duration_ms === input.effectiveDurationMs
+          && existingV2.duration_source === input.durationSource
+          && existingV2.candidate_limit === input.candidateLimit
+        ) {
+          return {
+            reflection: reflectionFromRow(row),
+            processingPlan: planV2FromRows(existingPlan, existingV2),
+            reused: true
+          };
+        }
+        throw new DailyReflectionConflictError("daily_reflection_plan_binding_conflict");
+      }
+      if (row.status !== "created" && row.status !== "uploading") {
+        throw new DailyReflectionConflictError(
+          "daily_reflection_v2_plan_binding_not_active"
+        );
+      }
+      if (row.upload_id !== null && row.upload_id !== input.uploadId) {
+        throw new DailyReflectionConflictError("daily_reflection_upload_binding_conflict");
+      }
+      const uploadOwner = this.database.prepare(`
+        SELECT id FROM dr_reflections
+        WHERE account_id = ? AND upload_id = ? AND id <> ?
+      `).get(input.accountId, input.uploadId, input.reflectionId) as { id: string } | undefined;
+      if (uploadOwner) {
+        throw new DailyReflectionConflictError("daily_reflection_upload_already_bound");
+      }
+
+      const now = this.now();
+      const updated = this.database.prepare(`
+        UPDATE dr_reflections
+        SET upload_id = ?, processing_profile = ?,
+            version = version + 1, updated_at = ?
+        WHERE id = ? AND account_id = ? AND version = ?
+          AND lease_owner = ? AND attempt_version = ? AND lease_until > ?
+      `).run(
+        input.uploadId,
+        input.processingProfile,
+        now,
+        input.reflectionId,
+        input.accountId,
+        input.expectedVersion,
+        input.leaseOwner,
+        input.attemptVersion,
+        now
+      );
+      if (updated.changes !== 1) {
+        throw new DailyReflectionVersionConflictError(
+          this.requireReflectionRow(input.accountId, input.reflectionId).version
+        );
+      }
+      this.insertPlan({
+        reflectionId: input.reflectionId,
+        accountId: input.accountId,
+        uploadId: input.uploadId,
+        inputMethod: row.input_method,
+        sourceOrigin: v2Input.source_origin,
+        processingProfile: input.processingProfile,
+        ingestionContext: "daily_reflection",
+        planVersion: DAILY_REFLECTION_PROCESSING_PLAN_VERSION,
+        reviewPolicy: "required"
+      });
+      this.database.prepare(`
+        INSERT INTO dr_processing_plans_v2 (
+          account_id, reflection_id, plan_version, input_adapter,
+          capture_purpose, effective_duration_ms, duration_source,
+          candidate_limit, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        input.accountId,
+        input.reflectionId,
+        DAILY_REFLECTION_PROCESSING_PLAN_V2_VERSION,
+        v2Input.input_adapter,
+        v2Input.capture_purpose,
+        input.effectiveDurationMs,
+        input.durationSource,
+        input.candidateLimit,
+        now
+      );
+      const reflection = reflectionFromRow(
+        this.requireReflectionRow(input.accountId, input.reflectionId)
+      );
+      return {
+        reflection,
+        processingPlan: planV2FromRows(
+          this.findPlanRow(input.accountId, input.reflectionId)!,
+          this.findPlanV2Row(input.accountId, input.reflectionId)!
+        ),
+        reused: false
+      };
+    });
+    return run.immediate();
+  }
+
   claimExecutionLease(input: {
     accountId: string;
     reflectionId: string;
@@ -1406,15 +1836,24 @@ export class DailyReflectionRepository {
             "daily_reflection_invalid_provisional_upload_id"
           );
         }
+        const v2Input = this.findV2InputRow(accountId, reflectionId);
         if (
           provisionalUploadId !== expectedUploadId
-          || row.input_method !== "browser_recording"
+          || (!v2Input && row.input_method !== "browser_recording")
         ) {
           throw new DailyReflectionConflictError(
             "daily_reflection_invalid_provisional_upload_id"
           );
         }
-        if (this.findPlanRow(accountId, reflectionId)) return null;
+        const existingPlan = this.findPlanRow(accountId, reflectionId);
+        if (
+          existingPlan
+          && (!v2Input || existingPlan.upload_id !== provisionalUploadId)
+        ) {
+          throw new DailyReflectionConflictError(
+            "daily_reflection_upload_binding_conflict"
+          );
+        }
         if (row.upload_id !== null && row.upload_id !== provisionalUploadId) {
           throw new DailyReflectionConflictError(
             "daily_reflection_upload_binding_conflict"
@@ -1857,6 +2296,226 @@ export class DailyReflectionRepository {
     `).run(parsedAccountId, parsedReflectionId).changes;
   }
 
+  createManualCandidateV2(rawInput: {
+    accountId: string;
+    reflectionId: string;
+    expectedVersion: number;
+    candidateKind: "insight" | "open_question" | "decision" | "user_action";
+    proposedText: string;
+    evidenceIds: string[];
+    confidence: number;
+    caution: string;
+    actionClaimed: boolean;
+  }) {
+    const input = CreateManualCandidateV2InputSchema.parse(rawInput);
+    const run = this.database.transaction(() => {
+      const reflectionRow = this.requireReflectionRow(input.accountId, input.reflectionId);
+      const v2Input = this.findV2InputRow(input.accountId, input.reflectionId);
+      const plan = this.findPlanRow(input.accountId, input.reflectionId);
+      const planV2 = this.findPlanV2Row(input.accountId, input.reflectionId);
+      if (!v2Input || !plan || !planV2) {
+        throw new DailyReflectionConflictError("daily_reflection_v2_input_missing");
+      }
+      const providerRecovery = reflectionRow.status === "failed"
+        && Boolean(reflectionRow.error_code?.startsWith("daily_reflection_candidate_"));
+      if (reflectionRow.status !== "review_pending" && !providerRecovery) {
+        throw new DailyReflectionConflictError("daily_reflection_review_not_editable");
+      }
+      if (reflectionRow.version !== input.expectedVersion) {
+        throw new DailyReflectionVersionConflictError(reflectionRow.version);
+      }
+      const finalized = this.database.prepare(`
+        SELECT 1 FROM dr_reflection_confirmations
+        WHERE account_id = ? AND reflection_id = ?
+      `).get(input.accountId, input.reflectionId);
+      if (finalized) {
+        throw new DailyReflectionConflictError("daily_reflection_candidate_finalized");
+      }
+      const currentRows = this.listCandidateRows(input.accountId, input.reflectionId);
+      if (currentRows.length >= planV2.candidate_limit) {
+        throw new DailyReflectionConflictError("daily_reflection_candidate_limit_exceeded");
+      }
+      const canonicalSegments = parseDailyReflectionCanonicalTranscript(
+        this.readPublishedAsset<unknown>({
+          accountId: input.accountId,
+          reflectionId: input.reflectionId,
+          assetKind: "segments"
+        }),
+        plan.upload_id
+      );
+      if (!canonicalSegments?.length) {
+        throw new DailyReflectionConflictError(
+          "daily_reflection_confirmation_evidence_unavailable"
+        );
+      }
+      const evidenceOrder = new Map(
+        canonicalSegments.map((segment, index) => [segment.id, index] as const)
+      );
+      if (input.evidenceIds.some((evidenceId) => !evidenceOrder.has(evidenceId))) {
+        throw new DailyReflectionConflictError(
+          "daily_reflection_confirmation_evidence_unavailable"
+        );
+      }
+      const evidenceIds = [...input.evidenceIds].sort(
+        (left, right) => evidenceOrder.get(left)! - evidenceOrder.get(right)!
+      );
+      const ordinal = currentRows.reduce(
+        (maximum, candidate) => Math.max(maximum, candidate.ordinal),
+        -1
+      ) + 1;
+      const candidateId = this.idFactory();
+      const now = this.now();
+      const candidateType = legacyCandidateKindForV2(input);
+      this.database.prepare(`
+        INSERT INTO dr_candidates (
+          id, account_id, reflection_id, ordinal, proposed_text, user_text,
+          status, candidate_type, subject_person_id, subject_confirmed,
+          version, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, NULL, 'pending', ?, NULL, 0, 0, ?, ?)
+      `).run(
+        candidateId,
+        input.accountId,
+        input.reflectionId,
+        ordinal,
+        input.proposedText,
+        candidateType,
+        now,
+        now
+      );
+      const insertSource = this.database.prepare(`
+        INSERT INTO dr_candidate_sources (
+          account_id, candidate_id, position, source_segment_id
+        ) VALUES (?, ?, ?, ?)
+      `);
+      evidenceIds.forEach((evidenceId, position) => {
+        insertSource.run(input.accountId, candidateId, position, evidenceId);
+      });
+      this.database.prepare(`
+        INSERT INTO dr_candidate_v2_metadata (
+          account_id, reflection_id, candidate_id, candidate_kind,
+          evidence_ids_json, confidence, caution, action_claimed,
+          created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        input.accountId,
+        input.reflectionId,
+        candidateId,
+        input.candidateKind,
+        JSON.stringify(evidenceIds),
+        input.confidence,
+        input.caution,
+        input.actionClaimed ? 1 : 0,
+        now,
+        now
+      );
+      const updated = this.database.prepare(`
+        UPDATE dr_reflections
+        SET status = 'review_pending', error_code = NULL, error_message = NULL,
+            version = version + 1, updated_at = ?
+        WHERE id = ? AND account_id = ? AND version = ?
+          AND review_status IS NULL
+          AND (status = 'review_pending' OR (
+            status = 'failed' AND error_code LIKE 'daily_reflection_candidate_%'
+          ))
+      `).run(
+        now,
+        input.reflectionId,
+        input.accountId,
+        input.expectedVersion
+      );
+      if (updated.changes !== 1) {
+        throw new DailyReflectionVersionConflictError(
+          this.requireReflectionRow(input.accountId, input.reflectionId).version
+        );
+      }
+      return {
+        reflection: reflectionFromRow(
+          this.requireReflectionRow(input.accountId, input.reflectionId)
+        ),
+        candidate: this.candidateFromRow(
+          input.accountId,
+          this.listCandidateRows(input.accountId, input.reflectionId)
+            .find((candidate) => candidate.id === candidateId)!
+        ),
+        retentionEligibility: evidenceIds.length > 0
+          ? "retain_selected" as const
+          : "recap_only" as const
+      };
+    });
+    return run.immediate();
+  }
+
+  excludeCandidateV2(rawInput: {
+    accountId: string;
+    reflectionId: string;
+    candidateId: string;
+    expectedVersion: number;
+  }) {
+    const input = ExcludeCandidateV2InputSchema.parse(rawInput);
+    const run = this.database.transaction(() => {
+      const reflectionRow = this.requireReflectionRow(input.accountId, input.reflectionId);
+      if (reflectionRow.status !== "review_pending" || reflectionRow.review_status !== null) {
+        throw new DailyReflectionConflictError("daily_reflection_review_not_editable");
+      }
+      if (reflectionRow.version !== input.expectedVersion) {
+        throw new DailyReflectionVersionConflictError(reflectionRow.version);
+      }
+      const row = this.listCandidateRows(input.accountId, input.reflectionId)
+        .find((candidate) => candidate.id === input.candidateId);
+      const v2 = row ? this.database.prepare(`
+        SELECT 1 FROM dr_candidate_v2_metadata
+        WHERE account_id = ? AND reflection_id = ? AND candidate_id = ?
+      `).get(input.accountId, input.reflectionId, input.candidateId) : null;
+      if (!row || !v2) throw new DailyReflectionNotFoundError();
+      if (this.isCandidateReviewDeleted(
+        input.accountId,
+        input.reflectionId,
+        input.candidateId
+      )) {
+        throw new DailyReflectionConflictError("daily_reflection_candidate_already_excluded");
+      }
+      const now = this.now();
+      const updatedCandidate = this.database.prepare(`
+        UPDATE dr_candidates
+        SET status = 'excluded', user_text = NULL, subject_person_id = NULL,
+            subject_confirmed = 0, version = version + 1, updated_at = ?
+        WHERE id = ? AND account_id = ? AND reflection_id = ?
+      `).run(now, input.candidateId, input.accountId, input.reflectionId);
+      if (updatedCandidate.changes !== 1) throw new DailyReflectionNotFoundError();
+      this.appendCandidateReviewExclusionEvent({
+        accountId: input.accountId,
+        reflectionId: input.reflectionId,
+        candidateId: input.candidateId,
+        eventKind: "excluded",
+        now
+      });
+      const updatedReflection = this.database.prepare(`
+        UPDATE dr_reflections
+        SET version = version + 1, updated_at = ?
+        WHERE id = ? AND account_id = ? AND version = ?
+          AND status = 'review_pending' AND review_status IS NULL
+      `).run(now, input.reflectionId, input.accountId, input.expectedVersion);
+      if (updatedReflection.changes !== 1) {
+        throw new DailyReflectionVersionConflictError(
+          this.requireReflectionRow(input.accountId, input.reflectionId).version
+        );
+      }
+      return {
+        reflection: reflectionFromRow(
+          this.requireReflectionRow(input.accountId, input.reflectionId)
+        ),
+        candidate: this.candidateFromRow(
+          input.accountId,
+          this.listCandidateRows(input.accountId, input.reflectionId)
+            .find((candidate) => candidate.id === input.candidateId)!
+        ),
+        disposition: "excluded" as const,
+        recoverable: true as const
+      };
+    });
+    return run.immediate();
+  }
+
   updateCandidateDecisions(rawInput: {
     accountId: string;
     reflectionId: string;
@@ -1866,6 +2525,7 @@ export class DailyReflectionRepository {
       status: "pending" | "kept" | "excluded";
       userText: string | null;
       subjectPersonId: string | null;
+      actionClaimed?: boolean;
     }>;
   }) {
     const input = UpdateCandidateDecisionsInputSchema.parse(rawInput);
@@ -1893,7 +2553,8 @@ export class DailyReflectionRepository {
       const update = this.database.prepare(`
         UPDATE dr_candidates
         SET user_text = ?, status = ?, subject_person_id = ?,
-            subject_confirmed = ?, version = version + 1, updated_at = ?
+            subject_confirmed = ?, candidate_type = ?,
+            version = version + 1, updated_at = ?
         WHERE id = ? AND account_id = ? AND reflection_id = ?
       `);
       const now = this.now();
@@ -1901,15 +2562,43 @@ export class DailyReflectionRepository {
         if (!currentCandidates.has(decision.candidateId)) {
           throw new DailyReflectionConflictError("daily_reflection_candidate_mismatch");
         }
-        const isV2 = this.database.prepare(`
-          SELECT 1 FROM dr_candidate_v2_metadata
+        const v2 = this.database.prepare(`
+          SELECT candidate_kind, evidence_ids_json, confidence, caution, action_claimed
+          FROM dr_candidate_v2_metadata
           WHERE account_id = ? AND reflection_id = ? AND candidate_id = ?
-        `).get(input.accountId, input.reflectionId, decision.candidateId);
-        if (isV2 && decision.subjectPersonId !== null) {
+        `).get(
+          input.accountId,
+          input.reflectionId,
+          decision.candidateId
+        ) as CandidateV2MetadataRow | undefined;
+        if (v2 && decision.subjectPersonId !== null) {
           throw new DailyReflectionConflictError(
             "daily_reflection_v2_subject_not_supported"
           );
         }
+        if (decision.actionClaimed !== undefined && !v2) {
+          throw new DailyReflectionConflictError(
+            "daily_reflection_action_claim_requires_v2"
+          );
+        }
+        if (
+          decision.actionClaimed === true
+          && (
+            v2?.candidate_kind !== "user_action"
+            || z.array(DailyReflectionIdSchema).parse(JSON.parse(v2.evidence_ids_json)).length === 0
+          )
+        ) {
+          throw new DailyReflectionConflictError(
+            "daily_reflection_action_claim_requires_evidence"
+          );
+        }
+        const actionClaimed = decision.actionClaimed ?? Boolean(v2?.action_claimed);
+        const candidateType = v2
+          ? legacyCandidateKindForV2({
+              candidateKind: v2.candidate_kind,
+              actionClaimed
+            })
+          : currentCandidates.get(decision.candidateId)!.candidate_type;
         const subjectPersonId = decision.status === "kept"
           ? decision.subjectPersonId
           : null;
@@ -1918,6 +2607,7 @@ export class DailyReflectionRepository {
           decision.status,
           subjectPersonId,
           subjectPersonId === null ? 0 : 1,
+          candidateType,
           now,
           decision.candidateId,
           input.accountId,
@@ -1925,6 +2615,36 @@ export class DailyReflectionRepository {
         );
         if (result.changes !== 1) {
           throw new DailyReflectionConflictError("daily_reflection_candidate_mismatch");
+        }
+        if (v2 && decision.actionClaimed !== undefined) {
+          this.database.prepare(`
+            UPDATE dr_candidate_v2_metadata
+            SET action_claimed = ?, updated_at = ?
+            WHERE account_id = ? AND reflection_id = ? AND candidate_id = ?
+          `).run(
+            decision.actionClaimed ? 1 : 0,
+            now,
+            input.accountId,
+            input.reflectionId,
+            decision.candidateId
+          );
+        }
+        if (
+          v2
+          && decision.status !== "excluded"
+          && this.isCandidateReviewDeleted(
+            input.accountId,
+            input.reflectionId,
+            decision.candidateId
+          )
+        ) {
+          this.appendCandidateReviewExclusionEvent({
+            accountId: input.accountId,
+            reflectionId: input.reflectionId,
+            candidateId: decision.candidateId,
+            eventKind: "restored",
+            now
+          });
         }
       }
       const updated = this.database.prepare(`
@@ -3202,9 +3922,19 @@ export class DailyReflectionRepository {
         throw new DailyReflectionConflictError("daily_reflection_v2_candidate_mismatch");
       }
       const v2Candidates = candidates.map((candidate) => CandidateV2Schema.parse(candidate));
+      const confirmationCandidates = v2Candidates.filter((candidate) =>
+        !this.isCandidateReviewDeleted(
+          input.accountId,
+          input.reflectionId,
+          candidate.id
+        )
+      );
+      if (confirmationCandidates.length === 0) {
+        throw new DailyReflectionConflictError("daily_reflection_candidates_missing");
+      }
       if (
         input.saveIntent === "retain_selected"
-        && v2Candidates.some(
+        && confirmationCandidates.some(
           (candidate) => candidate.status === "kept" && candidate.evidenceIds.length === 0
         )
       ) {
@@ -3220,7 +3950,7 @@ export class DailyReflectionRepository {
         rawCanonicalSegments,
         plan.upload_id
       );
-      const referencedEvidenceCount = v2Candidates.reduce(
+      const referencedEvidenceCount = confirmationCandidates.reduce(
         (count, candidate) => count + candidate.evidenceIds.length,
         0
       );
@@ -3237,7 +3967,7 @@ export class DailyReflectionRepository {
           "daily_reflection_confirmation_evidence_ambiguous"
         );
       }
-      const snapshots: ReflectionConfirmationCandidateSnapshotV2[] = v2Candidates.map(
+      const snapshots: ReflectionConfirmationCandidateSnapshotV2[] = confirmationCandidates.map(
         (candidate) => {
           const evidenceSnapshots = candidate.evidenceIds.map((evidenceId) => {
             const segment = segmentById.get(evidenceId);
@@ -3398,6 +4128,7 @@ export class DailyReflectionRepository {
         throw new DailyReflectionConflictError("daily_reflection_v2_input_missing");
       }
       const processingPlan = this.findPlanRow(input.accountId, input.reflectionId);
+      const processingPlanV2 = this.findPlanV2Row(input.accountId, input.reflectionId);
       if (
         !processingPlan
         || reflectionRow.upload_id === null
@@ -3406,6 +4137,12 @@ export class DailyReflectionRepository {
         || processingPlan.ingestion_context !== "daily_reflection"
       ) {
         throw new DailyReflectionConflictError("daily_reflection_processing_plan_mismatch");
+      }
+      if (
+        candidates.length
+        > (processingPlanV2?.candidate_limit ?? DAILY_REFLECTION_QUICK_CANDIDATE_LIMIT)
+      ) {
+        throw new DailyReflectionConflictError("daily_reflection_candidate_limit_exceeded");
       }
       const existing = this.listCandidateRows(input.accountId, input.reflectionId)
         .map((row) => this.candidateFromRow(input.accountId, row));

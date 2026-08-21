@@ -159,7 +159,8 @@ describe("Daily Reflection SQLite schema", () => {
           { version: 4, count: 1 },
           { version: 5, count: 1 },
           { version: 6, count: 1 },
-          { version: 7, count: 1 }
+          { version: 7, count: 1 },
+          { version: 8, count: 1 }
         ]);
       }
       expect((web.prepare("PRAGMA table_info(dr_reflections)").all() as Array<{
@@ -206,7 +207,8 @@ describe("Daily Reflection SQLite schema", () => {
         { version: 4 },
         { version: 5 },
         { version: 6 },
-        { version: 7 }
+        { version: 7 },
+        { version: 8 }
       ]);
       expect((first.prepare("PRAGMA table_info(dr_reflections)").all() as Array<{
         name: string;
@@ -248,14 +250,14 @@ describe("Daily Reflection SQLite schema", () => {
     try {
       expect(reopened.prepare(
         "SELECT COUNT(*) AS count FROM dr_schema_migrations"
-      ).get()).toEqual({ count: 7 });
+      ).get()).toEqual({ count: 8 });
       expect(reopened.prepare(
         "SELECT source_origin FROM dr_reflections WHERE id = 'reflection_reopen'"
       ).get()).toEqual({ source_origin: "unknown" });
       migrateDailyReflectionSchema(reopened);
       expect(reopened.prepare(
         "SELECT COUNT(*) AS count FROM dr_schema_migrations"
-      ).get()).toEqual({ count: 7 });
+      ).get()).toEqual({ count: 8 });
       expect(reopened.pragma("foreign_key_check")).toEqual([]);
       expect(reopened.pragma("integrity_check", { simple: true })).toBe("ok");
     } finally {
@@ -284,7 +286,8 @@ describe("Daily Reflection SQLite schema", () => {
         { version: 4 },
         { version: 5 },
         { version: 6 },
-        { version: 7 }
+        { version: 7 },
+        { version: 8 }
       ]);
       expect(database.prepare(`
         SELECT lease_owner, lease_until, attempt_version, upload_fingerprint

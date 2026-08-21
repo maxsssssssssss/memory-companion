@@ -160,7 +160,8 @@ export const DailyReflectionCandidateDecisionSchema = z.object({
   candidateId: DailyReflectionIdSchema,
   status: CandidateStatusSchema,
   userText: CandidateUserTextInputSchema,
-  subjectPersonId: DailyReflectionIdSchema.nullable()
+  subjectPersonId: DailyReflectionIdSchema.nullable(),
+  actionClaimed: z.boolean().optional()
 }).strict().superRefine((candidate, context) => {
   if (candidate.status !== "kept" && candidate.subjectPersonId !== null) {
     addIssue(context, ["subjectPersonId"], "only kept candidates may select a Subject");
@@ -176,6 +177,43 @@ export const DailyReflectionCandidateUpdateRequestSchema = z.object({
     addIssue(context, ["candidates"], "candidate ids must be unique");
   }
 });
+
+export const DailyReflectionManualCandidateV2CreateRequestSchema = z.object({
+  expectedVersion: DailyReflectionVersionSchema,
+  candidateKind: CandidateKindV2Schema,
+  proposedText: z.string().trim().min(1).max(20_000),
+  evidenceIds: z.array(DailyReflectionIdSchema).max(64),
+  confidence: z.number().min(0).max(1),
+  caution: z.string().trim().min(1).max(4_000),
+  actionClaimed: z.boolean()
+}).strict().superRefine((candidate, context) => {
+  if (new Set(candidate.evidenceIds).size !== candidate.evidenceIds.length) {
+    addIssue(context, ["evidenceIds"], "evidenceIds must be unique");
+  }
+  if (candidate.candidateKind !== "user_action" && candidate.actionClaimed) {
+    addIssue(context, ["actionClaimed"], "only user_action may claim an action");
+  }
+  if (candidate.actionClaimed && candidate.evidenceIds.length === 0) {
+    addIssue(context, ["evidenceIds"], "claimed actions require canonical Evidence");
+  }
+});
+
+export const DailyReflectionManualCandidateV2CreateResponseSchema = z.object({
+  reflection: DailyReflectionSchema,
+  candidate: CandidateSchema,
+  retentionEligibility: z.enum(["retain_selected", "recap_only"])
+}).strict();
+
+export const DailyReflectionCandidateExcludeRequestSchema = z.object({
+  expectedVersion: DailyReflectionVersionSchema
+}).strict();
+
+export const DailyReflectionCandidateExcludeResponseSchema = z.object({
+  reflection: DailyReflectionSchema,
+  candidate: CandidateSchema,
+  disposition: z.literal("excluded"),
+  recoverable: z.literal(true)
+}).strict();
 
 export const DailyReflectionFinalizeRequestSchema = z.object({
   expectedVersion: DailyReflectionVersionSchema,

@@ -16,6 +16,10 @@ import {
   cleanupDailyReflectionStagingAssets
 } from "./cleanup";
 import { buildDailyReflectionCandidates } from "./candidate-builder";
+import {
+  structuredDailyReflectionCandidateProvider,
+  type DailyReflectionCandidateProvider
+} from "./candidate-provider";
 import { getDailyReflectionDatabase } from "./db";
 import {
   createDailyReflectionJob,
@@ -49,6 +53,7 @@ import {
 } from "./upload-record";
 
 const PROCESSING_LEASE_MS = 15 * 60_000;
+const PROVIDER_LEASE_HEARTBEAT_MS = 30_000;
 
 export type DailyReflectionStagingResult = {
   outcome: "completed" | "reused" | "failed" | "tombstoned" | "busy";
@@ -62,6 +67,8 @@ export type ProcessDailyReflectionUploadDependencies = {
   repository: DailyReflectionRepository;
   transcribeAudio: UploadTranscriptionProcessor;
   buildCandidates: typeof buildDailyReflectionCandidates;
+  candidateProvider: DailyReflectionCandidateProvider;
+  providerLeaseHeartbeatMs: number;
   cleanupCompletedAudio: typeof cleanupDailyReflectionCompletedAudio;
   now: () => string;
   beforePublishAsset?: (
@@ -293,7 +300,8 @@ async function executeDailyReflectionUpload(
         uploadId,
         assetKind: "segments"
       })) ?? [],
-    buildCandidates: dependencies.buildCandidates
+    buildCandidates: dependencies.buildCandidates,
+    candidateProvider: dependencies.candidateProvider
   });
   let view = service.get(input.accountId, input.reflectionId);
   const plan = view.processingPlan;
@@ -362,6 +370,7 @@ async function executeDailyReflectionUpload(
         assetKind: "segments"
       })) ?? [],
     buildCandidates: dependencies.buildCandidates,
+    candidateProvider: dependencies.candidateProvider,
     executionFence: fence
   });
   view = service.get(input.accountId, input.reflectionId);
@@ -566,10 +575,31 @@ async function executeDailyReflectionUpload(
     }
     renewDraftLease(guard);
     await assertDraftWritable(guard);
-    const workerResult = await service.executeCandidateWorker({
-      accountId: input.accountId,
-      reflectionId: input.reflectionId
-    });
+    const providerAbortController = plan.planVersion === 2
+      ? new AbortController()
+      : null;
+    let providerLeaseError: unknown = null;
+    const providerLeaseHeartbeat = providerAbortController
+      ? setInterval(() => {
+          try {
+            renewDraftLease(guard);
+          } catch (error) {
+            providerLeaseError = error;
+            providerAbortController.abort();
+          }
+        }, dependencies.providerLeaseHeartbeatMs)
+      : null;
+    let workerResult;
+    try {
+      workerResult = await service.executeCandidateWorker({
+        accountId: input.accountId,
+        reflectionId: input.reflectionId,
+        ...(providerAbortController ? { signal: providerAbortController.signal } : {})
+      });
+    } finally {
+      if (providerLeaseHeartbeat) clearInterval(providerLeaseHeartbeat);
+    }
+    if (providerLeaseError) throw providerLeaseError;
     await assertDraftWritable(guard);
     view = service.get(input.accountId, input.reflectionId);
     if (
@@ -733,6 +763,10 @@ export function processDailyReflectionUpload(
       ?? createDailyReflectionRepository(getDailyReflectionDatabase()),
     transcribeAudio: dependencies.transcribeAudio ?? transcribeDailyReflectionAudio,
     buildCandidates: dependencies.buildCandidates ?? buildDailyReflectionCandidates,
+    candidateProvider: dependencies.candidateProvider
+      ?? structuredDailyReflectionCandidateProvider,
+    providerLeaseHeartbeatMs: dependencies.providerLeaseHeartbeatMs
+      ?? PROVIDER_LEASE_HEARTBEAT_MS,
     cleanupCompletedAudio: dependencies.cleanupCompletedAudio
       ?? cleanupDailyReflectionCompletedAudio,
     now: dependencies.now ?? (() => new Date().toISOString()),

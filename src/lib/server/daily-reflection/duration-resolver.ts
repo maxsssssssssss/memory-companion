@@ -2,14 +2,15 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 
 import {
-  DAILY_REFLECTION_DURATION_POLICY,
-  DailyReflectionDurationPolicyError,
   DailyReflectionDurationResolutionSchema,
   normalizeDailyReflectionClientReportedDurationMs,
   resolveDailyReflectionProcessingProfile,
   type DailyReflectionDurationResolution
 } from "@/lib/domain/daily-reflection-duration";
-import type { InputMethod } from "@/lib/domain/daily-reflection";
+import type {
+  InputMethod,
+  DailyReflectionV2InputAdapter
+} from "@/lib/domain/daily-reflection";
 import { getFfprobeExecutable } from "@/lib/server/ffmpeg";
 
 export { resolveDailyReflectionProcessingProfile };
@@ -29,7 +30,8 @@ export class DailyReflectionDurationProbeError extends Error {
 
 export type ResolveDailyReflectionDurationInput = {
   filePath: string;
-  inputMethod: Extract<InputMethod, "browser_recording">;
+  inputMethod: InputMethod;
+  inputAdapter?: DailyReflectionV2InputAdapter;
   clientReportedDurationMs?: unknown;
 };
 
@@ -85,11 +87,9 @@ function durationSecondsToMilliseconds(value: unknown) {
 }
 
 /**
- * Probes a persisted browser recording and keeps any browser-reported duration
- * as audit-only metadata. File uploads retain their existing full-recording
- * path and must not acquire this new probe precondition. Callers must persist
- * the returned processing profile in the immutable ProcessingPlan before
- * candidate extraction begins.
+ * Probes every persisted V2 input and keeps any client-reported duration as
+ * audit-only metadata. The immutable ProcessingPlan V2 is derived exclusively
+ * from this server result.
  */
 export async function resolveDailyReflectionAuthoritativeDuration(
   input: ResolveDailyReflectionDurationInput,
@@ -110,22 +110,19 @@ export async function resolveDailyReflectionAuthoritativeDuration(
   }
 
   const effectiveDurationMs = durationSecondsToMilliseconds(durationSeconds);
-
-  // Conversely, never round a valid browser recording just below the
-  // 30-second admission boundary up to an accepted duration.
-  if (durationSeconds < DAILY_REFLECTION_DURATION_POLICY.minimumSeconds) {
-    throw new DailyReflectionDurationPolicyError(
-      "daily_reflection_duration_too_short"
-    );
-  }
+  const inputAdapter = input.inputAdapter ?? (
+    input.inputMethod === "browser_recording" ? "browser_recorder" : "file_picker"
+  );
 
   const processingProfile = resolveDailyReflectionProcessingProfile({
     inputMethod: input.inputMethod,
+    inputAdapter,
     effectiveDurationMs
   });
 
   return DailyReflectionDurationResolutionSchema.parse({
     inputMethod: input.inputMethod,
+    inputAdapter,
     effectiveDurationMs,
     clientReportedDurationMs: normalizeDailyReflectionClientReportedDurationMs(
       input.clientReportedDurationMs

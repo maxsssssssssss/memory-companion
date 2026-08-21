@@ -1,6 +1,7 @@
 import { z } from "zod";
 
 export const DAILY_REFLECTION_PROCESSING_PLAN_VERSION = 1 as const;
+export const DAILY_REFLECTION_PROCESSING_PLAN_V2_VERSION = 2 as const;
 export const DAILY_REFLECTION_V2_CONTRACT_VERSION = 2 as const;
 
 export const DailyReflectionIdSchema = z.string().trim().min(1).max(512);
@@ -101,7 +102,7 @@ export function legacyCandidateKindForV2(input: {
   return "summary";
 }
 
-export const ProcessingPlanSchema = z.object({
+export const ProcessingPlanV1Schema = z.object({
   planVersion: z.literal(DAILY_REFLECTION_PROCESSING_PLAN_VERSION),
   reflectionId: DailyReflectionIdSchema,
   uploadId: DailyReflectionIdSchema,
@@ -111,6 +112,20 @@ export const ProcessingPlanSchema = z.object({
   ingestionContext: IngestionContextSchema,
   reviewPolicy: ReviewPolicySchema
 }).strict();
+
+export const ProcessingPlanV2Schema = ProcessingPlanV1Schema.extend({
+  planVersion: z.literal(DAILY_REFLECTION_PROCESSING_PLAN_V2_VERSION),
+  inputAdapter: DailyReflectionV2InputAdapterSchema,
+  capturePurpose: DailyReflectionV2CapturePurposeSchema,
+  effectiveDurationMs: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
+  durationSource: z.literal("server_ffprobe"),
+  candidateLimit: z.number().int().min(1).max(7)
+}).strict();
+
+export const ProcessingPlanSchema = z.discriminatedUnion("planVersion", [
+  ProcessingPlanV1Schema,
+  ProcessingPlanV2Schema
+]);
 
 export const DailyReflectionSchema = z.object({
   id: DailyReflectionIdSchema,
@@ -399,7 +414,7 @@ export const ReflectionConfirmationV2Schema = z.object({
   capturePurpose: DailyReflectionV2CapturePurposeSchema,
   recordingDate: z.string().date(),
   saveIntent: DailyReflectionSaveIntentSchema,
-  candidateSnapshots: z.array(ReflectionConfirmationCandidateSnapshotV2Schema).min(1).max(3),
+  candidateSnapshots: z.array(ReflectionConfirmationCandidateSnapshotV2Schema).min(1).max(7),
   createdAt: z.string().datetime()
 }).strict().superRefine((confirmation, context) => {
   for (const [candidateIndex, candidate] of confirmation.candidateSnapshots.entries()) {
@@ -518,7 +533,8 @@ export const DailyReflectionV2InputSchema = z.object({
 export const CreateDailyReflectionV2InputSchema = DailyReflectionV2InputSchema.extend({
   id: DailyReflectionIdSchema.optional(),
   accountId: DailyReflectionIdSchema,
-  uploadId: DailyReflectionIdSchema.nullable().optional()
+  uploadId: DailyReflectionIdSchema.nullable().optional(),
+  contentHash: z.string().regex(/^[a-f0-9]{64}$/u).optional()
 }).strict();
 
 export const PendingCandidateInputSchema = z.object({
@@ -585,6 +601,9 @@ export type LegacyDailyReflection = z.infer<typeof LegacyDailyReflectionSchema>;
 export type CandidateStatus = z.infer<typeof CandidateStatusSchema>;
 export type CandidateKind = z.infer<typeof CandidateKindSchema>;
 export type CandidateKindV2 = z.infer<typeof CandidateKindV2Schema>;
+export type DailyReflectionV2InputAdapter = z.infer<
+  typeof DailyReflectionV2InputAdapterSchema
+>;
 export type Candidate = z.infer<typeof CandidateSchema>;
 export type CandidateV2 = z.infer<typeof CandidateV2Schema>;
 export type ReflectionConfirmationCandidateSnapshot = z.infer<

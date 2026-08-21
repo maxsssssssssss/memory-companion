@@ -1,6 +1,6 @@
 import type Database from "better-sqlite3";
 
-export const DAILY_REFLECTION_SCHEMA_VERSION = 7;
+export const DAILY_REFLECTION_SCHEMA_VERSION = 8;
 
 // Version one intentionally represents the pre-provenance workflow shape.
 // Version two adds source_origin with a fail-closed legacy backfill and the
@@ -508,6 +508,89 @@ const DAILY_REFLECTION_SCHEMA_V7 = `
   END;
 `;
 
+// V2 keeps the frozen V1 ProcessingPlan row as its relational binding and
+// stores the additional server-authoritative input contract in one immutable
+// extension row. The operation receipt is also immutable: progress remains in
+// the reflection/job records, while replay identity cannot drift.
+const DAILY_REFLECTION_SCHEMA_V8 = `
+  CREATE TABLE dr_v2_input_receipts (
+    account_id TEXT NOT NULL,
+    reflection_id TEXT NOT NULL,
+    operation_key TEXT NOT NULL,
+    capture_purpose TEXT NOT NULL CHECK (capture_purpose = 'inspiration_capture'),
+    content_hash TEXT NOT NULL CHECK (length(content_hash) = 64),
+    upload_id TEXT NOT NULL,
+    job_id TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (account_id, reflection_id),
+    UNIQUE (account_id, capture_purpose, operation_key),
+    FOREIGN KEY (account_id, reflection_id)
+      REFERENCES dr_v2_reflection_inputs(account_id, reflection_id) ON DELETE CASCADE
+  );
+
+  CREATE TABLE dr_processing_plans_v2 (
+    account_id TEXT NOT NULL,
+    reflection_id TEXT NOT NULL,
+    plan_version INTEGER NOT NULL CHECK (plan_version = 2),
+    input_adapter TEXT NOT NULL CHECK (
+      input_adapter IN ('file_picker', 'browser_recorder', 'toy_sync')
+    ),
+    capture_purpose TEXT NOT NULL CHECK (capture_purpose = 'inspiration_capture'),
+    effective_duration_ms INTEGER NOT NULL CHECK (effective_duration_ms > 0),
+    duration_source TEXT NOT NULL CHECK (duration_source = 'server_ffprobe'),
+    candidate_limit INTEGER NOT NULL CHECK (candidate_limit BETWEEN 1 AND 7),
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (account_id, reflection_id),
+    FOREIGN KEY (account_id, reflection_id)
+      REFERENCES dr_processing_plans(account_id, reflection_id) ON DELETE CASCADE,
+    FOREIGN KEY (account_id, reflection_id)
+      REFERENCES dr_v2_reflection_inputs(account_id, reflection_id) ON DELETE CASCADE
+  );
+
+  CREATE TABLE dr_candidate_v2_review_exclusion_events (
+    id TEXT NOT NULL,
+    account_id TEXT NOT NULL,
+    reflection_id TEXT NOT NULL,
+    candidate_id TEXT NOT NULL,
+    event_kind TEXT NOT NULL CHECK (event_kind IN ('excluded', 'restored')),
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (account_id, id),
+    FOREIGN KEY (candidate_id, account_id)
+      REFERENCES dr_candidates(id, account_id) ON DELETE CASCADE,
+    FOREIGN KEY (reflection_id, account_id)
+      REFERENCES dr_reflections(id, account_id) ON DELETE CASCADE
+  );
+
+  CREATE INDEX idx_dr_candidate_v2_review_exclusion
+    ON dr_candidate_v2_review_exclusion_events(
+      account_id, reflection_id, candidate_id, created_at, id
+    );
+
+  CREATE TRIGGER dr_v2_input_receipts_immutable
+  BEFORE UPDATE ON dr_v2_input_receipts
+  BEGIN
+    SELECT RAISE(ABORT, 'daily_reflection_v2_receipt_immutable');
+  END;
+
+  CREATE TRIGGER dr_processing_plans_v2_immutable
+  BEFORE UPDATE ON dr_processing_plans_v2
+  BEGIN
+    SELECT RAISE(ABORT, 'daily_reflection_v2_plan_immutable');
+  END;
+
+  CREATE TRIGGER dr_candidate_v2_review_exclusion_scope
+  BEFORE INSERT ON dr_candidate_v2_review_exclusion_events
+  WHEN NOT EXISTS (
+    SELECT 1 FROM dr_candidates candidate
+    WHERE candidate.id = NEW.candidate_id
+      AND candidate.account_id = NEW.account_id
+      AND candidate.reflection_id = NEW.reflection_id
+  )
+  BEGIN
+    SELECT RAISE(ABORT, 'daily_reflection_v2_candidate_scope_mismatch');
+  END;
+`;
+
 const MIGRATIONS = [
   { version: 1, sql: DAILY_REFLECTION_SCHEMA_V1 },
   { version: 2, sql: DAILY_REFLECTION_SCHEMA_V2 },
@@ -515,7 +598,8 @@ const MIGRATIONS = [
   { version: 4, sql: DAILY_REFLECTION_SCHEMA_V4 },
   { version: 5, sql: DAILY_REFLECTION_SCHEMA_V5 },
   { version: 6, sql: DAILY_REFLECTION_SCHEMA_V6 },
-  { version: 7, sql: DAILY_REFLECTION_SCHEMA_V7 }
+  { version: 7, sql: DAILY_REFLECTION_SCHEMA_V7 },
+  { version: 8, sql: DAILY_REFLECTION_SCHEMA_V8 }
 ] as const;
 
 export function migrateDailyReflectionSchema(database: Database.Database) {

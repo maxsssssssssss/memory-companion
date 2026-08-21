@@ -1,6 +1,8 @@
 import { NextResponse } from "next/server";
 
 import {
+  DailyReflectionManualCandidateV2CreateRequestSchema,
+  DailyReflectionManualCandidateV2CreateResponseSchema,
   DailyReflectionCandidateUpdateRequestSchema,
   DailyReflectionCandidateUpdateResponseSchema
 } from "@/lib/domain/daily-reflection-api";
@@ -21,6 +23,52 @@ import { getPersonRepository } from "@/lib/server/person";
 
 function missing() {
   return NextResponse.json({ error: "daily_reflection_not_found" }, { status: 404 });
+}
+
+export async function POST(
+  request: Request,
+  { params }: { params: Promise<{ reflectionId: string }> }
+) {
+  if (!isDailyReflectionUploadEnabled()) return missing();
+  const reflectionId = DailyReflectionIdSchema.safeParse((await params).reflectionId);
+  if (!reflectionId.success) {
+    return NextResponse.json({ error: "invalid_reflection_id" }, { status: 400 });
+  }
+  let authContext;
+  try {
+    authContext = await requireAuthContext(request);
+  } catch (error) {
+    if (isUnauthenticatedError(error)) return unauthorizedResponse();
+    throw error;
+  }
+  const payload = DailyReflectionManualCandidateV2CreateRequestSchema.safeParse(
+    await request.json().catch(() => null)
+  );
+  if (!payload.success) {
+    return NextResponse.json({ error: "invalid_manual_candidate_v2" }, { status: 400 });
+  }
+  const repository = getDailyReflectionRepository();
+  try {
+    return NextResponse.json(DailyReflectionManualCandidateV2CreateResponseSchema.parse(
+      repository.createManualCandidateV2({
+        accountId: authContext.user.id,
+        reflectionId: reflectionId.data,
+        ...payload.data
+      })
+    ), { status: 201 });
+  } catch (error) {
+    if (error instanceof DailyReflectionNotFoundError) return missing();
+    if (error instanceof DailyReflectionVersionConflictError) {
+      return NextResponse.json(
+        { error: "version_conflict", currentVersion: error.currentVersion },
+        { status: 409 }
+      );
+    }
+    if (error instanceof DailyReflectionConflictError) {
+      return NextResponse.json({ error: error.code }, { status: 409 });
+    }
+    throw error;
+  }
 }
 
 export async function PATCH(

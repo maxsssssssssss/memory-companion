@@ -1,4 +1,5 @@
 import type Database from "better-sqlite3";
+import { createHash } from "node:crypto";
 import { access, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -8,7 +9,6 @@ import {
   DailyReflectionDetailResponseSchema,
   DailyReflectionHistoryResponseSchema
 } from "@/lib/domain/daily-reflection-api";
-import { DailyReflectionDurationPolicyError } from "@/lib/domain/daily-reflection-duration";
 import type { AuthContext } from "@/lib/server/auth/request-context";
 import { cleanupDailyReflectionStagingAssets } from "@/lib/server/daily-reflection/cleanup";
 import { openDailyReflectionDatabase } from "@/lib/server/daily-reflection/db";
@@ -214,6 +214,10 @@ function postRequest(input: {
   return {
     formData: vi.fn().mockResolvedValue(form)
   } as unknown as Request;
+}
+
+function audioContentHash(bytes: Uint8Array) {
+  return createHash("sha256").update(bytes).digest("hex");
 }
 
 function params(reflectionId: string) {
@@ -491,12 +495,22 @@ beforeEach(async () => {
       results
     }).results;
   });
-  resolveDailyReflectionAuthoritativeDurationMock.mockResolvedValue({
-    inputMethod: "browser_recording",
-    effectiveDurationMs: 60_000,
-    clientReportedDurationMs: null,
-    durationSource: "server_ffprobe",
-    processingProfile: "quick_reflection"
+  resolveDailyReflectionAuthoritativeDurationMock.mockImplementation(async (input: {
+    inputMethod: "file_upload" | "browser_recording";
+    inputAdapter?: "file_picker" | "browser_recorder" | "toy_sync";
+    clientReportedDurationMs?: number | null;
+  }) => {
+    const inputAdapter = input.inputAdapter
+      ?? (input.inputMethod === "browser_recording" ? "browser_recorder" : "file_picker");
+    const isQuick = input.inputMethod === "browser_recording";
+    return {
+      inputMethod: input.inputMethod,
+      inputAdapter,
+      effectiveDurationMs: isQuick ? 60_000 : 300_000,
+      clientReportedDurationMs: input.clientReportedDurationMs ?? null,
+      durationSource: "server_ffprobe" as const,
+      processingProfile: isQuick ? "quick_reflection" as const : "full_recording" as const
+    };
   });
   uploadStorageState.failAfterPersist = false;
   uploadStorageState.failBeforePersist = false;
@@ -617,7 +631,7 @@ describe("Daily Reflection workflow API", () => {
     const response = await postDailyReflection(postRequest({
       idempotencyKey: "browser-disabled",
       inputMethod: "browser_recording",
-      sourceOrigin: null
+      sourceOrigin: "user_reflection"
     }));
 
     expect(response.status).toBe(404);
@@ -634,6 +648,7 @@ describe("Daily Reflection workflow API", () => {
     uploadStorageState.captureBeforePersist = true;
     resolveDailyReflectionAuthoritativeDurationMock.mockResolvedValueOnce({
       inputMethod: "browser_recording",
+      inputAdapter: "browser_recorder",
       effectiveDurationMs: 60_000,
       clientReportedDurationMs: 300_000,
       durationSource: "server_ffprobe",
@@ -664,13 +679,13 @@ describe("Daily Reflection workflow API", () => {
 
     expect(repository.getReflection(accountId, body.reflectionId)).toMatchObject({
       inputMethod: "browser_recording",
-      sourceOrigin: "user_reflection",
+      sourceOrigin: "direct_conversation",
       processingProfile: "quick_reflection",
       status: "uploading"
     });
     expect(repository.getProcessingPlan(accountId, body.reflectionId)).toMatchObject({
       inputMethod: "browser_recording",
-      sourceOrigin: "user_reflection",
+      sourceOrigin: "direct_conversation",
       processingProfile: "quick_reflection",
       uploadId: body.uploadId
     });
@@ -684,6 +699,7 @@ describe("Daily Reflection workflow API", () => {
     expect(resolveDailyReflectionAuthoritativeDurationMock).toHaveBeenCalledWith({
       filePath: expect.stringContaining(body.uploadId),
       inputMethod: "browser_recording",
+      inputAdapter: "browser_recorder",
       clientReportedDurationMs: 300_000
     });
     expect(afterMock).toHaveBeenCalledTimes(1);
@@ -691,7 +707,7 @@ describe("Daily Reflection workflow API", () => {
     const repeated = await postDailyReflection(postRequest({
       idempotencyKey: "browser-authoritative",
       inputMethod: "browser_recording",
-      sourceOrigin: "unknown",
+      sourceOrigin: "direct_conversation",
       clientReportedDurationMs: "30000",
       processingProfile: "full_recording"
     }));
@@ -702,7 +718,7 @@ describe("Daily Reflection workflow API", () => {
       reused: true
     });
     expect(repository.getProcessingPlan(accountId, body.reflectionId)).toMatchObject({
-      sourceOrigin: "user_reflection",
+      sourceOrigin: "direct_conversation",
       processingProfile: "quick_reflection"
     });
     expect(resolveDailyReflectionAuthoritativeDurationMock).toHaveBeenCalledTimes(1);
@@ -719,7 +735,7 @@ describe("Daily Reflection workflow API", () => {
       const plan = repository.getProcessingPlan(accountId, payload.reflectionId);
       expect(reflection).toMatchObject({
         inputMethod: "browser_recording",
-        sourceOrigin: "user_reflection",
+        sourceOrigin: "direct_conversation",
         processingProfile: "quick_reflection",
         status: "uploading"
       });
@@ -747,42 +763,37 @@ describe("Daily Reflection workflow API", () => {
     expect(afterMock).not.toHaveBeenCalled();
   });
 
-  it("rejects a browser recording below the authoritative minimum", async () => {
+  it("accepts a 29-second browser recording as a server-authoritative quick reflection", async () => {
     process.env.DAILY_REFLECTION_BROWSER_RECORDING_ENABLED = "true";
-    resolveDailyReflectionAuthoritativeDurationMock.mockRejectedValueOnce(
-      new DailyReflectionDurationPolicyError(
-        "daily_reflection_duration_too_short"
-      )
-    );
+    resolveDailyReflectionAuthoritativeDurationMock.mockResolvedValueOnce({
+      inputMethod: "browser_recording",
+      inputAdapter: "browser_recorder",
+      effectiveDurationMs: 29_000,
+      clientReportedDurationMs: 180_000,
+      durationSource: "server_ffprobe",
+      processingProfile: "quick_reflection"
+    });
 
     const response = await postDailyReflection(postRequest({
       idempotencyKey: "browser-too-short",
       inputMethod: "browser_recording",
-      sourceOrigin: null,
+      sourceOrigin: "user_reflection",
       clientReportedDurationMs: "180000"
     }));
 
-    expect(response.status).toBe(400);
-    await expect(response.json()).resolves.toMatchObject({
-      error: "daily_reflection_duration_too_short",
-      retryable: false
+    expect(response.status).toBe(201);
+    const body = await response.json() as { reflectionId: string; uploadId: string };
+    expect(repository.getProcessingPlan(accountId, body.reflectionId)).toMatchObject({
+      planVersion: 2,
+      effectiveDurationMs: 29_000,
+      processingProfile: "quick_reflection",
+      candidateLimit: 3
     });
-    const reflection = database.prepare(`
-      SELECT status, error_code FROM dr_reflections WHERE idempotency_key = ?
-    `).get("browser-too-short");
-    expect(reflection).toEqual({
-      status: "failed",
-      error_code: "daily_reflection_duration_too_short"
+    await expect(store.read("uploads", body.uploadId)).resolves.toMatchObject({
+      durationSeconds: 29,
+      effectiveDurationMs: 29_000
     });
-    await expect(store.listIds("uploads")).resolves.toEqual([]);
-    await expect(store.listIds("daily-reflection-jobs")).resolves.toEqual([]);
-    expect(repository.getProcessingPlan(
-      accountId,
-      (database.prepare(`
-        SELECT id FROM dr_reflections WHERE idempotency_key = ?
-      `).get("browser-too-short") as { id: string }).id
-    )).toBeNull();
-    expect(afterMock).not.toHaveBeenCalled();
+    expect(afterMock).toHaveBeenCalledTimes(1);
   });
 
   it("keeps a probe failure replayable before binding the immutable plan", async () => {
@@ -791,6 +802,7 @@ describe("Daily Reflection workflow API", () => {
       .mockRejectedValueOnce(new DailyReflectionDurationProbeError())
       .mockResolvedValueOnce({
         inputMethod: "browser_recording",
+        inputAdapter: "browser_recorder",
         effectiveDurationMs: 181_000,
         clientReportedDurationMs: 60_000,
         durationSource: "server_ffprobe",
@@ -799,7 +811,7 @@ describe("Daily Reflection workflow API", () => {
     const request = () => postRequest({
       idempotencyKey: "browser-probe-retry",
       inputMethod: "browser_recording",
-      sourceOrigin: null,
+      sourceOrigin: "user_reflection",
       clientReportedDurationMs: "60000"
     });
 
@@ -865,7 +877,7 @@ describe("Daily Reflection workflow API", () => {
     const request = () => postRequest({
       idempotencyKey: "browser-storage-retry",
       inputMethod: "browser_recording",
-      sourceOrigin: null
+      sourceOrigin: "user_reflection"
     });
 
     const failed = await postDailyReflection(request());
@@ -897,7 +909,7 @@ describe("Daily Reflection workflow API", () => {
     const request = () => postRequest({
       idempotencyKey: "browser-raw-write-crash",
       inputMethod: "browser_recording",
-      sourceOrigin: null,
+      sourceOrigin: "user_reflection",
       bytes
     });
 
@@ -958,6 +970,7 @@ describe("Daily Reflection workflow API", () => {
   });
 
   it.each([
+    "unknown",
     "manual_note",
     "ai_derived_observation",
     "legacy_unknown",
@@ -980,8 +993,7 @@ describe("Daily Reflection workflow API", () => {
 
   it.each([
     "user_reflection",
-    "direct_conversation",
-    "unknown"
+    "direct_conversation"
   ] as const)("accepts source value %s for file upload", async (sourceOrigin) => {
     const response = await postDailyReflection(postRequest({
       idempotencyKey: `allowed-origin-${sourceOrigin}`,
@@ -1095,8 +1107,8 @@ describe("Daily Reflection workflow API", () => {
     expect(JSON.stringify(failedBody)).not.toContain("sensitive detail");
     const row = database.prepare(`
       SELECT id, status, error_code FROM dr_reflections
-      WHERE account_id = ? AND idempotency_key = ?
-    `).get(accountId, "persist-compensation") as {
+      WHERE account_id = ? AND id = ?
+    `).get(accountId, failedBody.reflectionId) as {
       id: string;
       status: string;
       error_code: string | null;
@@ -1138,27 +1150,22 @@ describe("Daily Reflection workflow API", () => {
   });
 
   it("takes over an uploading workflow whose persistence owner crashed", async () => {
-    const created = repository.createReflection({
-      id: "reflection_crashed_persist",
+    const bytes = new Uint8Array([82, 73, 70, 70, 61, 62, 63, 64]);
+    const created = repository.createReflectionV2({
       accountId,
       uploadId: null,
-      inputMethod: "file_upload",
+      operationKey: "crashed-persist",
+      inputAdapter: "file_picker",
       sourceOrigin: "user_reflection",
-      processingProfile: "full_recording",
-      ingestionContext: "daily_reflection",
-      idempotencyKey: "crashed-persist"
+      capturePurpose: "inspiration_capture",
+      recordingDate: "2026-08-13",
+      contentHash: audioContentHash(bytes)
     });
-    const uploadId = `daily-reflection-${created.reflection.id}`;
-    const bound = repository.bindUploadAndPlan({
-      accountId,
-      reflectionId: created.reflection.id,
-      expectedVersion: created.reflection.version,
-      uploadId
-    });
+    const uploadId = created.receipt!.uploadId;
     repository.transitionStatus({
       accountId,
       reflectionId: created.reflection.id,
-      expectedVersion: bound.reflection.version,
+      expectedVersion: created.reflection.version,
       status: "uploading"
     });
     const crashedFence = repository.claimExecutionLease({
@@ -1166,6 +1173,8 @@ describe("Daily Reflection workflow API", () => {
       reflectionId: created.reflection.id,
       leaseOwner: "crashed_upload_owner",
       leaseDurationMs: 60_000,
+      uploadFingerprint: audioContentHash(bytes),
+      provisionalUploadId: uploadId,
       allowedStatuses: ["uploading"],
       now: "2026-08-13T07:00:00.000Z"
     });
@@ -1175,7 +1184,7 @@ describe("Daily Reflection workflow API", () => {
 
     const response = await postDailyReflection(postRequest({
       idempotencyKey: "crashed-persist",
-      bytes: new Uint8Array([82, 73, 70, 70, 61, 62, 63, 64])
+      bytes
     }));
     expect(response.status).toBe(200);
     await expect(response.json()).resolves.toMatchObject({
@@ -1199,27 +1208,22 @@ describe("Daily Reflection workflow API", () => {
   });
 
   it("returns 202 without storage writes while another persistence lease is live", async () => {
-    const created = repository.createReflection({
-      id: "reflection_live_persist",
+    const bytes = new Uint8Array([82, 73, 70, 70, 1, 2, 3, 4]);
+    const created = repository.createReflectionV2({
       accountId,
       uploadId: null,
-      inputMethod: "file_upload",
+      operationKey: "live-persist",
+      inputAdapter: "file_picker",
       sourceOrigin: "user_reflection",
-      processingProfile: "full_recording",
-      ingestionContext: "daily_reflection",
-      idempotencyKey: "live-persist"
+      capturePurpose: "inspiration_capture",
+      recordingDate: "2026-08-13",
+      contentHash: audioContentHash(bytes)
     });
-    const uploadId = `daily-reflection-${created.reflection.id}`;
-    const bound = repository.bindUploadAndPlan({
-      accountId,
-      reflectionId: created.reflection.id,
-      expectedVersion: created.reflection.version,
-      uploadId
-    });
+    const uploadId = created.receipt!.uploadId;
     const uploading = repository.transitionStatus({
       accountId,
       reflectionId: created.reflection.id,
-      expectedVersion: bound.reflection.version,
+      expectedVersion: created.reflection.version,
       status: "uploading"
     });
     repository.claimExecutionLease({
@@ -1227,12 +1231,15 @@ describe("Daily Reflection workflow API", () => {
       reflectionId: created.reflection.id,
       leaseOwner: "live_upload_owner",
       leaseDurationMs: 2 * 60_000,
+      uploadFingerprint: audioContentHash(bytes),
+      provisionalUploadId: uploadId,
       allowedStatuses: ["uploading"],
       now: "2026-08-13T08:00:00.000Z"
     });
 
     const response = await postDailyReflection(postRequest({
-      idempotencyKey: "live-persist"
+      idempotencyKey: "live-persist",
+      bytes
     }));
 
     expect(response.status).toBe(202);
@@ -1558,7 +1565,7 @@ describe("Daily Reflection workflow API", () => {
     };
     expect(repository.getReflection(accountId, body.reflectionId)).toMatchObject({
       inputMethod: "file_upload",
-      sourceOrigin: "user_reflection",
+      sourceOrigin: "direct_conversation",
       processingProfile: "full_recording"
     });
     await expect(store.read("uploads", body.uploadId)).resolves.toMatchObject({
@@ -1578,7 +1585,13 @@ describe("Daily Reflection workflow API", () => {
     expect(database.prepare("SELECT COUNT(*) AS count FROM dr_reflections").get())
       .toEqual({ count: 1 });
     await expect(store.listIds("uploads")).resolves.toEqual([body.uploadId]);
-    expect(resolveDailyReflectionAuthoritativeDurationMock).not.toHaveBeenCalled();
+    expect(resolveDailyReflectionAuthoritativeDurationMock).toHaveBeenCalledWith({
+      filePath: expect.stringContaining(body.uploadId),
+      inputMethod: "file_upload",
+      inputAdapter: "toy_sync",
+      clientReportedDurationMs: null
+    });
+    expect(resolveDailyReflectionAuthoritativeDurationMock).toHaveBeenCalledTimes(1);
   });
 
   it("updates review decisions with account-scoped confirmed Subjects and optimistic versioning", async () => {

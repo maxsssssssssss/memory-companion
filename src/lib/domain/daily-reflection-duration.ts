@@ -1,18 +1,21 @@
 import { z } from "zod";
 
 import {
+  DailyReflectionV2InputAdapterSchema,
   InputMethodSchema,
   ProcessingProfileSchema,
   type ProcessingProfile
 } from "./daily-reflection";
 
 export const DAILY_REFLECTION_DURATION_POLICY = Object.freeze({
-  minimumSeconds: 30,
+  minimumSeconds: null,
   quickReflectionThresholdSeconds: 180,
   browserSafetyLimitSeconds: null
 } as const);
 
 export const DAILY_REFLECTION_QUICK_CANDIDATE_LIMIT = 3 as const;
+export const DAILY_REFLECTION_FULL_CANDIDATE_DEFAULT = 5 as const;
+export const DAILY_REFLECTION_FULL_CANDIDATE_LIMIT = 7 as const;
 
 const MILLISECONDS_PER_SECOND = 1_000;
 
@@ -45,7 +48,8 @@ export class DailyReflectionDurationPolicyError extends Error {
 }
 
 export const DailyReflectionProcessingProfileInputSchema = z.object({
-  inputMethod: z.unknown(),
+  inputMethod: z.unknown().optional(),
+  inputAdapter: z.unknown().optional(),
   effectiveDurationMs: z.unknown().optional()
 }).strict();
 
@@ -55,8 +59,7 @@ export type DailyReflectionProcessingProfileInput = z.input<
 
 /**
  * Resolves the immutable processing profile from a server-authoritative
- * duration. The 30-second minimum is a browser-recording admission check; it
- * is not an upload, ASR chunking, or global media limit.
+ * duration for every V2 input adapter. Client-selected profiles are ignored.
  */
 export function resolveDailyReflectionProcessingProfile(
   input: DailyReflectionProcessingProfileInput
@@ -68,14 +71,20 @@ export function resolveDailyReflectionProcessingProfile(
     );
   }
 
-  const inputMethod = InputMethodSchema.safeParse(parsedInput.data.inputMethod);
-  if (!inputMethod.success) {
+  const inputMethod = parsedInput.data.inputMethod === undefined
+    ? null
+    : InputMethodSchema.safeParse(parsedInput.data.inputMethod);
+  const inputAdapter = parsedInput.data.inputAdapter === undefined
+    ? null
+    : DailyReflectionV2InputAdapterSchema.safeParse(parsedInput.data.inputAdapter);
+  if (
+    (!inputMethod && !inputAdapter)
+    || (inputMethod && !inputMethod.success)
+    || (inputAdapter && !inputAdapter.success)
+  ) {
     throw new DailyReflectionDurationPolicyError(
       "daily_reflection_input_method_invalid"
     );
-  }
-  if (inputMethod.data === "file_upload") {
-    return "full_recording";
   }
   if (
     parsedInput.data.effectiveDurationMs === null
@@ -92,14 +101,6 @@ export function resolveDailyReflectionProcessingProfile(
   if (!duration.success) {
     throw new DailyReflectionDurationPolicyError(
       "daily_reflection_duration_invalid"
-    );
-  }
-
-  const minimumDurationMs =
-    DAILY_REFLECTION_DURATION_POLICY.minimumSeconds * MILLISECONDS_PER_SECOND;
-  if (duration.data < minimumDurationMs) {
-    throw new DailyReflectionDurationPolicyError(
-      "daily_reflection_duration_too_short"
     );
   }
 
@@ -120,6 +121,7 @@ export function normalizeDailyReflectionClientReportedDurationMs(
 
 export const DailyReflectionDurationResolutionSchema = z.object({
   inputMethod: InputMethodSchema,
+  inputAdapter: DailyReflectionV2InputAdapterSchema,
   effectiveDurationMs: DailyReflectionEffectiveDurationMsSchema,
   clientReportedDurationMs: DailyReflectionClientReportedDurationMsSchema.nullable(),
   durationSource: DailyReflectionDurationSourceSchema,
@@ -128,6 +130,7 @@ export const DailyReflectionDurationResolutionSchema = z.object({
   try {
     const expectedProfile = resolveDailyReflectionProcessingProfile({
       inputMethod: resolution.inputMethod,
+      inputAdapter: resolution.inputAdapter,
       effectiveDurationMs: resolution.effectiveDurationMs
     });
     if (resolution.processingProfile !== expectedProfile) {

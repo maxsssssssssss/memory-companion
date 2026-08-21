@@ -6,6 +6,7 @@ import {
   type Candidate,
   type CandidateAdmissionResult,
   type CreateDailyReflectionInput,
+  type CreateDailyReflectionV2Input,
   type DailyReflectionAdmissionOperation,
   type DailyReflection,
   type PendingCandidateInput,
@@ -19,7 +20,16 @@ import {
 
 import { buildDailyReflectionCandidates } from "./candidate-builder";
 import {
+  DailyReflectionCandidateProviderFailedError,
+  DailyReflectionCandidateProviderUnavailableError,
+  DailyReflectionCandidateValidationError,
+  structuredDailyReflectionCandidateProvider,
+  validateDailyReflectionProviderCandidates,
+  type DailyReflectionCandidateProvider
+} from "./candidate-provider";
+import {
   DailyReflectionConflictError,
+  DailyReflectionLeaseLostError,
   DailyReflectionRepository,
   DailyReflectionVersionConflictError
 } from "./repository";
@@ -71,6 +81,7 @@ export type DailyReflectionWorkerResult = {
 export type DailyReflectionServiceOptions = {
   readTranscriptSegments?: DailyReflectionTranscriptReader;
   buildCandidates?: typeof buildDailyReflectionCandidates;
+  candidateProvider?: DailyReflectionCandidateProvider;
   executionFence?: { leaseOwner: string; attemptVersion: number };
 };
 
@@ -148,6 +159,7 @@ function namespaceCandidateIds(
 export class DailyReflectionService {
   private readonly readTranscriptSegments?: DailyReflectionTranscriptReader;
   private readonly buildCandidates: typeof buildDailyReflectionCandidates;
+  private readonly candidateProvider: DailyReflectionCandidateProvider;
   private readonly executionFence?: { leaseOwner: string; attemptVersion: number };
 
   constructor(
@@ -156,6 +168,8 @@ export class DailyReflectionService {
   ) {
     this.readTranscriptSegments = options.readTranscriptSegments;
     this.buildCandidates = options.buildCandidates ?? buildDailyReflectionCandidates;
+    this.candidateProvider = options.candidateProvider
+      ?? structuredDailyReflectionCandidateProvider;
     this.executionFence = options.executionFence
       ? {
         leaseOwner: options.executionFence.leaseOwner,
@@ -174,6 +188,10 @@ export class DailyReflectionService {
 
   createReflection(input: CreateDailyReflectionInput) {
     return this.create(input);
+  }
+
+  createReflectionV2(input: CreateDailyReflectionV2Input) {
+    return this.repository.createReflectionV2(input);
   }
 
   get(accountId: string, reflectionId: string): DailyReflectionView {
@@ -373,8 +391,12 @@ export class DailyReflectionService {
   async executeCandidateWorker(rawInput: {
     accountId: string;
     reflectionId: string;
+    signal?: AbortSignal;
   }): Promise<DailyReflectionWorkerResult> {
-    const input = WorkerInputSchema.parse(rawInput);
+    const input = WorkerInputSchema.parse({
+      accountId: rawInput.accountId,
+      reflectionId: rawInput.reflectionId
+    });
     let view = this.currentWorkerView(input.accountId, input.reflectionId);
 
     // First tombstone check: a queued worker must become a no-op after cancel
@@ -460,32 +482,103 @@ export class DailyReflectionService {
       );
     }
 
-    let pendingCandidates: PendingCandidateInput[];
-    try {
-      pendingCandidates = namespaceCandidateIds(
-        input.accountId,
-        input.reflectionId,
-        this.buildCandidates({
+    const v2Input = this.repository.getReflectionV2Input(
+      input.accountId,
+      input.reflectionId
+    );
+    let persistCandidates: (expectedVersion: number) => void;
+    if (v2Input) {
+      if (processingPlan.planVersion !== 2) {
+        return this.failWorker(
+          input.accountId,
+          input.reflectionId,
+          "daily_reflection_processing_plan_v2_required",
+          "Daily Reflection V2 requires a server-authoritative ProcessingPlan V2"
+        );
+      }
+      try {
+        const response = await this.candidateProvider.generate({
+          accountId: input.accountId,
+          reflectionId: input.reflectionId,
+          input: v2Input,
+          processingPlan,
           segments,
-          sourceOrigin: processingPlan.sourceOrigin,
-          processingProfile: processingPlan.processingProfile
-        })
-      );
-    } catch (error) {
-      return this.failWorker(
-        input.accountId,
-        input.reflectionId,
-        "daily_reflection_candidate_build_failed",
-        error instanceof Error ? error.message : "Candidate building failed"
-      );
-    }
-    if (pendingCandidates.length === 0) {
-      return this.failWorker(
-        input.accountId,
-        input.reflectionId,
-        "daily_reflection_candidates_missing",
-        "Canonical transcript produced no review candidates"
-      );
+          ...(rawInput.signal ? { signal: rawInput.signal } : {})
+        });
+        if (rawInput.signal?.aborted) {
+          throw new DailyReflectionLeaseLostError();
+        }
+        const pendingCandidates = validateDailyReflectionProviderCandidates({
+          accountId: input.accountId,
+          reflectionId: input.reflectionId,
+          segments,
+          candidateLimit: processingPlan.candidateLimit,
+          response
+        });
+        persistCandidates = (expectedVersion) => {
+          this.repository.savePendingCandidatesV2({
+            accountId: input.accountId,
+            reflectionId: input.reflectionId,
+            expectedVersion,
+            candidates: pendingCandidates,
+            ...this.fenced()
+          });
+        };
+      } catch (error) {
+        if (error instanceof DailyReflectionLeaseLostError || rawInput.signal?.aborted) {
+          throw new DailyReflectionLeaseLostError();
+        }
+        const errorCode = error instanceof DailyReflectionCandidateProviderUnavailableError
+          ? error.code
+          : error instanceof DailyReflectionCandidateProviderFailedError
+            ? error.code
+            : error instanceof DailyReflectionCandidateValidationError
+              ? error.code
+              : "daily_reflection_candidate_provider_failed";
+        return this.failWorker(
+          input.accountId,
+          input.reflectionId,
+          errorCode,
+          errorCode
+        );
+      }
+    } else {
+      let pendingCandidates: PendingCandidateInput[];
+      try {
+        pendingCandidates = namespaceCandidateIds(
+          input.accountId,
+          input.reflectionId,
+          this.buildCandidates({
+            segments,
+            sourceOrigin: processingPlan.sourceOrigin,
+            processingProfile: processingPlan.processingProfile
+          })
+        );
+      } catch (error) {
+        return this.failWorker(
+          input.accountId,
+          input.reflectionId,
+          "daily_reflection_candidate_build_failed",
+          error instanceof Error ? error.message : "Candidate building failed"
+        );
+      }
+      if (pendingCandidates.length === 0) {
+        return this.failWorker(
+          input.accountId,
+          input.reflectionId,
+          "daily_reflection_candidates_missing",
+          "Canonical transcript produced no review candidates"
+        );
+      }
+      persistCandidates = (expectedVersion) => {
+        this.repository.createPendingCandidates({
+          accountId: input.accountId,
+          reflectionId: input.reflectionId,
+          expectedVersion,
+          candidates: pendingCandidates,
+          ...this.fenced()
+        });
+      };
     }
 
     // A cancellation may race with the synchronous pure builder as well.
@@ -499,13 +592,7 @@ export class DailyReflectionService {
     }
 
     try {
-      this.repository.createPendingCandidates({
-        accountId: input.accountId,
-        reflectionId: input.reflectionId,
-        expectedVersion: view.reflection.version,
-        candidates: pendingCandidates,
-        ...this.fenced()
-      });
+      persistCandidates(view.reflection.version);
     } catch (error) {
       return this.settleWorkerRace(input.accountId, input.reflectionId, error);
     }

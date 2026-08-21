@@ -16,7 +16,7 @@ import {
 describe("resolveDailyReflectionProcessingProfile", () => {
   it("freezes the Stage 3 duration policy", () => {
     expect(DAILY_REFLECTION_DURATION_POLICY).toEqual({
-      minimumSeconds: 30,
+      minimumSeconds: null,
       quickReflectionThresholdSeconds: 180,
       browserSafetyLimitSeconds: null
     });
@@ -25,6 +25,7 @@ describe("resolveDailyReflectionProcessingProfile", () => {
   });
 
   it.each([
+    [29_000, "quick_reflection"],
     [30_000, "quick_reflection"],
     [179_000, "quick_reflection"],
     [180_000, "quick_reflection"],
@@ -41,31 +42,21 @@ describe("resolveDailyReflectionProcessingProfile", () => {
     }
   );
 
-  it("rejects a 29-second browser recording without changing the file-upload rule", () => {
-    expect(() => resolveDailyReflectionProcessingProfile({
-      inputMethod: "browser_recording",
-      effectiveDurationMs: 29_000
-    })).toThrowError(expect.objectContaining({
-      code: "daily_reflection_duration_too_short",
-      retryable: false
-    }));
-
+  it("applies the same authoritative duration policy to file input", () => {
     expect(resolveDailyReflectionProcessingProfile({
       inputMethod: "file_upload",
       effectiveDurationMs: 29_000
-    })).toBe("full_recording");
-    expect(resolveDailyReflectionProcessingProfile({
-      inputMethod: "file_upload",
-      effectiveDurationMs: undefined
-    })).toBe("full_recording");
-    expect(resolveDailyReflectionProcessingProfile({
-      inputMethod: "file_upload",
-      effectiveDurationMs: "client-spoofed"
-    })).toBe("full_recording");
+    })).toBe("quick_reflection");
     expect(resolveDailyReflectionProcessingProfile({
       inputMethod: "file_upload",
       effectiveDurationMs: 300_000
     })).toBe("full_recording");
+    expect(() => resolveDailyReflectionProcessingProfile({
+      inputMethod: "file_upload",
+      effectiveDurationMs: undefined
+    })).toThrowError(expect.objectContaining({
+      code: "daily_reflection_duration_missing"
+    }));
   });
 
   it.each([undefined, null])("rejects a missing authoritative duration (%s)", (value) => {
@@ -139,9 +130,9 @@ describe("resolveDailyReflectionAuthoritativeDuration", () => {
       inputMethod: "browser_recording"
     }, {
       readFfprobeStdout: shortRead
-    })).rejects.toMatchObject({
-      code: "daily_reflection_duration_too_short",
-      retryable: false
+    })).resolves.toMatchObject({
+      effectiveDurationMs: 30_000,
+      processingProfile: "quick_reflection"
     });
     expect(shortRead).toHaveBeenCalledWith("just-short.webm");
 
@@ -159,8 +150,8 @@ describe("resolveDailyReflectionAuthoritativeDuration", () => {
   });
 
   it.each([
-    [29, "daily_reflection_duration_too_short"],
-    [29.9999, "daily_reflection_duration_too_short"],
+    [29, "quick_reflection"],
+    [29.9999, "quick_reflection"],
     [30, "quick_reflection"],
     [179, "quick_reflection"],
     [180, "quick_reflection"],
@@ -178,17 +169,10 @@ describe("resolveDailyReflectionAuthoritativeDuration", () => {
         probeDurationSeconds: async () => durationSeconds
       });
 
-      if (expected === "daily_reflection_duration_too_short") {
-        await expect(request).rejects.toMatchObject({
-          code: expected,
-          retryable: false
-        });
-      } else {
-        await expect(request).resolves.toMatchObject({
-          effectiveDurationMs: Math.ceil(durationSeconds * 1_000),
-          processingProfile: expected
-        });
-      }
+      await expect(request).resolves.toMatchObject({
+        effectiveDurationMs: Math.ceil(durationSeconds * 1_000),
+        processingProfile: expected
+      });
     }
   );
 
@@ -201,6 +185,7 @@ describe("resolveDailyReflectionAuthoritativeDuration", () => {
       clientReportedDurationMs: 300_000
     }, { probeDurationSeconds })).resolves.toEqual({
       inputMethod: "browser_recording",
+      inputAdapter: "browser_recorder",
       effectiveDurationMs: 60_000,
       clientReportedDurationMs: 300_000,
       durationSource: "server_ffprobe",
@@ -286,6 +271,7 @@ describe("resolveDailyReflectionAuthoritativeDuration", () => {
   it("publishes a strict resolution DTO that rejects a client-selected profile", () => {
     expect(DailyReflectionDurationResolutionSchema.safeParse({
       inputMethod: "browser_recording",
+      inputAdapter: "browser_recorder",
       effectiveDurationMs: 60_000,
       clientReportedDurationMs: 300_000,
       durationSource: "server_ffprobe",
@@ -296,6 +282,7 @@ describe("resolveDailyReflectionAuthoritativeDuration", () => {
   it("rejects unknown fields in the duration resolution DTO", () => {
     expect(DailyReflectionDurationResolutionSchema.safeParse({
       inputMethod: "browser_recording",
+      inputAdapter: "browser_recorder",
       effectiveDurationMs: 60_000,
       clientReportedDurationMs: null,
       durationSource: "server_ffprobe",

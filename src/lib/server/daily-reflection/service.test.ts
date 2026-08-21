@@ -7,8 +7,14 @@ import type {
 import type { TranscriptSegment } from "@/lib/domain/types";
 
 import { buildDailyReflectionCandidates } from "./candidate-builder";
-import { openDailyReflectionDatabase } from "./db";
 import {
+  DailyReflectionCandidateProviderUnavailableError,
+  type DailyReflectionCandidateProvider
+} from "./candidate-provider";
+import { openDailyReflectionDatabase } from "./db";
+import { DailyReflectionInputOrchestrator } from "./input-orchestrator";
+import {
+  DailyReflectionLeaseLostError,
   DailyReflectionNotFoundError,
   DailyReflectionRepository,
   DailyReflectionVersionConflictError
@@ -81,7 +87,174 @@ function advanceToTranscribing(
   });
 }
 
+function advanceV2ToTranscribing() {
+  const orchestrator = new DailyReflectionInputOrchestrator(repository);
+  const reserved = orchestrator.reserve({
+    accountId: "account_service",
+    inputMethod: "file_upload",
+    inputAdapter: "file_picker",
+    sourceOrigin: "user_reflection",
+    capturePurpose: "inspiration_capture",
+    operationKey: "service_v2_operation",
+    recordingDate: "2026-08-13",
+    contentHash: "a".repeat(64)
+  });
+  const uploading = repository.transitionStatus({
+    accountId: "account_service",
+    reflectionId: reserved.reflection.id,
+    expectedVersion: reserved.reflection.version,
+    status: "uploading"
+  });
+  const fence = orchestrator.claimStaging({
+    receipt: reserved.receipt,
+    leaseOwner: "service_v2_staging",
+    leaseDurationMs: 60_000
+  })!;
+  const bound = orchestrator.bindAuthoritativePlan({
+    receipt: reserved.receipt,
+    expectedVersion: uploading.version + 1,
+    duration: {
+      inputMethod: "file_upload",
+      inputAdapter: "file_picker",
+      effectiveDurationMs: 300_000,
+      clientReportedDurationMs: null,
+      durationSource: "server_ffprobe",
+      processingProfile: "full_recording"
+    },
+    fence
+  });
+  repository.releaseExecutionLease({
+    accountId: "account_service",
+    reflectionId: reserved.reflection.id,
+    leaseOwner: fence.leaseOwner,
+    attemptVersion: fence.attemptVersion
+  });
+  const transcribing = repository.transitionStatus({
+    accountId: "account_service",
+    reflectionId: reserved.reflection.id,
+    expectedVersion: bound.reflection.version,
+    status: "transcribing"
+  });
+  return {
+    transcribing,
+    uploadId: reserved.receipt.uploadId,
+    reflectionId: reserved.reflection.id
+  };
+}
+
 describe("DailyReflectionService", () => {
+  it("uses the full canonical transcript with the V2 Provider and never calls the rule builder", async () => {
+    const { transcribing, uploadId } = advanceV2ToTranscribing();
+    const canonicalSegments = [
+      { ...segment(0), uploadId },
+      { ...segment(1), uploadId }
+    ];
+    const provider: DailyReflectionCandidateProvider = {
+      providerName: "fixture-provider",
+      generate: vi.fn(async () => ({
+        items: [{
+          candidateKind: "decision" as const,
+          proposedText: "Use the V2 provider result.",
+          evidenceIds: ["segment_1", "segment_2"],
+          confidence: 0.92,
+          caution: "Confirm the decision context.",
+          actionClaimed: false
+        }]
+      }))
+    };
+    const buildCandidates = vi.fn(() => {
+      throw new Error("legacy builder must not run");
+    });
+    const service = new DailyReflectionService(repository, {
+      readTranscriptSegments: async () => canonicalSegments,
+      candidateProvider: provider,
+      buildCandidates
+    });
+
+    const result = await service.executeCandidateWorker({
+      accountId: transcribing.accountId,
+      reflectionId: transcribing.id
+    });
+
+    expect(result).toMatchObject({
+      outcome: "completed",
+      reflection: { status: "review_pending" },
+      candidates: [{
+        contractVersion: 2,
+        candidateKind: "decision",
+        sourceSegmentIds: ["segment_1", "segment_2"]
+      }]
+    });
+    expect(provider.generate).toHaveBeenCalledWith(expect.objectContaining({
+      segments: canonicalSegments,
+      processingPlan: expect.objectContaining({ planVersion: 2, candidateLimit: 5 })
+    }));
+    expect(buildCandidates).not.toHaveBeenCalled();
+  });
+
+  it("retains the canonical transcript reference and exposes retry/manual recovery when the V2 Provider is unavailable", async () => {
+    const { transcribing, uploadId, reflectionId } = advanceV2ToTranscribing();
+    const provider: DailyReflectionCandidateProvider = {
+      providerName: "unavailable-provider",
+      generate: vi.fn(async () => {
+        throw new DailyReflectionCandidateProviderUnavailableError();
+      })
+    };
+    const service = new DailyReflectionService(repository, {
+      readTranscriptSegments: async () => [{ ...segment(0), uploadId }],
+      candidateProvider: provider
+    });
+
+    const result = await service.executeCandidateWorker({
+      accountId: transcribing.accountId,
+      reflectionId: transcribing.id
+    });
+
+    expect(result).toMatchObject({
+      outcome: "failed",
+      reflection: {
+        status: "failed",
+        errorCode: "daily_reflection_candidate_provider_unavailable"
+      },
+      candidates: []
+    });
+    expect(service.getTranscriptReference("account_service", reflectionId))
+      .toEqual(expect.objectContaining({ uploadId }));
+  });
+
+  it("discards a V2 Provider result after the lease signal is aborted", async () => {
+    const { transcribing, uploadId, reflectionId } = advanceV2ToTranscribing();
+    const controller = new AbortController();
+    const provider: DailyReflectionCandidateProvider = {
+      providerName: "late-provider",
+      generate: vi.fn(async () => {
+        controller.abort();
+        return {
+          items: [{
+            candidateKind: "insight" as const,
+            proposedText: "Late result.",
+            evidenceIds: ["segment_1"],
+            confidence: 0.9,
+            caution: "Late result must be discarded.",
+            actionClaimed: false
+          }]
+        };
+      })
+    };
+    const service = new DailyReflectionService(repository, {
+      readTranscriptSegments: async () => [{ ...segment(0), uploadId }],
+      candidateProvider: provider
+    });
+
+    await expect(service.executeCandidateWorker({
+      accountId: transcribing.accountId,
+      reflectionId: transcribing.id,
+      signal: controller.signal
+    })).rejects.toBeInstanceOf(DailyReflectionLeaseLostError);
+    expect(repository.getReflectionDetail("account_service", reflectionId))
+      .toMatchObject({ reflection: { status: "extracting" }, candidates: [] });
+  });
+
   it("provides idempotent create and account-scoped reflection views", () => {
     const service = new DailyReflectionService(repository);
     const first = service.create(createInput());
