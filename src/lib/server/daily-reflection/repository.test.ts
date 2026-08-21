@@ -507,7 +507,7 @@ describe("DailyReflectionRepository", () => {
     ]);
   });
 
-  it("fails closed before confirmation for Evidence-free or unsupported V2 retention", () => {
+  it("fails closed for Evidence-free V2 retention and admits sourced direct conversation", () => {
     const evidenceFree = createReviewPendingV2({
       id: "reflection_v2_no_evidence",
       operationKey: "operation_v2_no_evidence",
@@ -560,16 +560,23 @@ describe("DailyReflectionRepository", () => {
         subjectPersonId: null
       }]
     });
-    expect(() => repository.finalizeReviewV2({
+    const directFinalized = repository.finalizeReviewV2({
       accountId: "account_1",
       reflectionId: direct.reflection.id,
       expectedVersion: directDecided.reflection.version,
       operationKey: direct.operationKey,
       saveIntent: "retain_selected"
-    })).toThrowError(expect.objectContaining({
-      code: "daily_reflection_v2_retain_source_not_supported"
-    }));
-    expect(repository.getConfirmation("account_1", direct.reflection.id)).toBeNull();
+    });
+    expect(directFinalized.operation).toMatchObject({ status: "confirmation_ready" });
+    expect(directFinalized.confirmation).toMatchObject({
+      sourceOrigin: "direct_conversation",
+      saveIntent: "retain_selected",
+      candidateSnapshots: [expect.objectContaining({
+        evidenceSnapshots: [expect.objectContaining({
+          effectiveOrigin: "direct_conversation"
+        })]
+      })]
+    });
   });
   it("creates an explicitly sourced reflection with its persisted processing plan", () => {
     const created = repository.createReflection(createInput());

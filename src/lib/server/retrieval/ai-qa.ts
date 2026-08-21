@@ -1161,8 +1161,8 @@ function evidenceSourceSemanticsPrompt(
       candidate.sourceSegmentIds.some((sourceId) => sourceIds.has(sourceId))
     );
     if (!source) return [];
-    const boundary = source.origin === "user_reflection"
-      ? "Memory wording is user_confirmed_derived_content and is not a verbatim quote; cite only this canonical transcript Evidence."
+    const boundary = source.contentKind === "user_confirmed_derived_content"
+      ? "Memory wording is user_confirmed_derived_content: a user-confirmed derived interpretation, not a verbatim quote; cite only this canonical transcript Evidence."
       : source.origin === "unknown"
         ? "Do not infer a speaker, owner, or verbatim quote from this source."
         : "Treat Memory wording as navigation; cite only this canonical transcript Evidence.";

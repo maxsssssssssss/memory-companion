@@ -45,7 +45,7 @@ async function canonicalEvidenceForUpload(
   upload: ReadyUpload,
   source: RetrievalUploadResolution
 ) {
-  if (source.attribution.origin === "user_reflection") {
+  if (source.attribution.contentKind === "user_confirmed_derived_content") {
     return buildCanonicalQaEvidenceCorpus({
       segments: source.canonicalSegments ?? [],
       audioInsights: [],

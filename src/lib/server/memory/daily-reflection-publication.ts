@@ -49,7 +49,8 @@ export type DailyReflectionPublicationInput = {
   confirmationId: string;
   confirmationFingerprint: string;
   uploadId: string;
-  sourceOrigin: "user_reflection";
+  sourceOrigin: "user_reflection" | "direct_conversation";
+  contentKind: "user_confirmed_derived_content";
   contractVersion?: 1 | 2;
   saveIntent?: "retain_selected";
   inputAdapter?: "file_picker" | "browser_recorder" | "toy_sync";
@@ -78,6 +79,8 @@ type PublicationRow = {
   confirmation_fingerprint: string;
   payload_digest: string;
   source_origin: "user_reflection";
+  effective_source_origin: "user_reflection" | "direct_conversation";
+  content_kind: "user_confirmed_derived_content";
   contract_version: 1 | 2;
   save_intent: "retain_selected";
   input_adapter: "file_picker" | "browser_recorder" | "toy_sync" | null;
@@ -157,8 +160,11 @@ export function createDailyReflectionMemoryPublicationRepository(
           && candidate.subjectPersonId === null
           && candidate.subjectEvidence.length === 0
       );
+    const hasValidSourceSemantics = input.contentKind === "user_confirmed_derived_content"
+      && (contractVersion === 2 || input.sourceOrigin === "user_reflection");
     if (
-      (contractVersion === 2 && !isValidV2)
+      !hasValidSourceSemantics
+      || (contractVersion === 2 && !isValidV2)
       || (contractVersion === 1 && (
         input.saveIntent !== undefined
         || input.inputAdapter !== undefined
@@ -191,7 +197,8 @@ export function createDailyReflectionMemoryPublicationRepository(
         || existing.upload_id !== input.uploadId
         || existing.confirmation_fingerprint !== input.confirmationFingerprint
         || existing.payload_digest !== input.payloadDigest
-        || existing.source_origin !== input.sourceOrigin
+        || existing.effective_source_origin !== input.sourceOrigin
+        || existing.content_kind !== input.contentKind
         || existing.contract_version !== contractVersion
         || existing.save_intent !== saveIntent
         || existing.input_adapter !== (input.inputAdapter ?? null)
@@ -223,10 +230,12 @@ export function createDailyReflectionMemoryPublicationRepository(
     database.prepare(`
       INSERT INTO memory_daily_reflection_publications (
         id, user_id, reflection_id, confirmation_id, upload_id,
-        confirmation_fingerprint, payload_digest, source_origin, status,
+        confirmation_fingerprint, payload_digest, source_origin,
+        effective_source_origin, content_kind, status,
         created_at, updated_at, deleted_at, contract_version, save_intent,
         input_adapter, capture_purpose, recording_date
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'unpublished', ?, ?, NULL, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, 'user_reflection', ?, ?,
+        'unpublished', ?, ?, NULL, ?, ?, ?, ?, ?)
     `).run(
       input.id,
       input.userId,
@@ -236,6 +245,7 @@ export function createDailyReflectionMemoryPublicationRepository(
       input.confirmationFingerprint,
       input.payloadDigest,
       input.sourceOrigin,
+      input.contentKind,
       input.now,
       input.now,
       contractVersion,
@@ -292,8 +302,9 @@ export function createDailyReflectionMemoryPublicationRepository(
       INSERT INTO memory_daily_reflection_evidence_provenance (
         memory_evidence_id, user_id, publication_id, reflection_id,
         confirmation_id, candidate_id, upload_id, source_segment_id,
-        source_origin, content_digest, created_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        source_origin, effective_source_origin, content_kind,
+        content_digest, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'user_reflection', ?, ?, ?, ?)
     `);
     const evidenceMemory = database.prepare(`
       SELECT memory_id, upload_id, source_id
@@ -347,6 +358,7 @@ export function createDailyReflectionMemoryPublicationRepository(
             input.uploadId,
             provenance.sourceSegmentId,
             input.sourceOrigin,
+            input.contentKind,
             provenance.contentDigest,
             input.now
           );

@@ -175,7 +175,8 @@ export function retrieveMemoryIndexEvidence(input: {
       return source?.eligible === true
         && (
           isEligibleForScope(memory, input.scope)
-          || source.attribution.origin === "user_reflection" && memory.status === "active"
+          || source.attribution.contentKind === "user_confirmed_derived_content"
+            && memory.status === "active"
         );
     })
     .slice(0, limit);

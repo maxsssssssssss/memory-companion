@@ -3,10 +3,11 @@
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import Database from "better-sqlite3";
 import { afterEach, describe, expect, it } from "vitest";
 import { openMemoryDatabase } from "./db";
 import { createMemoryRepository } from "./repository";
-import { MEMORY_SCHEMA_VERSION } from "./schema";
+import { MEMORY_SCHEMA_VERSION, migrateMemorySchema } from "./schema";
 
 let tempDir: string | undefined;
 
@@ -42,6 +43,12 @@ describe("memory database", () => {
     const dailyReflectionReceiptColumns = database
       .prepare("PRAGMA table_info(memory_daily_reflection_candidate_receipts)")
       .all() as Array<{ name: string }>;
+    const dailyReflectionProvenanceColumns = database
+      .prepare("PRAGMA table_info(memory_daily_reflection_evidence_provenance)")
+      .all() as Array<{ name: string }>;
+    const dailyReflectionProvenanceForeignKeys = database
+      .prepare("PRAGMA foreign_key_list(memory_daily_reflection_evidence_provenance)")
+      .all() as Array<{ table: string }>;
 
     expect(tables.map((table) => table.name)).toEqual(
       expect.arrayContaining([
@@ -117,12 +124,19 @@ describe("memory database", () => {
         "save_intent",
         "input_adapter",
         "capture_purpose",
-        "recording_date"
+        "recording_date",
+        "effective_source_origin",
+        "content_kind"
       ])
     );
     expect(dailyReflectionReceiptColumns.map((column) => column.name)).toEqual(
       expect.arrayContaining(["candidate_kind", "action_claimed"])
     );
+    expect(dailyReflectionProvenanceColumns.map((column) => column.name)).toEqual(
+      expect.arrayContaining(["effective_source_origin", "content_kind"])
+    );
+    expect(dailyReflectionProvenanceForeignKeys.map((foreignKey) => foreignKey.table))
+      .not.toContain("memory_evidence");
     expect(dcRelationshipLinkColumns.map((column) => column.name)).toContain("relationship_epoch");
     expect(database.pragma("foreign_keys", { simple: true })).toBe(1);
 
@@ -262,6 +276,113 @@ describe("memory database", () => {
     expect(database.prepare(`
       SELECT COUNT(*) AS count FROM dc_memory_bridge_candidate_receipts
     `).get()).toEqual({ count: 0 });
+    expect(database.pragma("foreign_key_check")).toEqual([]);
+    database.close();
+  });
+
+  it("repairs already-applied V14 Reflection source metadata without losing V1 provenance", () => {
+    const database = new Database(":memory:");
+    database.pragma("foreign_keys = ON");
+    database.exec(`
+      CREATE TABLE schema_migrations (
+        version INTEGER PRIMARY KEY,
+        applied_at TEXT NOT NULL
+      );
+      WITH RECURSIVE versions(version) AS (
+        SELECT 1 UNION ALL SELECT version + 1 FROM versions WHERE version < 14
+      )
+      INSERT INTO schema_migrations(version, applied_at)
+      SELECT version, '2026-08-21T00:00:00.000Z' FROM versions;
+
+      CREATE TABLE memory_evidence (id TEXT PRIMARY KEY);
+      CREATE TABLE memory_daily_reflection_publications (
+        id TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL,
+        reflection_id TEXT NOT NULL,
+        confirmation_id TEXT NOT NULL,
+        upload_id TEXT NOT NULL,
+        confirmation_fingerprint TEXT NOT NULL,
+        payload_digest TEXT NOT NULL,
+        source_origin TEXT NOT NULL CHECK (source_origin = 'user_reflection'),
+        status TEXT NOT NULL CHECK (status IN ('unpublished', 'published', 'deleted')),
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        deleted_at TEXT,
+        contract_version INTEGER NOT NULL DEFAULT 1 CHECK (contract_version IN (1, 2)),
+        save_intent TEXT NOT NULL DEFAULT 'retain_selected' CHECK (save_intent = 'retain_selected'),
+        input_adapter TEXT,
+        capture_purpose TEXT,
+        recording_date TEXT,
+        UNIQUE (id, user_id),
+        UNIQUE (user_id, reflection_id),
+        UNIQUE (user_id, confirmation_id),
+        UNIQUE (user_id, upload_id)
+      );
+      CREATE TABLE memory_daily_reflection_evidence_provenance (
+        memory_evidence_id TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL,
+        publication_id TEXT NOT NULL,
+        reflection_id TEXT NOT NULL,
+        confirmation_id TEXT NOT NULL,
+        candidate_id TEXT NOT NULL,
+        upload_id TEXT NOT NULL,
+        source_segment_id TEXT NOT NULL,
+        source_origin TEXT NOT NULL CHECK (source_origin = 'user_reflection'),
+        content_digest TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        UNIQUE (user_id, publication_id, candidate_id, source_segment_id),
+        FOREIGN KEY (publication_id, user_id)
+          REFERENCES memory_daily_reflection_publications(id, user_id) ON DELETE CASCADE,
+        FOREIGN KEY (memory_evidence_id)
+          REFERENCES memory_evidence(id) ON DELETE CASCADE
+      );
+      CREATE INDEX idx_memory_daily_reflection_evidence_source
+        ON memory_daily_reflection_evidence_provenance(
+          user_id, upload_id, source_segment_id, candidate_id
+        );
+
+      INSERT INTO memory_evidence(id) VALUES ('evidence_v14_legacy');
+      INSERT INTO memory_daily_reflection_publications (
+        id, user_id, reflection_id, confirmation_id, upload_id,
+        confirmation_fingerprint, payload_digest, source_origin, status,
+        created_at, updated_at, deleted_at
+      ) VALUES (
+        'publication_v14_legacy', 'account_v14', 'reflection_v14',
+        'confirmation_v14', 'upload_v14', '${"a".repeat(64)}',
+        '${"b".repeat(64)}', 'user_reflection', 'published',
+        '2026-08-21T00:00:00.000Z', '2026-08-21T00:00:00.000Z', NULL
+      );
+      INSERT INTO memory_daily_reflection_evidence_provenance (
+        memory_evidence_id, user_id, publication_id, reflection_id,
+        confirmation_id, candidate_id, upload_id, source_segment_id,
+        source_origin, content_digest, created_at
+      ) VALUES (
+        'evidence_v14_legacy', 'account_v14', 'publication_v14_legacy',
+        'reflection_v14', 'confirmation_v14', 'candidate_v14', 'upload_v14',
+        'segment_v14', 'user_reflection', '${"c".repeat(64)}',
+        '2026-08-21T00:00:00.000Z'
+      );
+    `);
+
+    migrateMemorySchema(database);
+    expect(database.prepare(`
+      SELECT effective_source_origin, content_kind
+      FROM memory_daily_reflection_publications
+    `).get()).toEqual({
+      effective_source_origin: "user_reflection",
+      content_kind: "user_confirmed_derived_content"
+    });
+    expect(database.prepare(`
+      SELECT effective_source_origin, content_kind
+      FROM memory_daily_reflection_evidence_provenance
+    `).get()).toEqual({
+      effective_source_origin: "user_reflection",
+      content_kind: "user_confirmed_derived_content"
+    });
+    database.prepare("DELETE FROM memory_evidence WHERE id = ?").run("evidence_v14_legacy");
+    expect(database.prepare(`
+      SELECT COUNT(*) AS count FROM memory_daily_reflection_evidence_provenance
+    `).get()).toEqual({ count: 1 });
     expect(database.pragma("foreign_key_check")).toEqual([]);
     database.close();
   });

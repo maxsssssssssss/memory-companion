@@ -44,6 +44,9 @@ type PublicationRow = {
   reflection_id: string;
   upload_id: string;
   source_origin: "user_reflection";
+  effective_source_origin: "user_reflection" | "direct_conversation";
+  content_kind: "user_confirmed_derived_content";
+  contract_version: 1 | 2;
   status: "unpublished" | "published" | "deleted";
 };
 
@@ -52,6 +55,8 @@ type ProvenanceRow = {
   memory_id: string;
   source_segment_id: string;
   quote: string;
+  effective_source_origin: "user_reflection" | "direct_conversation";
+  content_kind: "user_confirmed_derived_content";
   content_digest: string;
 };
 
@@ -111,6 +116,7 @@ export function retrievalSourceStatement(origin: RetrievalSourceOrigin, date: st
 
 function attribution(input: {
   origin: RetrievalSourceOrigin;
+  contentKind: RetrievalSourceAttribution["contentKind"];
   date: string;
   reflectionId?: string;
   sourceSegmentIds: string[];
@@ -119,9 +125,7 @@ function attribution(input: {
     origin: input.origin,
     statement: retrievalSourceStatement(input.origin, input.date),
     date: input.date,
-    contentKind: input.origin === "user_reflection"
-      ? "user_confirmed_derived_content"
-      : "memory_navigation",
+    contentKind: input.contentKind,
     ...(input.reflectionId ? { reflectionId: input.reflectionId } : {}),
     sourceSegmentIds: [...new Set(input.sourceSegmentIds)]
   };
@@ -133,9 +137,15 @@ function publicationForUpload(
   uploadId: string
 ) {
   return database.prepare(`
-    SELECT id, reflection_id, upload_id, source_origin, status
+    SELECT id, reflection_id, upload_id, source_origin,
+      effective_source_origin, content_kind, contract_version, status
     FROM memory_daily_reflection_publications
     WHERE user_id = ? AND upload_id = ?
+      AND NOT EXISTS (
+        SELECT 1 FROM memory_upload_tombstones tombstone
+        WHERE tombstone.user_id = memory_daily_reflection_publications.user_id
+          AND tombstone.upload_id = memory_daily_reflection_publications.upload_id
+      )
   `).get(userId, uploadId) as PublicationRow | undefined;
 }
 
@@ -149,6 +159,8 @@ function provenanceForPublication(
       evidence.memory_id,
       provenance.source_segment_id,
       evidence.quote,
+      provenance.effective_source_origin,
+      provenance.content_kind,
       provenance.content_digest
     FROM memory_daily_reflection_evidence_provenance provenance
     INNER JOIN memory_evidence evidence
@@ -222,7 +234,7 @@ function resolvePublishedReflection(input: {
       || !plan
       || plan.reflectionId !== input.publication.reflection_id
       || plan.uploadId !== input.publication.upload_id
-      || plan.sourceOrigin !== "user_reflection"
+      || plan.sourceOrigin !== input.publication.effective_source_origin
       || plan.ingestionContext !== "daily_reflection"
       || plan.reviewPolicy !== "required"
       || !parsedUpload.success
@@ -246,6 +258,8 @@ function resolvePublishedReflection(input: {
       const segment = segmentById.get(item.source_segment_id);
       return !segment
         || item.quote !== segment.text.slice(0, 4_000)
+        || item.effective_source_origin !== input.publication.effective_source_origin
+        || item.content_kind !== input.publication.content_kind
         || item.content_digest !== digest({
           version: 1,
           accountId: input.userId,
@@ -253,7 +267,7 @@ function resolvePublishedReflection(input: {
           uploadId: input.publication.upload_id,
           sourceSegmentId: item.source_segment_id,
           quote: item.quote,
-          sourceOrigin: input.publication.source_origin
+          sourceOrigin: input.publication.effective_source_origin
         });
     })) {
       return invalid("provenance_mismatch");
@@ -291,6 +305,7 @@ export function resolveRetrievalUpload(input: {
       visible: true,
       attribution: attribution({
         origin: "direct_conversation",
+        contentKind: "memory_navigation",
         date,
         sourceSegmentIds: []
       })
@@ -299,13 +314,23 @@ export function resolveRetrievalUpload(input: {
   if (!isDailyReflectionUpload(input.upload)) {
     return {
       visible: false,
-      attribution: attribution({ origin: "unknown", date, sourceSegmentIds: [] })
+      attribution: attribution({
+        origin: "unknown",
+        contentKind: "memory_navigation",
+        date,
+        sourceSegmentIds: []
+      })
     };
   }
   if (!input.userId) {
     return {
       visible: false,
-      attribution: attribution({ origin: "unknown", date, sourceSegmentIds: [] })
+      attribution: attribution({
+        origin: "unknown",
+        contentKind: "memory_navigation",
+        date,
+        sourceSegmentIds: []
+      })
     };
   }
   const dependencies = resolveDependencies(input.dependencies);
@@ -317,11 +342,18 @@ export function resolveRetrievalUpload(input: {
   if (
     !publication
     || publication.reflection_id !== input.upload.reflectionId
-    || publication.source_origin !== "user_reflection"
+    || publication.content_kind !== "user_confirmed_derived_content"
+    || (publication.contract_version === 1
+      && publication.effective_source_origin !== "user_reflection")
   ) {
     return {
       visible: false,
-      attribution: attribution({ origin: "unknown", date, sourceSegmentIds: [] })
+      attribution: attribution({
+        origin: "unknown",
+        contentKind: "memory_navigation",
+        date,
+        sourceSegmentIds: []
+      })
     };
   }
   const resolved = resolvePublishedReflection({
@@ -334,6 +366,7 @@ export function resolveRetrievalUpload(input: {
       visible: false,
       attribution: attribution({
         origin: "unknown",
+        contentKind: "memory_navigation",
         date,
         reflectionId: publication.reflection_id,
         sourceSegmentIds: []
@@ -344,7 +377,8 @@ export function resolveRetrievalUpload(input: {
     visible: true,
     canonicalSegments: resolved.segments,
     attribution: attribution({
-      origin: "user_reflection",
+      origin: publication.effective_source_origin,
+      contentKind: publication.content_kind,
       date,
       reflectionId: publication.reflection_id,
       sourceSegmentIds: resolved.segments.map((segment) => segment.id)
@@ -379,6 +413,7 @@ export function resolveMemoryRetrievalSource(input: {
         memoryId: input.memory.id,
         ...attribution({
           origin: looksLikeDailyReflection ? "unknown" : "direct_conversation",
+          contentKind: "memory_navigation",
           date: input.memory.date,
           sourceSegmentIds
         })
@@ -390,7 +425,12 @@ export function resolveMemoryRetrievalSource(input: {
       eligible: false,
       attribution: {
         memoryId: input.memory.id,
-        ...attribution({ origin: "unknown", date: input.memory.date, sourceSegmentIds })
+        ...attribution({
+          origin: "unknown",
+          contentKind: "memory_navigation",
+          date: input.memory.date,
+          sourceSegmentIds
+        })
       }
     };
   }
@@ -417,7 +457,8 @@ export function resolveMemoryRetrievalSource(input: {
     attribution: {
       memoryId: input.memory.id,
       ...attribution({
-        origin: eligible ? "user_reflection" : "unknown",
+        origin: eligible ? publication.effective_source_origin : "unknown",
+        contentKind: eligible ? publication.content_kind : "memory_navigation",
         date: input.memory.date,
         reflectionId: publication.reflection_id,
         sourceSegmentIds

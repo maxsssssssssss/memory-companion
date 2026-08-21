@@ -71,7 +71,7 @@ function repository(memories: MemoryItem[], ownerAttributions: MemoryOwnerMetada
 }
 
 describe("memory index QA evidence adapter", () => {
-  it("retrieves an eligible published Reflection memory in current, week, and all scopes", () => {
+  it("retrieves a derived direct-conversation Reflection memory in current, week, and all scopes", () => {
     const selected = memory({
       id: "reflection_current",
       type: "preference",
@@ -82,8 +82,8 @@ describe("memory index QA evidence adapter", () => {
         eligible: true,
         attribution: {
           memoryId: item.id,
-          origin: "user_reflection" as const,
-          statement: "你在 2026-08-13 的复盘中提到……",
+          origin: "direct_conversation" as const,
+          statement: "在 2026-08-13 的交流中提到……",
           date: "2026-08-13",
           contentKind: "user_confirmed_derived_content" as const,
           reflectionId: "reflection_1",
@@ -108,7 +108,7 @@ describe("memory index QA evidence adapter", () => {
       expect(result.sourceAttributions, scope).toEqual([
         expect.objectContaining({
           memoryId: selected.id,
-          origin: "user_reflection",
+          origin: "direct_conversation",
           contentKind: "user_confirmed_derived_content"
         })
       ]);

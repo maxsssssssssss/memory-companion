@@ -67,14 +67,21 @@ function segment(id = SEGMENT_ID, text = "I prefer a quiet cafe."): TranscriptSe
   };
 }
 
-function seedPublication(status: "unpublished" | "published" | "deleted") {
+function seedPublication(
+  status: "unpublished" | "published" | "deleted",
+  sourceOrigin: "user_reflection" | "direct_conversation" = "user_reflection"
+) {
   const canonical = segment();
+  const contractVersion = sourceOrigin === "direct_conversation" ? 2 : 1;
   database.prepare(`
     INSERT INTO memory_daily_reflection_publications (
       id, user_id, reflection_id, confirmation_id, upload_id,
-      confirmation_fingerprint, payload_digest, source_origin, status,
-      created_at, updated_at, deleted_at
-    ) VALUES (?, ?, ?, 'confirmation_source', ?, ?, ?, 'user_reflection', ?, ?, ?, ?)
+      confirmation_fingerprint, payload_digest, source_origin,
+      effective_source_origin, content_kind, status,
+      created_at, updated_at, deleted_at, contract_version, save_intent,
+      input_adapter, capture_purpose, recording_date
+    ) VALUES (?, ?, ?, 'confirmation_source', ?, ?, ?, 'user_reflection', ?,
+      'user_confirmed_derived_content', ?, ?, ?, ?, ?, 'retain_selected', ?, ?, ?)
   `).run(
     PUBLICATION_ID,
     USER_ID,
@@ -82,10 +89,15 @@ function seedPublication(status: "unpublished" | "published" | "deleted") {
     UPLOAD_ID,
     "a".repeat(64),
     "b".repeat(64),
+    sourceOrigin,
     status,
     NOW,
     NOW,
-    status === "deleted" ? NOW : null
+    status === "deleted" ? NOW : null,
+    contractVersion,
+    contractVersion === 2 ? "file_picker" : null,
+    contractVersion === 2 ? "inspiration_capture" : null,
+    contractVersion === 2 ? DATE : null
   );
   createMemoryRepository(database).replaceUploadMemories({
     userId: USER_ID,
@@ -128,9 +140,10 @@ function seedPublication(status: "unpublished" | "published" | "deleted") {
     INSERT INTO memory_daily_reflection_evidence_provenance (
       memory_evidence_id, user_id, publication_id, reflection_id,
       confirmation_id, candidate_id, upload_id, source_segment_id,
-      source_origin, content_digest, created_at
+      source_origin, effective_source_origin, content_kind,
+      content_digest, created_at
     ) VALUES (?, ?, ?, ?, 'confirmation_source', 'candidate_kept', ?, ?,
-      'user_reflection', ?, ?)
+      'user_reflection', ?, 'user_confirmed_derived_content', ?, ?)
   `).run(
     EVIDENCE_ID,
     USER_ID,
@@ -138,6 +151,7 @@ function seedPublication(status: "unpublished" | "published" | "deleted") {
     REFLECTION_ID,
     UPLOAD_ID,
     SEGMENT_ID,
+    sourceOrigin,
     hash({
       version: 1,
       accountId: USER_ID,
@@ -145,14 +159,17 @@ function seedPublication(status: "unpublished" | "published" | "deleted") {
       uploadId: UPLOAD_ID,
       sourceSegmentId: SEGMENT_ID,
       quote: canonical.text,
-      sourceOrigin: "user_reflection"
+      sourceOrigin
     }),
     NOW
   );
   return canonical;
 }
 
-function sourceRepository(segments: TranscriptSegment[]) {
+function sourceRepository(
+  segments: TranscriptSegment[],
+  sourceOrigin: "user_reflection" | "direct_conversation" = "user_reflection"
+) {
   return {
     getReflection: vi.fn((accountId: string, reflectionId: string) =>
       accountId === USER_ID && reflectionId === REFLECTION_ID
@@ -169,7 +186,7 @@ function sourceRepository(segments: TranscriptSegment[]) {
         ? {
             reflectionId: REFLECTION_ID,
             uploadId: UPLOAD_ID,
-            sourceOrigin: "user_reflection",
+            sourceOrigin,
             ingestionContext: "daily_reflection",
             reviewPolicy: "required"
           }
@@ -219,6 +236,54 @@ describe("retrieval source awareness", () => {
           sourceSegmentIds: [SEGMENT_ID]
         }
       });
+  });
+
+  it("keeps direct-conversation origin separate from user-confirmed derived content", () => {
+    const canonical = seedPublication("unpublished", "direct_conversation");
+    const dependencies = {
+      memoryDatabase: database,
+      sourceRepository: sourceRepository([canonical], "direct_conversation")
+    };
+
+    expect(resolveRetrievalUpload({ userId: USER_ID, upload: upload(), dependencies }).visible)
+      .toBe(false);
+    database.prepare(`
+      UPDATE memory_daily_reflection_publications SET status = 'published'
+      WHERE id = ?
+    `).run(PUBLICATION_ID);
+    expect(resolveRetrievalUpload({
+      userId: OTHER_USER_ID,
+      upload: upload(),
+      dependencies
+    }).visible).toBe(false);
+
+    expect(resolveRetrievalUpload({ userId: USER_ID, upload: upload(), dependencies }))
+      .toMatchObject({
+        visible: true,
+        canonicalSegments: [canonical],
+        attribution: {
+          origin: "direct_conversation",
+          statement: `在 ${DATE} 的交流中提到……`,
+          contentKind: "user_confirmed_derived_content",
+          sourceSegmentIds: [SEGMENT_ID]
+        }
+      });
+    const memory = createMemoryRepository(database)
+      .getRelevantMemories({ userId: USER_ID })[0]!;
+    expect(resolveMemoryRetrievalSource({ userId: USER_ID, memory, dependencies }))
+      .toMatchObject({
+        eligible: true,
+        attribution: {
+          origin: "direct_conversation",
+          contentKind: "user_confirmed_derived_content"
+        }
+      });
+    database.prepare(`
+      UPDATE memory_daily_reflection_evidence_provenance
+      SET content_digest = ? WHERE memory_evidence_id = ?
+    `).run("f".repeat(64), EVIDENCE_ID);
+    expect(resolveRetrievalUpload({ userId: USER_ID, upload: upload(), dependencies }).visible)
+      .toBe(false);
   });
 
   it("fails closed for unpublished, deleted, cross-account, and drifted evidence", () => {
@@ -286,6 +351,23 @@ describe("retrieval source awareness", () => {
     const memory = createMemoryRepository(database).getRelevantMemories({ userId: USER_ID })[0]!;
     expect(resolveMemoryRetrievalSource({ userId: USER_ID, memory, dependencies }))
       .toMatchObject({ eligible: false });
+  });
+
+  it("fails closed on an account-scoped tombstone even if publication still says published", () => {
+    const canonical = seedPublication("published");
+    const dependencies = {
+      memoryDatabase: database,
+      sourceRepository: sourceRepository([canonical])
+    };
+    database.prepare(`
+      INSERT INTO memory_upload_tombstones (user_id, upload_id, reason, deleted_at)
+      VALUES (?, ?, 'upload_deleted', ?)
+    `).run(USER_ID, UPLOAD_ID, NOW);
+
+    expect(resolveRetrievalUpload({ userId: USER_ID, upload: upload(), dependencies }).visible)
+      .toBe(false);
+    expect(resolveRetrievalUpload({ userId: OTHER_USER_ID, upload: upload(), dependencies }).visible)
+      .toBe(false);
   });
 
   it("keeps ordinary recordings source-aware without asserting Reflection provenance", () => {

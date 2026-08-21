@@ -114,8 +114,8 @@ describe("memory scope QA shadow isolation", () => {
         visible: true,
         canonicalSegments: [canonical],
         attribution: {
-          origin: "user_reflection",
-          statement: "你在 2026-08-13 的复盘中提到……",
+          origin: "direct_conversation",
+          statement: "在 2026-08-13 的交流中提到……",
           date: "2026-08-13",
           contentKind: "user_confirmed_derived_content",
           reflectionId: "reflection_1",

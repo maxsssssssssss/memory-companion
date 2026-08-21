@@ -168,20 +168,35 @@ function canonicalAssets(input: {
   ) {
     throw new DailyReflectionMemoryAdmissionError("daily_reflection_confirmation_invalid");
   }
-  if (confirmation.data.sourceOrigin !== "user_reflection") {
+  const v2Confirmation = "contractVersion" in confirmation.data
+    ? confirmation.data
+    : null;
+  if (
+    confirmation.data.sourceOrigin !== "user_reflection"
+    && !(v2Confirmation && confirmation.data.sourceOrigin === "direct_conversation")
+  ) {
     throw new DailyReflectionMemoryAdmissionError("daily_reflection_origin_not_supported");
   }
   if (
-    "contractVersion" in confirmation.data
-    && confirmation.data.saveIntent !== "retain_selected"
+    v2Confirmation
+    && v2Confirmation.saveIntent !== "retain_selected"
   ) {
     throw new DailyReflectionMemoryAdmissionError("daily_reflection_confirmation_invalid");
   }
+  const sourceOrigin = confirmation.data.sourceOrigin as
+    | "user_reflection"
+    | "direct_conversation";
   const kept = confirmation.data.candidateSnapshots.filter(
     (candidate) => candidate.status === "kept"
   );
   if (kept.length === 0) {
-    return { confirmation: confirmation.data, kept, upload: null, segments: [] };
+    return {
+      confirmation: confirmation.data,
+      sourceOrigin,
+      kept,
+      upload: null,
+      segments: []
+    };
   }
 
   const reflection = input.sourceRepository.getReflection(input.accountId, input.reflectionId);
@@ -210,7 +225,7 @@ function canonicalAssets(input: {
     || reflection.id !== input.reflectionId
     || !plan
     || plan.reflectionId !== input.reflectionId
-    || plan.sourceOrigin !== "user_reflection"
+    || plan.sourceOrigin !== sourceOrigin
     || plan.ingestionContext !== "daily_reflection"
     || plan.reviewPolicy !== "required"
     || !upload.success
@@ -221,8 +236,8 @@ function canonicalAssets(input: {
     || new Set(segments.data.map((segment) => segment.id)).size !== segments.data.length
     || segments.data.some((segment) => segment.uploadId !== upload.data.id)
     || (
-      "contractVersion" in confirmation.data
-      && confirmation.data.recordingDate !== upload.data.recordingDate
+      v2Confirmation
+      && v2Confirmation.recordingDate !== upload.data.recordingDate
     )
   ) {
     throw new DailyReflectionMemoryAdmissionError(
@@ -244,7 +259,7 @@ function canonicalAssets(input: {
       const segment = segmentById.get(snapshot.sourceSegmentId);
       return !segment
         || snapshot.uploadId !== upload.data.id
-        || snapshot.effectiveOrigin !== "user_reflection"
+        || snapshot.effectiveOrigin !== sourceOrigin
         || snapshot.startSeconds !== segment.startSeconds
         || snapshot.endSeconds !== segment.endSeconds
         || snapshot.text !== segment.text;
@@ -256,6 +271,7 @@ function canonicalAssets(input: {
   }
   return {
     confirmation: confirmation.data,
+    sourceOrigin,
     kept,
     upload: upload.data,
     segments: segments.data
@@ -376,7 +392,7 @@ export function createDailyReflectionMemoryAdmissionService(
             uploadId: evidence.uploadId,
             sourceSegmentId: evidence.sourceId,
             quote: evidence.quote,
-            sourceOrigin: canonical.confirmation.sourceOrigin
+            sourceOrigin: canonical.sourceOrigin
           })
         })) : []
       });
@@ -426,7 +442,8 @@ export function createDailyReflectionMemoryAdmissionService(
       confirmationId: canonical.confirmation.id,
       confirmationFingerprint: canonical.confirmation.fingerprint,
       uploadId: canonical.upload.id,
-      sourceOrigin: "user_reflection",
+      sourceOrigin: canonical.sourceOrigin,
+      contentKind: "user_confirmed_derived_content",
       ...("contractVersion" in canonical.confirmation ? {
         contractVersion: 2 as const,
         saveIntent: "retain_selected" as const,

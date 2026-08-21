@@ -135,7 +135,7 @@ async function readUploadEvidence(
   upload: StoredUpload,
   source: RetrievalUploadResolution
 ) {
-  if (source.attribution.origin === "user_reflection") {
+  if (source.attribution.contentKind === "user_confirmed_derived_content") {
     return {
       segments: decorateSegments(upload, source.canonicalSegments ?? []),
       audioInsights: [],

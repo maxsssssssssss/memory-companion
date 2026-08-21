@@ -134,8 +134,10 @@ function keptV2(input: {
   id: string;
   kind: "insight" | "open_question" | "decision" | "user_action";
   text: string;
+  evidenceText?: string;
   segmentId: string;
   actionClaimed: boolean;
+  sourceOrigin?: "user_reflection" | "direct_conversation";
 }): ReflectionConfirmationCandidateSnapshot {
   const candidateType = input.kind === "open_question"
     ? "question" as const
@@ -158,8 +160,8 @@ function keptV2(input: {
       uploadId: UPLOAD_ID,
       startSeconds: 0,
       endSeconds: 8,
-      text: input.text,
-      effectiveOrigin: "user_reflection"
+      text: input.evidenceText ?? input.text,
+      effectiveOrigin: input.sourceOrigin ?? "user_reflection"
     }],
     confidence: 0.86,
     caution: "这是用户复盘中确认保留的内容。",
@@ -187,7 +189,9 @@ function fixture(input: {
   candidates: ReflectionConfirmationCandidateSnapshot[];
   segments?: TranscriptSegment[];
   contractVersion?: 1 | 2;
+  sourceOrigin?: "user_reflection" | "direct_conversation";
 }) {
+  const sourceOrigin = input.sourceOrigin ?? "user_reflection";
   const confirmation: ReflectionConfirmation = input.contractVersion === 2 ? {
     contractVersion: 2,
     id: "confirmation_memory",
@@ -197,7 +201,7 @@ function fixture(input: {
     requestFingerprint: "b".repeat(64),
     idempotencyKey: "finalize_memory_v2",
     operationKey: "finalize_memory_v2",
-    sourceOrigin: "user_reflection",
+    sourceOrigin,
     inputMethod: "file_upload",
     processingProfile: "quick_reflection",
     inputAdapter: "file_picker",
@@ -245,7 +249,7 @@ function fixture(input: {
       accountId: ACCOUNT_ID,
       uploadId: UPLOAD_ID,
       inputMethod: "file_upload" as const,
-      sourceOrigin: "user_reflection" as const,
+      sourceOrigin,
       processingProfile: "quick_reflection" as const,
       ingestionContext: "daily_reflection" as const,
       status: "confirmation_ready" as const,
@@ -261,7 +265,7 @@ function fixture(input: {
       reflectionId: REFLECTION_ID,
       uploadId: UPLOAD_ID,
       inputMethod: "file_upload" as const,
-      sourceOrigin: "user_reflection" as const,
+      sourceOrigin,
       processingProfile: "quick_reflection" as const,
       ingestionContext: "daily_reflection" as const,
       reviewPolicy: "required" as const
@@ -276,6 +280,61 @@ function fixture(input: {
     now: () => NOW
   });
   return { confirmation, upload, segments, sourceRepository, publicationRepository, service };
+}
+
+async function publishDirectConversationV2() {
+  const canonical = trustedSegment({
+    id: "segment_v2_direct",
+    text: "我答应明天联系团队并确认下一步安排。"
+  });
+  const derivedText = "我确认了明天联系团队的后续行动。";
+  const candidateId = "candidate_v2_direct";
+  const setup = fixture({
+    contractVersion: 2,
+    sourceOrigin: "direct_conversation",
+    candidates: [keptV2({
+      id: candidateId,
+      kind: "user_action",
+      text: derivedText,
+      evidenceText: canonical.text,
+      segmentId: canonical.id,
+      actionClaimed: true,
+      sourceOrigin: "direct_conversation"
+    })],
+    segments: [canonical]
+  });
+  const [admitted] = await setup.service.admit({
+    accountId: ACCOUNT_ID,
+    reflectionId: REFLECTION_ID,
+    confirmationFingerprint: FINGERPRINT
+  });
+  expect(admitted).toMatchObject({
+    candidateId,
+    status: "admitted",
+    memoryId: expect.any(String)
+  });
+  setup.publicationRepository.markPublished({
+    userId: ACCOUNT_ID,
+    reflectionId: REFLECTION_ID,
+    now: NOW
+  });
+  setup.sourceRepository.getReflection.mockReturnValue({
+    ...setup.sourceRepository.getReflection(),
+    status: "completed"
+  } as never);
+  return {
+    ...setup,
+    admitted: admitted!,
+    candidateId,
+    canonical,
+    derivedText,
+    retrievalUpload: {
+      ...setup.upload,
+      status: "ready" as const,
+      ingestionContext: "daily_reflection" as const,
+      reflectionId: REFLECTION_ID
+    }
+  };
 }
 
 function count(table: string) {
@@ -410,6 +469,126 @@ describe("Daily Reflection existing-Memory admission", () => {
       evidence: count("memory_evidence"),
       receipts: count("memory_daily_reflection_candidate_receipts")
     }).toEqual(counts);
+  });
+
+  it("publishes direct-conversation V2 derivation while citing only canonical transcript", async () => {
+    const setup = await publishDirectConversationV2();
+    expect(database.prepare(`
+      SELECT source_origin, effective_source_origin, content_kind, contract_version
+      FROM memory_daily_reflection_publications
+    `).get()).toEqual({
+      source_origin: "user_reflection",
+      effective_source_origin: "direct_conversation",
+      content_kind: "user_confirmed_derived_content",
+      contract_version: 2
+    });
+    expect(database.prepare(`
+      SELECT effective_source_origin, content_kind, source_segment_id
+      FROM memory_daily_reflection_evidence_provenance
+    `).get()).toEqual({
+      effective_source_origin: "direct_conversation",
+      content_kind: "user_confirmed_derived_content",
+      source_segment_id: setup.canonical.id
+    });
+    expect(database.prepare(`
+      SELECT summary FROM memory_items WHERE id = ?
+    `).get(setup.admitted.memoryId)).toEqual({ summary: setup.derivedText });
+    expect(database.prepare(`
+      SELECT quote FROM memory_evidence WHERE memory_id = ?
+    `).get(setup.admitted.memoryId)).toEqual({ quote: setup.canonical.text });
+
+    const dependencies = {
+      memoryDatabase: database,
+      sourceRepository: setup.sourceRepository
+    };
+    expect(resolveRetrievalUpload({
+      userId: ACCOUNT_ID,
+      upload: setup.retrievalUpload,
+      dependencies
+    })).toMatchObject({
+      visible: true,
+      canonicalSegments: [setup.canonical],
+      attribution: {
+        origin: "direct_conversation",
+        statement: "在 2026-08-13 的交流中提到……",
+        contentKind: "user_confirmed_derived_content",
+        sourceSegmentIds: [setup.canonical.id]
+      }
+    });
+  });
+
+  it("keeps direct-conversation provenance for audit but returns zero after single revocation", async () => {
+    const setup = await publishDirectConversationV2();
+    const receipt = database.prepare(`
+      SELECT operation_key FROM memory_daily_reflection_candidate_receipts
+      WHERE candidate_id = ?
+    `).get(setup.candidateId) as { operation_key: string };
+    const payloadDigest = dailyReflectionCandidateRevocationPayloadDigest({
+      userId: ACCOUNT_ID,
+      reflectionId: REFLECTION_ID,
+      confirmationId: "confirmation_memory",
+      candidateId: setup.candidateId,
+      operationKey: receipt.operation_key
+    });
+    createDailyReflectionMemoryCandidateRevocationRepository(database).apply({
+      id: "revocation_v2_direct",
+      userId: ACCOUNT_ID,
+      reflectionId: REFLECTION_ID,
+      confirmationId: "confirmation_memory",
+      candidateId: setup.candidateId,
+      operationKey: receipt.operation_key,
+      payloadDigest,
+      now: "2026-08-13T09:00:00.000Z"
+    });
+
+    expect(count("memory_items")).toBe(0);
+    expect(count("memory_evidence")).toBe(0);
+    expect(count("memory_daily_reflection_candidate_receipts")).toBe(1);
+    expect(count("memory_daily_reflection_evidence_provenance")).toBe(1);
+    expect(resolveRetrievalUpload({
+      userId: ACCOUNT_ID,
+      upload: setup.retrievalUpload,
+      dependencies: {
+        memoryDatabase: database,
+        sourceRepository: setup.sourceRepository
+      }
+    }).visible).toBe(false);
+  });
+
+  it("tombstones direct-conversation V2 and enqueues Hybrid cleanup without erasing audit rows", async () => {
+    const setup = await publishDirectConversationV2();
+    const enqueueIndexJob = vi.fn(async () => ({ jobId: "index_v2_delete", enqueued: true }));
+    await expect(deleteMemoryUploadAndRefreshIndex({
+      userId: ACCOUNT_ID,
+      uploadId: UPLOAD_ID,
+      indexRefreshFailure: "throw"
+    }, {
+      getRepository: () => createMemoryRepository(database),
+      resolveExecutionMode: () => "queue",
+      resolveHybridMode: () => "shadow",
+      enqueueIndexJob
+    })).resolves.toEqual({ memoryDeleted: true, indexRefresh: "enqueued" });
+
+    expect(count("memory_items")).toBe(0);
+    expect(count("memory_evidence")).toBe(0);
+    expect(count("memory_daily_reflection_candidate_receipts")).toBe(1);
+    expect(count("memory_daily_reflection_evidence_provenance")).toBe(1);
+    expect(database.prepare(`
+      SELECT status FROM memory_daily_reflection_publications
+    `).get()).toEqual({ status: "deleted" });
+    expect(resolveRetrievalUpload({
+      userId: ACCOUNT_ID,
+      upload: setup.retrievalUpload,
+      dependencies: {
+        memoryDatabase: database,
+        sourceRepository: setup.sourceRepository
+      }
+    }).visible).toBe(false);
+    expect(enqueueIndexJob).toHaveBeenCalledWith({
+      version: 1,
+      userRef: ACCOUNT_ID,
+      reason: "upload_deleted"
+    });
   });
 
   it("rejects an unclaimed V2 action with zero publication side effects", async () => {

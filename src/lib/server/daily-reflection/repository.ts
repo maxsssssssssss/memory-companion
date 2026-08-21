@@ -3889,16 +3889,6 @@ export class DailyReflectionRepository {
       if (!v2InputRow || v2InputRow.operation_key !== input.operationKey) {
         throw new DailyReflectionConflictError("daily_reflection_v2_input_mismatch");
       }
-      if (
-        input.saveIntent === "retain_selected"
-        && v2InputRow.source_origin !== "user_reflection"
-      ) {
-        // Memory v10-v14 only publishes user_reflection. A later source-awareness
-        // wave may explicitly add direct-conversation publication semantics.
-        throw new DailyReflectionConflictError(
-          "daily_reflection_v2_retain_source_not_supported"
-        );
-      }
       const plan = this.findPlanRow(input.accountId, input.reflectionId);
       if (
         !plan

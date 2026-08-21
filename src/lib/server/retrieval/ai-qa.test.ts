@@ -159,6 +159,7 @@ function memoryContext(input: {
   summary?: string;
   ownerAttributions?: MemoryOwnerMetadata[];
   sourceOrigin?: "user_reflection" | "direct_conversation" | "unknown";
+  contentKind?: "user_confirmed_derived_content" | "memory_navigation";
 } = {}): MemoryIndexQaContext {
   const date = input.date ?? "2026-07-09";
   const sourceIds = input.sourceIds ?? ["brief_1", "seg_memory_target"];
@@ -207,10 +208,11 @@ function memoryContext(input: {
             ? `在 ${date} 的交流中提到……`
             : "来源尚未完全确认",
         date,
-        contentKind: input.sourceOrigin === "user_reflection"
+        contentKind: input.contentKind ?? (input.sourceOrigin === "user_reflection"
           ? "user_confirmed_derived_content" as const
-          : "memory_navigation" as const,
-        ...(input.sourceOrigin === "user_reflection"
+          : "memory_navigation" as const),
+        ...(input.contentKind === "user_confirmed_derived_content"
+          || input.sourceOrigin === "user_reflection"
           ? { reflectionId: "reflection_1" }
           : {}),
         sourceSegmentIds: sourceIds
@@ -695,7 +697,8 @@ describe("answerQuestionWithAI", () => {
         briefItems: [],
         memoryContext: memoryContext({
           sourceIds: ["seg_memory_target"],
-          sourceOrigin: "user_reflection",
+          sourceOrigin: "direct_conversation",
+          contentKind: "user_confirmed_derived_content",
           ownerAttributions: [{
             version: 1,
             memoryId: "memory_1",
@@ -727,10 +730,10 @@ describe("answerQuestionWithAI", () => {
       expect(request.messages[1].content).toContain("[Long-term memory]");
       expect(request.messages[1].content).toContain("Original evidence: [E1]");
       expect(request.messages[1].content).toContain("The next meeting time still needs confirmation.");
-      expect(request.messages[1].content).toContain("你在 2026-07-09 的复盘中提到……");
+      expect(request.messages[1].content).toContain("在 2026-07-09 的交流中提到……");
       expect(request.messages[1].content).toContain("Content kind: user_confirmed_derived_content");
       expect(request.messages[1].content).toContain(
-        "Memory wording is user_confirmed_derived_content and is not a verbatim quote"
+        "Memory wording is user_confirmed_derived_content: a user-confirmed derived interpretation, not a verbatim quote"
       );
       expect(request.messages[1].content).toContain(
         "Owner attribution: known_identity id=person_partner confidence=0.95 source=manual_mapping."
@@ -742,7 +745,7 @@ describe("answerQuestionWithAI", () => {
           sourceSegmentIds: ["seg_memory_target"],
           memoryIds: ["memory_1"],
           memoryEvidenceIds: ["memory_evidence_0"],
-          sourceOrigin: "user_reflection",
+          sourceOrigin: "direct_conversation",
           contentKind: "user_confirmed_derived_content"
         })
       ]);

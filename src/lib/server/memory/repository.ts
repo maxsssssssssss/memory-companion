@@ -568,7 +568,8 @@ export function createMemoryRepository(database: Database.Database): MemoryRepos
     const retainedDailyReflectionProvenance = database.prepare(`
       SELECT memory_evidence_id, user_id, publication_id, reflection_id,
              confirmation_id, candidate_id, upload_id, source_segment_id,
-             source_origin, content_digest, created_at
+             source_origin, effective_source_origin, content_kind,
+             content_digest, created_at
       FROM memory_daily_reflection_evidence_provenance
       WHERE user_id = ?
       ORDER BY memory_evidence_id
@@ -582,6 +583,8 @@ export function createMemoryRepository(database: Database.Database): MemoryRepos
       upload_id: string;
       source_segment_id: string;
       source_origin: string;
+      effective_source_origin: string;
+      content_kind: string;
       content_digest: string;
       created_at: string;
     }>;
@@ -664,8 +667,9 @@ export function createMemoryRepository(database: Database.Database): MemoryRepos
       INSERT INTO memory_daily_reflection_evidence_provenance (
         memory_evidence_id, user_id, publication_id, reflection_id,
         confirmation_id, candidate_id, upload_id, source_segment_id,
-        source_origin, content_digest, created_at
-      ) SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+        source_origin, effective_source_origin, content_kind,
+        content_digest, created_at
+      ) SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
       WHERE EXISTS (SELECT 1 FROM memory_evidence WHERE id = ?)
       ON CONFLICT(memory_evidence_id) DO NOTHING
     `);
@@ -680,6 +684,8 @@ export function createMemoryRepository(database: Database.Database): MemoryRepos
         provenance.upload_id,
         provenance.source_segment_id,
         provenance.source_origin,
+        provenance.effective_source_origin,
+        provenance.content_kind,
         provenance.content_digest,
         provenance.created_at,
         provenance.memory_evidence_id
@@ -863,8 +869,7 @@ export function createMemoryRepository(database: Database.Database): MemoryRepos
       for (const table of [
         "memory_daily_reflection_candidate_person_sources",
         "memory_daily_reflection_candidate_current_memories",
-        "memory_daily_reflection_candidate_payloads",
-        "memory_daily_reflection_candidate_revocations"
+        "memory_daily_reflection_candidate_payloads"
       ]) {
         database.prepare(`
           DELETE FROM ${table}

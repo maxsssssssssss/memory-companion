@@ -1023,6 +1023,12 @@ const MEMORY_SCHEMA_V14 = `
       capture_purpose IS NULL OR capture_purpose = 'inspiration_capture'
     );
   ALTER TABLE memory_daily_reflection_publications ADD COLUMN recording_date TEXT;
+  ALTER TABLE memory_daily_reflection_publications
+    ADD COLUMN effective_source_origin TEXT NOT NULL DEFAULT 'user_reflection'
+      CHECK (effective_source_origin IN ('user_reflection', 'direct_conversation'));
+  ALTER TABLE memory_daily_reflection_publications
+    ADD COLUMN content_kind TEXT NOT NULL DEFAULT 'user_confirmed_derived_content'
+      CHECK (content_kind = 'user_confirmed_derived_content');
 
   ALTER TABLE memory_daily_reflection_candidate_receipts
     ADD COLUMN candidate_kind TEXT CHECK (
@@ -1052,6 +1058,135 @@ const MEMORY_SCHEMA_V14 = `
     SELECT RAISE(ABORT, 'daily_reflection_publication_contract_mismatch');
   END;
 `;
+
+function tableColumns(database: Database.Database, table: string) {
+  return new Set((database.prepare(`PRAGMA table_info(${table})`).all() as Array<{
+    name: string;
+  }>).map((column) => column.name));
+}
+
+function ensureMemorySchemaV14ReflectionSourceMetadata(database: Database.Database) {
+  const publicationColumns = tableColumns(
+    database,
+    "memory_daily_reflection_publications"
+  );
+  if (!publicationColumns.has("effective_source_origin")) {
+    database.exec(`
+      ALTER TABLE memory_daily_reflection_publications
+        ADD COLUMN effective_source_origin TEXT NOT NULL DEFAULT 'user_reflection'
+          CHECK (effective_source_origin IN ('user_reflection', 'direct_conversation'));
+    `);
+  }
+  if (!publicationColumns.has("content_kind")) {
+    database.exec(`
+      ALTER TABLE memory_daily_reflection_publications
+        ADD COLUMN content_kind TEXT NOT NULL DEFAULT 'user_confirmed_derived_content'
+          CHECK (content_kind = 'user_confirmed_derived_content');
+    `);
+  }
+
+  const provenanceColumns = tableColumns(
+    database,
+    "memory_daily_reflection_evidence_provenance"
+  );
+  const hasMemoryEvidenceCascade = (database.prepare(`
+    PRAGMA foreign_key_list(memory_daily_reflection_evidence_provenance)
+  `).all() as Array<{ table: string }>).some(
+    (foreignKey) => foreignKey.table === "memory_evidence"
+  );
+  if (hasMemoryEvidenceCascade) {
+    const effectiveSourceExpression = provenanceColumns.has("effective_source_origin")
+      ? "effective_source_origin"
+      : "source_origin";
+    const contentKindExpression = provenanceColumns.has("content_kind")
+      ? "content_kind"
+      : "'user_confirmed_derived_content'";
+    database.exec(`
+      ALTER TABLE memory_daily_reflection_evidence_provenance
+        RENAME TO memory_daily_reflection_evidence_provenance_v14_legacy;
+
+      CREATE TABLE memory_daily_reflection_evidence_provenance (
+        memory_evidence_id TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL,
+        publication_id TEXT NOT NULL,
+        reflection_id TEXT NOT NULL,
+        confirmation_id TEXT NOT NULL,
+        candidate_id TEXT NOT NULL,
+        upload_id TEXT NOT NULL,
+        source_segment_id TEXT NOT NULL,
+        source_origin TEXT NOT NULL CHECK (source_origin = 'user_reflection'),
+        effective_source_origin TEXT NOT NULL DEFAULT 'user_reflection' CHECK (
+          effective_source_origin IN ('user_reflection', 'direct_conversation')
+        ),
+        content_kind TEXT NOT NULL DEFAULT 'user_confirmed_derived_content' CHECK (
+          content_kind = 'user_confirmed_derived_content'
+        ),
+        content_digest TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        UNIQUE (user_id, publication_id, candidate_id, source_segment_id),
+        FOREIGN KEY (publication_id, user_id)
+          REFERENCES memory_daily_reflection_publications(id, user_id) ON DELETE CASCADE
+      );
+
+      INSERT INTO memory_daily_reflection_evidence_provenance (
+        memory_evidence_id, user_id, publication_id, reflection_id,
+        confirmation_id, candidate_id, upload_id, source_segment_id,
+        source_origin, effective_source_origin, content_kind,
+        content_digest, created_at
+      )
+      SELECT memory_evidence_id, user_id, publication_id, reflection_id,
+        confirmation_id, candidate_id, upload_id, source_segment_id,
+        source_origin, ${effectiveSourceExpression}, ${contentKindExpression},
+        content_digest, created_at
+      FROM memory_daily_reflection_evidence_provenance_v14_legacy;
+
+      DROP TABLE memory_daily_reflection_evidence_provenance_v14_legacy;
+
+      CREATE INDEX idx_memory_daily_reflection_evidence_source
+        ON memory_daily_reflection_evidence_provenance(
+          user_id, upload_id, source_segment_id, candidate_id
+        );
+    `);
+  } else {
+    if (!provenanceColumns.has("effective_source_origin")) {
+      database.exec(`
+        ALTER TABLE memory_daily_reflection_evidence_provenance
+          ADD COLUMN effective_source_origin TEXT NOT NULL DEFAULT 'user_reflection'
+            CHECK (effective_source_origin IN ('user_reflection', 'direct_conversation'));
+      `);
+    }
+    if (!provenanceColumns.has("content_kind")) {
+      database.exec(`
+        ALTER TABLE memory_daily_reflection_evidence_provenance
+          ADD COLUMN content_kind TEXT NOT NULL DEFAULT 'user_confirmed_derived_content'
+            CHECK (content_kind = 'user_confirmed_derived_content');
+      `);
+    }
+  }
+
+  database.exec(`
+    CREATE TRIGGER IF NOT EXISTS memory_daily_reflection_source_contract_insert
+    BEFORE INSERT ON memory_daily_reflection_publications
+    WHEN NEW.content_kind <> 'user_confirmed_derived_content'
+      OR (NEW.contract_version = 1 AND NEW.effective_source_origin <> 'user_reflection')
+    BEGIN
+      SELECT RAISE(ABORT, 'daily_reflection_publication_source_contract_mismatch');
+    END;
+
+    CREATE TRIGGER IF NOT EXISTS memory_daily_reflection_provenance_source_contract_insert
+    BEFORE INSERT ON memory_daily_reflection_evidence_provenance
+    WHEN NOT EXISTS (
+      SELECT 1 FROM memory_daily_reflection_publications publication
+      WHERE publication.id = NEW.publication_id
+        AND publication.user_id = NEW.user_id
+        AND publication.effective_source_origin = NEW.effective_source_origin
+        AND publication.content_kind = NEW.content_kind
+    )
+    BEGIN
+      SELECT RAISE(ABORT, 'daily_reflection_provenance_source_contract_mismatch');
+    END;
+  `);
+}
 
 const MIGRATIONS = [
   { version: 1, sql: MEMORY_SCHEMA_V1 },
@@ -1090,6 +1225,11 @@ export function migrateMemorySchema(database: Database.Database) {
     database.transaction(() => {
       database.exec(migration.sql);
       recordMigration.run(migration.version, new Date().toISOString());
+    })();
+  }
+  if (hasMigration.get(14)) {
+    database.transaction(() => {
+      ensureMemorySchemaV14ReflectionSourceMetadata(database);
     })();
   }
 }
