@@ -8,6 +8,8 @@ import {
 import {
   DailyReflectionCandidateUpdateRequestSchema,
   DailyReflectionCandidateUpdateResponseSchema,
+  DailyReflectionCardUpdateRequestSchema,
+  DailyReflectionCardUpdateResponseSchema,
   DailyReflectionCandidateExcludeRequestSchema,
   DailyReflectionCandidateExcludeResponseSchema,
   DailyReflectionManualCandidateV2CreateRequestSchema,
@@ -16,15 +18,19 @@ import {
   DailyReflectionCandidateRevocationResponseSchema,
   DailyReflectionDetailResponseSchema,
   DailyReflectionHistoryResponseSchema,
+  DailyReflectionOperationLookupResponseSchema,
   DailyReflectionUploadSourceSchema,
   DailyReflectionV2FinalizeRequestSchema,
   DailyReflectionV2FinalizeResponseSchema,
   type DailyReflectionCandidateUpdateRequest,
   type DailyReflectionCandidateUpdateResponse,
+  type DailyReflectionCardUpdateRequest,
+  type DailyReflectionCardUpdateResponse,
   type DailyReflectionCandidateRevocationRequest,
   type DailyReflectionCandidateRevocationResponse,
   type DailyReflectionDetailResponse,
   type DailyReflectionHistoryItem,
+  type DailyReflectionOperationLookupResponse,
   type DailyReflectionUploadSource,
   type DailyReflectionV2FinalizeRequest,
   type DailyReflectionV2FinalizeResponse
@@ -74,7 +80,7 @@ const DailyReflectionBrowserRecordingInputSchema = z.object({
   ),
   operationKey: z.string().trim().min(1).max(512),
   inputAdapter: z.literal("browser_recorder"),
-  sourceOrigin: z.literal("user_reflection"),
+  sourceOrigin: DailyReflectionV2SourceOriginSchema,
   capturePurpose: DailyReflectionV2CapturePurposeSchema,
   recordingDate: RecordingDateSchema,
   clientReportedDurationMs: DailyReflectionClientReportedDurationMsSchema.optional()
@@ -165,6 +171,15 @@ export interface DailyReflectionApi {
     reflectionId: string,
     signal?: AbortSignal
   ): Promise<DailyReflectionDetailResponse>;
+  getOperation(
+    operationKey: string,
+    signal?: AbortSignal
+  ): Promise<DailyReflectionOperationLookupResponse>;
+  updateCards(
+    reflectionId: string,
+    input: DailyReflectionCardUpdateRequest,
+    signal?: AbortSignal
+  ): Promise<DailyReflectionCardUpdateResponse>;
   updateCandidates(
     reflectionId: string,
     input: DailyReflectionCandidateUpdateRequest,
@@ -482,6 +497,37 @@ export function createDailyReflectionApi(
         signal
       });
       return parseJsonResponse(response, DailyReflectionDetailResponseSchema);
+    },
+
+    async getOperation(operationKey, signal) {
+      const parsed = z.string().trim().min(1).max(512).safeParse(operationKey);
+      if (!parsed.success) {
+        throw new DailyReflectionApiError(400, "invalid_operation_key");
+      }
+      const response = await sameOrigin(
+        `/api/daily-reflections/operations/${encodeURIComponent(parsed.data)}`,
+        { method: "GET", signal }
+      );
+      return parseJsonResponse(response, DailyReflectionOperationLookupResponseSchema);
+    },
+
+    async updateCards(reflectionId, input, signal) {
+      const parsedInput = DailyReflectionCardUpdateRequestSchema.safeParse(input);
+      if (!parsedInput.success) {
+        throw new DailyReflectionApiError(
+          400,
+          "invalid_card_update",
+          errorMessage(400, "invalid_card_update"),
+          { cause: parsedInput.error }
+        );
+      }
+      const response = await sameOrigin(`${reflectionPath(reflectionId)}/cards`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(parsedInput.data),
+        signal
+      });
+      return parseJsonResponse(response, DailyReflectionCardUpdateResponseSchema);
     },
 
     async updateCandidates(reflectionId, input, signal) {

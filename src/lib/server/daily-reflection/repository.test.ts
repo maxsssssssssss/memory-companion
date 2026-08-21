@@ -257,7 +257,8 @@ function createReviewPendingV2(input: {
     inputAdapter: "file_picker",
     sourceOrigin,
     capturePurpose: "inspiration_capture",
-    recordingDate: "2026-08-21"
+    recordingDate: "2026-08-21",
+    contentHash: "c".repeat(64)
   }).reflection;
   const extracting = transitionPath(created, ["uploading", "transcribing", "extracting"]);
   const fence = repository.claimExecutionLease({
@@ -317,6 +318,164 @@ function createReviewPendingV2(input: {
   };
 }
 
+function createReviewPendingCards(input: {
+  id?: string;
+  operationKey?: string;
+  cardKind?: "insight" | "open_question" | "decision" | "user_action";
+} = {}) {
+  const reflectionId = input.id ?? "reflection_cards";
+  const operationKey = input.operationKey ?? "operation_cards";
+  let uploadId = `upload_${reflectionId}`;
+  const cardKind = input.cardKind ?? "insight";
+  const createdResult = repository.createReflectionV2({
+    id: reflectionId,
+    accountId: "account_1",
+    uploadId: null,
+    operationKey,
+    inputAdapter: "file_picker",
+    sourceOrigin: "user_reflection",
+    capturePurpose: "inspiration_capture",
+    recordingDate: "2026-08-21",
+    contentHash: "d".repeat(64)
+  });
+  const created = createdResult.reflection;
+  uploadId = createdResult.receipt?.uploadId ?? uploadId;
+  const uploading = repository.transitionStatus({
+    accountId: created.accountId,
+    reflectionId: created.id,
+    expectedVersion: created.version,
+    status: "uploading"
+  });
+  const fence = repository.claimExecutionLease({
+    accountId: uploading.accountId,
+    reflectionId: uploading.id,
+    leaseOwner: `card-builder-${reflectionId}`,
+    leaseDurationMs: 60_000,
+    allowedStatuses: ["uploading"]
+  });
+  if (!fence) throw new Error("expected Card pipeline lease");
+  const bound = repository.bindUploadAndPlanV2({
+    accountId: uploading.accountId,
+    reflectionId: uploading.id,
+    expectedVersion: repository.getReflection(uploading.accountId, uploading.id).version,
+    uploadId,
+    inputAdapter: "file_picker",
+    processingProfile: "full_recording",
+    effectiveDurationMs: 300_000,
+    durationSource: "server_ffprobe",
+    candidateLimit: 5,
+    leaseOwner: fence.leaseOwner,
+    attemptVersion: fence.attemptVersion
+  });
+  const transcribing = repository.transitionStatus({
+    accountId: bound.reflection.accountId,
+    reflectionId: bound.reflection.id,
+    expectedVersion: bound.reflection.version,
+    status: "transcribing",
+    leaseOwner: fence.leaseOwner,
+    attemptVersion: fence.attemptVersion
+  });
+  const extracting = repository.transitionStatus({
+    accountId: transcribing.accountId,
+    reflectionId: transcribing.id,
+    expectedVersion: transcribing.version,
+    status: "extracting",
+    leaseOwner: fence.leaseOwner,
+    attemptVersion: fence.attemptVersion
+  });
+  repository.publishAssetUnderExecutionFence({
+    accountId: extracting.accountId,
+    reflectionId: extracting.id,
+    leaseOwner: fence.leaseOwner,
+    attemptVersion: fence.attemptVersion,
+    assetKind: "segments",
+    payload: [
+      { id: "segment_card_1", uploadId, startSeconds: 0, endSeconds: 8, text: "第一段原话。", confidence: 0.98, sceneLabels: [], valueLabels: [] },
+      { id: "segment_card_2", uploadId, startSeconds: 8, endSeconds: 16, text: "第二段原话。", confidence: 0.98, sceneLabels: [], valueLabels: [] }
+    ]
+  });
+  const saved = repository.saveCardPipelineV2({
+    accountId: extracting.accountId,
+    reflectionId: extracting.id,
+    expectedVersion: extracting.version,
+    leaseOwner: fence.leaseOwner,
+    attemptVersion: fence.attemptVersion,
+    candidates: [
+      { id: `${reflectionId}_hidden_1`, ordinal: 0, candidateKind: cardKind, proposedText: "隐藏提取一", evidenceIds: ["segment_card_1"], confidence: 0.9, caution: "audit", actionClaimed: false },
+      { id: `${reflectionId}_hidden_2`, ordinal: 1, candidateKind: "insight", proposedText: "隐藏提取二", evidenceIds: ["segment_card_2"], confidence: 0.8, caution: "audit", actionClaimed: false }
+    ],
+    cards: [
+      {
+        id: `${reflectionId}_card_primary`,
+        cardKind,
+        proposedTitle: "主要重点",
+        proposedText: "用户看到的主要重点",
+        sourceCandidateIds: [`${reflectionId}_hidden_1`],
+        evidenceIds: ["segment_card_1"],
+        clusterId: `${reflectionId}_cluster_1`,
+        clusterTitle: "主题一",
+        displayTier: "primary",
+        rank: 0,
+        confidence: 0.9,
+        importance: 0.9,
+        durability: 0.8,
+        novelty: 0.7,
+        epistemicStatus: "explicit_user_statement",
+        riskFlags: [],
+        actionClaimed: false,
+        reviewStatus: "pending"
+      },
+      {
+        id: `${reflectionId}_card_more`,
+        cardKind: "insight",
+        proposedTitle: "更多内容",
+        proposedText: "用户可展开的更多内容",
+        sourceCandidateIds: [`${reflectionId}_hidden_2`],
+        evidenceIds: ["segment_card_2"],
+        clusterId: `${reflectionId}_cluster_2`,
+        clusterTitle: "主题二",
+        displayTier: "more",
+        rank: 1,
+        confidence: 0.8,
+        importance: 0.6,
+        durability: 0.6,
+        novelty: 0.5,
+        epistemicStatus: "reported_event",
+        riskFlags: [],
+        actionClaimed: false,
+        reviewStatus: "not_proposed"
+      }
+    ],
+    audit: {
+      modelName: "test-model",
+      promptVersion: "test-prompt-v1",
+      policy: { extractionInputTokenBudget: 100 },
+      windowCount: 1,
+      providerCallCount: 2,
+      hiddenCandidateCount: 2,
+      clusterCount: 2,
+      cardCount: 2,
+      inputTokenEstimate: 50,
+      outputTokenBudget: 100
+    }
+  });
+  const reflection = repository.transitionStatus({
+    accountId: saved.reflection.accountId,
+    reflectionId: saved.reflection.id,
+    expectedVersion: saved.reflection.version,
+    status: "review_pending",
+    leaseOwner: fence.leaseOwner,
+    attemptVersion: fence.attemptVersion
+  });
+  repository.releaseExecutionLease({
+    accountId: reflection.accountId,
+    reflectionId: reflection.id,
+    leaseOwner: fence.leaseOwner,
+    attemptVersion: fence.attemptVersion
+  });
+  return { reflection, operationKey };
+}
+
 describe("DailyReflectionRepository", () => {
   it("persists idempotent V2 input without merging accounts or operation payloads", () => {
     const input = {
@@ -352,6 +511,161 @@ describe("DailyReflectionRepository", () => {
     });
     expect(() => repository.getReflectionV2Input("account_2", first.reflection.id))
       .toThrow(DailyReflectionNotFoundError);
+  });
+
+  it("persists Cards separately and hides Hidden Candidates from the default detail", () => {
+    const review = createReviewPendingCards();
+    const detail = repository.getReflectionDetail("account_1", review.reflection.id);
+    expect(detail.cards.map((card) => ({
+      id: card.id,
+      tier: card.displayTier,
+      status: card.reviewStatus
+    }))).toEqual([
+      { id: "reflection_cards_card_primary", tier: "primary", status: "pending" },
+      { id: "reflection_cards_card_more", tier: "more", status: "not_proposed" }
+    ]);
+    expect(detail.candidates.map((candidate) => candidate.id)).toEqual([
+      "reflection_cards_card_primary",
+      "reflection_cards_card_more"
+    ]);
+    expect(database.prepare(`
+      SELECT candidate_role, COUNT(*) AS count
+      FROM dr_candidate_v2_roles
+      GROUP BY candidate_role
+      ORDER BY candidate_role
+    `).all()).toEqual([
+      { candidate_role: "card_projection", count: 2 },
+      { candidate_role: "hidden_extraction", count: 2 }
+    ]);
+  });
+
+  it("allows a user to promote a More Card into the Primary review set", () => {
+    const review = createReviewPendingCards({
+      id: "reflection_card_promotion",
+      operationKey: "operation_card_promotion"
+    });
+
+    const updated = repository.updateReflectionCards({
+      accountId: "account_1",
+      reflectionId: review.reflection.id,
+      expectedVersion: review.reflection.version,
+      cards: [{
+        cardId: "reflection_card_promotion_card_more",
+        reviewStatus: "pending",
+        userTitle: null,
+        userText: null,
+        promoteToPrimary: true
+      }]
+    });
+
+    expect(updated.cards.find((card) => card.id.endsWith("card_more"))).toMatchObject({
+      displayTier: "primary",
+      reviewStatus: "pending"
+    });
+  });
+
+  it("allows only an explicit user update to claim an evidenced user_action Card", () => {
+    const review = createReviewPendingCards({
+      id: "reflection_action_card",
+      operationKey: "operation_action_card",
+      cardKind: "user_action"
+    });
+    expect(() => repository.updateReflectionCards({
+      accountId: "account_2",
+      reflectionId: review.reflection.id,
+      expectedVersion: review.reflection.version,
+      cards: [{
+        cardId: "reflection_action_card_card_primary",
+        reviewStatus: "kept",
+        userTitle: null,
+        userText: null,
+        actionClaimed: true
+      }]
+    })).toThrow(DailyReflectionNotFoundError);
+    const updated = repository.updateReflectionCards({
+      accountId: "account_1",
+      reflectionId: review.reflection.id,
+      expectedVersion: review.reflection.version,
+      cards: [{
+        cardId: "reflection_action_card_card_primary",
+        reviewStatus: "kept",
+        userTitle: "我确认的行动",
+        userText: null,
+        actionClaimed: true
+      }]
+    });
+    expect(updated.cards[0]).toMatchObject({
+      cardKind: "user_action",
+      actionClaimed: true,
+      reviewStatus: "kept",
+      userTitle: "我确认的行动"
+    });
+    expect(() => repository.updateReflectionCards({
+      accountId: "account_1",
+      reflectionId: review.reflection.id,
+      expectedVersion: updated.reflection.version,
+      cards: [{
+        cardId: "reflection_action_card_card_more",
+        reviewStatus: "kept",
+        userTitle: null,
+        userText: null,
+        actionClaimed: true
+      }]
+    })).toThrowError(expect.objectContaining({ code: "daily_reflection_action_claim_invalid" }));
+  });
+
+  it("finalizes only kept Cards and never admits Hidden or untouched More results", () => {
+    const review = createReviewPendingCards({
+      id: "reflection_card_finalize",
+      operationKey: "operation_card_finalize"
+    });
+    const updated = repository.updateReflectionCards({
+      accountId: "account_1",
+      reflectionId: review.reflection.id,
+      expectedVersion: review.reflection.version,
+      cards: [{
+        cardId: "reflection_card_finalize_card_primary",
+        reviewStatus: "kept",
+        userTitle: null,
+        userText: "用户确认后的重点"
+      }]
+    });
+    const finalized = repository.finalizeReviewV2({
+      accountId: "account_1",
+      reflectionId: review.reflection.id,
+      expectedVersion: updated.reflection.version,
+      operationKey: review.operationKey,
+      saveIntent: "retain_selected"
+    });
+    expect(finalized.confirmation.candidateSnapshots).toHaveLength(1);
+    expect(finalized.confirmation.candidateSnapshots[0]).toMatchObject({
+      candidateId: "reflection_card_finalize_card_primary",
+      finalText: "用户确认后的重点",
+      status: "kept"
+    });
+    expect(finalized.confirmation.candidateSnapshots.some((snapshot) =>
+      snapshot.candidateId.includes("hidden") || snapshot.candidateId.endsWith("card_more")
+    )).toBe(false);
+  });
+
+  it("recap_only completes with unreviewed Primary and More Cards and creates zero admission", () => {
+    const review = createReviewPendingCards({
+      id: "reflection_card_recap",
+      operationKey: "operation_card_recap"
+    });
+    const finalized = repository.finalizeReviewV2({
+      accountId: "account_1",
+      reflectionId: review.reflection.id,
+      expectedVersion: review.reflection.version,
+      operationKey: review.operationKey,
+      saveIntent: "recap_only"
+    });
+    expect(finalized.operation).toBeNull();
+    expect(finalized.confirmation.candidateSnapshots).toHaveLength(2);
+    expect(finalized.confirmation.candidateSnapshots.every((snapshot) =>
+      snapshot.status === "excluded"
+    )).toBe(true);
+    expect(repository.getAdmissionOperation("account_1", review.reflection.id)).toBeNull();
   });
 
   it("completes an Evidence-free V2 recap with no admission operation or Person association", () => {

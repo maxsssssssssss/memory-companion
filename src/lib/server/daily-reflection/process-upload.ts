@@ -17,7 +17,9 @@ import {
 } from "./cleanup";
 import { buildDailyReflectionCandidates } from "./candidate-builder";
 import {
+  structuredDailyReflectionCardOrganizerProvider,
   structuredDailyReflectionCandidateProvider,
+  type DailyReflectionCardOrganizerProvider,
   type DailyReflectionCandidateProvider
 } from "./candidate-provider";
 import { getDailyReflectionDatabase } from "./db";
@@ -68,6 +70,7 @@ export type ProcessDailyReflectionUploadDependencies = {
   transcribeAudio: UploadTranscriptionProcessor;
   buildCandidates: typeof buildDailyReflectionCandidates;
   candidateProvider: DailyReflectionCandidateProvider;
+  cardOrganizerProvider: DailyReflectionCardOrganizerProvider;
   providerLeaseHeartbeatMs: number;
   cleanupCompletedAudio: typeof cleanupDailyReflectionCompletedAudio;
   now: () => string;
@@ -301,7 +304,8 @@ async function executeDailyReflectionUpload(
         assetKind: "segments"
       })) ?? [],
     buildCandidates: dependencies.buildCandidates,
-    candidateProvider: dependencies.candidateProvider
+    candidateProvider: dependencies.candidateProvider,
+    cardOrganizerProvider: dependencies.cardOrganizerProvider
   });
   let view = service.get(input.accountId, input.reflectionId);
   const plan = view.processingPlan;
@@ -371,6 +375,7 @@ async function executeDailyReflectionUpload(
       })) ?? [],
     buildCandidates: dependencies.buildCandidates,
     candidateProvider: dependencies.candidateProvider,
+    cardOrganizerProvider: dependencies.cardOrganizerProvider,
     executionFence: fence
   });
   view = service.get(input.accountId, input.reflectionId);
@@ -765,6 +770,8 @@ export function processDailyReflectionUpload(
     buildCandidates: dependencies.buildCandidates ?? buildDailyReflectionCandidates,
     candidateProvider: dependencies.candidateProvider
       ?? structuredDailyReflectionCandidateProvider,
+    cardOrganizerProvider: dependencies.cardOrganizerProvider
+      ?? structuredDailyReflectionCardOrganizerProvider,
     providerLeaseHeartbeatMs: dependencies.providerLeaseHeartbeatMs
       ?? PROVIDER_LEASE_HEARTBEAT_MS,
     cleanupCompletedAudio: dependencies.cleanupCompletedAudio

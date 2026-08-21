@@ -1,6 +1,8 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type {
+  DailyReflectionCardUpdateRequest,
+  DailyReflectionCardView,
   DailyReflectionCandidateView,
   DailyReflectionDetailResponse
 } from "@/lib/domain/daily-reflection-api";
@@ -42,6 +44,22 @@ function storeOperationReceipt(
   values.set(
     `daily-reflection:operation-receipt:v2:user_1:${receipt.reflectionId}`,
     JSON.stringify(receipt)
+  );
+}
+
+function storePendingInputOperation(
+  storage: Pick<Storage, "setItem">,
+  operationKey = "pending-operation"
+) {
+  storage.setItem(
+    "daily-reflection:pending-input:v2:user_1",
+    JSON.stringify({
+      accountId: "user_1",
+      operationKey,
+      inputAdapter: "file_picker",
+      sourceOrigin: "user_reflection",
+      recordingDate: "2026-08-13"
+    })
   );
 }
 
@@ -118,6 +136,7 @@ function detail(
         }]
       : [],
     effectiveOrigin: "user_reflection",
+    cards: [],
     candidates: [],
     confirmation: null,
     admissionOperation: null,
@@ -188,6 +207,47 @@ function reviewCandidateV2(
       text: "我准备明天把这件事做完。"
     }],
     ...overrides
+  };
+}
+
+function reviewCard(
+  id: string,
+  displayTier: "primary" | "more",
+  cardKind: DailyReflectionCardView["cardKind"] = "insight"
+): DailyReflectionCardView {
+  return {
+    id,
+    reflectionId: "reflection_1",
+    cardKind,
+    proposedTitle: `${id} 标题`,
+    proposedText: `${id} 内容`,
+    userTitle: null,
+    userText: null,
+    sourceCandidateIds: [`candidate_${id}`],
+    evidenceIds: ["segment_reflection_1"],
+    clusterId: `cluster_${id}`,
+    clusterTitle: "今天的重点",
+    displayTier,
+    rank: displayTier === "primary" ? 0 : 1,
+    confidence: 0.8,
+    importance: 0.8,
+    durability: 0.7,
+    novelty: 0.6,
+    epistemicStatus: "explicit_user_statement",
+    riskFlags: [],
+    actionClaimed: false,
+    reviewStatus: displayTier === "primary" ? "pending" : "not_proposed",
+    version: 0,
+    createdAt: NOW,
+    updatedAt: NOW,
+    evidence: [{
+      sourceSegmentId: "segment_reflection_1",
+      uploadId: "upload_reflection_1",
+      effectiveOrigin: "user_reflection",
+      startSeconds: 0,
+      endSeconds: 5,
+      text: "今天完成了一个重要决定。"
+    }]
   };
 }
 
@@ -311,6 +371,11 @@ function fakeApi(overrides: Partial<DailyReflectionApi> = {}): DailyReflectionAp
     upload: async () => operationReceipt(),
     uploadBrowserRecording: async () => operationReceipt("reflection_1", "browser_recorder"),
     get: async (reflectionId) => detail(reflectionId, "review_pending"),
+    getOperation: async () => ({ found: false }),
+    updateCards: async (_reflectionId, input) => ({
+      reflection: { ...detail("reflection_1", "review_pending").reflection, version: input.expectedVersion + 1 },
+      cards: []
+    }),
     updateCandidates: async (_reflectionId, input) => ({
       reflection: { ...detail("reflection_1", "review_pending").reflection, version: input.expectedVersion + 1 },
       candidates: []
@@ -672,6 +737,88 @@ describe("DailyReflectionSessionController", () => {
     expect(controller.getSnapshot().state).toBe("error");
   });
 
+  it("adopts the durable operation receipt after an upload response is lost without posting twice", async () => {
+    const upload = vi.fn(async () => {
+      throw new DailyReflectionApiError(0, "network_error");
+    });
+    const getOperation = vi.fn(async () => ({
+      found: true as const,
+      reflectionId: "reflection_recovered",
+      uploadId: "upload_reflection_recovered",
+      jobId: "job_reflection_recovered",
+      contentHash: "b".repeat(64),
+      status: "review_pending" as const
+    }));
+    const get = vi.fn(async () => detail("reflection_recovered", "review_pending", 100));
+    const controller = new DailyReflectionSessionController({
+      api: fakeApi({ upload, getOperation, get }),
+      pollIntervalMs: 0,
+      createIdempotencyKey: () => "lost-response-operation"
+    });
+    await controller.initialize();
+
+    await expect(controller.upload(
+      new File(["audio"], "reflection.wav", { type: "audio/wav" }),
+      "user_reflection",
+      "2026-08-13"
+    )).resolves.toBe(true);
+
+    expect(upload).toHaveBeenCalledOnce();
+    expect(getOperation).toHaveBeenCalledWith("lost-response-operation", expect.any(AbortSignal));
+    expect(get).toHaveBeenCalledWith("reflection_recovered", expect.any(AbortSignal));
+    expect(controller.getSnapshot()).toMatchObject({
+      reflectionId: "reflection_recovered",
+      state: "review_pending",
+      operation: "idle"
+    });
+  });
+
+  it("recovers a persisted pending operation on page initialization", async () => {
+    storePendingInputOperation(window.localStorage, "pending-operation");
+    const getOperation = vi.fn(async () => ({
+      found: true as const,
+      reflectionId: "reflection_recovered",
+      uploadId: "upload_reflection_recovered",
+      jobId: "job_reflection_recovered",
+      contentHash: "c".repeat(64),
+      status: "review_pending" as const
+    }));
+    const get = vi.fn(async () => detail("reflection_recovered", "review_pending", 100));
+    const controller = new DailyReflectionSessionController({
+      api: fakeApi({ getOperation, get }),
+      pollIntervalMs: 0
+    });
+
+    await controller.initialize();
+
+    expect(getOperation).toHaveBeenCalledWith("pending-operation", expect.any(AbortSignal));
+    expect(controller.getSnapshot()).toMatchObject({
+      reflectionId: "reflection_recovered",
+      state: "review_pending"
+    });
+  });
+
+  it("does not lookup or adopt a different record after a fail-closed upload conflict", async () => {
+    const getOperation = vi.fn(async () => ({ found: false as const }));
+    const upload = vi.fn(async () => {
+      throw new DailyReflectionApiError(409, "operation_payload_conflict");
+    });
+    const controller = new DailyReflectionSessionController({
+      api: fakeApi({ upload, getOperation }),
+      createIdempotencyKey: () => "conflicting-operation"
+    });
+    await controller.initialize();
+
+    await expect(controller.upload(
+      new File(["audio"], "reflection.wav", { type: "audio/wav" }),
+      "user_reflection",
+      "2026-08-13"
+    )).resolves.toBe(false);
+
+    expect(getOperation).not.toHaveBeenCalled();
+    expect(controller.getSnapshot()).toMatchObject({ state: "error", reflectionId: null });
+  });
+
   it("keeps the upload receipt true when later processing status refresh fails", async () => {
     const upload = vi.fn(async () => ({
       ...operationReceipt("reflection_toy_receipt", "toy_sync"),
@@ -786,6 +933,51 @@ describe("DailyReflectionSessionController", () => {
       }]
     }, expect.any(AbortSignal));
     expect(controller.getSnapshot().detail?.candidates).toEqual(accepted.candidates);
+  });
+
+  it("bulk-keeps only Primary Cards and never claims an action", async () => {
+    const primaryAction = reviewCard("card_primary", "primary", "user_action");
+    const moreInsight = reviewCard("card_more", "more");
+    const ready = {
+      ...reviewDetail(3, []),
+      cards: [primaryAction, moreInsight]
+    };
+    const accepted = {
+      ...ready,
+      reflection: { ...ready.reflection, version: 4 },
+      cards: [{ ...primaryAction, reviewStatus: "kept" as const, version: 1 }, moreInsight]
+    };
+    const get = vi.fn()
+      .mockResolvedValueOnce(ready)
+      .mockResolvedValueOnce(accepted);
+    const updateCards = vi.fn(async (
+      _reflectionId: string,
+      _input: DailyReflectionCardUpdateRequest,
+      _signal?: AbortSignal
+    ) => ({
+      reflection: accepted.reflection,
+      cards: accepted.cards
+    }));
+    const controller = new DailyReflectionSessionController({
+      api: fakeApi({ get, updateCards })
+    });
+    await controller.initialize("reflection_1");
+
+    await controller.acceptAllCandidates();
+
+    expect(updateCards).toHaveBeenCalledWith("reflection_1", {
+      expectedVersion: 3,
+      cards: [{
+        cardId: primaryAction.id,
+        reviewStatus: "kept",
+        userTitle: null,
+        userText: null
+      }]
+    }, expect.any(AbortSignal));
+    expect(updateCards.mock.calls[0]?.[1].cards[0]).not.toHaveProperty("actionClaimed");
+    expect(updateCards.mock.calls[0]?.[1].cards).not.toEqual(
+      expect.arrayContaining([expect.objectContaining({ cardId: moreInsight.id })])
+    );
   });
 
   it("reloads authoritative truth and shows the exact safe message after a stale update", async () => {

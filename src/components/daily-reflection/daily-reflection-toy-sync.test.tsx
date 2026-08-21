@@ -159,7 +159,8 @@ describe("DailyReflectionToySync", () => {
     const onUpload = vi.fn(async (
       _file: File,
       _recordingDate: string,
-      _operationKey: string
+      _operationKey: string,
+      _sourceOrigin: "user_reflection" | "direct_conversation"
     ) => true);
     render(
       <DailyReflectionToySync
@@ -186,12 +187,17 @@ describe("DailyReflectionToySync", () => {
       target: { value: "2026-08-15" }
     });
     fireEvent.click(within(latestCard!).getByRole("button", { name: "确认日期" }));
-    fireEvent.click(within(latestCard!).getByRole("button", { name: "作为我的复盘上传" }));
+    const uploadButton = within(latestCard!).getByRole("button", { name: "上传并开始整理" });
+    expect(uploadButton).toBeDisabled();
+    fireEvent.click(within(latestCard!).getByRole("radio", { name: "我自己的复盘" }));
+    expect(uploadButton).toBeEnabled();
+    fireEvent.click(uploadButton);
 
     await waitFor(() => expect(onUpload).toHaveBeenCalledTimes(1));
     expect(onUpload.mock.calls[0]?.[0]).toBeInstanceOf(File);
     expect(onUpload.mock.calls[0]?.[1]).toBe("2026-08-15");
     expect(onUpload.mock.calls[0]?.[2]).toMatch(/^toyop_v2_[a-f0-9]{64}$/u);
+    expect(onUpload.mock.calls[0]?.[3]).toBe("user_reflection");
     expect(await within(latestCard!).findByText("录音已收到")).toBeInTheDocument();
     expect(fixture.runtime.pickDirectory).toHaveBeenCalledTimes(1);
   });
@@ -268,7 +274,8 @@ describe("DailyReflectionToySync", () => {
     const onUpload = vi.fn((
       _file: File,
       _recordingDate: string,
-      _operationKey: string
+      _operationKey: string,
+      _sourceOrigin: "user_reflection" | "direct_conversation"
     ) => new Promise<boolean>((resolve) => {
       finishUpload = resolve;
     }));
@@ -284,8 +291,10 @@ describe("DailyReflectionToySync", () => {
 
     const latestCard = screen.getByText("latest.wav").closest("li")!;
     const olderCard = screen.getByText("older.wav").closest("li")!;
-    fireEvent.click(within(latestCard).getByRole("button", { name: "作为我的复盘上传" }));
-    fireEvent.click(within(olderCard).getByRole("button", { name: "作为我的复盘上传" }));
+    fireEvent.click(within(latestCard).getByRole("radio", { name: "我自己的复盘" }));
+    fireEvent.click(within(olderCard).getByRole("radio", { name: "和其他人的真实交流" }));
+    fireEvent.click(within(latestCard).getByRole("button", { name: "上传并开始整理" }));
+    fireEvent.click(within(olderCard).getByRole("button", { name: "上传并开始整理" }));
 
     await waitFor(() => expect(onUpload).toHaveBeenCalledTimes(1));
     expect(onUpload.mock.calls[0]?.[0].name).toBe("latest.wav");
@@ -315,13 +324,16 @@ describe("DailyReflectionToySync", () => {
     expect(await within(olderCard).findByText("已忽略")).toBeInTheDocument();
 
     const latestCard = screen.getByText("latest.wav").closest("li")!;
-    fireEvent.click(within(latestCard).getByRole("button", { name: "作为我的复盘上传" }));
+    fireEvent.click(within(latestCard).getByRole("radio", { name: "和其他人的真实交流" }));
+    fireEvent.click(within(latestCard).getByRole("button", { name: "上传并开始整理" }));
     expect(await within(latestCard).findByText("上传没有完成，请重试。")).toBeInTheDocument();
     fireEvent.click(within(latestCard).getByRole("button", { name: "重试上传" }));
 
     await waitFor(() => expect(onUpload).toHaveBeenCalledTimes(2));
     expect(onUpload.mock.calls[0]?.[1]).toBe(onUpload.mock.calls[1]?.[1]);
     expect(onUpload.mock.calls[0]?.[2]).toBe(onUpload.mock.calls[1]?.[2]);
+    expect(onUpload.mock.calls[0]?.[3]).toBe("direct_conversation");
+    expect(onUpload.mock.calls[1]?.[3]).toBe("direct_conversation");
     expect(await within(latestCard).findByText("录音已收到")).toBeInTheDocument();
     expect(onUpload).not.toHaveBeenCalledWith(
       expect.objectContaining({ name: "older.wav" }),

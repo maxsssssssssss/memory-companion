@@ -9,6 +9,7 @@ export * from "./db";
 export * from "./duration-resolver";
 export * from "./candidate-builder";
 export * from "./candidate-provider";
+export * from "./card-pipeline-policy";
 export * from "./canonical-transcript";
 export * from "./candidate-revocation";
 export * from "./cleanup";

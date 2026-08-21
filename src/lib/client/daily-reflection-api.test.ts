@@ -78,6 +78,35 @@ function browserRecordingInput(
   };
 }
 
+function cardResponse() {
+  return {
+    id: "card_1",
+    reflectionId: "reflection_1",
+    cardKind: "insight" as const,
+    proposedTitle: "一个重点",
+    proposedText: "今天做出了一个决定。",
+    userTitle: null,
+    userText: null,
+    sourceCandidateIds: ["hidden_1"],
+    evidenceIds: ["segment_1"],
+    clusterId: "cluster_1",
+    clusterTitle: "决定",
+    displayTier: "more" as const,
+    rank: 1,
+    confidence: 0.9,
+    importance: 0.8,
+    durability: 0.7,
+    novelty: 0.6,
+    epistemicStatus: "explicit_user_statement" as const,
+    riskFlags: [],
+    actionClaimed: false,
+    reviewStatus: "not_proposed" as const,
+    version: 0,
+    createdAt: "2026-08-13T08:00:00.000Z",
+    updatedAt: "2026-08-13T08:00:00.000Z"
+  };
+}
+
 describe("createDailyReflectionApi", () => {
   it("exports the exact public file-upload source contract", () => {
     expect(DailyReflectionUploadSourceSchema.options).toEqual([
@@ -737,6 +766,72 @@ describe("createDailyReflectionApi", () => {
       message: "这份复盘已经在其他页面更新，请重新加载最新内容。"
     });
     expect(String(error)).not.toContain("private repository state");
+  });
+
+  it("looks up only the bounded operation receipt and rejects extra response fields", async () => {
+    const safe = vi.fn<typeof fetch>().mockResolvedValue(jsonResponse({
+      found: true,
+      reflectionId: "reflection_1",
+      uploadId: "upload_1",
+      jobId: "job_1",
+      contentHash: "a".repeat(64),
+      status: "review_pending"
+    }));
+    await expect(createDailyReflectionApi(safe).getOperation("operation / 1"))
+      .resolves.toMatchObject({ found: true, reflectionId: "reflection_1" });
+    expect(safe).toHaveBeenCalledWith(
+      "/api/daily-reflections/operations/operation%20%2F%201",
+      expect.objectContaining({ method: "GET", credentials: "same-origin" })
+    );
+
+    const unsafe = vi.fn<typeof fetch>().mockResolvedValue(jsonResponse({
+      found: false,
+      transcript: "must never be returned"
+    }));
+    await expect(createDailyReflectionApi(unsafe).getOperation("operation_1"))
+      .rejects.toMatchObject({ code: "invalid_response" });
+  });
+
+  it("promotes a Card through the strict versioned API without claiming an action", async () => {
+    const promoted = { ...cardResponse(), displayTier: "primary" as const, reviewStatus: "pending" as const };
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(jsonResponse({
+      reflection: { ...reflection("review_pending"), version: 2 },
+      cards: [promoted]
+    }));
+    const api = createDailyReflectionApi(fetcher);
+
+    await expect(api.updateCards("reflection_1", {
+      expectedVersion: 1,
+      cards: [{
+        cardId: "card_1",
+        reviewStatus: "pending",
+        userTitle: "   ",
+        userText: null,
+        promoteToPrimary: true
+      }]
+    })).resolves.toMatchObject({ cards: [{ displayTier: "primary" }] });
+    expect(JSON.parse(String(fetcher.mock.calls[0][1]?.body))).toEqual({
+      expectedVersion: 1,
+      cards: [{
+        cardId: "card_1",
+        reviewStatus: "pending",
+        userTitle: null,
+        userText: null,
+        promoteToPrimary: true
+      }]
+    });
+
+    const invalidFetcher = vi.fn<typeof fetch>();
+    await expect(createDailyReflectionApi(invalidFetcher).updateCards("reflection_1", {
+      expectedVersion: 1,
+      cards: [{
+        cardId: "card_1",
+        reviewStatus: "kept",
+        userTitle: null,
+        userText: "x".repeat(4_001)
+      }]
+    })).rejects.toMatchObject({ status: 400, code: "invalid_card_update" });
+    expect(invalidFetcher).not.toHaveBeenCalled();
   });
 
   it("strictly parses detail and action responses", async () => {

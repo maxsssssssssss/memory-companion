@@ -93,6 +93,29 @@ export const CandidateKindV2Schema = z.enum([
   "user_action"
 ]);
 
+export const ReflectionCardDisplayTierSchema = z.enum(["primary", "more"]);
+
+export const ReflectionCardReviewStatusSchema = z.enum([
+  "not_proposed",
+  "pending",
+  "kept",
+  "excluded"
+]);
+
+export const ReflectionCardEpistemicStatusSchema = z.enum([
+  "explicit_user_statement",
+  "reported_event",
+  "ai_inference",
+  "unknown"
+]);
+
+export const ReflectionCardRiskFlagSchema = z.enum([
+  "ai_inference",
+  "attribution_uncertain",
+  "low_evidence",
+  "sensitive"
+]);
+
 export function legacyCandidateKindForV2(input: {
   candidateKind: z.infer<typeof CandidateKindV2Schema>;
   actionClaimed: boolean;
@@ -244,6 +267,71 @@ export const CandidateV2Schema = z.object({
 });
 
 export const CandidateSchema = z.union([CandidateV1Schema, CandidateV2Schema]);
+
+export const ReflectionCardBaseSchema = z.object({
+  id: DailyReflectionIdSchema,
+  reflectionId: DailyReflectionIdSchema,
+  cardKind: CandidateKindV2Schema,
+  proposedTitle: z.string().trim().min(1).max(240),
+  proposedText: z.string().trim().min(1).max(20_000),
+  userTitle: z.string().trim().min(1).max(240).nullable(),
+  userText: z.string().trim().min(1).max(20_000).nullable(),
+  sourceCandidateIds: z.array(DailyReflectionIdSchema).min(1).max(64),
+  evidenceIds: z.array(DailyReflectionIdSchema).min(1).max(64),
+  clusterId: DailyReflectionIdSchema,
+  clusterTitle: z.string().trim().min(1).max(240),
+  displayTier: ReflectionCardDisplayTierSchema,
+  rank: z.number().int().nonnegative(),
+  confidence: z.number().min(0).max(1),
+  importance: z.number().min(0).max(1),
+  durability: z.number().min(0).max(1),
+  novelty: z.number().min(0).max(1),
+  epistemicStatus: ReflectionCardEpistemicStatusSchema,
+  riskFlags: z.array(ReflectionCardRiskFlagSchema).max(8),
+  actionClaimed: z.boolean(),
+  reviewStatus: ReflectionCardReviewStatusSchema,
+  version: DailyReflectionVersionSchema,
+  createdAt: z.string().datetime(),
+  updatedAt: z.string().datetime()
+}).strict();
+
+export const ReflectionCardSchema = ReflectionCardBaseSchema.superRefine((card, context) => {
+  if (new Set(card.sourceCandidateIds).size !== card.sourceCandidateIds.length) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["sourceCandidateIds"],
+      message: "sourceCandidateIds must be unique"
+    });
+  }
+  if (new Set(card.evidenceIds).size !== card.evidenceIds.length) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["evidenceIds"],
+      message: "evidenceIds must be unique"
+    });
+  }
+  if (card.displayTier === "primary" && card.reviewStatus === "not_proposed") {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["reviewStatus"],
+      message: "primary cards must be proposed for review"
+    });
+  }
+  if (card.displayTier === "more" && card.reviewStatus === "pending") {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["reviewStatus"],
+      message: "More cards do not block review by default"
+    });
+  }
+  if (card.cardKind !== "user_action" && card.actionClaimed) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["actionClaimed"],
+      message: "only user_action cards may claim an action"
+    });
+  }
+});
 
 export const ReflectionConfirmationEvidenceSnapshotSchema = z.object({
   sourceSegmentId: DailyReflectionIdSchema,
@@ -414,7 +502,7 @@ export const ReflectionConfirmationV2Schema = z.object({
   capturePurpose: DailyReflectionV2CapturePurposeSchema,
   recordingDate: z.string().date(),
   saveIntent: DailyReflectionSaveIntentSchema,
-  candidateSnapshots: z.array(ReflectionConfirmationCandidateSnapshotV2Schema).min(1).max(7),
+  candidateSnapshots: z.array(ReflectionConfirmationCandidateSnapshotV2Schema).min(1).max(12),
   createdAt: z.string().datetime()
 }).strict().superRefine((confirmation, context) => {
   for (const [candidateIndex, candidate] of confirmation.candidateSnapshots.entries()) {
@@ -579,6 +667,27 @@ export const PendingCandidateV2InputSchema = z.object({
   }
 });
 
+export const PendingReflectionCardInputSchema = ReflectionCardBaseSchema.pick({
+  id: true,
+  cardKind: true,
+  proposedTitle: true,
+  proposedText: true,
+  sourceCandidateIds: true,
+  evidenceIds: true,
+  clusterId: true,
+  clusterTitle: true,
+  displayTier: true,
+  rank: true,
+  confidence: true,
+  importance: true,
+  durability: true,
+  novelty: true,
+  epistemicStatus: true,
+  riskFlags: true,
+  actionClaimed: true,
+  reviewStatus: true
+}).strict();
+
 /**
  * Compatibility adapter for records written before source provenance existed.
  * New create inputs use SourceOriginSchema directly and therefore never infer a
@@ -606,6 +715,7 @@ export type DailyReflectionV2InputAdapter = z.infer<
 >;
 export type Candidate = z.infer<typeof CandidateSchema>;
 export type CandidateV2 = z.infer<typeof CandidateV2Schema>;
+export type ReflectionCard = z.infer<typeof ReflectionCardSchema>;
 export type ReflectionConfirmationCandidateSnapshot = z.infer<
   typeof ReflectionConfirmationCandidateSnapshotSchema
 >;
@@ -634,3 +744,4 @@ export type CreateDailyReflectionV2Input = z.infer<
 >;
 export type PendingCandidateInput = z.infer<typeof PendingCandidateInputSchema>;
 export type PendingCandidateV2Input = z.infer<typeof PendingCandidateV2InputSchema>;
+export type PendingReflectionCardInput = z.infer<typeof PendingReflectionCardInputSchema>;

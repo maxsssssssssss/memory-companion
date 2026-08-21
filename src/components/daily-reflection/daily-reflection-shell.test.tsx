@@ -9,6 +9,7 @@ import type {
 } from "@/lib/client/browser-audio-recorder";
 import type { DailyReflectionSessionValue } from "@/lib/client/daily-reflection-session";
 import type {
+  DailyReflectionCardView,
   DailyReflectionCandidateView,
   DailyReflectionDetailResponse,
   DailyReflectionTranscriptSegmentView
@@ -83,6 +84,52 @@ function candidate(
       endSeconds: source.endSeconds,
       text: source.text
     }]
+  };
+}
+
+function card(
+  ordinal: number,
+  cardKind: DailyReflectionCardView["cardKind"],
+  evidenceIds: string[],
+  overrides: Partial<DailyReflectionCardView> = {}
+): DailyReflectionCardView {
+  return {
+    id: `card-${ordinal}`,
+    reflectionId: "reflection-1",
+    cardKind,
+    proposedTitle: `整理重点 ${ordinal + 1}`,
+    proposedText: `卡片内容 ${ordinal + 1}`,
+    userTitle: null,
+    userText: null,
+    sourceCandidateIds: [`candidate-v2-${ordinal}`],
+    evidenceIds,
+    clusterId: `cluster-${ordinal % 2}`,
+    clusterTitle: ordinal % 2 === 0 ? "工作与选择" : "关系与感受",
+    displayTier: ordinal < 2 ? "primary" : "more",
+    rank: ordinal,
+    confidence: 0.9,
+    importance: 0.8,
+    durability: 0.7,
+    novelty: 0.6,
+    epistemicStatus: "explicit_user_statement",
+    riskFlags: [],
+    actionClaimed: false,
+    reviewStatus: ordinal < 2 ? "pending" : "not_proposed",
+    version: 0,
+    createdAt: "2026-08-13T08:04:00.000Z",
+    updatedAt: "2026-08-13T08:04:00.000Z",
+    evidence: evidenceIds.map((sourceSegmentId) => {
+      const source = SEGMENTS.find((item) => item.id === sourceSegmentId)!;
+      return {
+        sourceSegmentId,
+        uploadId: source.uploadId,
+        effectiveOrigin: "direct_conversation" as const,
+        startSeconds: source.startSeconds,
+        endSeconds: source.endSeconds,
+        text: source.text
+      };
+    }),
+    ...overrides
   };
 }
 
@@ -190,6 +237,7 @@ function detail(
       candidate(1, "commitment", "segment-second"),
       candidate(4, "preference", "segment-fifth")
     ],
+    cards: [],
     confirmation: null,
     admissionOperation: null,
     admissionResults: [],
@@ -229,6 +277,8 @@ function session(
     startNew: vi.fn(),
     updateCandidate: vi.fn(async () => undefined),
     updateCandidates: vi.fn(async () => undefined),
+    updateCard: vi.fn(async () => undefined),
+    updateCards: vi.fn(async () => undefined),
     acceptAllCandidates: vi.fn(async () => undefined),
     createManualCandidate: vi.fn(async () => undefined),
     excludeCandidate: vi.fn(async () => undefined),
@@ -529,7 +579,7 @@ describe("DailyReflectionShellContent", () => {
     expect(screen.getByRole("button", { name: "停止录音" })).toBeEnabled();
   });
 
-  it("submits one ready recording with one stable key and no client-selected source", async () => {
+  it("submits one ready recording with one stable key and the user's editable source", async () => {
     let finishUpload!: () => void;
     const pendingUpload = new Promise<void>((resolve) => {
       finishUpload = resolve;
@@ -538,7 +588,8 @@ describe("DailyReflectionShellContent", () => {
       _file: File,
       _clientReportedDurationMs: number | undefined,
       _recordingDate: string,
-      _idempotencyKey: string
+      _idempotencyKey: string,
+      _sourceOrigin?: "user_reflection" | "direct_conversation"
     ) => pendingUpload);
     const { factory, instances } = controlledRecorderFactory();
     render(
@@ -556,17 +607,24 @@ describe("DailyReflectionShellContent", () => {
     fireEvent.click(screen.getByRole("button", { name: "停止录音" }));
     act(() => recorder.finishStop(181_000, "audio/webm;codecs=opus"));
     const submitButton = await screen.findByRole("button", { name: "提交并开始整理" });
+    const recorderSection = screen.getByRole("heading", { name: "开始快速复盘" })
+      .closest("section")!;
+    fireEvent.click(within(recorderSection).getByRole("radio", {
+      name: "我和其他人的真实交流"
+    }));
     fireEvent.click(submitButton);
     fireEvent.click(submitButton);
 
     expect(uploadBrowserRecording).toHaveBeenCalledTimes(1);
-    const [submittedFile, durationMs, date, operationKey] = uploadBrowserRecording.mock.calls[0]!;
+    const [submittedFile, durationMs, date, operationKey, submittedSource] =
+      uploadBrowserRecording.mock.calls[0]!;
     expect(submittedFile).toBeInstanceOf(File);
     expect(submittedFile.name).toMatch(/^daily-reflection-\d{4}-\d{2}-\d{2}\.webm$/u);
     expect(submittedFile.type).toBe("audio/webm;codecs=opus");
     expect(durationMs).toBe(181_000);
     expect(date).toMatch(/^\d{4}-\d{2}-\d{2}$/u);
     expect(operationKey).toBe("stable-browser-key");
+    expect(submittedSource).toBe("direct_conversation");
     expect(screen.getByText("正在整理这次复盘……")).toBeVisible();
 
     await act(async () => finishUpload());
@@ -635,7 +693,7 @@ describe("DailyReflectionShellContent", () => {
 
     expect(screen.getByText("周三散步.m4a")).toBeInTheDocument();
     expect(screen.getByText("我和其他人的真实交流")).toBeInTheDocument();
-    expect(screen.getByText("我把这次复盘整理成了几张卡片")).toBeInTheDocument();
+    expect(screen.getByText("本次复盘概览")).toBeInTheDocument();
     expect(screen.getAllByRole("button", { name: "展开全部原话" })).toHaveLength(5);
     expect(screen.queryByRole("button", { name: "查看全部" })).not.toBeInTheDocument();
     expect(screen.getByDisplayValue("待确认内容 4")).toBeVisible();
@@ -646,6 +704,7 @@ describe("DailyReflectionShellContent", () => {
     expect(screen.getByText("这段内容的整理")).toBeInTheDocument();
     expect(screen.getByText("表达的偏好")).toBeInTheDocument();
 
+    fireEvent.click(screen.getByRole("button", { name: "展开 5 段" }));
     const transcript = screen.getByRole("region", { name: "完整文字稿" });
     expect(within(transcript).getAllByRole("listitem").map((item) => item.textContent)).toEqual([
       expect.stringContaining("第一段真实原话。"),
@@ -709,7 +768,7 @@ describe("DailyReflectionShellContent", () => {
     expect(screen.getByRole("button", { name: "不记" })).toHaveAttribute("aria-pressed", "false");
     expect(screen.queryByRole("combobox")).not.toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole("button", { name: "全部接受" }));
+    fireEvent.click(screen.getByRole("button", { name: "记住这些重点" }));
     expect(acceptAllCandidates).toHaveBeenCalledOnce();
 
     fireEvent.click(screen.getByRole("button", { name: "只保存这次复盘" }));
@@ -781,8 +840,8 @@ describe("DailyReflectionShellContent", () => {
     })} />);
 
     fireEvent.click(screen.getByRole("button", { name: "展开全部原话" }));
-    expect(screen.getAllByText("第一段真实原话。")).toHaveLength(2);
-    expect(screen.getAllByText("第二段提到散步。")).toHaveLength(2);
+    expect(screen.getAllByText("第一段真实原话。")).toHaveLength(1);
+    expect(screen.getAllByText("第二段提到散步。")).toHaveLength(1);
 
     fireEvent.click(screen.getByRole("checkbox", { name: /这是我要做的/u }));
     expect(updateCandidate).toHaveBeenCalledWith(expect.objectContaining({
@@ -996,7 +1055,7 @@ describe("DailyReflectionShellContent", () => {
       detail: quickDetail
     })} />);
 
-    expect(screen.getByText("我把这次复盘整理成了几张卡片")).toBeVisible();
+    expect(screen.getByText("本次复盘概览")).toBeVisible();
     expect(screen.getAllByRole("button", { name: "展开全部原话" })).toHaveLength(5);
     expect(screen.queryByRole("button", { name: "查看全部" })).not.toBeInTheDocument();
     expect(screen.getByDisplayValue("待确认内容 4")).toBeVisible();
@@ -1075,8 +1134,92 @@ describe("DailyReflectionShellContent", () => {
     expect(screen.getByText("这次整理还不完整")).toBeVisible();
     expect(screen.getByRole("button", { name: "重新整理候选卡" })).toBeVisible();
     expect(screen.getByRole("button", { name: "手写补充一张卡片" })).toBeVisible();
+    expect(screen.getByText("完整文字记录")).toBeVisible();
+    expect(screen.queryByText("第一段真实原话。")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "展开 5 段" }));
     expect(screen.getByLabelText("完整文字稿")).toBeVisible();
     expect(screen.getByText("第一段真实原话。")).toBeVisible();
+  });
+
+  it("presents Card digest with Primary first, More collapsed, risks conditional, and Evidence before Transcript", async () => {
+    const updateCard = vi.fn(async () => undefined);
+    const acceptAllCandidates = vi.fn(async () => undefined);
+    const onLocalReviewMetric = vi.fn();
+    const primaryAction = card(0, "user_action", ["segment-early"], {
+      proposedTitle: "确认明天的安排",
+      proposedText: "明天散步十分钟。",
+      epistemicStatus: "ai_inference",
+      riskFlags: ["low_evidence"]
+    });
+    const primaryInsight = card(1, "insight", ["segment-second"], {
+      proposedTitle: "散步让我更放松"
+    });
+    const more = card(2, "open_question", ["segment-fifth"], {
+      proposedTitle: "还要想清楚的事"
+    });
+    const { container } = render(
+      <DailyReflectionShellContent
+        onLocalReviewMetric={onLocalReviewMetric}
+        session={session({
+          state: "review_pending",
+          reflectionId: "reflection-1",
+          detail: detail({ candidates: [], cards: [more, primaryInsight, primaryAction] }),
+          updateCard,
+          acceptAllCandidates
+        })}
+      />
+    );
+
+    expect(screen.getByText("本次复盘概览")).toBeVisible();
+    expect(screen.getByDisplayValue("确认明天的安排")).toBeVisible();
+    expect(screen.getByDisplayValue("散步让我更放松")).toBeVisible();
+    expect(screen.queryByDisplayValue("还要想清楚的事")).not.toBeInTheDocument();
+    expect(screen.getByText("含 AI 推断，请核对")).toBeVisible();
+    expect(screen.getByText("可核对依据较少")).toBeVisible();
+    expect(screen.queryByText("0.9")).not.toBeInTheDocument();
+    expect(screen.queryByText("第一段真实原话。")).not.toBeInTheDocument();
+    await waitFor(() => expect(onLocalReviewMetric).toHaveBeenCalledWith({
+      name: "cards_shown",
+      value: 3,
+      reflectionId: "reflection-1"
+    }));
+
+    fireEvent.click(screen.getByRole("button", { name: /还有 1 条整理结果/u }));
+    expect(screen.getByDisplayValue("还要想清楚的事")).toBeVisible();
+    expect(onLocalReviewMetric).toHaveBeenCalledWith({
+      name: "more_expanded",
+      value: 1,
+      reflectionId: "reflection-1",
+      tier: "more"
+    });
+    fireEvent.click(screen.getByRole("button", { name: "设为重点" }));
+    expect(updateCard).toHaveBeenCalledWith(expect.objectContaining({
+      cardId: more.id,
+      reviewStatus: "pending",
+      promoteToPrimary: true
+    }));
+    expect(onLocalReviewMetric).toHaveBeenCalledWith({
+      name: "card_promoted",
+      value: 1,
+      reflectionId: "reflection-1",
+      tier: "more"
+    });
+
+    fireEvent.click(screen.getAllByRole("button", { name: "查看依据" })[0]);
+    expect(screen.getByText("第一段真实原话。")).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "跳到完整文字记录" }));
+    await waitFor(() => {
+      const source = container.querySelector('[data-segment-id="segment-early"]');
+      expect(source).toHaveAttribute("data-highlighted", "true");
+    });
+
+    fireEvent.click(screen.getByRole("checkbox", { name: /这是我要做的/u }));
+    expect(updateCard).toHaveBeenCalledWith(expect.objectContaining({
+      cardId: primaryAction.id,
+      actionClaimed: true
+    }));
+    fireEvent.click(screen.getByRole("button", { name: "记住这些重点" }));
+    expect(acceptAllCandidates).toHaveBeenCalledOnce();
   });
 
   it("does not invent source or recording date while a recovered record is loading", () => {

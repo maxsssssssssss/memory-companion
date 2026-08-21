@@ -19,11 +19,13 @@ import {
   DailyReflectionStatusSchema,
   PendingCandidateInputSchema,
   PendingCandidateV2InputSchema,
+  PendingReflectionCardInputSchema,
   ProcessingProfileSchema,
   ProcessingPlanSchema,
   ProcessingPlanV2Schema,
   ReflectionConfirmationSchema,
   ReflectionConfirmationV2Schema,
+  ReflectionCardSchema,
   DailyReflectionSaveIntentSchema,
   DailyReflectionV2InputSchema,
   DailyReflectionV2InputAdapterSchema,
@@ -39,12 +41,14 @@ import {
   type DailyReflectionV2InputAdapter,
   type PendingCandidateInput,
   type PendingCandidateV2Input,
+  type PendingReflectionCardInput,
   type ProcessingProfile,
   type ProcessingPlan,
   type ReflectionConfirmation,
   type ReflectionConfirmationCandidateSnapshot,
   type ReflectionConfirmationCandidateSnapshotV2,
   type ReflectionConfirmationV2,
+  type ReflectionCard,
   type ReviewPolicy
 } from "@/lib/domain/daily-reflection";
 import {
@@ -135,6 +139,33 @@ type CandidateV2MetadataRow = {
   confidence: number;
   caution: string;
   action_claimed: 0 | 1;
+};
+
+type ReflectionCardRow = {
+  id: string;
+  reflection_id: string;
+  card_kind: "insight" | "open_question" | "decision" | "user_action";
+  proposed_title: string;
+  proposed_text: string;
+  user_title: string | null;
+  user_text: string | null;
+  source_candidate_ids_json: string;
+  evidence_ids_json: string;
+  cluster_id: string;
+  cluster_title: string;
+  display_tier: "primary" | "more";
+  rank: number;
+  confidence: number;
+  importance: number;
+  durability: number;
+  novelty: number;
+  epistemic_status: "explicit_user_statement" | "reported_event" | "ai_inference" | "unknown";
+  risk_flags_json: string;
+  action_claimed: 0 | 1;
+  review_status: "not_proposed" | "pending" | "kept" | "excluded";
+  version: number;
+  created_at: string;
+  updated_at: string;
 };
 
 type ReflectionV2InputRow = {
@@ -404,6 +435,65 @@ const SaveCandidatesV2InputSchema = z.object({
   }
   if (new Set(explicitIds).size !== explicitIds.length) {
     context.addIssue({ code: z.ZodIssueCode.custom, path: ["candidates"], message: "candidate ids must be unique" });
+  }
+});
+
+const SaveCardPipelineV2InputSchema = z.object({
+  accountId: DailyReflectionIdSchema,
+  reflectionId: DailyReflectionIdSchema,
+  expectedVersion: z.number().int().nonnegative(),
+  candidates: z.array(PendingCandidateV2InputSchema).min(1).max(64),
+  cards: z.array(PendingReflectionCardInputSchema).min(1).max(32),
+  audit: z.object({
+    modelName: z.string().trim().min(1).max(256),
+    promptVersion: z.string().trim().min(1).max(256),
+    policy: z.record(z.string(), z.unknown()),
+    windowCount: z.number().int().positive(),
+    providerCallCount: z.number().int().positive(),
+    hiddenCandidateCount: z.number().int().positive(),
+    clusterCount: z.number().int().positive(),
+    cardCount: z.number().int().positive(),
+    inputTokenEstimate: z.number().int().nonnegative(),
+    outputTokenBudget: z.number().int().positive()
+  }).strict(),
+  leaseOwner: z.string().trim().min(1).max(512).optional(),
+  attemptVersion: z.number().int().positive().optional()
+}).strict().superRefine((input, context) => {
+  if (Boolean(input.leaseOwner) !== (input.attemptVersion !== undefined)) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "leaseOwner and attemptVersion must be provided together"
+    });
+  }
+  const candidateIds = input.candidates.map((candidate) => candidate.id);
+  const cardIds = input.cards.map((card) => card.id);
+  if (
+    candidateIds.some((id) => !id)
+    || cardIds.some((id) => !id)
+    || new Set(candidateIds).size !== candidateIds.length
+    || new Set(cardIds).size !== cardIds.length
+    || cardIds.some((id) => candidateIds.includes(id))
+  ) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ["cards"], message: "pipeline ids must be unique" });
+  }
+});
+
+const UpdateReflectionCardsInputSchema = z.object({
+  accountId: DailyReflectionIdSchema,
+  reflectionId: DailyReflectionIdSchema,
+  expectedVersion: z.number().int().nonnegative(),
+  cards: z.array(z.object({
+    cardId: DailyReflectionIdSchema,
+    reviewStatus: z.enum(["not_proposed", "pending", "kept", "excluded"]),
+    userTitle: z.string().trim().min(1).max(240).nullable(),
+    userText: z.string().trim().min(1).max(4_000).nullable(),
+    actionClaimed: z.boolean().optional(),
+    promoteToPrimary: z.literal(true).optional()
+  }).strict()).min(1)
+}).strict().superRefine((input, context) => {
+  const ids = input.cards.map((card) => card.cardId);
+  if (new Set(ids).size !== ids.length) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ["cards"], message: "card ids must be unique" });
   }
 });
 
@@ -961,6 +1051,65 @@ export class DailyReflectionRepository {
       WHERE account_id = ? AND reflection_id = ?
       ORDER BY ordinal, id
     `).all(accountId, reflectionId) as CandidateRow[];
+  }
+
+  private cardFromRow(row: ReflectionCardRow): ReflectionCard {
+    return ReflectionCardSchema.parse({
+      id: row.id,
+      reflectionId: row.reflection_id,
+      cardKind: row.card_kind,
+      proposedTitle: row.proposed_title,
+      proposedText: row.proposed_text,
+      userTitle: row.user_title,
+      userText: row.user_text,
+      sourceCandidateIds: JSON.parse(row.source_candidate_ids_json) as unknown,
+      evidenceIds: JSON.parse(row.evidence_ids_json) as unknown,
+      clusterId: row.cluster_id,
+      clusterTitle: row.cluster_title,
+      displayTier: row.display_tier,
+      rank: row.rank,
+      confidence: row.confidence,
+      importance: row.importance,
+      durability: row.durability,
+      novelty: row.novelty,
+      epistemicStatus: row.epistemic_status,
+      riskFlags: JSON.parse(row.risk_flags_json) as unknown,
+      actionClaimed: row.action_claimed === 1,
+      reviewStatus: row.review_status,
+      version: row.version,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at
+    });
+  }
+
+  private listCardRows(accountId: string, reflectionId: string) {
+    return this.database.prepare(`
+      SELECT id, reflection_id, card_kind, proposed_title, proposed_text,
+             user_title, user_text, source_candidate_ids_json, evidence_ids_json,
+             cluster_id, cluster_title, display_tier, rank, confidence,
+             importance, durability, novelty, epistemic_status, risk_flags_json,
+             action_claimed, review_status, version, created_at, updated_at
+      FROM dr_reflection_cards
+      WHERE account_id = ? AND reflection_id = ?
+      ORDER BY rank, id
+    `).all(accountId, reflectionId) as ReflectionCardRow[];
+  }
+
+  listReflectionCards(accountId: string, reflectionId: string): ReflectionCard[] {
+    const parsedAccountId = DailyReflectionIdSchema.parse(accountId);
+    const parsedReflectionId = DailyReflectionIdSchema.parse(reflectionId);
+    this.requireReflectionRow(parsedAccountId, parsedReflectionId);
+    return this.listCardRows(parsedAccountId, parsedReflectionId)
+      .map((row) => this.cardFromRow(row));
+  }
+
+  private candidateRole(accountId: string, candidateId: string) {
+    return this.database.prepare(`
+      SELECT candidate_role
+      FROM dr_candidate_v2_roles
+      WHERE account_id = ? AND candidate_id = ?
+    `).get(accountId, candidateId) as
+      { candidate_role: "hidden_extraction" | "card_projection" } | undefined;
   }
 
   private findAdmissionOperationRow(accountId: string, reflectionId: string) {
@@ -3898,35 +4047,47 @@ export class DailyReflectionRepository {
       ) {
         throw new DailyReflectionConflictError("daily_reflection_processing_plan_mismatch");
       }
-      const candidates = this.listCandidateRows(input.accountId, input.reflectionId)
-        .map((row) => this.candidateFromRow(input.accountId, row));
+      const cards = this.listCardRows(input.accountId, input.reflectionId)
+        .map((row) => this.cardFromRow(row));
+      const legacyCandidates = cards.length === 0
+        ? this.listCandidateRows(input.accountId, input.reflectionId)
+          .map((row) => this.candidateFromRow(input.accountId, row))
+        : [];
       if (
-        candidates.length === 0
-        || candidates.some((candidate) => candidate.status === "pending")
-        || candidates.some((candidate) => !("contractVersion" in candidate))
+        cards.length === 0
+        && (
+          legacyCandidates.length === 0
+          || legacyCandidates.some((candidate) => candidate.status === "pending")
+          || legacyCandidates.some((candidate) => !("contractVersion" in candidate))
+        )
       ) {
         throw new DailyReflectionConflictError("daily_reflection_candidates_pending");
       }
-      const parsedCandidates = candidates.map((candidate) => CandidateV2Schema.safeParse(candidate));
-      if (parsedCandidates.some((candidate) => !candidate.success)) {
-        throw new DailyReflectionConflictError("daily_reflection_v2_candidate_mismatch");
-      }
-      const v2Candidates = candidates.map((candidate) => CandidateV2Schema.parse(candidate));
-      const confirmationCandidates = v2Candidates.filter((candidate) =>
-        !this.isCandidateReviewDeleted(
-          input.accountId,
-          input.reflectionId,
-          candidate.id
-        )
+      const legacyV2Candidates = legacyCandidates.map((candidate) =>
+        CandidateV2Schema.parse(candidate)
       );
+      const selectedCards = input.saveIntent === "retain_selected"
+        ? cards.filter((card) => card.reviewStatus === "kept")
+        : cards;
+      const confirmationCandidates = cards.length > 0
+        ? selectedCards
+        : legacyV2Candidates.filter((candidate) =>
+          !this.isCandidateReviewDeleted(
+            input.accountId,
+            input.reflectionId,
+            candidate.id
+          )
+        );
       if (confirmationCandidates.length === 0) {
-        throw new DailyReflectionConflictError("daily_reflection_candidates_missing");
+        throw new DailyReflectionConflictError(
+          cards.length > 0 && input.saveIntent === "retain_selected"
+            ? "daily_reflection_no_kept_cards"
+            : "daily_reflection_candidates_missing"
+        );
       }
       if (
         input.saveIntent === "retain_selected"
-        && confirmationCandidates.some(
-          (candidate) => candidate.status === "kept" && candidate.evidenceIds.length === 0
-        )
+        && confirmationCandidates.some((candidate) => candidate.evidenceIds.length === 0)
       ) {
         throw new DailyReflectionConflictError("daily_reflection_retain_requires_evidence");
       }
@@ -3975,25 +4136,57 @@ export class DailyReflectionRepository {
               effectiveOrigin: v2InputRow.source_origin
             };
           });
+          const isCard = "cardKind" in candidate;
+          const candidateKind = isCard ? candidate.cardKind : candidate.candidateKind;
+          const actionClaimed = candidate.actionClaimed;
+          const proposedText = candidate.proposedText;
+          const userText = candidate.userText;
           return {
             contractVersion: 2,
             candidateId: candidate.id,
-            proposedText: candidate.proposedText,
-            userText: candidate.userText,
-            finalText: candidate.userText ?? candidate.proposedText,
-            status: candidate.status as "kept" | "excluded",
-            candidateKind: candidate.candidateKind,
-            candidateType: legacyCandidateKindForV2(candidate),
+            proposedText,
+            userText,
+            finalText: userText ?? proposedText,
+            status: (isCard
+              ? input.saveIntent === "retain_selected" ? "kept" : "excluded"
+              : candidate.status) as "kept" | "excluded",
+            candidateKind,
+            candidateType: legacyCandidateKindForV2({ candidateKind, actionClaimed }),
             evidenceIds: [...candidate.evidenceIds],
             sourceSegmentIds: [...candidate.evidenceIds],
             evidenceSnapshots,
             confidence: candidate.confidence,
-            caution: candidate.caution,
-            actionClaimed: candidate.actionClaimed,
+            caution: isCard
+              ? candidate.riskFlags.length > 0
+                ? `Card risk: ${candidate.riskFlags.join(",")}`
+                : "Card validated against canonical Evidence"
+              : candidate.caution,
+            actionClaimed,
             subjectPersonId: null
           };
         }
       );
+      if (cards.length > 0) {
+        const now = this.now();
+        for (const card of cards) {
+          const status = input.saveIntent === "retain_selected" && card.reviewStatus === "kept"
+            ? "kept"
+            : "excluded";
+          this.database.prepare(`
+            UPDATE dr_reflection_cards
+            SET review_status = ?, version = version + 1, updated_at = ?
+            WHERE account_id = ? AND reflection_id = ? AND id = ?
+          `).run(status, now, input.accountId, input.reflectionId, card.id);
+          this.database.prepare(`
+            UPDATE dr_candidates
+            SET status = ?, user_text = ?, version = version + 1, updated_at = ?
+            WHERE account_id = ? AND reflection_id = ? AND id = ?
+          `).run(
+            status, card.userText, now,
+            input.accountId, input.reflectionId, card.id
+          );
+        }
+      }
       const confirmationFingerprint = stableFingerprint({
         contractVersion: 2,
         reflectionId: input.reflectionId,
@@ -4244,16 +4437,345 @@ export class DailyReflectionRepository {
     return run();
   }
 
+  saveCardPipelineV2(rawInput: {
+    accountId: string;
+    reflectionId: string;
+    expectedVersion: number;
+    candidates: PendingCandidateV2Input[];
+    cards: PendingReflectionCardInput[];
+    audit: {
+      modelName: string;
+      promptVersion: string;
+      policy: Record<string, unknown>;
+      windowCount: number;
+      providerCallCount: number;
+      hiddenCandidateCount: number;
+      clusterCount: number;
+      cardCount: number;
+      inputTokenEstimate: number;
+      outputTokenBudget: number;
+    };
+    leaseOwner?: string;
+    attemptVersion?: number;
+  }) {
+    const input = SaveCardPipelineV2InputSchema.parse(rawInput);
+    const run = this.database.transaction(() => {
+      const reflectionRow = this.requireReflectionRow(input.accountId, input.reflectionId);
+      this.assertLeaseFence(input);
+      if (isDailyReflectionTombstone(reflectionRow.status)) {
+        throw new DailyReflectionConflictError("daily_reflection_tombstoned");
+      }
+      const existingCards = this.listCardRows(input.accountId, input.reflectionId)
+        .map((row) => this.cardFromRow(row));
+      if (existingCards.length > 0) {
+        const same = existingCards.length === input.cards.length
+          && existingCards.every((card, index) => card.id === input.cards[index]?.id);
+        if (!same) {
+          throw new DailyReflectionConflictError("daily_reflection_card_set_conflict");
+        }
+        return { reflection: reflectionFromRow(reflectionRow), cards: existingCards, reused: true };
+      }
+      if (this.listCandidateRows(input.accountId, input.reflectionId).length > 0) {
+        throw new DailyReflectionConflictError("daily_reflection_candidate_set_conflict");
+      }
+      if (reflectionRow.status !== "extracting") {
+        throw new DailyReflectionConflictError("daily_reflection_not_extracting");
+      }
+      if (reflectionRow.version !== input.expectedVersion) {
+        throw new DailyReflectionVersionConflictError(reflectionRow.version);
+      }
+      const v2Input = this.findV2InputRow(input.accountId, input.reflectionId);
+      const plan = this.findPlanRow(input.accountId, input.reflectionId);
+      const planV2 = this.findPlanV2Row(input.accountId, input.reflectionId);
+      if (!v2Input || !plan || !planV2 || plan.source_origin !== v2Input.source_origin) {
+        throw new DailyReflectionConflictError("daily_reflection_processing_plan_mismatch");
+      }
+
+      const rawSegments = this.readPublishedAsset<unknown>({
+        accountId: input.accountId,
+        reflectionId: input.reflectionId,
+        assetKind: "segments"
+      });
+      const canonicalSegments = parseDailyReflectionCanonicalTranscript(rawSegments, plan.upload_id);
+      if (!canonicalSegments) {
+        throw new DailyReflectionConflictError("daily_reflection_confirmation_evidence_unavailable");
+      }
+      const canonicalEvidence = new Set(canonicalSegments.map((segment) => segment.id));
+      const candidateById = new Map(input.candidates.map((candidate) => [candidate.id!, candidate]));
+      if (
+        input.candidates.some((candidate) =>
+          candidate.actionClaimed
+          || candidate.evidenceIds.length === 0
+          || candidate.evidenceIds.some((evidenceId) => !canonicalEvidence.has(evidenceId)))
+      ) {
+        throw new DailyReflectionConflictError("daily_reflection_candidate_evidence_invalid");
+      }
+      for (const card of input.cards) {
+        if (card.actionClaimed) {
+          throw new DailyReflectionConflictError("daily_reflection_provider_action_claim_forbidden");
+        }
+        const sources = card.sourceCandidateIds.map((candidateId) => candidateById.get(candidateId));
+        if (sources.some((candidate) => !candidate)) {
+          throw new DailyReflectionConflictError("daily_reflection_card_candidate_invalid");
+        }
+        const expectedEvidence = [...new Set(sources.flatMap((candidate) => candidate!.evidenceIds))];
+        if (
+          expectedEvidence.length !== card.evidenceIds.length
+          || expectedEvidence.some((evidenceId, index) => evidenceId !== card.evidenceIds[index])
+          || card.evidenceIds.some((evidenceId) => !canonicalEvidence.has(evidenceId))
+        ) {
+          throw new DailyReflectionConflictError("daily_reflection_card_evidence_invalid");
+        }
+      }
+
+      const now = this.now();
+      const insertCandidate = this.database.prepare(`
+        INSERT INTO dr_candidates (
+          id, account_id, reflection_id, ordinal, proposed_text, user_text,
+          status, candidate_type, subject_person_id, subject_confirmed,
+          version, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, NULL, ?, ?, NULL, 0, 0, ?, ?)
+      `);
+      const insertSource = this.database.prepare(`
+        INSERT INTO dr_candidate_sources (
+          account_id, candidate_id, position, source_segment_id
+        ) VALUES (?, ?, ?, ?)
+      `);
+      const insertMetadata = this.database.prepare(`
+        INSERT INTO dr_candidate_v2_metadata (
+          account_id, reflection_id, candidate_id, candidate_kind,
+          evidence_ids_json, confidence, caution, action_claimed,
+          created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `);
+      const insertRole = this.database.prepare(`
+        INSERT INTO dr_candidate_v2_roles (
+          account_id, reflection_id, candidate_id, candidate_role, created_at
+        ) VALUES (?, ?, ?, ?, ?)
+      `);
+      for (const candidate of input.candidates) {
+        insertCandidate.run(
+          candidate.id!, input.accountId, input.reflectionId, candidate.ordinal,
+          candidate.proposedText, "pending", legacyCandidateKindForV2(candidate), now, now
+        );
+        candidate.evidenceIds.forEach((evidenceId, position) => {
+          insertSource.run(input.accountId, candidate.id!, position, evidenceId);
+        });
+        insertMetadata.run(
+          input.accountId, input.reflectionId, candidate.id!, candidate.candidateKind,
+          JSON.stringify(candidate.evidenceIds), candidate.confidence, candidate.caution,
+          0, now, now
+        );
+        insertRole.run(
+          input.accountId, input.reflectionId, candidate.id!, "hidden_extraction", now
+        );
+      }
+
+      const insertCard = this.database.prepare(`
+        INSERT INTO dr_reflection_cards (
+          id, account_id, reflection_id, card_kind, proposed_title, proposed_text,
+          user_title, user_text, source_candidate_ids_json, evidence_ids_json,
+          cluster_id, cluster_title, display_tier, rank, confidence, importance,
+          durability, novelty, epistemic_status, risk_flags_json, action_claimed,
+          review_status, version, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, 0, ?, ?)
+      `);
+      for (const card of input.cards) {
+        const projectionStatus = card.reviewStatus === "kept"
+          ? "kept"
+          : card.reviewStatus === "excluded" ? "excluded" : "pending";
+        insertCandidate.run(
+          card.id!, input.accountId, input.reflectionId,
+          input.candidates.length + card.rank, card.proposedText,
+          projectionStatus, legacyCandidateKindForV2({
+            candidateKind: card.cardKind,
+            actionClaimed: false
+          }), now, now
+        );
+        card.evidenceIds.forEach((evidenceId, position) => {
+          insertSource.run(input.accountId, card.id!, position, evidenceId);
+        });
+        insertMetadata.run(
+          input.accountId, input.reflectionId, card.id!, card.cardKind,
+          JSON.stringify(card.evidenceIds), card.confidence,
+          "Card projection; user-facing risk is stored separately", 0, now, now
+        );
+        insertRole.run(
+          input.accountId, input.reflectionId, card.id!, "card_projection", now
+        );
+        insertCard.run(
+          card.id!, input.accountId, input.reflectionId, card.cardKind,
+          card.proposedTitle, card.proposedText,
+          JSON.stringify(card.sourceCandidateIds), JSON.stringify(card.evidenceIds),
+          card.clusterId, card.clusterTitle, card.displayTier, card.rank,
+          card.confidence, card.importance, card.durability, card.novelty,
+          card.epistemicStatus, JSON.stringify(card.riskFlags), card.reviewStatus,
+          now, now
+        );
+      }
+      this.database.prepare(`
+        INSERT INTO dr_card_pipeline_runs (
+          account_id, reflection_id, model_name, prompt_version, policy_json,
+          window_count, provider_call_count, hidden_candidate_count,
+          cluster_count, card_count, input_token_estimate, output_token_budget,
+          created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        input.accountId, input.reflectionId, input.audit.modelName,
+        input.audit.promptVersion, JSON.stringify(input.audit.policy),
+        input.audit.windowCount, input.audit.providerCallCount,
+        input.audit.hiddenCandidateCount, input.audit.clusterCount,
+        input.audit.cardCount, input.audit.inputTokenEstimate,
+        input.audit.outputTokenBudget, now
+      );
+      const updated = this.database.prepare(`
+        UPDATE dr_reflections
+        SET version = version + 1, updated_at = ?
+        WHERE id = ? AND account_id = ? AND version = ?
+          ${input.leaseOwner
+            ? "AND lease_owner = ? AND attempt_version = ? AND lease_until > ?"
+            : ""}
+      `).run(
+        now, input.reflectionId, input.accountId, input.expectedVersion,
+        ...(input.leaseOwner ? [input.leaseOwner, input.attemptVersion!, now] : [])
+      );
+      if (updated.changes !== 1) {
+        throw new DailyReflectionVersionConflictError(
+          this.requireReflectionRow(input.accountId, input.reflectionId).version
+        );
+      }
+      return {
+        reflection: reflectionFromRow(
+          this.requireReflectionRow(input.accountId, input.reflectionId)
+        ),
+        cards: this.listCardRows(input.accountId, input.reflectionId)
+          .map((row) => this.cardFromRow(row)),
+        reused: false
+      };
+    });
+    return run.immediate();
+  }
+
+  updateReflectionCards(rawInput: {
+    accountId: string;
+    reflectionId: string;
+    expectedVersion: number;
+    cards: Array<{
+      cardId: string;
+      reviewStatus: "not_proposed" | "pending" | "kept" | "excluded";
+      userTitle: string | null;
+      userText: string | null;
+      actionClaimed?: boolean;
+      promoteToPrimary?: true;
+    }>;
+  }) {
+    const input = UpdateReflectionCardsInputSchema.parse(rawInput);
+    const run = this.database.transaction(() => {
+      const reflectionRow = this.requireReflectionRow(input.accountId, input.reflectionId);
+      const reflection = reflectionFromRow(reflectionRow);
+      if (reflection.status !== "review_pending") {
+        throw new DailyReflectionConflictError("daily_reflection_card_update_conflict");
+      }
+      if (reflection.version !== input.expectedVersion) {
+        throw new DailyReflectionVersionConflictError(reflection.version);
+      }
+      const cards = this.listCardRows(input.accountId, input.reflectionId)
+        .map((row) => this.cardFromRow(row));
+      const cardById = new Map(cards.map((card) => [card.id, card]));
+      const now = this.now();
+      for (const decision of input.cards) {
+        const card = cardById.get(decision.cardId);
+        if (!card) throw new DailyReflectionConflictError("daily_reflection_card_update_conflict");
+        if (decision.promoteToPrimary && card.displayTier !== "more") {
+          throw new DailyReflectionConflictError("daily_reflection_card_promotion_invalid");
+        }
+        const displayTier = decision.promoteToPrimary ? "primary" : card.displayTier;
+        if (
+          displayTier === "primary" && decision.reviewStatus === "not_proposed"
+          || displayTier === "more" && decision.reviewStatus === "pending"
+        ) {
+          throw new DailyReflectionConflictError("daily_reflection_card_review_status_invalid");
+        }
+        const actionClaimed = decision.actionClaimed ?? card.actionClaimed;
+        if (
+          actionClaimed
+          && (card.cardKind !== "user_action" || card.evidenceIds.length === 0)
+        ) {
+          throw new DailyReflectionConflictError("daily_reflection_action_claim_invalid");
+        }
+        const updatedCard = this.database.prepare(`
+          UPDATE dr_reflection_cards
+          SET user_title = ?, user_text = ?, display_tier = ?, review_status = ?, action_claimed = ?,
+              version = version + 1, updated_at = ?
+          WHERE account_id = ? AND reflection_id = ? AND id = ? AND version = ?
+        `).run(
+          decision.userTitle, decision.userText, displayTier, decision.reviewStatus,
+          actionClaimed ? 1 : 0, now, input.accountId, input.reflectionId,
+          decision.cardId, card.version
+        );
+        if (updatedCard.changes !== 1) {
+          throw new DailyReflectionConflictError("daily_reflection_card_update_conflict");
+        }
+        const candidateStatus = decision.reviewStatus === "kept"
+          ? "kept"
+          : decision.reviewStatus === "excluded" ? "excluded" : "pending";
+        this.database.prepare(`
+          UPDATE dr_candidates
+          SET user_text = ?, status = ?, version = version + 1, updated_at = ?
+          WHERE account_id = ? AND reflection_id = ? AND id = ?
+        `).run(
+          decision.userText, candidateStatus, now,
+          input.accountId, input.reflectionId, decision.cardId
+        );
+        this.database.prepare(`
+          UPDATE dr_candidate_v2_metadata
+          SET action_claimed = ?, updated_at = ?
+          WHERE account_id = ? AND reflection_id = ? AND candidate_id = ?
+        `).run(
+          actionClaimed ? 1 : 0, now,
+          input.accountId, input.reflectionId, decision.cardId
+        );
+      }
+      const updatedReflection = this.database.prepare(`
+        UPDATE dr_reflections
+        SET version = version + 1, updated_at = ?
+        WHERE id = ? AND account_id = ? AND version = ?
+      `).run(now, input.reflectionId, input.accountId, input.expectedVersion);
+      if (updatedReflection.changes !== 1) {
+        throw new DailyReflectionVersionConflictError(
+          this.requireReflectionRow(input.accountId, input.reflectionId).version
+        );
+      }
+      return {
+        reflection: reflectionFromRow(
+          this.requireReflectionRow(input.accountId, input.reflectionId)
+        ),
+        cards: this.listCardRows(input.accountId, input.reflectionId)
+          .map((row) => this.cardFromRow(row))
+      };
+    });
+    return run.immediate();
+  }
+
   createPendingCandidates(input: Parameters<DailyReflectionRepository["savePendingCandidates"]>[0]) {
     return this.savePendingCandidates(input);
   }
 
   getReflectionDetail(accountId: string, reflectionId: string) {
     const operation = this.getAdmissionOperation(accountId, reflectionId);
+    const candidates = this.listCandidates(accountId, reflectionId).filter((candidate) => {
+      if (!("contractVersion" in candidate)) return true;
+      const role = this.candidateRole(accountId, candidate.id);
+      // Pre-V9 V2 records have no role and remain readable through the legacy
+      // adapter. New extraction candidates are internal and never leave the
+      // repository detail boundary.
+      return !role || role.candidate_role === "card_projection";
+    });
     return {
       reflection: this.getReflection(accountId, reflectionId),
       processingPlan: this.getProcessingPlan(accountId, reflectionId),
-      candidates: this.listCandidates(accountId, reflectionId),
+      candidates,
+      cards: this.listReflectionCards(accountId, reflectionId),
       confirmation: this.getConfirmation(accountId, reflectionId),
       admissionOperation: operation,
       admissionResults: operation

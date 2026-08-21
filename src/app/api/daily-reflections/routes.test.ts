@@ -147,6 +147,7 @@ import { POST as finalizeDailyReflection } from "./[reflectionId]/finalize/route
 import { POST as revokeDailyReflectionCandidate } from
   "./[reflectionId]/candidates/[candidateId]/revoke/route";
 import { POST as retryDailyReflection } from "./[reflectionId]/retry/route";
+import { GET as getDailyReflectionOperation } from "./operations/[operationKey]/route";
 
 const accountId = "account_daily_reflection_api";
 const otherAccountId = "account_daily_reflection_other";
@@ -552,6 +553,57 @@ afterEach(async () => {
 });
 
 describe("Daily Reflection workflow API", () => {
+  it("returns an account-scoped body-free operation receipt and preserves deleted truth", async () => {
+    const operationKey = "receipt-recovery-safe";
+    const createdResponse = await postDailyReflection(postRequest({
+      idempotencyKey: operationKey,
+      inputAdapter: "file_picker",
+      sourceOrigin: "user_reflection"
+    }));
+    expect(createdResponse.status).toBe(201);
+    const created = await createdResponse.json() as {
+      reflectionId: string;
+      uploadId: string;
+      jobId: string;
+      contentHash: string;
+    };
+    const lookup = () => getDailyReflectionOperation(
+      new Request(`http://localhost/api/daily-reflections/operations/${operationKey}`),
+      { params: Promise.resolve({ operationKey }) }
+    );
+
+    const found = await lookup();
+    expect(found.status).toBe(200);
+    expect(await found.json()).toEqual({
+      found: true,
+      reflectionId: created.reflectionId,
+      uploadId: created.uploadId,
+      jobId: created.jobId,
+      contentHash: created.contentHash,
+      status: "uploading"
+    });
+    expect(found.headers.get("Cache-Control")).toBe("private, no-store");
+
+    setAccount(otherAccountId);
+    const crossAccount = await lookup();
+    expect(await crossAccount.json()).toEqual({ found: false });
+
+    setAccount(accountId);
+    const current = repository.getReflection(accountId, created.reflectionId);
+    new DailyReflectionService(repository).updateStatus({
+      accountId,
+      reflectionId: created.reflectionId,
+      expectedVersion: current.version,
+      status: "deleted"
+    });
+    const deleted = await lookup();
+    expect(await deleted.json()).toEqual(expect.objectContaining({
+      found: true,
+      reflectionId: created.reflectionId,
+      status: "deleted"
+    }));
+  });
+
   it("fails closed when disabled", async () => {
     delete process.env.DAILY_REFLECTION_UPLOAD_ENABLED;
     const disabled = await postDailyReflection(postRequest({ idempotencyKey: "disabled" }));

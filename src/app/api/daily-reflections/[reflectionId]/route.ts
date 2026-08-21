@@ -157,6 +157,11 @@ export async function GET(
       && (!plan || view.candidates.some((candidate) =>
         candidate.sourceSegmentIds.some((sourceId) => !segmentById.has(sourceId))))
     )
+    || (
+      view.cards.length > 0
+      && (!plan || view.cards.some((card) =>
+        card.evidenceIds.some((evidenceId) => !segmentById.has(evidenceId))))
+    )
   ) {
     return detailUnavailable();
   }
@@ -185,12 +190,26 @@ export async function GET(
       resolved.reflectionId
     ),
     revokedCandidateIds,
-    candidates: view.candidates.map((candidate) => ({
+    candidates: view.cards.length > 0 ? [] : view.candidates.map((candidate) => ({
       ...candidate,
       evidence: candidate.sourceSegmentIds.map((sourceSegmentId) => {
         const segment = segmentById.get(sourceSegmentId)!;
         return {
           sourceSegmentId,
+          uploadId: segment.uploadId,
+          effectiveOrigin: plan!.sourceOrigin,
+          startSeconds: segment.startSeconds,
+          endSeconds: segment.endSeconds,
+          text: segment.text
+        };
+      })
+    })),
+    cards: view.cards.map((card) => ({
+      ...card,
+      evidence: card.evidenceIds.map((evidenceId) => {
+        const segment = segmentById.get(evidenceId)!;
+        return {
+          sourceSegmentId: evidenceId,
           uploadId: segment.uploadId,
           effectiveOrigin: plan!.sourceOrigin,
           startSeconds: segment.startSeconds,

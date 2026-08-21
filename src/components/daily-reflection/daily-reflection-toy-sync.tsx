@@ -42,7 +42,8 @@ export type DailyReflectionToySyncProps = Readonly<{
   onUpload(
     file: File,
     recordingDate: string,
-    operationKey: string
+    operationKey: string,
+    sourceOrigin: "user_reflection" | "direct_conversation"
   ): Promise<boolean>;
   runtime?: ToySyncRuntime;
 }>;
@@ -83,7 +84,8 @@ export type ToyAudioSyncProps = Readonly<{
   onUpload?: (
     file: File,
     recordingDate: string,
-    operationKey: string
+    operationKey: string,
+    sourceOrigin: "user_reflection" | "direct_conversation"
   ) => Promise<boolean>;
   runtime?: ToySyncRuntime;
   selectedDuplicateKey?: string | null;
@@ -153,6 +155,10 @@ export function ToyAudioSync({
   const [scanResult, setScanResult] = useState<ToySyncScanResult | null>(null);
   const [syncState, setSyncState] = useState<ToySyncState | null>(null);
   const [recordingDates, setRecordingDates] = useState<Record<string, string>>({});
+  const [sourceOrigins, setSourceOrigins] = useState<Record<
+    string,
+    "user_reflection" | "direct_conversation"
+  >>({});
   const [editingDateKey, setEditingDateKey] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
   const recordScope = useMemo(() => (
@@ -198,6 +204,7 @@ export function ToyAudioSync({
     setScanResult(null);
     setSyncState(null);
     setRecordingDates({});
+    setSourceOrigins({});
     setEditingDateKey(null);
     setMessage(null);
   }, [accountId, destination, relationshipId, runtime]);
@@ -597,6 +604,11 @@ export function ToyAudioSync({
       setMessage("请先确认这条录音发生的日期。");
       return;
     }
+    const sourceOrigin = sourceOrigins[recording.duplicateKey];
+    if (!sourceOrigin) {
+      setMessage("请先确认这条录音是你自己的复盘，还是和其他人的真实交流。");
+      return;
+    }
     setMessage(null);
     let attempt: ToySyncUploadAttempt | null = null;
     try {
@@ -604,7 +616,8 @@ export function ToyAudioSync({
       const receiptReceived = await onUpload(
         recording.file,
         recordingDate,
-        attempt.operationKey
+        attempt.operationKey,
+        sourceOrigin
       );
       await attempt.finish(receiptReceived);
     } catch {
@@ -635,7 +648,7 @@ export function ToyAudioSync({
     : {
         eyebrow: "玩偶录音",
         title: "连接玩偶录音",
-        scope: "此入口当前仅用于“我自己的复盘”。包含他人真实交流时，请使用下方手动上传并选择正确来源。"
+        scope: "上传前必须逐条确认来源：可以是你自己的复盘，也可以是和其他人的真实交流。系统不会替你判断。"
       };
 
   return (
@@ -746,6 +759,35 @@ export function ToyAudioSync({
                           : "重试会沿用第一次确认的日期。"}
                       </p>
                     ) : null}
+                    {!selectionMode && canUpload ? (
+                      <fieldset className={styles.sourceFieldset}>
+                        <legend>这条录音来自哪里？</legend>
+                        <label className={styles.sourceChoice}>
+                          <input
+                            checked={sourceOrigins[recording.duplicateKey] === "user_reflection"}
+                            name={`toy-source-${recording.duplicateKey}`}
+                            onChange={() => setSourceOrigins((current) => ({
+                              ...current,
+                              [recording.duplicateKey]: "user_reflection"
+                            }))}
+                            type="radio"
+                          />
+                          <span>我自己的复盘</span>
+                        </label>
+                        <label className={styles.sourceChoice}>
+                          <input
+                            checked={sourceOrigins[recording.duplicateKey] === "direct_conversation"}
+                            name={`toy-source-${recording.duplicateKey}`}
+                            onChange={() => setSourceOrigins((current) => ({
+                              ...current,
+                              [recording.duplicateKey]: "direct_conversation"
+                            }))}
+                            type="radio"
+                          />
+                          <span>和其他人的真实交流</span>
+                        </label>
+                      </fieldset>
+                    ) : null}
                     {state.status === "failed" ? (
                       <p className={styles.inlineError}>{state.errorMessage ?? "上传没有完成，可以重试。"}</p>
                     ) : null}
@@ -761,10 +803,10 @@ export function ToyAudioSync({
                         ) : (
                           <button
                             className={styles.primaryButton}
-                            disabled={busy || !date || !onUpload}
+                            disabled={busy || !date || !onUpload || !sourceOrigins[recording.duplicateKey]}
                             onClick={() => void upload(recording)}
                             type="button"
-                          >{state.status === "failed" ? "重试上传" : "作为我的复盘上传"}</button>
+                          >{state.status === "failed" ? "重试上传" : "上传并开始整理"}</button>
                         )
                       ) : null}
                       {state.status === "uploading" ? <span role="status">正在上传…</span> : null}

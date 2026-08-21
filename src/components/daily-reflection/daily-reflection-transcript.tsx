@@ -37,6 +37,7 @@ export function DailyReflectionTranscript({
   segments
 }: DailyReflectionTranscriptProps) {
   const [query, setQuery] = useState("");
+  const [expanded, setExpanded] = useState(false);
   const [highlightedSegmentId, setHighlightedSegmentId] = useState<string | null>(null);
   const segmentNodes = useRef(new Map<string, HTMLLIElement>());
 
@@ -62,6 +63,7 @@ export function DailyReflectionTranscript({
       return;
     }
     setQuery("");
+    setExpanded(true);
     setHighlightedSegmentId(focusRequest.segmentId);
     const timer = window.setTimeout(() => {
       const node = segmentNodes.current.get(focusRequest.segmentId);
@@ -75,13 +77,18 @@ export function DailyReflectionTranscript({
     <section className={styles.transcriptSection} aria-labelledby="daily-reflection-transcript-title">
       <div className={styles.sectionHeading}>
         <div>
-          <p>完整记录</p>
-          <h2 id="daily-reflection-transcript-title">文字稿</h2>
+          <p>需要时再核对</p>
+          <h2 id="daily-reflection-transcript-title">完整文字记录</h2>
         </div>
-        <span>{sortedSegments.length} 段</span>
+        <button
+          aria-expanded={expanded}
+          className={styles.secondaryButton}
+          onClick={() => setExpanded((current) => !current)}
+          type="button"
+        >{expanded ? "收起" : `展开 ${sortedSegments.length} 段`}</button>
       </div>
 
-      <label className={styles.searchField}>
+      {expanded ? <><label className={styles.searchField}>
         <span>搜索文字稿</span>
         <input
           onChange={(event) => setQuery(event.target.value)}
@@ -121,7 +128,7 @@ export function DailyReflectionTranscript({
         ) : (
           <p className={styles.emptySearch}>没有找到匹配的文字。</p>
         )}
-      </div>
+      </div></> : null}
     </section>
   );
 }

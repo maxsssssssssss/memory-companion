@@ -9,6 +9,7 @@ import {
   type CreateDailyReflectionV2Input,
   type DailyReflectionAdmissionOperation,
   type DailyReflection,
+  type ReflectionCard,
   type PendingCandidateInput,
   type ProcessingPlan,
   type ReflectionConfirmation
@@ -24,9 +25,24 @@ import {
   DailyReflectionCandidateProviderUnavailableError,
   DailyReflectionCandidateValidationError,
   structuredDailyReflectionCandidateProvider,
+  structuredDailyReflectionCardOrganizerProvider,
   validateDailyReflectionProviderCandidates,
+  validateDailyReflectionOrganizedCards,
+  dailyReflectionCandidateModelName,
+  estimateDailyReflectionOrganizerInputTokens,
+  type DailyReflectionCardOrganizerProvider,
+  type DailyReflectionHiddenCandidate,
   type DailyReflectionCandidateProvider
 } from "./candidate-provider";
+import {
+  DAILY_REFLECTION_CARD_PIPELINE_PROMPT_VERSION,
+  DEFAULT_DAILY_REFLECTION_CARD_PIPELINE_POLICY,
+  DailyReflectionCardPipelinePolicySchema,
+  buildDailyReflectionTranscriptWindows,
+  dailyReflectionCardDisplayPlan,
+  estimateDailyReflectionTokens,
+  type DailyReflectionCardPipelinePolicy
+} from "./card-pipeline-policy";
 import {
   DailyReflectionConflictError,
   DailyReflectionLeaseLostError,
@@ -55,6 +71,7 @@ export type DailyReflectionView = {
   processingPlan: ProcessingPlan | null;
   transcriptReference: DailyReflectionTranscriptReference | null;
   candidates: Candidate[];
+  cards: ReflectionCard[];
   confirmation: ReflectionConfirmation | null;
   admissionOperation: DailyReflectionAdmissionOperation | null;
   admissionResults: CandidateAdmissionResult[];
@@ -82,6 +99,8 @@ export type DailyReflectionServiceOptions = {
   readTranscriptSegments?: DailyReflectionTranscriptReader;
   buildCandidates?: typeof buildDailyReflectionCandidates;
   candidateProvider?: DailyReflectionCandidateProvider;
+  cardOrganizerProvider?: DailyReflectionCardOrganizerProvider;
+  cardPipelinePolicy?: DailyReflectionCardPipelinePolicy;
   executionFence?: { leaseOwner: string; attemptVersion: number };
 };
 
@@ -160,6 +179,8 @@ export class DailyReflectionService {
   private readonly readTranscriptSegments?: DailyReflectionTranscriptReader;
   private readonly buildCandidates: typeof buildDailyReflectionCandidates;
   private readonly candidateProvider: DailyReflectionCandidateProvider;
+  private readonly cardOrganizerProvider: DailyReflectionCardOrganizerProvider;
+  private readonly cardPipelinePolicy: DailyReflectionCardPipelinePolicy;
   private readonly executionFence?: { leaseOwner: string; attemptVersion: number };
 
   constructor(
@@ -170,6 +191,11 @@ export class DailyReflectionService {
     this.buildCandidates = options.buildCandidates ?? buildDailyReflectionCandidates;
     this.candidateProvider = options.candidateProvider
       ?? structuredDailyReflectionCandidateProvider;
+    this.cardOrganizerProvider = options.cardOrganizerProvider
+      ?? structuredDailyReflectionCardOrganizerProvider;
+    this.cardPipelinePolicy = DailyReflectionCardPipelinePolicySchema.parse(
+      options.cardPipelinePolicy ?? DEFAULT_DAILY_REFLECTION_CARD_PIPELINE_POLICY
+    );
     this.executionFence = options.executionFence
       ? {
         leaseOwner: options.executionFence.leaseOwner,
@@ -497,30 +523,135 @@ export class DailyReflectionService {
         );
       }
       try {
-        const response = await this.candidateProvider.generate({
+        const windows = buildDailyReflectionTranscriptWindows({
+          segments,
+          policy: this.cardPipelinePolicy
+        });
+        const extracted: DailyReflectionHiddenCandidate[] = [];
+        let inputTokenEstimate = 0;
+        for (const window of windows) {
+          inputTokenEstimate += window.estimatedInputTokens;
+          const response = await this.candidateProvider.generate({
+            accountId: input.accountId,
+            reflectionId: input.reflectionId,
+            input: v2Input,
+            processingPlan,
+            segments: window.segments,
+            windowIndex: window.index,
+            windowCount: windows.length,
+            maxOutputTokens: this.cardPipelinePolicy.extractionOutputTokenBudget,
+            ...(rawInput.signal ? { signal: rawInput.signal } : {})
+          });
+          if (rawInput.signal?.aborted) throw new DailyReflectionLeaseLostError();
+          extracted.push(...validateDailyReflectionProviderCandidates({
+            accountId: input.accountId,
+            reflectionId: input.reflectionId,
+            segments: window.segments,
+            candidateLimit: this.cardPipelinePolicy.maxHiddenPerWindow,
+            response
+          }));
+        }
+        const seen = new Set<string>();
+        const pendingCandidates = extracted
+          .sort((left, right) =>
+            right.confidence - left.confidence
+            || left.ordinal - right.ordinal
+            || left.id!.localeCompare(right.id!)
+          )
+          .filter((candidate) => {
+            const key = `${candidate.candidateKind}\u0000${candidate.proposedText
+              .trim().replace(/\s+/gu, " ").toLocaleLowerCase("zh-CN")}`;
+            if (seen.has(key)) return false;
+            seen.add(key);
+            return true;
+          })
+          .slice(0, this.cardPipelinePolicy.maxHiddenTotal)
+          .map((candidate, ordinal) => ({ ...candidate, ordinal }));
+        if (pendingCandidates.length === 0) {
+          throw new DailyReflectionCandidateValidationError("candidates_missing");
+        }
+        const organizerCandidates: DailyReflectionHiddenCandidate[] = [];
+        for (const candidate of pendingCandidates) {
+          const trial = [...organizerCandidates, candidate];
+          const estimate = estimateDailyReflectionOrganizerInputTokens({
+            candidates: trial,
+            evidenceSnippets: {}
+          });
+          if (estimate > this.cardPipelinePolicy.organizerInputTokenBudget) {
+            if (organizerCandidates.length === 0) {
+              throw new DailyReflectionCandidateValidationError(
+                "organizer_input_budget_exceeded"
+              );
+            }
+            break;
+          }
+          organizerCandidates.push(candidate);
+        }
+        const segmentById = new Map(segments.map((segment) => [segment.id, segment] as const));
+        const evidenceSnippets: Record<string, string> = {};
+        for (const evidenceId of [
+          ...new Set(organizerCandidates.flatMap((candidate) => candidate.evidenceIds))
+        ]) {
+          const text = segmentById.get(evidenceId)!.text;
+          // Never cut Canonical text. A short whole segment is added only when
+          // the complete Organizer payload remains within its configured cap.
+          if (estimateDailyReflectionTokens(text) > 80) continue;
+          const trial = { ...evidenceSnippets, [evidenceId]: text };
+          if (estimateDailyReflectionOrganizerInputTokens({
+            candidates: organizerCandidates,
+            evidenceSnippets: trial
+          }) > this.cardPipelinePolicy.organizerInputTokenBudget) continue;
+          evidenceSnippets[evidenceId] = text;
+        }
+        const organizerTokenEstimate = estimateDailyReflectionOrganizerInputTokens({
+          candidates: organizerCandidates,
+          evidenceSnippets
+        });
+        inputTokenEstimate += organizerTokenEstimate;
+        const organizerResponse = await this.cardOrganizerProvider.organize({
           accountId: input.accountId,
           reflectionId: input.reflectionId,
           input: v2Input,
           processingPlan,
-          segments,
+          candidates: organizerCandidates,
+          evidenceSnippets,
+          displayPlan: dailyReflectionCardDisplayPlan(
+            processingPlan.effectiveDurationMs,
+            this.cardPipelinePolicy
+          ),
+          maxOutputTokens: this.cardPipelinePolicy.organizerOutputTokenBudget,
           ...(rawInput.signal ? { signal: rawInput.signal } : {})
         });
-        if (rawInput.signal?.aborted) {
-          throw new DailyReflectionLeaseLostError();
-        }
-        const pendingCandidates = validateDailyReflectionProviderCandidates({
+        if (rawInput.signal?.aborted) throw new DailyReflectionLeaseLostError();
+        const cards = validateDailyReflectionOrganizedCards({
           accountId: input.accountId,
           reflectionId: input.reflectionId,
-          segments,
-          candidateLimit: processingPlan.candidateLimit,
-          response
+          effectiveDurationMs: processingPlan.effectiveDurationMs,
+          policy: this.cardPipelinePolicy,
+          candidates: organizerCandidates,
+          response: organizerResponse
         });
         persistCandidates = (expectedVersion) => {
-          this.repository.savePendingCandidatesV2({
+          this.repository.saveCardPipelineV2({
             accountId: input.accountId,
             reflectionId: input.reflectionId,
             expectedVersion,
-            candidates: pendingCandidates,
+            candidates: pendingCandidates.map(({ topicHint: _topicHint, ...candidate }) => candidate),
+            cards,
+            audit: {
+              modelName: dailyReflectionCandidateModelName(),
+              promptVersion: DAILY_REFLECTION_CARD_PIPELINE_PROMPT_VERSION,
+              policy: { ...this.cardPipelinePolicy },
+              windowCount: windows.length,
+              providerCallCount: windows.length + 1,
+              hiddenCandidateCount: pendingCandidates.length,
+              clusterCount: new Set(cards.map((card) => card.clusterId)).size,
+              cardCount: cards.length,
+              inputTokenEstimate,
+              outputTokenBudget:
+                windows.length * this.cardPipelinePolicy.extractionOutputTokenBudget
+                + this.cardPipelinePolicy.organizerOutputTokenBudget
+            },
             ...this.fenced()
           });
         };

@@ -9,8 +9,11 @@ import type { TranscriptSegment } from "@/lib/domain/types";
 import { buildDailyReflectionCandidates } from "./candidate-builder";
 import {
   DailyReflectionCandidateProviderUnavailableError,
+  estimateDailyReflectionOrganizerInputTokens,
+  type DailyReflectionCardOrganizerProvider,
   type DailyReflectionCandidateProvider
 } from "./candidate-provider";
+import { DEFAULT_DAILY_REFLECTION_CARD_PIPELINE_POLICY } from "./card-pipeline-policy";
 import { openDailyReflectionDatabase } from "./db";
 import { DailyReflectionInputOrchestrator } from "./input-orchestrator";
 import {
@@ -143,12 +146,33 @@ function advanceV2ToTranscribing() {
 }
 
 describe("DailyReflectionService", () => {
-  it("uses the full canonical transcript with the V2 Provider and never calls the rule builder", async () => {
+  it("uses windowed extraction plus Card organization and never calls the rule builder", async () => {
     const { transcribing, uploadId } = advanceV2ToTranscribing();
     const canonicalSegments = [
       { ...segment(0), uploadId },
       { ...segment(1), uploadId }
     ];
+    const publicationFence = repository.claimExecutionLease({
+      accountId: transcribing.accountId,
+      reflectionId: transcribing.id,
+      leaseOwner: "service-segment-publication",
+      leaseDurationMs: 60_000,
+      allowedStatuses: ["transcribing"]
+    })!;
+    repository.publishAssetUnderExecutionFence({
+      accountId: transcribing.accountId,
+      reflectionId: transcribing.id,
+      leaseOwner: publicationFence.leaseOwner,
+      attemptVersion: publicationFence.attemptVersion,
+      assetKind: "segments",
+      payload: canonicalSegments
+    });
+    repository.releaseExecutionLease({
+      accountId: transcribing.accountId,
+      reflectionId: transcribing.id,
+      leaseOwner: publicationFence.leaseOwner,
+      attemptVersion: publicationFence.attemptVersion
+    });
     const provider: DailyReflectionCandidateProvider = {
       providerName: "fixture-provider",
       generate: vi.fn(async () => ({
@@ -159,15 +183,43 @@ describe("DailyReflectionService", () => {
           confidence: 0.92,
           caution: "Confirm the decision context.",
           actionClaimed: false
+        }, {
+          candidateKind: "insight" as const,
+          proposedText: `Lower-priority organizer overflow ${"x".repeat(500)}`,
+          evidenceIds: ["segment_2"],
+          confidence: 0.8,
+          caution: "Confirm the insight context.",
+          actionClaimed: true
         }]
       }))
     };
     const buildCandidates = vi.fn(() => {
       throw new Error("legacy builder must not run");
     });
+    const organizer: DailyReflectionCardOrganizerProvider = {
+      providerName: "fixture-organizer",
+      organize: vi.fn(async (input) => ({ items: [{
+        cardKind: "decision" as const,
+        proposedTitle: "Provider decision",
+        proposedText: "Use the V2 provider result.",
+        sourceCandidateIds: [input.candidates[0].id!],
+        clusterTitle: "Decision",
+        confidence: 0.92,
+        importance: 0.9,
+        durability: 0.8,
+        novelty: 0.7,
+        epistemicStatus: "explicit_user_statement" as const,
+        riskFlags: []
+      }] }))
+    };
     const service = new DailyReflectionService(repository, {
       readTranscriptSegments: async () => canonicalSegments,
       candidateProvider: provider,
+      cardOrganizerProvider: organizer,
+      cardPipelinePolicy: {
+        ...DEFAULT_DAILY_REFLECTION_CARD_PIPELINE_POLICY,
+        organizerInputTokenBudget: 120
+      },
       buildCandidates
     });
 
@@ -189,6 +241,16 @@ describe("DailyReflectionService", () => {
       segments: canonicalSegments,
       processingPlan: expect.objectContaining({ planVersion: 2, candidateLimit: 5 })
     }));
+    expect(organizer.organize).toHaveBeenCalledWith(expect.objectContaining({
+      candidates: [expect.objectContaining({ actionClaimed: false })],
+      displayPlan: expect.objectContaining({ presentation: "compact", primaryCount: 5 })
+    }));
+    const organizerInput = vi.mocked(organizer.organize).mock.calls[0]![0];
+    expect(organizerInput.candidates).toHaveLength(1);
+    expect(estimateDailyReflectionOrganizerInputTokens(organizerInput)).toBeLessThanOrEqual(120);
+    expect(repository.listReflectionCards("account_service", transcribing.id)).toEqual([
+      expect.objectContaining({ proposedTitle: "Provider decision", displayTier: "primary" })
+    ]);
     expect(buildCandidates).not.toHaveBeenCalled();
   });
 
@@ -218,6 +280,42 @@ describe("DailyReflectionService", () => {
       },
       candidates: []
     });
+    expect(service.getTranscriptReference("account_service", reflectionId))
+      .toEqual(expect.objectContaining({ uploadId }));
+  });
+
+  it("fails closed only when all extraction windows are empty and keeps the Transcript", async () => {
+    const { transcribing, uploadId, reflectionId } = advanceV2ToTranscribing();
+    const provider: DailyReflectionCandidateProvider = {
+      providerName: "empty-window-provider",
+      generate: vi.fn(async () => ({ items: [] }))
+    };
+    const organizer: DailyReflectionCardOrganizerProvider = {
+      providerName: "must-not-run",
+      organize: vi.fn(async () => {
+        throw new Error("organizer must not run without Hidden Candidates");
+      })
+    };
+    const service = new DailyReflectionService(repository, {
+      readTranscriptSegments: async () => [{ ...segment(0), uploadId }],
+      candidateProvider: provider,
+      cardOrganizerProvider: organizer
+    });
+
+    const result = await service.executeCandidateWorker({
+      accountId: transcribing.accountId,
+      reflectionId: transcribing.id
+    });
+
+    expect(result).toMatchObject({
+      outcome: "failed",
+      reflection: {
+        status: "failed",
+        errorCode: "daily_reflection_candidate_validation_failed"
+      },
+      candidates: []
+    });
+    expect(organizer.organize).not.toHaveBeenCalled();
     expect(service.getTranscriptReference("account_service", reflectionId))
       .toEqual(expect.objectContaining({ uploadId }));
   });
@@ -270,6 +368,7 @@ describe("DailyReflectionService", () => {
         uploadId: "upload_service"
       },
       candidates: [],
+      cards: [],
       confirmation: null,
       admissionOperation: null,
       admissionResults: []

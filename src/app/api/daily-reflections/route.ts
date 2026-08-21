@@ -142,9 +142,14 @@ export async function GET(request: Request) {
         const segments = parseDailyReflectionCanonicalTranscript(rawSegments, plan.uploadId);
         transcriptAvailable = Boolean(segments?.length);
       }
-      const pendingCount = detail.candidates.filter((candidate) => candidate.status === "pending").length;
-      const keptCount = detail.candidates.filter((candidate) => candidate.status === "kept").length;
-      const excludedCount = detail.candidates.filter((candidate) => candidate.status === "excluded").length;
+      const reviewStatuses = detail.cards.length > 0
+        ? detail.cards.map((card) => card.reviewStatus)
+        : detail.candidates.map((candidate) => candidate.status);
+      const pendingCount = reviewStatuses.filter((status) => status === "pending").length;
+      const keptCount = reviewStatuses.filter((status) => status === "kept").length;
+      const excludedCount = reviewStatuses.filter(
+        (status) => status === "excluded" || status === "not_proposed"
+      ).length;
       const rememberedCount = detail.admissionOperation
         ? repository.getRememberedCandidateCount(authContext.user.id, reflection.id)
         : 0;
@@ -169,7 +174,7 @@ export async function GET(request: Request) {
         sourceOrigin: displayOrigin,
         recordingDate,
         sourceStatement: retrievalSourceStatement(displayOrigin, date),
-        candidateCount: detail.candidates.length,
+        candidateCount: reviewStatuses.length,
         pendingCount,
         keptCount,
         excludedCount,

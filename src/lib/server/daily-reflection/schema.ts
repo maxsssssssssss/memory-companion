@@ -1,6 +1,6 @@
 import type Database from "better-sqlite3";
 
-export const DAILY_REFLECTION_SCHEMA_VERSION = 8;
+export const DAILY_REFLECTION_SCHEMA_VERSION = 9;
 
 // Version one intentionally represents the pre-provenance workflow shape.
 // Version two adds source_origin with a fail-closed legacy backfill and the
@@ -591,6 +591,133 @@ const DAILY_REFLECTION_SCHEMA_V8 = `
   END;
 `;
 
+// V9 adds a user-facing Card projection without changing the frozen Memory
+// schema. Hidden extraction candidates and Card admission projections remain
+// distinguishable and the existing admission foreign keys stay intact.
+const DAILY_REFLECTION_SCHEMA_V9 = `
+  CREATE TABLE dr_candidate_v2_roles (
+    account_id TEXT NOT NULL,
+    reflection_id TEXT NOT NULL,
+    candidate_id TEXT NOT NULL,
+    candidate_role TEXT NOT NULL CHECK (
+      candidate_role IN ('hidden_extraction', 'card_projection')
+    ),
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (account_id, candidate_id),
+    FOREIGN KEY (candidate_id, account_id)
+      REFERENCES dr_candidates(id, account_id) ON DELETE CASCADE,
+    FOREIGN KEY (reflection_id, account_id)
+      REFERENCES dr_reflections(id, account_id) ON DELETE CASCADE
+  );
+
+  CREATE INDEX idx_dr_candidate_v2_role_reflection
+    ON dr_candidate_v2_roles(account_id, reflection_id, candidate_role, candidate_id);
+
+  CREATE TABLE dr_reflection_cards (
+    id TEXT PRIMARY KEY,
+    account_id TEXT NOT NULL,
+    reflection_id TEXT NOT NULL,
+    card_kind TEXT NOT NULL CHECK (
+      card_kind IN ('insight', 'open_question', 'decision', 'user_action')
+    ),
+    proposed_title TEXT NOT NULL CHECK (length(trim(proposed_title)) > 0),
+    proposed_text TEXT NOT NULL CHECK (length(trim(proposed_text)) > 0),
+    user_title TEXT,
+    user_text TEXT,
+    source_candidate_ids_json TEXT NOT NULL CHECK (json_valid(source_candidate_ids_json)),
+    evidence_ids_json TEXT NOT NULL CHECK (json_valid(evidence_ids_json)),
+    cluster_id TEXT NOT NULL CHECK (length(trim(cluster_id)) > 0),
+    cluster_title TEXT NOT NULL CHECK (length(trim(cluster_title)) > 0),
+    display_tier TEXT NOT NULL CHECK (display_tier IN ('primary', 'more')),
+    rank INTEGER NOT NULL CHECK (rank >= 0),
+    confidence REAL NOT NULL CHECK (confidence >= 0 AND confidence <= 1),
+    importance REAL NOT NULL CHECK (importance >= 0 AND importance <= 1),
+    durability REAL NOT NULL CHECK (durability >= 0 AND durability <= 1),
+    novelty REAL NOT NULL CHECK (novelty >= 0 AND novelty <= 1),
+    epistemic_status TEXT NOT NULL CHECK (
+      epistemic_status IN (
+        'explicit_user_statement', 'reported_event', 'ai_inference', 'unknown'
+      )
+    ),
+    risk_flags_json TEXT NOT NULL CHECK (json_valid(risk_flags_json)),
+    action_claimed INTEGER NOT NULL CHECK (action_claimed IN (0, 1)),
+    review_status TEXT NOT NULL CHECK (
+      review_status IN ('not_proposed', 'pending', 'kept', 'excluded')
+    ),
+    version INTEGER NOT NULL DEFAULT 0 CHECK (version >= 0),
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE (id, account_id),
+    UNIQUE (account_id, reflection_id, rank),
+    FOREIGN KEY (id, account_id)
+      REFERENCES dr_candidates(id, account_id) ON DELETE CASCADE,
+    FOREIGN KEY (reflection_id, account_id)
+      REFERENCES dr_reflections(id, account_id) ON DELETE CASCADE
+  );
+
+  CREATE INDEX idx_dr_reflection_cards_display
+    ON dr_reflection_cards(account_id, reflection_id, display_tier, rank, id);
+
+  CREATE TABLE dr_card_pipeline_runs (
+    account_id TEXT NOT NULL,
+    reflection_id TEXT NOT NULL,
+    model_name TEXT NOT NULL,
+    prompt_version TEXT NOT NULL,
+    policy_json TEXT NOT NULL CHECK (json_valid(policy_json)),
+    window_count INTEGER NOT NULL CHECK (window_count > 0),
+    provider_call_count INTEGER NOT NULL CHECK (provider_call_count > 0),
+    hidden_candidate_count INTEGER NOT NULL CHECK (hidden_candidate_count > 0),
+    cluster_count INTEGER NOT NULL CHECK (cluster_count > 0),
+    card_count INTEGER NOT NULL CHECK (card_count > 0),
+    input_token_estimate INTEGER NOT NULL CHECK (input_token_estimate >= 0),
+    output_token_budget INTEGER NOT NULL CHECK (output_token_budget > 0),
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (account_id, reflection_id),
+    FOREIGN KEY (reflection_id, account_id)
+      REFERENCES dr_reflections(id, account_id) ON DELETE CASCADE
+  );
+
+  CREATE TRIGGER dr_candidate_v2_role_scope_insert
+  BEFORE INSERT ON dr_candidate_v2_roles
+  WHEN NOT EXISTS (
+    SELECT 1 FROM dr_candidates candidate
+    WHERE candidate.id = NEW.candidate_id
+      AND candidate.account_id = NEW.account_id
+      AND candidate.reflection_id = NEW.reflection_id
+  )
+  BEGIN
+    SELECT RAISE(ABORT, 'daily_reflection_v2_candidate_scope_mismatch');
+  END;
+
+  CREATE TRIGGER dr_reflection_cards_locked_after_confirmation
+  BEFORE UPDATE ON dr_reflection_cards
+  WHEN EXISTS (
+    SELECT 1 FROM dr_reflection_confirmations confirmation
+    WHERE confirmation.account_id = OLD.account_id
+      AND confirmation.reflection_id = OLD.reflection_id
+  )
+  BEGIN
+    SELECT RAISE(ABORT, 'daily_reflection_card_finalized');
+  END;
+
+  CREATE TRIGGER dr_reflection_cards_delete_locked_after_confirmation
+  BEFORE DELETE ON dr_reflection_cards
+  WHEN EXISTS (
+    SELECT 1 FROM dr_reflection_confirmations confirmation
+    WHERE confirmation.account_id = OLD.account_id
+      AND confirmation.reflection_id = OLD.reflection_id
+  )
+  BEGIN
+    SELECT RAISE(ABORT, 'daily_reflection_card_finalized');
+  END;
+
+  CREATE TRIGGER dr_card_pipeline_runs_immutable
+  BEFORE UPDATE ON dr_card_pipeline_runs
+  BEGIN
+    SELECT RAISE(ABORT, 'daily_reflection_card_pipeline_run_immutable');
+  END;
+`;
+
 const MIGRATIONS = [
   { version: 1, sql: DAILY_REFLECTION_SCHEMA_V1 },
   { version: 2, sql: DAILY_REFLECTION_SCHEMA_V2 },
@@ -599,7 +726,8 @@ const MIGRATIONS = [
   { version: 5, sql: DAILY_REFLECTION_SCHEMA_V5 },
   { version: 6, sql: DAILY_REFLECTION_SCHEMA_V6 },
   { version: 7, sql: DAILY_REFLECTION_SCHEMA_V7 },
-  { version: 8, sql: DAILY_REFLECTION_SCHEMA_V8 }
+  { version: 8, sql: DAILY_REFLECTION_SCHEMA_V8 },
+  { version: 9, sql: DAILY_REFLECTION_SCHEMA_V9 }
 ] as const;
 
 export function migrateDailyReflectionSchema(database: Database.Database) {

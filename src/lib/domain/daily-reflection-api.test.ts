@@ -67,6 +67,7 @@ function detailResponse() {
     confirmation: null,
     admissionOperation: null,
     admissionResults: [],
+    cards: [],
     candidates: [{
       id: "candidate_detail_contract",
       reflectionId: "reflection_detail_contract",

@@ -18,6 +18,8 @@ import {
   ProcessingPlanSchema,
   ReflectionConfirmationSchema,
   ReflectionConfirmationV2Schema,
+  ReflectionCardBaseSchema,
+  ReflectionCardSchema,
   SourceOriginSchema
 } from "./daily-reflection";
 import {
@@ -156,6 +158,64 @@ export const DailyReflectionCandidateViewSchema = z.union([
   DailyReflectionCandidateV2ViewSchema
 ]);
 
+export const DailyReflectionCardViewSchema = ReflectionCardBaseSchema.extend({
+  evidence: z.array(DailyReflectionCandidateEvidenceSchema).min(1).max(64)
+}).strict().superRefine((card, context) => {
+  if (new Set(card.sourceCandidateIds).size !== card.sourceCandidateIds.length) {
+    addIssue(context, ["sourceCandidateIds"], "sourceCandidateIds must be unique");
+  }
+  if (new Set(card.evidenceIds).size !== card.evidenceIds.length) {
+    addIssue(context, ["evidenceIds"], "evidenceIds must be unique");
+  }
+  if (card.displayTier === "primary" && card.reviewStatus === "not_proposed") {
+    addIssue(context, ["reviewStatus"], "primary cards must be proposed for review");
+  }
+  if (card.displayTier === "more" && card.reviewStatus === "pending") {
+    addIssue(context, ["reviewStatus"], "More cards do not block review by default");
+  }
+  if (card.cardKind !== "user_action" && card.actionClaimed) {
+    addIssue(context, ["actionClaimed"], "only user_action cards may claim an action");
+  }
+  if (
+    card.evidence.length !== card.evidenceIds.length
+    || card.evidence.some(
+      (evidence, index) => evidence.sourceSegmentId !== card.evidenceIds[index]
+    )
+  ) {
+    addIssue(context, ["evidence"], "Card Evidence must exactly cover evidenceIds");
+  }
+});
+
+export const DailyReflectionCardDecisionSchema = z.object({
+  cardId: DailyReflectionIdSchema,
+  reviewStatus: z.enum(["not_proposed", "pending", "kept", "excluded"]),
+  userTitle: z.union([
+    z.string().max(240).transform((value) => value.trim() || null),
+    z.null()
+  ]),
+  userText: z.union([
+    z.string().max(4_000).transform((value) => value.trim() || null),
+    z.null()
+  ]),
+  actionClaimed: z.boolean().optional(),
+  promoteToPrimary: z.literal(true).optional()
+}).strict();
+
+export const DailyReflectionCardUpdateRequestSchema = z.object({
+  expectedVersion: DailyReflectionVersionSchema,
+  cards: z.array(DailyReflectionCardDecisionSchema).min(1)
+}).strict().superRefine((input, context) => {
+  const ids = input.cards.map((card) => card.cardId);
+  if (new Set(ids).size !== ids.length) {
+    addIssue(context, ["cards"], "card ids must be unique");
+  }
+});
+
+export const DailyReflectionCardUpdateResponseSchema = z.object({
+  reflection: DailyReflectionSchema,
+  cards: z.array(ReflectionCardSchema)
+}).strict();
+
 export const DailyReflectionCandidateDecisionSchema = z.object({
   candidateId: DailyReflectionIdSchema,
   status: CandidateStatusSchema,
@@ -221,6 +281,18 @@ export const DailyReflectionFinalizeRequestSchema = z.object({
 }).strict();
 
 export const DailyReflectionV2CreateRequestSchema = DailyReflectionV2InputSchema;
+
+export const DailyReflectionOperationLookupResponseSchema = z.discriminatedUnion("found", [
+  z.object({ found: z.literal(false) }).strict(),
+  z.object({
+    found: z.literal(true),
+    reflectionId: DailyReflectionIdSchema,
+    uploadId: DailyReflectionIdSchema,
+    jobId: DailyReflectionIdSchema,
+    contentHash: z.string().regex(/^[a-f0-9]{64}$/u),
+    status: DailyReflectionStatusSchema
+  }).strict()
+]);
 
 export const DailyReflectionV2FinalizeRequestSchema = z.object({
   expectedVersion: DailyReflectionVersionSchema,
@@ -290,6 +362,7 @@ export const DailyReflectionDetailResponseSchema = z.object({
   segments: z.array(DailyReflectionTranscriptSegmentViewSchema),
   effectiveOrigin: SourceOriginSchema.nullable(),
   candidates: z.array(DailyReflectionCandidateViewSchema),
+  cards: z.array(DailyReflectionCardViewSchema).default([]),
   confirmation: ReflectionConfirmationSchema.nullable().default(null),
   admissionOperation: DailyReflectionAdmissionOperationSchema.nullable().default(null),
   admissionResults: z.array(CandidateAdmissionResultSchema).default([]),
@@ -428,6 +501,30 @@ export const DailyReflectionDetailResponseSchema = z.object({
     });
   });
 
+  detail.cards.forEach((card, cardIndex) => {
+    if (card.reflectionId !== detail.reflection.id) {
+      addIssue(context, ["cards", cardIndex, "reflectionId"], "card reflection mismatch");
+    }
+    card.evidenceIds.forEach((evidenceId, evidenceIndex) => {
+      const evidence = card.evidence[evidenceIndex];
+      const segment = segmentById.get(evidenceId);
+      if (!evidence || !segment || evidence.sourceSegmentId !== evidenceId) {
+        addIssue(context, ["cards", cardIndex, "evidence", evidenceIndex], "card Evidence is unavailable");
+        return;
+      }
+      if (
+        evidence.uploadId !== segment.uploadId
+        || evidence.startSeconds !== segment.startSeconds
+        || evidence.endSeconds !== segment.endSeconds
+        || evidence.text !== segment.text
+        || !plan
+        || evidence.effectiveOrigin !== plan.sourceOrigin
+      ) {
+        addIssue(context, ["cards", cardIndex, "evidence", evidenceIndex], "card Evidence must match the canonical transcript");
+      }
+    });
+  });
+
   if (detail.confirmation) {
     if (
       detail.confirmation.reflectionId !== detail.reflection.id
@@ -533,6 +630,14 @@ export type DailyReflectionCandidateEvidence = z.infer<
   typeof DailyReflectionCandidateEvidenceSchema
 >;
 export type DailyReflectionCandidateView = z.infer<typeof DailyReflectionCandidateViewSchema>;
+export type DailyReflectionCardView = z.infer<typeof DailyReflectionCardViewSchema>;
+export type DailyReflectionCardDecision = z.infer<typeof DailyReflectionCardDecisionSchema>;
+export type DailyReflectionCardUpdateRequest = z.infer<
+  typeof DailyReflectionCardUpdateRequestSchema
+>;
+export type DailyReflectionCardUpdateResponse = z.infer<
+  typeof DailyReflectionCardUpdateResponseSchema
+>;
 export type DailyReflectionCandidateDecision = z.infer<
   typeof DailyReflectionCandidateDecisionSchema
 >;
@@ -547,6 +652,9 @@ export type DailyReflectionV2CreateRequest = z.infer<
 >;
 export type DailyReflectionV2FinalizeRequest = z.infer<
   typeof DailyReflectionV2FinalizeRequestSchema
+>;
+export type DailyReflectionOperationLookupResponse = z.infer<
+  typeof DailyReflectionOperationLookupResponseSchema
 >;
 export type DailyReflectionCandidateRevocationRequest = z.infer<
   typeof DailyReflectionCandidateRevocationRequestSchema
