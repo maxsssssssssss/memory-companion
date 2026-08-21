@@ -2,9 +2,13 @@ import { describe, expect, it } from "vitest";
 
 import {
   CandidateKindSchema,
+  CandidateKindV2Schema,
   CandidateSchema,
   CandidateStatusSchema,
   CreateDailyReflectionInputSchema,
+  DailyReflectionV2InputSchema,
+  PendingCandidateV2InputSchema,
+  ReflectionConfirmationV2Schema,
   DailyReflectionStatusSchema,
   IngestionContextSchema,
   InputMethodSchema,
@@ -12,6 +16,7 @@ import {
   ProcessingPlanSchema,
   ProcessingProfileSchema,
   SourceOriginSchema,
+  legacyCandidateKindForV2,
   normalizeLegacySourceOrigin
 } from "./daily-reflection";
 
@@ -152,5 +157,109 @@ describe("Daily Reflection domain contracts", () => {
       sourceSegmentIds: ["segment_1", "segment_1"]
     })).toThrow();
     expect(() => CandidateSchema.parse({ ...base, subjectConfirmed: true })).toThrow();
+  });
+
+  it("defines the strict inspiration-capture V2 contract without Person inference", () => {
+    expect(CandidateKindV2Schema.options).toEqual([
+      "insight",
+      "open_question",
+      "decision",
+      "user_action"
+    ]);
+    expect(DailyReflectionV2InputSchema.parse({
+      operationKey: "reflection-v2-operation",
+      inputAdapter: "toy_sync",
+      sourceOrigin: "direct_conversation",
+      capturePurpose: "inspiration_capture",
+      recordingDate: "2026-08-21"
+    })).toMatchObject({ capturePurpose: "inspiration_capture" });
+    expect(PendingCandidateV2InputSchema.parse({
+      ordinal: 0,
+      candidateKind: "insight",
+      proposedText: "我意识到需要给重要问题留出思考时间。",
+      evidenceIds: [],
+      confidence: 0.72,
+      caution: "这是用户复盘中的总结。",
+      actionClaimed: false
+    })).toMatchObject({ evidenceIds: [] });
+    expect(legacyCandidateKindForV2({
+      candidateKind: "insight",
+      actionClaimed: false
+    })).toBe("summary");
+    expect(legacyCandidateKindForV2({
+      candidateKind: "decision",
+      actionClaimed: false
+    })).toBe("summary");
+    expect(legacyCandidateKindForV2({
+      candidateKind: "open_question",
+      actionClaimed: false
+    })).toBe("question");
+    expect(legacyCandidateKindForV2({
+      candidateKind: "user_action",
+      actionClaimed: true
+    })).toBe("commitment");
+    expect(() => PendingCandidateV2InputSchema.parse({
+      ordinal: 1,
+      candidateKind: "decision",
+      proposedText: "A decision is not itself a claimed action.",
+      evidenceIds: ["segment_2"],
+      confidence: 0.8,
+      caution: "Keep the action boundary explicit.",
+      actionClaimed: true
+    })).toThrow();
+    expect(() => PendingCandidateV2InputSchema.parse({
+      ordinal: 0,
+      candidateKind: "insight",
+      proposedText: "重复 Evidence 不应被接受。",
+      evidenceIds: ["segment_1", "segment_1"],
+      confidence: 0.72,
+      caution: "需要核对。",
+      actionClaimed: false,
+      subjectPersonId: "person_alice"
+    })).toThrow();
+  });
+
+  it("allows Evidence-free V2 recap but rejects Evidence-free retention", () => {
+    const confirmation = {
+      contractVersion: 2 as const,
+      id: "confirmation_v2",
+      reflectionId: "reflection_v2",
+      accountId: "account_1",
+      fingerprint: "a".repeat(64),
+      requestFingerprint: "b".repeat(64),
+      idempotencyKey: "operation_v2",
+      operationKey: "operation_v2",
+      sourceOrigin: "user_reflection" as const,
+      inputMethod: "file_upload" as const,
+      processingProfile: "full_recording" as const,
+      inputAdapter: "file_picker" as const,
+      capturePurpose: "inspiration_capture" as const,
+      recordingDate: "2026-08-21",
+      saveIntent: "recap_only" as const,
+      candidateSnapshots: [{
+        contractVersion: 2 as const,
+        candidateId: "candidate_v2",
+        proposedText: "今天最重要的领悟。",
+        userText: null,
+        finalText: "今天最重要的领悟。",
+        status: "kept" as const,
+        candidateKind: "insight" as const,
+        candidateType: "summary" as const,
+        evidenceIds: [],
+        sourceSegmentIds: [],
+        evidenceSnapshots: [],
+        confidence: 0.8,
+        caution: "无直接 Evidence，只能保存复盘。",
+        actionClaimed: false,
+        subjectPersonId: null
+      }],
+      createdAt: timestamp
+    };
+    expect(ReflectionConfirmationV2Schema.parse(confirmation).saveIntent)
+      .toBe("recap_only");
+    expect(() => ReflectionConfirmationV2Schema.parse({
+      ...confirmation,
+      saveIntent: "retain_selected"
+    })).toThrow();
   });
 });

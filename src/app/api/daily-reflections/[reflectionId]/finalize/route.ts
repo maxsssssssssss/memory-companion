@@ -5,7 +5,9 @@ import { NextResponse } from "next/server";
 import { DailyReflectionIdSchema } from "@/lib/domain/daily-reflection";
 import {
   DailyReflectionFinalizeRequestSchema,
-  DailyReflectionFinalizeResponseSchema
+  DailyReflectionFinalizeResponseSchema,
+  DailyReflectionV2FinalizeRequestSchema,
+  DailyReflectionV2FinalizeResponseSchema
 } from "@/lib/domain/daily-reflection-api";
 import {
   isUnauthenticatedError,
@@ -49,21 +51,107 @@ export async function POST(
     if (isUnauthenticatedError(error)) return unauthorizedResponse();
     throw error;
   }
-  const payload = DailyReflectionFinalizeRequestSchema.safeParse(
-    await request.json().catch(() => null)
-  );
-  if (!payload.success) {
+  const rawPayload = await request.json().catch(() => null);
+  const v2Payload = DailyReflectionV2FinalizeRequestSchema.safeParse(rawPayload);
+  const v1Payload = DailyReflectionFinalizeRequestSchema.safeParse(rawPayload);
+  if (!v2Payload.success && !v1Payload.success) {
     return NextResponse.json({ error: "invalid_finalize_input" }, { status: 400 });
   }
 
   const repository = getDailyReflectionRepository();
+  if (v2Payload.success) {
+    let finalized;
+    try {
+      finalized = repository.finalizeReviewV2({
+        accountId: authContext.user.id,
+        reflectionId: reflectionId.data,
+        expectedVersion: v2Payload.data.expectedVersion,
+        operationKey: v2Payload.data.operationKey,
+        saveIntent: v2Payload.data.saveIntent
+      });
+    } catch (error) {
+      if (error instanceof DailyReflectionNotFoundError) return missing();
+      if (error instanceof DailyReflectionVersionConflictError) {
+        return NextResponse.json(
+          { error: "version_conflict", currentVersion: error.currentVersion },
+          { status: 409 }
+        );
+      }
+      if (error instanceof DailyReflectionConflictError) {
+        return conflict(error.code);
+      }
+      throw error;
+    }
+
+    if (v2Payload.data.saveIntent === "recap_only") {
+      if (finalized.operation !== null) {
+        return conflict("daily_reflection_v2_admission_contract_conflict", true);
+      }
+      return NextResponse.json(DailyReflectionV2FinalizeResponseSchema.parse({
+        reflection: repository.getReflection(authContext.user.id, reflectionId.data),
+        confirmation: finalized.confirmation,
+        admission: { exists: false },
+        reused: finalized.reused
+      }));
+    }
+
+    try {
+      await getDailyReflectionMemoryAdmissionService().admitUnderLease({
+        accountId: authContext.user.id,
+        reflectionId: reflectionId.data,
+        leaseOwner: `daily-reflection-finalize:${randomUUID()}`,
+        leaseDurationMs: ADMISSION_LEASE_DURATION_MS
+      });
+    } catch (error) {
+      if (error instanceof DailyReflectionNotFoundError) return missing();
+      if (error instanceof DailyReflectionConflictError) {
+        if (
+          error.code === "daily_reflection_admission_busy"
+          || error.code === "daily_reflection_admission_claim_conflict"
+          || error.code === "daily_reflection_admission_lease_lost"
+        ) {
+          return conflict("daily_reflection_admission_in_progress", true);
+        }
+        if (error.code === "daily_reflection_delete_requested") return missing();
+      }
+      if (error instanceof DailyReflectionMemoryAdmissionError || error instanceof Error) {
+        return NextResponse.json({
+          error: "daily_reflection_memory_admission_failed",
+          retryable: true
+        }, { status: 503 });
+      }
+      throw error;
+    }
+    const operation = repository.getAdmissionOperation(
+      authContext.user.id,
+      reflectionId.data
+    );
+    if (!operation) {
+      return conflict("daily_reflection_v2_admission_contract_conflict", true);
+    }
+    return NextResponse.json(DailyReflectionV2FinalizeResponseSchema.parse({
+      reflection: repository.getReflection(authContext.user.id, reflectionId.data),
+      confirmation: finalized.confirmation,
+      admission: {
+        exists: true,
+        operation,
+        results: repository.listAdmissionResults(authContext.user.id, operation.id)
+      },
+      reused: finalized.reused
+    }));
+  }
+
+  if (!v1Payload.success) {
+    return NextResponse.json({ error: "invalid_finalize_input" }, { status: 400 });
+  }
+  const payload = v1Payload.data;
   let finalized;
   try {
     finalized = repository.finalizeReview({
       accountId: authContext.user.id,
       reflectionId: reflectionId.data,
-      expectedVersion: payload.data.expectedVersion,
-      idempotencyKey: payload.data.idempotencyKey
+      expectedVersion: payload.expectedVersion,
+      idempotencyKey: payload.idempotencyKey
     });
   } catch (error) {
     if (error instanceof DailyReflectionNotFoundError) return missing();

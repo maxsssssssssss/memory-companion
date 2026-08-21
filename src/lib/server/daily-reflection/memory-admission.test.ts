@@ -130,11 +130,86 @@ function excluded(input: {
   };
 }
 
+function keptV2(input: {
+  id: string;
+  kind: "insight" | "open_question" | "decision" | "user_action";
+  text: string;
+  segmentId: string;
+  actionClaimed: boolean;
+}): ReflectionConfirmationCandidateSnapshot {
+  const candidateType = input.kind === "open_question"
+    ? "question" as const
+    : input.kind === "user_action" && input.actionClaimed
+      ? "commitment" as const
+      : "summary" as const;
+  return {
+    contractVersion: 2,
+    candidateId: input.id,
+    proposedText: input.text,
+    userText: null,
+    finalText: input.text,
+    status: "kept",
+    candidateKind: input.kind,
+    candidateType,
+    evidenceIds: [input.segmentId],
+    sourceSegmentIds: [input.segmentId],
+    evidenceSnapshots: [{
+      sourceSegmentId: input.segmentId,
+      uploadId: UPLOAD_ID,
+      startSeconds: 0,
+      endSeconds: 8,
+      text: input.text,
+      effectiveOrigin: "user_reflection"
+    }],
+    confidence: 0.86,
+    caution: "这是用户复盘中确认保留的内容。",
+    actionClaimed: input.actionClaimed,
+    subjectPersonId: null
+  };
+}
+
+function excludedV2(input: {
+  id: string;
+  text: string;
+  segmentId: string;
+}): ReflectionConfirmationCandidateSnapshot {
+  return {
+    ...keptV2({
+      ...input,
+      kind: "insight",
+      actionClaimed: false
+    }),
+    status: "excluded"
+  };
+}
+
 function fixture(input: {
   candidates: ReflectionConfirmationCandidateSnapshot[];
   segments?: TranscriptSegment[];
+  contractVersion?: 1 | 2;
 }) {
-  const confirmation: ReflectionConfirmation = {
+  const confirmation: ReflectionConfirmation = input.contractVersion === 2 ? {
+    contractVersion: 2,
+    id: "confirmation_memory",
+    reflectionId: REFLECTION_ID,
+    accountId: ACCOUNT_ID,
+    fingerprint: FINGERPRINT,
+    requestFingerprint: "b".repeat(64),
+    idempotencyKey: "finalize_memory_v2",
+    operationKey: "finalize_memory_v2",
+    sourceOrigin: "user_reflection",
+    inputMethod: "file_upload",
+    processingProfile: "quick_reflection",
+    inputAdapter: "file_picker",
+    capturePurpose: "inspiration_capture",
+    recordingDate: "2026-08-13",
+    saveIntent: "retain_selected",
+    candidateSnapshots: input.candidates as Extract<
+      ReflectionConfirmation,
+      { contractVersion: 2 }
+    >["candidateSnapshots"],
+    createdAt: NOW
+  } : {
     id: "confirmation_memory",
     reflectionId: REFLECTION_ID,
     accountId: ACCOUNT_ID,
@@ -226,6 +301,175 @@ function createConfirmedPerson(accountId: string, key: string) {
 }
 
 describe("Daily Reflection existing-Memory admission", () => {
+  it("persists V2 contract metadata and admitted action provenance without Person state", async () => {
+    const insight = trustedSegment({
+      id: "segment_v2_insight",
+      text: "I realized that writing down tradeoffs helps me make durable decisions."
+    });
+    const question = trustedSegment({
+      id: "segment_v2_question",
+      text: "这项长期安排仍需确认具体负责人和完成时间。"
+    });
+    const action = trustedSegment({
+      id: "segment_v2_action",
+      text: "我答应明天联系团队并确认下一步安排。"
+    });
+    const setup = fixture({
+      contractVersion: 2,
+      candidates: [
+        keptV2({
+          id: "candidate_v2_insight",
+          kind: "insight",
+          text: insight.text,
+          segmentId: insight.id,
+          actionClaimed: false
+        }),
+        keptV2({
+          id: "candidate_v2_question",
+          kind: "open_question",
+          text: question.text,
+          segmentId: question.id,
+          actionClaimed: false
+        }),
+        keptV2({
+          id: "candidate_v2_action",
+          kind: "user_action",
+          text: action.text,
+          segmentId: action.id,
+          actionClaimed: true
+        })
+      ],
+      segments: [insight, question, action]
+    });
+
+    const first = await setup.service.admit({
+      accountId: ACCOUNT_ID,
+      reflectionId: REFLECTION_ID,
+      confirmationFingerprint: FINGERPRINT
+    });
+    expect(first).toEqual([
+      expect.objectContaining({
+        candidateId: "candidate_v2_action",
+        status: "admitted",
+        reasonCode: null
+      }),
+      expect.objectContaining({
+        candidateId: "candidate_v2_insight",
+        status: "rejected",
+        reasonCode: "verified_owner_required"
+      }),
+      expect.objectContaining({
+        candidateId: "candidate_v2_question",
+        status: "rejected",
+        reasonCode: "verified_owner_required"
+      })
+    ]);
+    expect(database.prepare(`
+      SELECT type FROM memory_items ORDER BY type
+    `).all()).toEqual([{ type: "commitment" }]);
+    expect(database.prepare(`
+      SELECT contract_version, save_intent, input_adapter, capture_purpose,
+             recording_date, status
+      FROM memory_daily_reflection_publications
+    `).get()).toEqual({
+      contract_version: 2,
+      save_intent: "retain_selected",
+      input_adapter: "file_picker",
+      capture_purpose: "inspiration_capture",
+      recording_date: "2026-08-13",
+      status: "unpublished"
+    });
+    expect(database.prepare(`
+      SELECT candidate_kind, action_claimed
+      FROM memory_daily_reflection_candidate_receipts
+      ORDER BY candidate_id
+    `).all()).toEqual([
+      { candidate_kind: "user_action", action_claimed: 1 },
+      { candidate_kind: "insight", action_claimed: 0 },
+      { candidate_kind: "open_question", action_claimed: 0 }
+    ]);
+    expect(count("person_evidence")).toBe(0);
+    expect(count("person_subject_observations")).toBe(0);
+
+    const counts = {
+      memories: count("memory_items"),
+      evidence: count("memory_evidence"),
+      receipts: count("memory_daily_reflection_candidate_receipts")
+    };
+    expect(await setup.service.admit({
+      accountId: ACCOUNT_ID,
+      reflectionId: REFLECTION_ID,
+      confirmationFingerprint: FINGERPRINT
+    })).toEqual([
+      expect.objectContaining({ candidateId: "candidate_v2_action", status: "already_admitted" }),
+      expect.objectContaining({ candidateId: "candidate_v2_insight", status: "rejected" }),
+      expect.objectContaining({ candidateId: "candidate_v2_question", status: "rejected" })
+    ]);
+    expect({
+      memories: count("memory_items"),
+      evidence: count("memory_evidence"),
+      receipts: count("memory_daily_reflection_candidate_receipts")
+    }).toEqual(counts);
+  });
+
+  it("rejects an unclaimed V2 action with zero publication side effects", async () => {
+    const segment = trustedSegment({
+      id: "segment_v2_unclaimed_action",
+      text: "I might contact the team tomorrow."
+    });
+    const setup = fixture({
+      contractVersion: 2,
+      candidates: [keptV2({
+        id: "candidate_v2_unclaimed_action",
+        kind: "user_action",
+        text: segment.text,
+        segmentId: segment.id,
+        actionClaimed: false
+      })],
+      segments: [segment]
+    });
+    await expect(setup.service.admit({
+      accountId: ACCOUNT_ID,
+      reflectionId: REFLECTION_ID,
+      confirmationFingerprint: FINGERPRINT
+    })).resolves.toEqual([
+      expect.objectContaining({
+        candidateId: "candidate_v2_unclaimed_action",
+        status: "rejected",
+        reasonCode: "action_not_claimed",
+        memoryId: null
+      })
+    ]);
+    expect(count("memory_items")).toBe(0);
+    expect(count("memory_daily_reflection_publications")).toBe(0);
+    expect(count("person_evidence")).toBe(0);
+  });
+
+  it("keeps excluded V2 candidates out of Memory and Person storage", async () => {
+    const segment = trustedSegment({
+      id: "segment_v2_excluded",
+      text: "This candidate was explicitly excluded."
+    });
+    const setup = fixture({
+      contractVersion: 2,
+      candidates: [excludedV2({
+        id: "candidate_v2_excluded",
+        text: segment.text,
+        segmentId: segment.id
+      })],
+      segments: [segment]
+    });
+    await expect(setup.service.admit({
+      accountId: ACCOUNT_ID,
+      reflectionId: REFLECTION_ID,
+      confirmationFingerprint: FINGERPRINT
+    })).resolves.toEqual([]);
+    expect(count("memory_items")).toBe(0);
+    expect(count("memory_daily_reflection_publications")).toBe(0);
+    expect(count("person_evidence")).toBe(0);
+    expect(count("person_subject_observations")).toBe(0);
+  });
+
   it("admits only eligible kept candidates from a fenced extracting upload", async () => {
     const admittedSegment = trustedSegment({
       id: "segment_admitted",

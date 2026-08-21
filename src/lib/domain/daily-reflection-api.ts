@@ -2,6 +2,7 @@ import { z } from "zod";
 
 import {
   CandidateKindSchema,
+  CandidateKindV2Schema,
   CandidateAdmissionResultSchema,
   CandidateSchema,
   CandidateStatusSchema,
@@ -11,8 +12,12 @@ import {
   DailyReflectionSchema,
   DailyReflectionStatusSchema,
   DailyReflectionVersionSchema,
+  DailyReflectionV2InputSchema,
+  DailyReflectionSaveIntentSchema,
+  DAILY_REFLECTION_V2_CONTRACT_VERSION,
   ProcessingPlanSchema,
   ReflectionConfirmationSchema,
+  ReflectionConfirmationV2Schema,
   SourceOriginSchema
 } from "./daily-reflection";
 import {
@@ -73,7 +78,7 @@ export const DailyReflectionCandidateEvidenceSchema = z.object({
   message: "evidence endSeconds must be greater than startSeconds"
 });
 
-export const DailyReflectionCandidateViewSchema = z.object({
+export const DailyReflectionCandidateV1ViewSchema = z.object({
   id: DailyReflectionIdSchema,
   reflectionId: DailyReflectionIdSchema,
   ordinal: z.number().int().nonnegative(),
@@ -114,6 +119,43 @@ export const DailyReflectionCandidateViewSchema = z.object({
   }
 });
 
+export const DailyReflectionCandidateV2ViewSchema = z.object({
+  contractVersion: z.literal(DAILY_REFLECTION_V2_CONTRACT_VERSION),
+  id: DailyReflectionIdSchema,
+  reflectionId: DailyReflectionIdSchema,
+  ordinal: z.number().int().nonnegative(),
+  proposedText: z.string().trim().min(1).max(20_000),
+  userText: z.string().trim().min(1).max(20_000).nullable(),
+  status: CandidateStatusSchema,
+  candidateKind: CandidateKindV2Schema,
+  candidateType: CandidateKindSchema,
+  evidenceIds: z.array(DailyReflectionIdSchema).max(64),
+  sourceSegmentIds: z.array(DailyReflectionIdSchema).max(64),
+  confidence: z.number().min(0).max(1),
+  caution: z.string().trim().min(1).max(4_000),
+  actionClaimed: z.boolean(),
+  subjectPersonId: z.null(),
+  subjectConfirmed: z.literal(false),
+  version: DailyReflectionVersionSchema,
+  createdAt: z.string().datetime(),
+  updatedAt: z.string().datetime(),
+  evidence: z.array(DailyReflectionCandidateEvidenceSchema).max(64)
+}).strict().superRefine((candidate, context) => {
+  if (
+    candidate.evidenceIds.length !== candidate.sourceSegmentIds.length
+    || candidate.evidenceIds.some(
+      (evidenceId, index) => evidenceId !== candidate.sourceSegmentIds[index]
+    )
+  ) {
+    addIssue(context, ["evidenceIds"], "V2 evidenceIds must match sourceSegmentIds");
+  }
+});
+
+export const DailyReflectionCandidateViewSchema = z.union([
+  DailyReflectionCandidateV1ViewSchema,
+  DailyReflectionCandidateV2ViewSchema
+]);
+
 export const DailyReflectionCandidateDecisionSchema = z.object({
   candidateId: DailyReflectionIdSchema,
   status: CandidateStatusSchema,
@@ -138,6 +180,14 @@ export const DailyReflectionCandidateUpdateRequestSchema = z.object({
 export const DailyReflectionFinalizeRequestSchema = z.object({
   expectedVersion: DailyReflectionVersionSchema,
   idempotencyKey: z.string().trim().min(1).max(512)
+}).strict();
+
+export const DailyReflectionV2CreateRequestSchema = DailyReflectionV2InputSchema;
+
+export const DailyReflectionV2FinalizeRequestSchema = z.object({
+  expectedVersion: DailyReflectionVersionSchema,
+  operationKey: z.string().trim().min(1).max(512),
+  saveIntent: DailyReflectionSaveIntentSchema
 }).strict();
 
 export const DailyReflectionCandidateRevocationRequestSchema = z.object({
@@ -256,6 +306,13 @@ export const DailyReflectionDetailResponseSchema = z.object({
     }
   }
 
+  const evidenceFreeV2Recap = detail.confirmation !== null
+    && "contractVersion" in detail.confirmation
+    && detail.confirmation.contractVersion === 2
+    && detail.confirmation.saveIntent === "recap_only"
+    && detail.confirmation.candidateSnapshots.every(
+      (candidate) => candidate.evidenceIds.length === 0
+    );
   if (
     (
       detail.reflection.status === "review_pending"
@@ -264,7 +321,11 @@ export const DailyReflectionDetailResponseSchema = z.object({
       || detail.reflection.status === "completed"
       || detail.reflection.status === "admission_failed"
     )
-    && (!plan || detail.upload === null || detail.segments.length === 0)
+    && (
+      !plan
+      || detail.upload === null
+      || (detail.segments.length === 0 && !evidenceFreeV2Recap)
+    )
   ) {
     addIssue(
       context,
@@ -394,6 +455,29 @@ export const DailyReflectionFinalizeResponseSchema = z.object({
   reused: z.boolean()
 }).strict();
 
+export const DailyReflectionV2FinalizeRecapResponseSchema = z.object({
+  reflection: DailyReflectionSchema,
+  confirmation: ReflectionConfirmationV2Schema,
+  admission: z.object({ exists: z.literal(false) }).strict(),
+  reused: z.boolean()
+}).strict();
+
+export const DailyReflectionV2FinalizeRetainedResponseSchema = z.object({
+  reflection: DailyReflectionSchema,
+  confirmation: ReflectionConfirmationV2Schema,
+  admission: z.object({
+    exists: z.literal(true),
+    operation: DailyReflectionAdmissionOperationSchema,
+    results: z.array(CandidateAdmissionResultSchema)
+  }).strict(),
+  reused: z.boolean()
+}).strict();
+
+export const DailyReflectionV2FinalizeResponseSchema = z.union([
+  DailyReflectionV2FinalizeRecapResponseSchema,
+  DailyReflectionV2FinalizeRetainedResponseSchema
+]);
+
 export const DailyReflectionCandidateUpdateResponseSchema = z.object({
   reflection: DailyReflectionSchema,
   candidates: z.array(CandidateSchema)
@@ -420,6 +504,12 @@ export type DailyReflectionCandidateUpdateRequest = z.infer<
 export type DailyReflectionFinalizeRequest = z.infer<
   typeof DailyReflectionFinalizeRequestSchema
 >;
+export type DailyReflectionV2CreateRequest = z.infer<
+  typeof DailyReflectionV2CreateRequestSchema
+>;
+export type DailyReflectionV2FinalizeRequest = z.infer<
+  typeof DailyReflectionV2FinalizeRequestSchema
+>;
 export type DailyReflectionCandidateRevocationRequest = z.infer<
   typeof DailyReflectionCandidateRevocationRequestSchema
 >;
@@ -431,6 +521,9 @@ export type DailyReflectionDetailResponse = z.infer<
 >;
 export type DailyReflectionFinalizeResponse = z.infer<
   typeof DailyReflectionFinalizeResponseSchema
+>;
+export type DailyReflectionV2FinalizeResponse = z.infer<
+  typeof DailyReflectionV2FinalizeResponseSchema
 >;
 export type DailyReflectionCandidateUpdateResponse = z.infer<
   typeof DailyReflectionCandidateUpdateResponseSchema

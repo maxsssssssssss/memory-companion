@@ -26,6 +26,8 @@ export class DailyReflectionPublicationError extends Error {
 
 export type DailyReflectionPublicationCandidate = {
   candidateId: string;
+  candidateKind?: "insight" | "open_question" | "decision" | "user_action";
+  actionClaimed?: boolean;
   operationKey: string;
   status: "admitted" | "rejected";
   reasonCode: string | null;
@@ -48,6 +50,11 @@ export type DailyReflectionPublicationInput = {
   confirmationFingerprint: string;
   uploadId: string;
   sourceOrigin: "user_reflection";
+  contractVersion?: 1 | 2;
+  saveIntent?: "retain_selected";
+  inputAdapter?: "file_picker" | "browser_recorder" | "toy_sync";
+  capturePurpose?: "inspiration_capture";
+  recordingDate?: string;
   payloadDigest: string;
   sourceSegments: TranscriptSegment[];
   candidates: DailyReflectionPublicationCandidate[];
@@ -71,6 +78,11 @@ type PublicationRow = {
   confirmation_fingerprint: string;
   payload_digest: string;
   source_origin: "user_reflection";
+  contract_version: 1 | 2;
+  save_intent: "retain_selected";
+  input_adapter: "file_picker" | "browser_recorder" | "toy_sync" | null;
+  capture_purpose: "inspiration_capture" | null;
+  recording_date: string | null;
   status: "unpublished" | "published" | "deleted";
   created_at: string;
   updated_at: string;
@@ -83,6 +95,8 @@ type ReceiptRow = {
   memory_id: string | null;
   reason_code: string | null;
   operation_key: string;
+  candidate_kind: "insight" | "open_question" | "decision" | "user_action" | null;
+  action_claimed: 0 | 1 | null;
 };
 
 function publicationResults(rows: ReceiptRow[], replay: boolean) {
@@ -121,7 +135,8 @@ export function createDailyReflectionMemoryPublicationRepository(
 
   function listResults(userId: string, publicationId: string) {
     return database.prepare(`
-      SELECT candidate_id, status, memory_id, reason_code, operation_key
+      SELECT candidate_id, status, memory_id, reason_code, operation_key,
+             candidate_kind, action_claimed
       FROM memory_daily_reflection_candidate_receipts
       WHERE user_id = ? AND publication_id = ?
       ORDER BY candidate_id
@@ -129,6 +144,34 @@ export function createDailyReflectionMemoryPublicationRepository(
   }
 
   const publish = database.transaction((input: DailyReflectionPublicationInput) => {
+    const contractVersion = input.contractVersion ?? 1;
+    const saveIntent = input.saveIntent ?? "retain_selected";
+    const isValidV2 = contractVersion === 2
+      && saveIntent === "retain_selected"
+      && input.inputAdapter !== undefined
+      && input.capturePurpose === "inspiration_capture"
+      && input.recordingDate !== undefined
+      && input.candidates.every(
+        (candidate) => candidate.candidateKind !== undefined
+          && candidate.actionClaimed !== undefined
+          && candidate.subjectPersonId === null
+          && candidate.subjectEvidence.length === 0
+      );
+    if (
+      (contractVersion === 2 && !isValidV2)
+      || (contractVersion === 1 && (
+        input.saveIntent !== undefined
+        || input.inputAdapter !== undefined
+        || input.capturePurpose !== undefined
+        || input.recordingDate !== undefined
+        || input.candidates.some(
+          (candidate) => candidate.candidateKind !== undefined
+            || candidate.actionClaimed !== undefined
+        )
+      ))
+    ) {
+      throw new DailyReflectionPublicationError("daily_reflection_publication_conflict");
+    }
     const tombstone = database.prepare(`
       SELECT 1 FROM memory_upload_tombstones
       WHERE user_id = ? AND upload_id = ?
@@ -149,6 +192,11 @@ export function createDailyReflectionMemoryPublicationRepository(
         || existing.confirmation_fingerprint !== input.confirmationFingerprint
         || existing.payload_digest !== input.payloadDigest
         || existing.source_origin !== input.sourceOrigin
+        || existing.contract_version !== contractVersion
+        || existing.save_intent !== saveIntent
+        || existing.input_adapter !== (input.inputAdapter ?? null)
+        || existing.capture_purpose !== (input.capturePurpose ?? null)
+        || existing.recording_date !== (input.recordingDate ?? null)
       ) {
         throw new DailyReflectionPublicationError("daily_reflection_publication_conflict");
       }
@@ -176,8 +224,9 @@ export function createDailyReflectionMemoryPublicationRepository(
       INSERT INTO memory_daily_reflection_publications (
         id, user_id, reflection_id, confirmation_id, upload_id,
         confirmation_fingerprint, payload_digest, source_origin, status,
-        created_at, updated_at, deleted_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'unpublished', ?, ?, NULL)
+        created_at, updated_at, deleted_at, contract_version, save_intent,
+        input_adapter, capture_purpose, recording_date
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'unpublished', ?, ?, NULL, ?, ?, ?, ?, ?)
     `).run(
       input.id,
       input.userId,
@@ -188,7 +237,12 @@ export function createDailyReflectionMemoryPublicationRepository(
       input.payloadDigest,
       input.sourceOrigin,
       input.now,
-      input.now
+      input.now,
+      contractVersion,
+      saveIntent,
+      input.inputAdapter ?? null,
+      input.capturePurpose ?? null,
+      input.recordingDate ?? null
     );
 
     const insertPayload = database.prepare(`
@@ -231,8 +285,8 @@ export function createDailyReflectionMemoryPublicationRepository(
     const insertReceipt = database.prepare(`
       INSERT INTO memory_daily_reflection_candidate_receipts (
         user_id, publication_id, candidate_id, status, memory_id,
-        reason_code, operation_key, created_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        reason_code, operation_key, created_at, candidate_kind, action_claimed
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
     const insertProvenance = database.prepare(`
       INSERT INTO memory_daily_reflection_evidence_provenance (
@@ -399,7 +453,9 @@ export function createDailyReflectionMemoryPublicationRepository(
         memoryId,
         candidate.reasonCode,
         candidate.operationKey,
-        input.now
+        input.now,
+        candidate.candidateKind ?? null,
+        candidate.actionClaimed === undefined ? null : candidate.actionClaimed ? 1 : 0
       );
       results.push({
         candidateId: candidate.candidateId,

@@ -220,7 +220,357 @@ function createCompletedCandidateSet() {
   return repository.getReflection(review.reflection.accountId, review.reflection.id);
 }
 
+function createReviewPendingV2(input: {
+  id?: string;
+  operationKey?: string;
+  sourceOrigin?: "user_reflection" | "direct_conversation";
+  candidates?: Array<{
+    id: string;
+    ordinal: number;
+    candidateKind: "insight" | "open_question" | "decision" | "user_action";
+    proposedText: string;
+    evidenceIds: string[];
+    confidence: number;
+    caution: string;
+    actionClaimed: boolean;
+  }>;
+} = {}) {
+  const reflectionId = input.id ?? "reflection_v2";
+  const operationKey = input.operationKey ?? "operation_v2";
+  const uploadId = `upload_${reflectionId}`;
+  const sourceOrigin = input.sourceOrigin ?? "user_reflection";
+  const candidates = input.candidates ?? [{
+    id: "candidate_v2",
+    ordinal: 0,
+    candidateKind: "insight" as const,
+    proposedText: "今天最值得记住的是先澄清问题。",
+    evidenceIds: ["segment_v2"],
+    confidence: 0.82,
+    caution: "这是用户复盘中的总结。",
+    actionClaimed: false
+  }];
+  const created = repository.createReflectionV2({
+    id: reflectionId,
+    accountId: "account_1",
+    uploadId,
+    operationKey,
+    inputAdapter: "file_picker",
+    sourceOrigin,
+    capturePurpose: "inspiration_capture",
+    recordingDate: "2026-08-21"
+  }).reflection;
+  const extracting = transitionPath(created, ["uploading", "transcribing", "extracting"]);
+  const fence = repository.claimExecutionLease({
+    accountId: extracting.accountId,
+    reflectionId: extracting.id,
+    leaseOwner: `v2-candidate-builder-${reflectionId}`,
+    leaseDurationMs: 60_000,
+    allowedStatuses: ["extracting"]
+  });
+  if (!fence) throw new Error("expected V2 candidate builder lease");
+  const sourceIds = [...new Set(candidates.flatMap((candidate) => candidate.evidenceIds))];
+  if (sourceIds.length > 0) {
+    repository.publishAssetUnderExecutionFence({
+      accountId: extracting.accountId,
+      reflectionId: extracting.id,
+      leaseOwner: fence.leaseOwner,
+      attemptVersion: fence.attemptVersion,
+      assetKind: "segments",
+      payload: sourceIds.map((sourceId, index) => ({
+        id: sourceId,
+        uploadId,
+        startSeconds: index * 8,
+        endSeconds: index * 8 + 8,
+        text: `Canonical reflection evidence ${index + 1}.`,
+        confidence: 0.98,
+        sceneLabels: [],
+        valueLabels: []
+      }))
+    });
+  }
+  const saved = repository.savePendingCandidatesV2({
+    accountId: extracting.accountId,
+    reflectionId: extracting.id,
+    expectedVersion: extracting.version,
+    leaseOwner: fence.leaseOwner,
+    attemptVersion: fence.attemptVersion,
+    candidates
+  });
+  const reflection = repository.transitionStatus({
+    accountId: saved.reflection.accountId,
+    reflectionId: saved.reflection.id,
+    expectedVersion: saved.reflection.version,
+    status: "review_pending",
+    leaseOwner: fence.leaseOwner,
+    attemptVersion: fence.attemptVersion
+  });
+  repository.releaseExecutionLease({
+    accountId: reflection.accountId,
+    reflectionId: reflection.id,
+    leaseOwner: fence.leaseOwner,
+    attemptVersion: fence.attemptVersion
+  });
+  return {
+    reflection,
+    operationKey,
+    candidates: repository.listCandidates(reflection.accountId, reflection.id)
+  };
+}
+
 describe("DailyReflectionRepository", () => {
+  it("persists idempotent V2 input without merging accounts or operation payloads", () => {
+    const input = {
+      id: "reflection_v2_create",
+      accountId: "account_1",
+      uploadId: "upload_v2_create",
+      operationKey: "operation_v2_create",
+      inputAdapter: "file_picker" as const,
+      sourceOrigin: "user_reflection" as const,
+      capturePurpose: "inspiration_capture" as const,
+      recordingDate: "2026-08-21"
+    };
+    const first = repository.createReflectionV2(input);
+    expect(first).toMatchObject({ reused: false, input: {
+      operationKey: input.operationKey,
+      recordingDate: input.recordingDate
+    } });
+    expect(repository.createReflectionV2(input)).toMatchObject({ reused: true });
+    expect(() => repository.createReflectionV2({
+      ...input,
+      recordingDate: "2026-08-20"
+    })).toThrowError(expect.objectContaining({
+      code: "daily_reflection_idempotency_conflict"
+    }));
+    expect(repository.createReflectionV2({
+      ...input,
+      id: "reflection_v2_create_other",
+      accountId: "account_2",
+      uploadId: "upload_v2_create_other"
+    })).toMatchObject({
+      reused: false,
+      reflection: { accountId: "account_2", id: "reflection_v2_create_other" }
+    });
+    expect(() => repository.getReflectionV2Input("account_2", first.reflection.id))
+      .toThrow(DailyReflectionNotFoundError);
+  });
+
+  it("completes an Evidence-free V2 recap with no admission operation or Person association", () => {
+    const review = createReviewPendingV2({
+      candidates: [{
+        id: "candidate_v2_recap",
+        ordinal: 0,
+        candidateKind: "insight",
+        proposedText: "这是只保留在复盘里的手写领悟。",
+        evidenceIds: [],
+        confidence: 0.7,
+        caution: "没有 canonical Evidence，不能进入长期 Memory。",
+        actionClaimed: false
+      }]
+    });
+    expect(() => repository.updateCandidateDecisions({
+      accountId: review.reflection.accountId,
+      reflectionId: review.reflection.id,
+      expectedVersion: review.reflection.version,
+      candidates: [{
+        candidateId: "candidate_v2_recap",
+        status: "kept",
+        userText: null,
+        subjectPersonId: "person_alice"
+      }]
+    })).toThrowError(expect.objectContaining({
+      code: "daily_reflection_v2_subject_not_supported"
+    }));
+    const decided = repository.updateCandidateDecisions({
+      accountId: review.reflection.accountId,
+      reflectionId: review.reflection.id,
+      expectedVersion: review.reflection.version,
+      candidates: [{
+        candidateId: "candidate_v2_recap",
+        status: "kept",
+        userText: "这是用户确认后的复盘文本。",
+        subjectPersonId: null
+      }]
+    });
+    const finalized = repository.finalizeReviewV2({
+      accountId: review.reflection.accountId,
+      reflectionId: review.reflection.id,
+      expectedVersion: decided.reflection.version,
+      operationKey: review.operationKey,
+      saveIntent: "recap_only"
+    });
+    expect(finalized).toMatchObject({
+      reused: false,
+      operation: null,
+      confirmation: {
+        contractVersion: 2,
+        operationKey: review.operationKey,
+        saveIntent: "recap_only",
+        candidateSnapshots: [{
+          candidateId: "candidate_v2_recap",
+          evidenceIds: [],
+          subjectPersonId: null
+        }]
+      }
+    });
+    expect(repository.getReflection("account_1", review.reflection.id).status).toBe("completed");
+    expect(repository.getAdmissionOperation("account_1", review.reflection.id)).toBeNull();
+    expect(database.prepare(
+      "SELECT COUNT(*) AS count FROM dr_candidate_admission_receipts"
+    ).get()).toEqual({ count: 0 });
+    expect(repository.finalizeReviewV2({
+      accountId: review.reflection.accountId,
+      reflectionId: review.reflection.id,
+      expectedVersion: decided.reflection.version,
+      operationKey: review.operationKey,
+      saveIntent: "recap_only"
+    })).toEqual({ ...finalized, reused: true });
+    expect(() => repository.finalizeReviewV2({
+      accountId: review.reflection.accountId,
+      reflectionId: review.reflection.id,
+      expectedVersion: decided.reflection.version,
+      operationKey: review.operationKey,
+      saveIntent: "retain_selected"
+    })).toThrowError(expect.objectContaining({
+      code: "daily_reflection_finalize_idempotency_conflict"
+    }));
+    expect(() => repository.finalizeReviewV2({
+      accountId: "account_2",
+      reflectionId: review.reflection.id,
+      expectedVersion: decided.reflection.version,
+      operationKey: review.operationKey,
+      saveIntent: "recap_only"
+    })).toThrow(DailyReflectionNotFoundError);
+  });
+
+  it("freezes kept V2 Evidence and maps only claimed actions to commitments", () => {
+    const review = createReviewPendingV2({
+      candidates: [
+        {
+          id: "candidate_v2_insight",
+          ordinal: 0,
+          candidateKind: "insight",
+          proposedText: "Insight",
+          evidenceIds: ["segment_v2_insight"],
+          confidence: 0.8,
+          caution: "Reflection summary.",
+          actionClaimed: false
+        },
+        {
+          id: "candidate_v2_question",
+          ordinal: 1,
+          candidateKind: "open_question",
+          proposedText: "Question",
+          evidenceIds: ["segment_v2_question"],
+          confidence: 0.75,
+          caution: "Open question.",
+          actionClaimed: false
+        },
+        {
+          id: "candidate_v2_action",
+          ordinal: 2,
+          candidateKind: "user_action",
+          proposedText: "Action",
+          evidenceIds: ["segment_v2_action"],
+          confidence: 0.9,
+          caution: "Explicit user action.",
+          actionClaimed: true
+        }
+      ]
+    });
+    const decided = repository.updateCandidateDecisions({
+      accountId: review.reflection.accountId,
+      reflectionId: review.reflection.id,
+      expectedVersion: review.reflection.version,
+      candidates: review.candidates.map((candidate) => ({
+        candidateId: candidate.id,
+        status: "kept" as const,
+        userText: null,
+        subjectPersonId: null
+      }))
+    });
+    const finalized = repository.finalizeReviewV2({
+      accountId: review.reflection.accountId,
+      reflectionId: review.reflection.id,
+      expectedVersion: decided.reflection.version,
+      operationKey: review.operationKey,
+      saveIntent: "retain_selected"
+    });
+    expect(finalized.operation).toMatchObject({ status: "confirmation_ready" });
+    expect(finalized.confirmation.candidateSnapshots.map((candidate) => ({
+      kind: candidate.candidateKind,
+      type: candidate.candidateType,
+      evidenceCount: candidate.evidenceSnapshots.length
+    }))).toEqual([
+      { kind: "insight", type: "summary", evidenceCount: 1 },
+      { kind: "open_question", type: "question", evidenceCount: 1 },
+      { kind: "user_action", type: "commitment", evidenceCount: 1 }
+    ]);
+  });
+
+  it("fails closed before confirmation for Evidence-free or unsupported V2 retention", () => {
+    const evidenceFree = createReviewPendingV2({
+      id: "reflection_v2_no_evidence",
+      operationKey: "operation_v2_no_evidence",
+      candidates: [{
+        id: "candidate_v2_no_evidence",
+        ordinal: 0,
+        candidateKind: "decision",
+        proposedText: "No Evidence decision",
+        evidenceIds: [],
+        confidence: 0.6,
+        caution: "No Evidence.",
+        actionClaimed: false
+      }]
+    });
+    const evidenceFreeDecided = repository.updateCandidateDecisions({
+      accountId: evidenceFree.reflection.accountId,
+      reflectionId: evidenceFree.reflection.id,
+      expectedVersion: evidenceFree.reflection.version,
+      candidates: [{
+        candidateId: "candidate_v2_no_evidence",
+        status: "kept",
+        userText: null,
+        subjectPersonId: null
+      }]
+    });
+    expect(() => repository.finalizeReviewV2({
+      accountId: "account_1",
+      reflectionId: evidenceFree.reflection.id,
+      expectedVersion: evidenceFreeDecided.reflection.version,
+      operationKey: evidenceFree.operationKey,
+      saveIntent: "retain_selected"
+    })).toThrowError(expect.objectContaining({
+      code: "daily_reflection_retain_requires_evidence"
+    }));
+    expect(repository.getConfirmation("account_1", evidenceFree.reflection.id)).toBeNull();
+
+    const direct = createReviewPendingV2({
+      id: "reflection_v2_direct",
+      operationKey: "operation_v2_direct",
+      sourceOrigin: "direct_conversation"
+    });
+    const directDecided = repository.updateCandidateDecisions({
+      accountId: direct.reflection.accountId,
+      reflectionId: direct.reflection.id,
+      expectedVersion: direct.reflection.version,
+      candidates: [{
+        candidateId: "candidate_v2",
+        status: "kept",
+        userText: null,
+        subjectPersonId: null
+      }]
+    });
+    expect(() => repository.finalizeReviewV2({
+      accountId: "account_1",
+      reflectionId: direct.reflection.id,
+      expectedVersion: directDecided.reflection.version,
+      operationKey: direct.operationKey,
+      saveIntent: "retain_selected"
+    })).toThrowError(expect.objectContaining({
+      code: "daily_reflection_v2_retain_source_not_supported"
+    }));
+    expect(repository.getConfirmation("account_1", direct.reflection.id)).toBeNull();
+  });
   it("creates an explicitly sourced reflection with its persisted processing plan", () => {
     const created = repository.createReflection(createInput());
 

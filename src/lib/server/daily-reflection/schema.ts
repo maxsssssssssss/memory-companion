@@ -1,6 +1,6 @@
 import type Database from "better-sqlite3";
 
-export const DAILY_REFLECTION_SCHEMA_VERSION = 6;
+export const DAILY_REFLECTION_SCHEMA_VERSION = 7;
 
 // Version one intentionally represents the pre-provenance workflow shape.
 // Version two adds source_origin with a fail-closed legacy backfill and the
@@ -358,13 +358,164 @@ const DAILY_REFLECTION_SCHEMA_V6 = `
   END;
 `;
 
+const DAILY_REFLECTION_SCHEMA_V7 = `
+  CREATE TABLE dr_v2_reflection_inputs (
+    account_id TEXT NOT NULL,
+    reflection_id TEXT NOT NULL,
+    operation_key TEXT NOT NULL,
+    contract_fingerprint TEXT NOT NULL CHECK (length(contract_fingerprint) = 64),
+    input_adapter TEXT NOT NULL CHECK (
+      input_adapter IN ('file_picker', 'browser_recorder', 'toy_sync')
+    ),
+    source_origin TEXT NOT NULL CHECK (
+      source_origin IN ('user_reflection', 'direct_conversation')
+    ),
+    capture_purpose TEXT NOT NULL CHECK (capture_purpose = 'inspiration_capture'),
+    recording_date TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (account_id, reflection_id),
+    UNIQUE (account_id, operation_key),
+    FOREIGN KEY (reflection_id, account_id)
+      REFERENCES dr_reflections(id, account_id) ON DELETE CASCADE
+  );
+
+  CREATE TABLE dr_candidate_v2_metadata (
+    account_id TEXT NOT NULL,
+    reflection_id TEXT NOT NULL,
+    candidate_id TEXT NOT NULL,
+    candidate_kind TEXT NOT NULL CHECK (
+      candidate_kind IN ('insight', 'open_question', 'decision', 'user_action')
+    ),
+    evidence_ids_json TEXT NOT NULL CHECK (json_valid(evidence_ids_json)),
+    confidence REAL NOT NULL CHECK (confidence >= 0 AND confidence <= 1),
+    caution TEXT NOT NULL CHECK (length(trim(caution)) > 0),
+    action_claimed INTEGER NOT NULL CHECK (action_claimed IN (0, 1)),
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (account_id, candidate_id),
+    FOREIGN KEY (candidate_id, account_id)
+      REFERENCES dr_candidates(id, account_id) ON DELETE CASCADE,
+    FOREIGN KEY (reflection_id, account_id)
+      REFERENCES dr_reflections(id, account_id) ON DELETE CASCADE
+  );
+
+  CREATE INDEX idx_dr_candidate_v2_reflection
+    ON dr_candidate_v2_metadata(account_id, reflection_id, candidate_id);
+
+  ALTER TABLE dr_reflection_confirmations
+    ADD COLUMN contract_version INTEGER NOT NULL DEFAULT 1
+      CHECK (contract_version IN (1, 2));
+  ALTER TABLE dr_reflection_confirmations
+    ADD COLUMN save_intent TEXT CHECK (
+      save_intent IS NULL OR save_intent IN ('recap_only', 'retain_selected')
+    );
+  ALTER TABLE dr_reflection_confirmations ADD COLUMN operation_key TEXT;
+  ALTER TABLE dr_reflection_confirmations
+    ADD COLUMN input_adapter TEXT CHECK (
+      input_adapter IS NULL OR input_adapter IN ('file_picker', 'browser_recorder', 'toy_sync')
+    );
+  ALTER TABLE dr_reflection_confirmations
+    ADD COLUMN capture_purpose TEXT CHECK (
+      capture_purpose IS NULL OR capture_purpose = 'inspiration_capture'
+    );
+  ALTER TABLE dr_reflection_confirmations ADD COLUMN recording_date TEXT;
+
+  CREATE UNIQUE INDEX idx_dr_confirmation_v2_operation
+    ON dr_reflection_confirmations(account_id, operation_key)
+    WHERE operation_key IS NOT NULL;
+
+  CREATE TRIGGER dr_candidate_v2_scope_insert
+  BEFORE INSERT ON dr_candidate_v2_metadata
+  WHEN NOT EXISTS (
+    SELECT 1 FROM dr_candidates candidate
+    WHERE candidate.id = NEW.candidate_id
+      AND candidate.account_id = NEW.account_id
+      AND candidate.reflection_id = NEW.reflection_id
+  )
+  BEGIN
+    SELECT RAISE(ABORT, 'daily_reflection_v2_candidate_scope_mismatch');
+  END;
+
+  CREATE TRIGGER dr_candidate_v2_scope_update
+  BEFORE UPDATE ON dr_candidate_v2_metadata
+  WHEN NOT EXISTS (
+    SELECT 1 FROM dr_candidates candidate
+    WHERE candidate.id = NEW.candidate_id
+      AND candidate.account_id = NEW.account_id
+      AND candidate.reflection_id = NEW.reflection_id
+  )
+  BEGIN
+    SELECT RAISE(ABORT, 'daily_reflection_v2_candidate_scope_mismatch');
+  END;
+
+  CREATE TRIGGER dr_v2_reflection_inputs_immutable
+  BEFORE UPDATE ON dr_v2_reflection_inputs
+  BEGIN
+    SELECT RAISE(ABORT, 'daily_reflection_v2_input_immutable');
+  END;
+
+  CREATE TRIGGER dr_confirmation_v2_contract_insert
+  BEFORE INSERT ON dr_reflection_confirmations
+  WHEN (
+    NEW.contract_version = 2 AND (
+      NEW.save_intent IS NULL OR NEW.operation_key IS NULL
+      OR NEW.input_adapter IS NULL OR NEW.capture_purpose IS NULL
+      OR NEW.recording_date IS NULL
+    )
+  ) OR (
+    NEW.contract_version = 1 AND (
+      NEW.save_intent IS NOT NULL OR NEW.operation_key IS NOT NULL
+      OR NEW.input_adapter IS NOT NULL OR NEW.capture_purpose IS NOT NULL
+      OR NEW.recording_date IS NOT NULL
+    )
+  )
+  BEGIN
+    SELECT RAISE(ABORT, 'daily_reflection_confirmation_contract_mismatch');
+  END;
+
+  CREATE TRIGGER dr_candidate_v2_metadata_locked_insert_after_confirmation
+  BEFORE INSERT ON dr_candidate_v2_metadata
+  WHEN EXISTS (
+    SELECT 1 FROM dr_reflection_confirmations confirmation
+    WHERE confirmation.account_id = NEW.account_id
+      AND confirmation.reflection_id = NEW.reflection_id
+  )
+  BEGIN
+    SELECT RAISE(ABORT, 'daily_reflection_candidate_finalized');
+  END;
+
+  CREATE TRIGGER dr_candidate_v2_metadata_locked_after_confirmation
+  BEFORE UPDATE ON dr_candidate_v2_metadata
+  WHEN EXISTS (
+    SELECT 1 FROM dr_reflection_confirmations confirmation
+    WHERE confirmation.account_id = OLD.account_id
+      AND confirmation.reflection_id = OLD.reflection_id
+  )
+  BEGIN
+    SELECT RAISE(ABORT, 'daily_reflection_candidate_finalized');
+  END;
+
+  CREATE TRIGGER dr_candidate_v2_metadata_locked_delete_after_confirmation
+  BEFORE DELETE ON dr_candidate_v2_metadata
+  WHEN EXISTS (
+    SELECT 1 FROM dr_reflection_confirmations confirmation
+    WHERE confirmation.account_id = OLD.account_id
+      AND confirmation.reflection_id = OLD.reflection_id
+  )
+  BEGIN
+    SELECT RAISE(ABORT, 'daily_reflection_candidate_finalized');
+  END;
+`;
+
 const MIGRATIONS = [
   { version: 1, sql: DAILY_REFLECTION_SCHEMA_V1 },
   { version: 2, sql: DAILY_REFLECTION_SCHEMA_V2 },
   { version: 3, sql: DAILY_REFLECTION_SCHEMA_V3 },
   { version: 4, sql: DAILY_REFLECTION_SCHEMA_V4 },
   { version: 5, sql: DAILY_REFLECTION_SCHEMA_V5 },
-  { version: 6, sql: DAILY_REFLECTION_SCHEMA_V6 }
+  { version: 6, sql: DAILY_REFLECTION_SCHEMA_V6 },
+  { version: 7, sql: DAILY_REFLECTION_SCHEMA_V7 }
 ] as const;
 
 export function migrateDailyReflectionSchema(database: Database.Database) {

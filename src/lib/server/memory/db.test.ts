@@ -36,6 +36,12 @@ describe("memory database", () => {
     const dcRelationshipLinkColumns = database
       .prepare("PRAGMA table_info(dc_person_relationship_links)")
       .all() as Array<{ name: string }>;
+    const dailyReflectionPublicationColumns = database
+      .prepare("PRAGMA table_info(memory_daily_reflection_publications)")
+      .all() as Array<{ name: string }>;
+    const dailyReflectionReceiptColumns = database
+      .prepare("PRAGMA table_info(memory_daily_reflection_candidate_receipts)")
+      .all() as Array<{ name: string }>;
 
     expect(tables.map((table) => table.name)).toEqual(
       expect.arrayContaining([
@@ -102,8 +108,21 @@ describe("memory database", () => {
       { version: 10 },
       { version: 11 },
       { version: 12 },
-      { version: 13 }
+      { version: 13 },
+      { version: 14 }
     ]);
+    expect(dailyReflectionPublicationColumns.map((column) => column.name)).toEqual(
+      expect.arrayContaining([
+        "contract_version",
+        "save_intent",
+        "input_adapter",
+        "capture_purpose",
+        "recording_date"
+      ])
+    );
+    expect(dailyReflectionReceiptColumns.map((column) => column.name)).toEqual(
+      expect.arrayContaining(["candidate_kind", "action_claimed"])
+    );
     expect(dcRelationshipLinkColumns.map((column) => column.name)).toContain("relationship_epoch");
     expect(database.pragma("foreign_keys", { simple: true })).toBe(1);
 

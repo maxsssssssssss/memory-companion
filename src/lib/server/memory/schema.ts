@@ -1,6 +1,6 @@
 import type Database from "better-sqlite3";
 
-export const MEMORY_SCHEMA_VERSION = 13;
+export const MEMORY_SCHEMA_VERSION = 14;
 
 const MEMORY_SCHEMA_V1 = `
   CREATE TABLE memory_items (
@@ -1007,6 +1007,52 @@ const MEMORY_SCHEMA_V13 = `
   END;
 `;
 
+const MEMORY_SCHEMA_V14 = `
+  ALTER TABLE memory_daily_reflection_publications
+    ADD COLUMN contract_version INTEGER NOT NULL DEFAULT 1
+      CHECK (contract_version IN (1, 2));
+  ALTER TABLE memory_daily_reflection_publications
+    ADD COLUMN save_intent TEXT NOT NULL DEFAULT 'retain_selected'
+      CHECK (save_intent = 'retain_selected');
+  ALTER TABLE memory_daily_reflection_publications
+    ADD COLUMN input_adapter TEXT CHECK (
+      input_adapter IS NULL OR input_adapter IN ('file_picker', 'browser_recorder', 'toy_sync')
+    );
+  ALTER TABLE memory_daily_reflection_publications
+    ADD COLUMN capture_purpose TEXT CHECK (
+      capture_purpose IS NULL OR capture_purpose = 'inspiration_capture'
+    );
+  ALTER TABLE memory_daily_reflection_publications ADD COLUMN recording_date TEXT;
+
+  ALTER TABLE memory_daily_reflection_candidate_receipts
+    ADD COLUMN candidate_kind TEXT CHECK (
+      candidate_kind IS NULL OR candidate_kind IN (
+        'insight', 'open_question', 'decision', 'user_action'
+      )
+    );
+  ALTER TABLE memory_daily_reflection_candidate_receipts
+    ADD COLUMN action_claimed INTEGER CHECK (
+      action_claimed IS NULL OR action_claimed IN (0, 1)
+    );
+
+  CREATE TRIGGER memory_daily_reflection_v2_publication_contract_insert
+  BEFORE INSERT ON memory_daily_reflection_publications
+  WHEN (
+    NEW.contract_version = 2 AND (
+      NEW.save_intent <> 'retain_selected' OR NEW.input_adapter IS NULL
+      OR NEW.capture_purpose IS NULL OR NEW.recording_date IS NULL
+    )
+  ) OR (
+    NEW.contract_version = 1 AND (
+      NEW.input_adapter IS NOT NULL OR NEW.capture_purpose IS NOT NULL
+      OR NEW.recording_date IS NOT NULL
+    )
+  )
+  BEGIN
+    SELECT RAISE(ABORT, 'daily_reflection_publication_contract_mismatch');
+  END;
+`;
+
 const MIGRATIONS = [
   { version: 1, sql: MEMORY_SCHEMA_V1 },
   { version: 2, sql: MEMORY_SCHEMA_V2 },
@@ -1020,7 +1066,8 @@ const MIGRATIONS = [
   { version: 10, sql: MEMORY_SCHEMA_V10 },
   { version: 11, sql: MEMORY_SCHEMA_V11 },
   { version: 12, sql: MEMORY_SCHEMA_V12 },
-  { version: 13, sql: MEMORY_SCHEMA_V13 }
+  { version: 13, sql: MEMORY_SCHEMA_V13 },
+  { version: 14, sql: MEMORY_SCHEMA_V14 }
 ] as const;
 
 export function migrateMemorySchema(database: Database.Database) {

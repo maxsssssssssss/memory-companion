@@ -21,7 +21,7 @@ describe("Daily Reflection state machine", () => {
       transcribing: ["extracting", "failed", "cancelled", "deleted"],
       extracting: ["review_pending", "failed", "cancelled", "deleted"],
       review_pending: ["confirmation_ready", "cancelled", "deleted"],
-      confirmation_ready: ["admitting", "admission_failed", "deleted"],
+      confirmation_ready: ["admitting", "completed", "admission_failed", "deleted"],
       admitting: ["completed", "admission_failed", "deleted"],
       completed: ["deleted"],
       admission_failed: ["admitting", "deleted"],

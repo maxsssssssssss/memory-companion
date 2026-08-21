@@ -1,6 +1,7 @@
 import { z } from "zod";
 
 export const DAILY_REFLECTION_PROCESSING_PLAN_VERSION = 1 as const;
+export const DAILY_REFLECTION_V2_CONTRACT_VERSION = 2 as const;
 
 export const DailyReflectionIdSchema = z.string().trim().min(1).max(512);
 export const DailyReflectionVersionSchema = z.number().int().nonnegative();
@@ -8,6 +9,24 @@ export const DailyReflectionVersionSchema = z.number().int().nonnegative();
 export const InputMethodSchema = z.enum([
   "file_upload",
   "browser_recording"
+]);
+
+export const DailyReflectionV2InputAdapterSchema = z.enum([
+  "file_picker",
+  "browser_recorder",
+  "toy_sync"
+]);
+
+export const DailyReflectionV2SourceOriginSchema = z.enum([
+  "user_reflection",
+  "direct_conversation"
+]);
+
+export const DailyReflectionV2CapturePurposeSchema = z.literal("inspiration_capture");
+
+export const DailyReflectionSaveIntentSchema = z.enum([
+  "recap_only",
+  "retain_selected"
 ]);
 
 export const SourceOriginSchema = z.enum([
@@ -66,6 +85,22 @@ export const CandidateKindSchema = z.enum([
   "summary"
 ]);
 
+export const CandidateKindV2Schema = z.enum([
+  "insight",
+  "open_question",
+  "decision",
+  "user_action"
+]);
+
+export function legacyCandidateKindForV2(input: {
+  candidateKind: z.infer<typeof CandidateKindV2Schema>;
+  actionClaimed: boolean;
+}): z.infer<typeof CandidateKindSchema> {
+  if (input.candidateKind === "open_question") return "question";
+  if (input.candidateKind === "user_action" && input.actionClaimed) return "commitment";
+  return "summary";
+}
+
 export const ProcessingPlanSchema = z.object({
   planVersion: z.literal(DAILY_REFLECTION_PROCESSING_PLAN_VERSION),
   reflectionId: DailyReflectionIdSchema,
@@ -103,7 +138,7 @@ export const LegacyDailyReflectionSchema = DailyReflectionSchema
     sourceOrigin: normalizeLegacySourceOrigin(reflection.sourceOrigin)
   }));
 
-export const CandidateSchema = z.object({
+export const CandidateV1Schema = z.object({
   id: DailyReflectionIdSchema,
   reflectionId: DailyReflectionIdSchema,
   ordinal: z.number().int().nonnegative(),
@@ -143,6 +178,58 @@ export const CandidateSchema = z.object({
   }
 });
 
+export const CandidateV2Schema = z.object({
+  contractVersion: z.literal(DAILY_REFLECTION_V2_CONTRACT_VERSION),
+  id: DailyReflectionIdSchema,
+  reflectionId: DailyReflectionIdSchema,
+  ordinal: z.number().int().nonnegative(),
+  proposedText: z.string().trim().min(1).max(20_000),
+  userText: z.string().trim().min(1).max(20_000).nullable(),
+  status: CandidateStatusSchema,
+  candidateKind: CandidateKindV2Schema,
+  candidateType: CandidateKindSchema,
+  evidenceIds: z.array(DailyReflectionIdSchema).max(64),
+  sourceSegmentIds: z.array(DailyReflectionIdSchema).max(64),
+  confidence: z.number().min(0).max(1),
+  caution: z.string().trim().min(1).max(4_000),
+  actionClaimed: z.boolean(),
+  subjectPersonId: z.null(),
+  subjectConfirmed: z.literal(false),
+  version: DailyReflectionVersionSchema,
+  createdAt: z.string().datetime(),
+  updatedAt: z.string().datetime()
+}).strict().superRefine((candidate, context) => {
+  if (
+    candidate.evidenceIds.length !== candidate.sourceSegmentIds.length
+    || candidate.evidenceIds.some(
+      (evidenceId, index) => evidenceId !== candidate.sourceSegmentIds[index]
+    )
+    || new Set(candidate.evidenceIds).size !== candidate.evidenceIds.length
+  ) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["evidenceIds"],
+      message: "V2 evidenceIds must exactly match unique sourceSegmentIds"
+    });
+  }
+  if (candidate.candidateType !== legacyCandidateKindForV2(candidate)) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["candidateType"],
+      message: "candidateType must be the deterministic V2 compatibility projection"
+    });
+  }
+  if (candidate.candidateKind !== "user_action" && candidate.actionClaimed) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["actionClaimed"],
+      message: "only user_action candidates may claim an action"
+    });
+  }
+});
+
+export const CandidateSchema = z.union([CandidateV1Schema, CandidateV2Schema]);
+
 export const ReflectionConfirmationEvidenceSnapshotSchema = z.object({
   sourceSegmentId: DailyReflectionIdSchema,
   uploadId: DailyReflectionIdSchema,
@@ -154,7 +241,7 @@ export const ReflectionConfirmationEvidenceSnapshotSchema = z.object({
   message: "evidence endSeconds must be greater than startSeconds"
 });
 
-export const ReflectionConfirmationCandidateSnapshotSchema = z.object({
+export const ReflectionConfirmationCandidateSnapshotV1Schema = z.object({
   candidateId: DailyReflectionIdSchema,
   proposedText: z.string().trim().min(1).max(20_000),
   userText: z.string().trim().min(1).max(4_000).nullable(),
@@ -200,7 +287,77 @@ export const ReflectionConfirmationCandidateSnapshotSchema = z.object({
   }
 });
 
-export const ReflectionConfirmationSchema = z.object({
+export const ReflectionConfirmationCandidateSnapshotV2Schema = z.object({
+  contractVersion: z.literal(DAILY_REFLECTION_V2_CONTRACT_VERSION),
+  candidateId: DailyReflectionIdSchema,
+  proposedText: z.string().trim().min(1).max(20_000),
+  userText: z.string().trim().min(1).max(4_000).nullable(),
+  finalText: z.string().trim().min(1).max(20_000),
+  status: z.enum(["kept", "excluded"]),
+  candidateKind: CandidateKindV2Schema,
+  candidateType: CandidateKindSchema,
+  evidenceIds: z.array(DailyReflectionIdSchema).max(64),
+  sourceSegmentIds: z.array(DailyReflectionIdSchema).max(64),
+  evidenceSnapshots: z.array(ReflectionConfirmationEvidenceSnapshotSchema).max(64),
+  confidence: z.number().min(0).max(1),
+  caution: z.string().trim().min(1).max(4_000),
+  actionClaimed: z.boolean(),
+  subjectPersonId: z.null()
+}).strict().superRefine((candidate, context) => {
+  if (
+    candidate.evidenceIds.length !== candidate.sourceSegmentIds.length
+    || candidate.evidenceIds.some(
+      (evidenceId, index) => evidenceId !== candidate.sourceSegmentIds[index]
+    )
+    || new Set(candidate.evidenceIds).size !== candidate.evidenceIds.length
+  ) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["evidenceIds"],
+      message: "V2 evidenceIds must exactly match unique sourceSegmentIds"
+    });
+  }
+  if (
+    candidate.evidenceSnapshots.length !== candidate.evidenceIds.length
+    || candidate.evidenceSnapshots.some(
+      (evidence, index) => evidence.sourceSegmentId !== candidate.evidenceIds[index]
+    )
+  ) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["evidenceSnapshots"],
+      message: "V2 evidenceSnapshots must exactly cover evidenceIds in order"
+    });
+  }
+  if (candidate.candidateType !== legacyCandidateKindForV2(candidate)) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["candidateType"],
+      message: "candidateType must be the deterministic V2 compatibility projection"
+    });
+  }
+  if (candidate.finalText !== (candidate.userText ?? candidate.proposedText)) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["finalText"],
+      message: "finalText must be derived from userText or proposedText"
+    });
+  }
+  if (candidate.candidateKind !== "user_action" && candidate.actionClaimed) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["actionClaimed"],
+      message: "only user_action candidates may claim an action"
+    });
+  }
+});
+
+export const ReflectionConfirmationCandidateSnapshotSchema = z.union([
+  ReflectionConfirmationCandidateSnapshotV1Schema,
+  ReflectionConfirmationCandidateSnapshotV2Schema
+]);
+
+export const ReflectionConfirmationV1Schema = z.object({
   id: DailyReflectionIdSchema,
   reflectionId: DailyReflectionIdSchema,
   accountId: DailyReflectionIdSchema,
@@ -210,7 +367,7 @@ export const ReflectionConfirmationSchema = z.object({
   sourceOrigin: SourceOriginSchema,
   inputMethod: InputMethodSchema,
   processingProfile: ProcessingProfileSchema,
-  candidateSnapshots: z.array(ReflectionConfirmationCandidateSnapshotSchema),
+  candidateSnapshots: z.array(ReflectionConfirmationCandidateSnapshotV1Schema),
   createdAt: z.string().datetime()
 }).strict().superRefine((confirmation, context) => {
   for (const [candidateIndex, candidate] of confirmation.candidateSnapshots.entries()) {
@@ -225,6 +382,54 @@ export const ReflectionConfirmationSchema = z.object({
     }
   }
 });
+
+export const ReflectionConfirmationV2Schema = z.object({
+  contractVersion: z.literal(DAILY_REFLECTION_V2_CONTRACT_VERSION),
+  id: DailyReflectionIdSchema,
+  reflectionId: DailyReflectionIdSchema,
+  accountId: DailyReflectionIdSchema,
+  fingerprint: z.string().regex(/^[a-f0-9]{64}$/u),
+  requestFingerprint: z.string().regex(/^[a-f0-9]{64}$/u),
+  idempotencyKey: z.string().trim().min(1).max(512),
+  operationKey: z.string().trim().min(1).max(512),
+  sourceOrigin: DailyReflectionV2SourceOriginSchema,
+  inputMethod: InputMethodSchema,
+  processingProfile: ProcessingProfileSchema,
+  inputAdapter: DailyReflectionV2InputAdapterSchema,
+  capturePurpose: DailyReflectionV2CapturePurposeSchema,
+  recordingDate: z.string().date(),
+  saveIntent: DailyReflectionSaveIntentSchema,
+  candidateSnapshots: z.array(ReflectionConfirmationCandidateSnapshotV2Schema).min(1).max(3),
+  createdAt: z.string().datetime()
+}).strict().superRefine((confirmation, context) => {
+  for (const [candidateIndex, candidate] of confirmation.candidateSnapshots.entries()) {
+    for (const [evidenceIndex, evidence] of candidate.evidenceSnapshots.entries()) {
+      if (evidence.effectiveOrigin !== confirmation.sourceOrigin) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["candidateSnapshots", candidateIndex, "evidenceSnapshots", evidenceIndex],
+          message: "confirmation Evidence origin must match sourceOrigin"
+        });
+      }
+    }
+    if (
+      confirmation.saveIntent === "retain_selected"
+      && candidate.status === "kept"
+      && candidate.evidenceIds.length === 0
+    ) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["candidateSnapshots", candidateIndex, "evidenceIds"],
+        message: "retained V2 candidates require canonical Evidence"
+      });
+    }
+  }
+});
+
+export const ReflectionConfirmationSchema = z.union([
+  ReflectionConfirmationV1Schema,
+  ReflectionConfirmationV2Schema
+]);
 
 export const CandidateAdmissionResultStatusSchema = z.enum([
   "admitted",
@@ -302,6 +507,20 @@ export const CreateDailyReflectionInputSchema = z.object({
   reviewPolicy: ReviewPolicySchema.optional()
 }).strict();
 
+export const DailyReflectionV2InputSchema = z.object({
+  operationKey: z.string().trim().min(1).max(512),
+  inputAdapter: DailyReflectionV2InputAdapterSchema,
+  sourceOrigin: DailyReflectionV2SourceOriginSchema,
+  capturePurpose: DailyReflectionV2CapturePurposeSchema,
+  recordingDate: z.string().date()
+}).strict();
+
+export const CreateDailyReflectionV2InputSchema = DailyReflectionV2InputSchema.extend({
+  id: DailyReflectionIdSchema.optional(),
+  accountId: DailyReflectionIdSchema,
+  uploadId: DailyReflectionIdSchema.nullable().optional()
+}).strict();
+
 export const PendingCandidateInputSchema = z.object({
   id: DailyReflectionIdSchema.optional(),
   ordinal: z.number().int().nonnegative(),
@@ -314,6 +533,32 @@ export const PendingCandidateInputSchema = z.object({
       code: z.ZodIssueCode.custom,
       path: ["sourceSegmentIds"],
       message: "sourceSegmentIds must be unique"
+    });
+  }
+});
+
+export const PendingCandidateV2InputSchema = z.object({
+  id: DailyReflectionIdSchema.optional(),
+  ordinal: z.number().int().nonnegative(),
+  candidateKind: CandidateKindV2Schema,
+  proposedText: z.string().trim().min(1).max(20_000),
+  evidenceIds: z.array(DailyReflectionIdSchema).max(64),
+  confidence: z.number().min(0).max(1),
+  caution: z.string().trim().min(1).max(4_000),
+  actionClaimed: z.boolean()
+}).strict().superRefine((candidate, context) => {
+  if (new Set(candidate.evidenceIds).size !== candidate.evidenceIds.length) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["evidenceIds"],
+      message: "evidenceIds must be unique"
+    });
+  }
+  if (candidate.candidateKind !== "user_action" && candidate.actionClaimed) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["actionClaimed"],
+      message: "only user_action candidates may claim an action"
     });
   }
 });
@@ -339,14 +584,20 @@ export type DailyReflection = z.infer<typeof DailyReflectionSchema>;
 export type LegacyDailyReflection = z.infer<typeof LegacyDailyReflectionSchema>;
 export type CandidateStatus = z.infer<typeof CandidateStatusSchema>;
 export type CandidateKind = z.infer<typeof CandidateKindSchema>;
+export type CandidateKindV2 = z.infer<typeof CandidateKindV2Schema>;
 export type Candidate = z.infer<typeof CandidateSchema>;
+export type CandidateV2 = z.infer<typeof CandidateV2Schema>;
 export type ReflectionConfirmationCandidateSnapshot = z.infer<
   typeof ReflectionConfirmationCandidateSnapshotSchema
+>;
+export type ReflectionConfirmationCandidateSnapshotV2 = z.infer<
+  typeof ReflectionConfirmationCandidateSnapshotV2Schema
 >;
 export type ReflectionConfirmationEvidenceSnapshot = z.infer<
   typeof ReflectionConfirmationEvidenceSnapshotSchema
 >;
 export type ReflectionConfirmation = z.infer<typeof ReflectionConfirmationSchema>;
+export type ReflectionConfirmationV2 = z.infer<typeof ReflectionConfirmationV2Schema>;
 export type CandidateAdmissionResultStatus = z.infer<
   typeof CandidateAdmissionResultStatusSchema
 >;
@@ -358,4 +609,9 @@ export type DailyReflectionAdmissionOperation = z.infer<
   typeof DailyReflectionAdmissionOperationSchema
 >;
 export type CreateDailyReflectionInput = z.infer<typeof CreateDailyReflectionInputSchema>;
+export type DailyReflectionV2Input = z.infer<typeof DailyReflectionV2InputSchema>;
+export type CreateDailyReflectionV2Input = z.infer<
+  typeof CreateDailyReflectionV2InputSchema
+>;
 export type PendingCandidateInput = z.infer<typeof PendingCandidateInputSchema>;
+export type PendingCandidateV2Input = z.infer<typeof PendingCandidateV2InputSchema>;

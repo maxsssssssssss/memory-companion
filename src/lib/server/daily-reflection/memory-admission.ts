@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { z } from "zod";
 
 import {
+  ReflectionConfirmationCandidateSnapshotV2Schema,
   ReflectionConfirmationSchema,
   type CandidateAdmissionResult,
   type ReflectionConfirmationCandidateSnapshot
@@ -93,6 +94,7 @@ function memoryForCandidate(input: {
   confirmationCreatedAt: string;
   upload: AudioUpload;
   candidate: ReflectionConfirmationCandidateSnapshot;
+  memoryType: "event" | "commitment" | "question" | "preference" | "summary";
   segments: TranscriptSegment[];
 }) {
   const memoryId = stableId(
@@ -112,7 +114,7 @@ function memoryForCandidate(input: {
   }));
   return {
     id: memoryId,
-    type: input.candidate.candidateType,
+    type: input.memoryType,
     title: titleFor(input.candidate.finalText),
     summary: input.candidate.finalText.slice(0, 4_000),
     importance: 0.5,
@@ -169,6 +171,12 @@ function canonicalAssets(input: {
   if (confirmation.data.sourceOrigin !== "user_reflection") {
     throw new DailyReflectionMemoryAdmissionError("daily_reflection_origin_not_supported");
   }
+  if (
+    "contractVersion" in confirmation.data
+    && confirmation.data.saveIntent !== "retain_selected"
+  ) {
+    throw new DailyReflectionMemoryAdmissionError("daily_reflection_confirmation_invalid");
+  }
   const kept = confirmation.data.candidateSnapshots.filter(
     (candidate) => candidate.status === "kept"
   );
@@ -212,6 +220,10 @@ function canonicalAssets(input: {
     || segments.data.length === 0
     || new Set(segments.data.map((segment) => segment.id)).size !== segments.data.length
     || segments.data.some((segment) => segment.uploadId !== upload.data.id)
+    || (
+      "contractVersion" in confirmation.data
+      && confirmation.data.recordingDate !== upload.data.recordingDate
+    )
   ) {
     throw new DailyReflectionMemoryAdmissionError(
       "daily_reflection_canonical_evidence_invalid"
@@ -270,6 +282,14 @@ export function createDailyReflectionMemoryAdmissionService(
     const store = canonicalStore({ upload: canonical.upload, segments: canonical.segments });
     const candidates: DailyReflectionPublicationCandidate[] = [];
     for (const candidate of canonical.kept) {
+      const parsedV2Candidate = ReflectionConfirmationCandidateSnapshotV2Schema
+        .safeParse(candidate);
+      const v2Candidate = parsedV2Candidate.success ? parsedV2Candidate.data : null;
+      const memoryType = v2Candidate?.candidateKind === "open_question"
+        ? "question" as const
+        : v2Candidate?.candidateKind === "user_action" && v2Candidate.actionClaimed
+          ? "commitment" as const
+          : v2Candidate ? "summary" as const : candidate.candidateType;
       const evidenceSegments = candidate.sourceSegmentIds.map((id) => segmentById.get(id)!);
       const memory = memoryForCandidate({
         accountId: input.accountId,
@@ -277,6 +297,7 @@ export function createDailyReflectionMemoryAdmissionService(
         confirmationCreatedAt: canonical.confirmation.createdAt,
         upload: canonical.upload,
         candidate,
+        memoryType,
         segments: evidenceSegments
       });
       const operationKey = stableId(
@@ -298,7 +319,14 @@ export function createDailyReflectionMemoryAdmissionService(
         sourceSegmentCount: evidenceSegments.length
       });
       let reasonCode: string | null = null;
-      if (ownerAttribution.owner.type !== "known_identity") {
+      if (
+        v2Candidate?.candidateKind === "user_action"
+        && !v2Candidate.actionClaimed
+      ) {
+        reasonCode = "action_not_claimed";
+      } else if (v2Candidate && v2Candidate.subjectPersonId !== null) {
+        reasonCode = "v2_subject_not_supported";
+      } else if (ownerAttribution.owner.type !== "known_identity") {
         reasonCode = "verified_owner_required";
       } else if (!admission.shouldPersist) {
         reasonCode = admission.reasons[0] ?? "memory_admission_rejected";
@@ -327,6 +355,10 @@ export function createDailyReflectionMemoryAdmissionService(
         : [];
       candidates.push({
         candidateId: candidate.candidateId,
+        ...(v2Candidate ? {
+          candidateKind: v2Candidate.candidateKind,
+          actionClaimed: v2Candidate.actionClaimed
+        } : {}),
         operationKey,
         status: admitted ? "admitted" : "rejected",
         reasonCode,
@@ -365,7 +397,7 @@ export function createDailyReflectionMemoryAdmissionService(
     }
 
     const payloadDigest = digest({
-      version: 1,
+      version: "contractVersion" in canonical.confirmation ? 2 : 1,
       accountId: input.accountId,
       reflectionId: input.reflectionId,
       confirmationId: canonical.confirmation.id,
@@ -395,6 +427,13 @@ export function createDailyReflectionMemoryAdmissionService(
       confirmationFingerprint: canonical.confirmation.fingerprint,
       uploadId: canonical.upload.id,
       sourceOrigin: "user_reflection",
+      ...("contractVersion" in canonical.confirmation ? {
+        contractVersion: 2 as const,
+        saveIntent: "retain_selected" as const,
+        inputAdapter: canonical.confirmation.inputAdapter,
+        capturePurpose: canonical.confirmation.capturePurpose,
+        recordingDate: canonical.confirmation.recordingDate
+      } : {}),
       payloadDigest,
       sourceSegments: canonical.segments,
       candidates,

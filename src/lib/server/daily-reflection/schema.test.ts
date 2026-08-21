@@ -158,7 +158,8 @@ describe("Daily Reflection SQLite schema", () => {
           { version: 3, count: 1 },
           { version: 4, count: 1 },
           { version: 5, count: 1 },
-          { version: 6, count: 1 }
+          { version: 6, count: 1 },
+          { version: 7, count: 1 }
         ]);
       }
       expect((web.prepare("PRAGMA table_info(dr_reflections)").all() as Array<{
@@ -204,7 +205,8 @@ describe("Daily Reflection SQLite schema", () => {
         { version: 3 },
         { version: 4 },
         { version: 5 },
-        { version: 6 }
+        { version: 6 },
+        { version: 7 }
       ]);
       expect((first.prepare("PRAGMA table_info(dr_reflections)").all() as Array<{
         name: string;
@@ -222,6 +224,8 @@ describe("Daily Reflection SQLite schema", () => {
         { name: "dr_candidate_sources" },
         { name: "dr_processing_plans" },
         { name: "dr_asset_publications" },
+        { name: "dr_v2_reflection_inputs" },
+        { name: "dr_candidate_v2_metadata" },
         { name: "dr_schema_migrations" }
       ]));
       first.prepare(`
@@ -244,14 +248,14 @@ describe("Daily Reflection SQLite schema", () => {
     try {
       expect(reopened.prepare(
         "SELECT COUNT(*) AS count FROM dr_schema_migrations"
-      ).get()).toEqual({ count: 6 });
+      ).get()).toEqual({ count: 7 });
       expect(reopened.prepare(
         "SELECT source_origin FROM dr_reflections WHERE id = 'reflection_reopen'"
       ).get()).toEqual({ source_origin: "unknown" });
       migrateDailyReflectionSchema(reopened);
       expect(reopened.prepare(
         "SELECT COUNT(*) AS count FROM dr_schema_migrations"
-      ).get()).toEqual({ count: 6 });
+      ).get()).toEqual({ count: 7 });
       expect(reopened.pragma("foreign_key_check")).toEqual([]);
       expect(reopened.pragma("integrity_check", { simple: true })).toBe("ok");
     } finally {
@@ -279,7 +283,8 @@ describe("Daily Reflection SQLite schema", () => {
         { version: 3 },
         { version: 4 },
         { version: 5 },
-        { version: 6 }
+        { version: 6 },
+        { version: 7 }
       ]);
       expect(database.prepare(`
         SELECT lease_owner, lease_until, attempt_version, upload_fingerprint
@@ -355,6 +360,61 @@ describe("Daily Reflection SQLite schema", () => {
       expect(database.prepare(
         "SELECT COUNT(*) AS count FROM dr_candidates"
       ).get()).toEqual({ count: 0 });
+    } finally {
+      database.close();
+    }
+  });
+
+  it("adds V2 sidecars without weakening candidate scope or confirmation shape", () => {
+    const database = openDailyReflectionDatabase({ filePath: ":memory:" });
+    try {
+      const insertReflection = database.prepare(`
+        INSERT INTO dr_reflections (
+          id, account_id, upload_id, input_method, source_origin,
+          processing_profile, ingestion_context, status, version,
+          idempotency_key, create_fingerprint, error_code, error_message,
+          created_at, updated_at
+        ) VALUES (?, 'account_1', ?, 'file_upload', 'user_reflection',
+          'full_recording', 'daily_reflection', 'extracting', 0,
+          NULL, ?, NULL, NULL, ?, ?)
+      `);
+      insertReflection.run("reflection_v2_a", "upload_v2_a", "fingerprint_a", timestamp, timestamp);
+      insertReflection.run("reflection_v2_b", "upload_v2_b", "fingerprint_b", timestamp, timestamp);
+      database.prepare(`
+        INSERT INTO dr_candidates (
+          id, account_id, reflection_id, ordinal, proposed_text, user_text,
+          status, candidate_type, subject_person_id, subject_confirmed,
+          version, created_at, updated_at
+        ) VALUES ('candidate_v2', 'account_1', 'reflection_v2_a', 0, 'text', NULL,
+          'pending', 'summary', NULL, 0, 0, ?, ?)
+      `).run(timestamp, timestamp);
+
+      const insertMetadata = database.prepare(`
+        INSERT INTO dr_candidate_v2_metadata (
+          account_id, reflection_id, candidate_id, candidate_kind,
+          evidence_ids_json, confidence, caution, action_claimed,
+          created_at, updated_at
+        ) VALUES ('account_1', ?, 'candidate_v2', 'insight', '[]', 0.8,
+          'user reflection', 0, ?, ?)
+      `);
+      expect(() => insertMetadata.run("reflection_v2_b", timestamp, timestamp))
+        .toThrow(/daily_reflection_v2_candidate_scope_mismatch/u);
+      expect(() => insertMetadata.run("reflection_v2_a", timestamp, timestamp))
+        .not.toThrow();
+
+      expect(() => database.prepare(`
+        INSERT INTO dr_reflection_confirmations (
+          id, account_id, reflection_id, idempotency_key, request_fingerprint,
+          confirmation_fingerprint, source_origin, input_method,
+          processing_profile, candidate_snapshots_json, created_at,
+          contract_version, save_intent
+        ) VALUES ('confirmation_invalid_v2', 'account_1', 'reflection_v2_a',
+          'operation_invalid_v2', ?, ?, 'user_reflection', 'file_upload',
+          'full_recording', '[]', ?, 2, 'recap_only')
+      `).run("a".repeat(64), "b".repeat(64), timestamp))
+        .toThrow(/daily_reflection_confirmation_contract_mismatch/u);
+      expect(database.pragma("foreign_key_check")).toEqual([]);
+      expect(database.pragma("integrity_check", { simple: true })).toBe("ok");
     } finally {
       database.close();
     }

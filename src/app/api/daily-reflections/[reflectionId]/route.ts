@@ -133,6 +133,13 @@ export async function GET(
 
   const segmentById = new Map(segments.map((segment) => [segment.id, segment] as const));
   if (segmentById.size !== segments.length) invalidPublishedAsset = true;
+  const evidenceFreeV2Recap = view.confirmation !== null
+    && "contractVersion" in view.confirmation
+    && view.confirmation.contractVersion === 2
+    && view.confirmation.saveIntent === "recap_only"
+    && view.confirmation.candidateSnapshots.every(
+      (candidate) => candidate.evidenceIds.length === 0
+    );
   if (
     invalidPublishedAsset
     || (
@@ -143,7 +150,7 @@ export async function GET(
         || view.reflection.status === "completed"
         || view.reflection.status === "admission_failed"
       )
-      && (!plan || !upload || segments.length === 0)
+      && (!plan || !upload || (segments.length === 0 && !evidenceFreeV2Recap))
     )
     || (
       view.candidates.length > 0
