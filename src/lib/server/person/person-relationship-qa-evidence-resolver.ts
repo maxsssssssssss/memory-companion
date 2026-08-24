@@ -253,7 +253,7 @@ function retainedUploadIsCurrent(input: {
     FROM memory_evidence_provenance p
     INNER JOIN memory_evidence e ON e.id = p.memory_evidence_id
     INNER JOIN memory_items m ON m.id = e.memory_id AND m.user_id = p.user_id
-    WHERE p.user_id = ? AND p.upload_id = ?
+    WHERE p.user_id = ? AND p.upload_id = ? AND m.status = 'active'
     ORDER BY p.memory_evidence_id
   `).all(input.accountId, input.uploadId) as Array<{
     memory_evidence_id: string;

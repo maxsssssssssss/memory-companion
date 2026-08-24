@@ -1963,10 +1963,10 @@ describe("API routes", () => {
     );
   });
 
-  it("answers current day qa from browser-provided context without persisting server history", async () => {
+  it("answers current-upload QA from an exact browser context without persisting server history", async () => {
     answerQuestionWithAIMock.mockResolvedValueOnce({
       id: "answer_day_context",
-      uploadId: "day_2026-06-03",
+      uploadId: "upload_morning",
       question: "这一天有什么重点？",
       answer: "这一天上午确认上线节奏，晚间要补齐客户材料。[E1]",
       citedSegmentIds: ["seg_context_1"],
@@ -2041,7 +2041,7 @@ describe("API routes", () => {
     const request = new Request("http://localhost/api/days/context/qa", {
       method: "POST",
       body: JSON.stringify({
-        uploadId: "day_2026-06-03",
+        uploadId: "upload_morning",
         question: "这一天有什么重点？",
         conversation,
         promptPresetId: "date",
@@ -2060,7 +2060,7 @@ describe("API routes", () => {
     expect(response.status).toBe(200);
     expect(answerQuestionWithAIMock).toHaveBeenCalledWith({
       userId: "user_default",
-      uploadId: "day_2026-06-03",
+      uploadId: "upload_morning",
       question: "这一天有什么重点？",
       scope: "current",
       segments: [segment],
@@ -2068,6 +2068,7 @@ describe("API routes", () => {
       semanticSegments: [semanticSegment],
       briefItems: [briefItem],
       relationshipSignals: [relationshipSignal],
+      retrievalSourceSegmentIds: ["seg_context_1"],
       qaPromptInstruction: "场景可能是约会或亲密关系沟通。优先关注双方表达、互动节奏、边界、期待、没说清的地方和让人舒服或不舒服的细节；避免操控性建议，不做人格或心理诊断。",
       settingsStore: storeMock,
       conversation
@@ -2076,7 +2077,7 @@ describe("API routes", () => {
     expect(storeMock.read).not.toHaveBeenCalled();
     await expect(response.json()).resolves.toEqual({
       id: "answer_day_context",
-      uploadId: "day_2026-06-03",
+      uploadId: "upload_morning",
       question: "这一天有什么重点？",
       answer: "这一天上午确认上线节奏，晚间要补齐客户材料。[E1]",
       citedSegmentIds: ["seg_context_1"],
@@ -2087,7 +2088,7 @@ describe("API routes", () => {
   it("ignores malformed relationship signals in browser-provided context", async () => {
     answerQuestionWithAIMock.mockResolvedValueOnce({
       id: "answer_tolerant_context",
-      uploadId: "day_2026-06-03",
+      uploadId: "upload_tolerant_context",
       question: "What should I review?",
       answer: "Review the cited exchange. [E1]",
       citedSegmentIds: ["seg_tolerant_context"],
@@ -2114,7 +2115,7 @@ describe("API routes", () => {
     const request = new Request("http://localhost/api/days/context/qa", {
       method: "POST",
       body: JSON.stringify({
-        uploadId: "day_2026-06-03",
+        uploadId: "upload_tolerant_context",
         question: "What should I review?",
         segments: [segment],
         audioInsights: [],
@@ -2130,9 +2131,54 @@ describe("API routes", () => {
     expect(response.status).toBe(200);
     expect(answerQuestionWithAIMock).toHaveBeenCalledWith(
       expect.objectContaining({
-        relationshipSignals: [validSignal]
+        relationshipSignals: [validSignal],
+        retrievalSourceSegmentIds: [segment.id]
       })
     );
+  });
+
+  it("rejects historical or cross-upload Evidence from current-upload QA", async () => {
+    const request = new Request("http://localhost/api/days/context/qa", {
+      method: "POST",
+      body: JSON.stringify({
+        uploadId: "upload_current",
+        scope: "current",
+        question: "这次相处提到了什么？",
+        segments: [{
+          id: "segment_current",
+          uploadId: "upload_current",
+          startSeconds: 0,
+          endSeconds: 5,
+          text: "这是本次相处。",
+          confidence: 0.9,
+          sceneLabels: ["unknown"],
+          valueLabels: []
+        }, {
+          id: "segment_historical_person_memory",
+          uploadId: "upload_historical",
+          startSeconds: 10,
+          endSeconds: 15,
+          text: "这是历史人物记忆，不属于本次上传。",
+          confidence: 0.9,
+          sceneLabels: ["unknown"],
+          valueLabels: []
+        }],
+        audioInsights: [],
+        semanticSegments: [],
+        briefItems: [],
+        relationshipSignals: []
+      }),
+      headers: { "content-type": "application/json" }
+    });
+
+    const response = await postContextQa(request);
+
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toEqual({
+      error: "invalid_current_upload_context"
+    });
+    expect(answerQuestionWithAIMock).not.toHaveBeenCalled();
+    expect(retrieveMemoryIndexEvidenceMock).not.toHaveBeenCalled();
   });
 
   it("passes browser-provided week context scope through to AI QA", async () => {

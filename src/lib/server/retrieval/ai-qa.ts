@@ -132,6 +132,12 @@ export type AnswerQuestionWithAIInput = {
   onRetrievedEvidence?: (evidence: QaRetrievedEvidence[], retrievalMs: number) => unknown;
   /** Caller-owned hard boundary for scopes that must stay on canonical lexical retrieval. */
   disableHybridRetrieval?: boolean;
+  /**
+   * Server-owned exact source boundary shared by lexical and Hybrid retrieval.
+   * Candidates whose canonical source segments are not wholly contained here
+   * must never enter ranking or citation projection.
+   */
+  retrievalSourceSegmentIds?: readonly string[];
   /** Caller-owned fail-closed policy for a model/provider contract mismatch. */
   failClosedOnModelProviderMismatch?: boolean;
   /** Evaluation-only Provider usage observer. It must never alter answer generation. */
@@ -637,6 +643,25 @@ function canonicalQaEvidenceFromInput(
   ];
 }
 
+export function qaEvidenceMatchesRetrievalSourceBoundary(
+  input: Pick<AnswerQuestionWithAIInput, "retrievalSourceSegmentIds">,
+  evidence: Pick<QaRetrievedEvidence, "sourceSegmentIds">
+) {
+  if (!input.retrievalSourceSegmentIds) return true;
+  const allowed = new Set(
+    input.retrievalSourceSegmentIds.map((sourceId) => sourceId.trim()).filter(Boolean)
+  );
+  return evidence.sourceSegmentIds.length > 0
+    && evidence.sourceSegmentIds.every((sourceId) => allowed.has(sourceId));
+}
+
+function applyRetrievalSourceBoundary(
+  input: Pick<AnswerQuestionWithAIInput, "retrievalSourceSegmentIds">,
+  evidence: QaRetrievedEvidence[]
+) {
+  return evidence.filter((item) => qaEvidenceMatchesRetrievalSourceBoundary(input, item));
+}
+
 /**
  * Returns the existing Canonical Evidence pool before ranking and Top-16 selection.
  * Hybrid Retrieval uses this only in shadow/evaluation paths; QA continues to call
@@ -651,7 +676,10 @@ export function buildCanonicalQaEvidence(
     cards: input.relationshipSignals,
     segments: input.segments
   });
-  return canonicalQaEvidenceFromInput(input, relationshipEvidence);
+  return applyRetrievalSourceBoundary(
+    input,
+    canonicalQaEvidenceFromInput(input, relationshipEvidence)
+  );
 }
 
 export function buildCanonicalQaEvidenceCorpus(input: Pick<
@@ -772,7 +800,10 @@ export function retrieveQaEvidenceWithDiagnostics(
   });
   const relationshipContextBuildingMs = safeElapsedMs(relationshipStartedAt, now());
   const rerankingStartedAt = now();
-  const evidence = canonicalQaEvidenceFromInput(input, relationshipEvidence);
+  const evidence = applyRetrievalSourceBoundary(
+    input,
+    canonicalQaEvidenceFromInput(input, relationshipEvidence)
+  );
   const maxEvidenceEndSeconds = evidence.reduce((maximum, item) => Math.max(maximum, item.endSeconds), 0);
   const bestBySourceSet = new Map<string, RankedEvidenceCandidate>();
 

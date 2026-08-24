@@ -226,7 +226,7 @@ export function buildDateCompanionRelationshipQaInput(input: {
     semanticSegments: [],
     briefItems: context.briefItems,
     relationshipSignals: [],
-    disableHybridRetrieval: true,
+    retrievalSourceSegmentIds: context.eligibleSourceSegmentIds,
     failClosedOnModelProviderMismatch: true
   };
 }

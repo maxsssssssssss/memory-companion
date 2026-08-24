@@ -569,6 +569,39 @@ describe("answerQuestionWithAI", () => {
     });
   });
 
+  it("applies the caller-owned source allowlist before lexical ranking", () => {
+    const evidence = retrieveQaEvidence({
+      userId: "account_person",
+      uploadId: "person_confirmed",
+      question: "蓝色笔记本在哪里？",
+      relationshipScope: true,
+      segments: [
+        rawSegment({
+          id: "segment_person_allowed",
+          uploadId: "person_upload_old",
+          text: "蓝色笔记本在里斯本。"
+        }),
+        rawSegment({
+          id: "segment_other_person",
+          uploadId: "other_person_upload",
+          text: "另一个人的蓝色笔记本在马德里。"
+        })
+      ],
+      semanticSegments: [semanticSegment({
+        id: "semantic_other_person",
+        uploadId: "other_person_upload",
+        title: "其他人物的笔记本",
+        summary: "另一个人的蓝色笔记本在马德里。",
+        sourceSegmentIds: ["segment_other_person"]
+      })],
+      briefItems: [],
+      retrievalSourceSegmentIds: ["segment_person_allowed"]
+    });
+
+    expect(evidence.map((item) => item.id)).toEqual(["segment_person_allowed"]);
+    expect(JSON.stringify(evidence)).not.toContain("马德里");
+  });
+
   it("fails open to lexical evidence when phase31 lacks a trusted user id", async () => {
     getOpenAIClientRuntimeConfigMock.mockResolvedValue({ openRouterApiKey: "custom_key" });
     getQaModelPreferenceMock.mockResolvedValue("openai/gpt-5-mini");

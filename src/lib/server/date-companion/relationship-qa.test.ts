@@ -135,7 +135,7 @@ describe("Date Companion relationship QA Evidence allowlist", () => {
     expect(context.briefItems).toEqual([]);
   });
 
-  it("builds a canonical relationship input without Memory, Relationship Signals, or Hybrid", () => {
+  it("enables Hybrid only over the legacy relationship canonical source allowlist", () => {
     const qaInput = buildDateCompanionRelationshipQaInput({
       userId: "user_1",
       relationshipId: "relationship_1",
@@ -149,12 +149,13 @@ describe("Date Companion relationship QA Evidence allowlist", () => {
       userId: "user_1",
       uploadId: "relationship_1",
       relationshipScope: true,
-      disableHybridRetrieval: true,
+      retrievalSourceSegmentIds: ["segment_old"],
       failClosedOnModelProviderMismatch: true,
       relationshipSignals: [],
       audioInsights: [],
       semanticSegments: []
     });
+    expect(qaInput.disableHybridRetrieval).toBeUndefined();
     expect(qaInput.memoryContext).toBeUndefined();
     expect(qaInput.segments.map((item) => item.id)).toEqual(["segment_old"]);
   });

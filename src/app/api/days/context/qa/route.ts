@@ -46,6 +46,39 @@ const ContextQaBodySchema = z.object({
   relationshipSignals: z.array(z.unknown()).default([])
 });
 
+function currentUploadContextIsExact(input: {
+  uploadId: string;
+  segments: z.infer<typeof TranscriptSegmentSchema>[];
+  audioInsights: z.infer<typeof AudioInsightSchema>[];
+  semanticSegments: z.infer<typeof SemanticSegmentSchema>[];
+  briefItems: z.infer<typeof BriefItemSchema>[];
+  relationshipSignals: z.infer<typeof RelationshipSignalCardSchema>[];
+}) {
+  const segmentIds = input.segments.map((segment) => segment.id);
+  const allowedSourceIds = new Set(segmentIds);
+  const sourcesAreCurrent = (sourceIds: readonly string[]) =>
+    sourceIds.length > 0 && sourceIds.every((sourceId) => allowedSourceIds.has(sourceId));
+  return new Set(segmentIds).size === segmentIds.length
+    && input.segments.every((segment) => segment.uploadId === input.uploadId)
+    && input.audioInsights.every((insight) =>
+      insight.uploadId === input.uploadId
+      && sourcesAreCurrent(insight.sourceSegmentIds)
+      && (insight.emotionEvidence ?? []).every((evidence) =>
+        sourcesAreCurrent(evidence.sourceSegmentIds)
+      )
+    )
+    && input.semanticSegments.every((segment) =>
+      segment.uploadId === input.uploadId && sourcesAreCurrent(segment.sourceSegmentIds)
+    )
+    && input.briefItems.every((item) =>
+      item.uploadId === input.uploadId && sourcesAreCurrent(item.sourceSegmentIds)
+    )
+    && input.relationshipSignals.every((card) =>
+      card.uploadId === input.uploadId
+      && sourcesAreCurrent(card.evidenceSegments.map((evidence) => evidence.segmentId))
+    );
+}
+
 export async function POST(request: Request) {
   let authContext;
   try {
@@ -84,6 +117,19 @@ export async function POST(request: Request) {
     const parsed = RelationshipSignalCardSchema.safeParse(value);
     return parsed.success ? [parsed.data] : [];
   });
+  if (
+    scope === "current"
+    && !currentUploadContextIsExact({
+      uploadId,
+      segments,
+      audioInsights,
+      semanticSegments,
+      briefItems,
+      relationshipSignals
+    })
+  ) {
+    return NextResponse.json({ error: "invalid_current_upload_context" }, { status: 400 });
+  }
   if (
     segments.length === 0 &&
     audioInsights.length === 0 &&
@@ -127,6 +173,9 @@ export async function POST(request: Request) {
     briefItems,
     relationshipSignals,
     settingsStore: authContext.store,
+    ...(scope === "current"
+      ? { retrievalSourceSegmentIds: [...new Set(segments.map((segment) => segment.id))] }
+      : {}),
     ...(memoryContext && memoryContext.count > 0 ? { memoryContext } : {}),
     ...(memoryIndexFallback ? { memoryIndexFallback: true } : {}),
     ...(qaPromptInstruction ? { qaPromptInstruction } : {}),

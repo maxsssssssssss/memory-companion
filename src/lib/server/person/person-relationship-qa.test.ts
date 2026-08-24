@@ -719,7 +719,74 @@ describe("Person-scoped Relationship QA Evidence allowlist", () => {
     expect(JSON.stringify(regular)).not.toMatch(/Cross-account|ambiguous|Deleted/u);
   });
 
-  it("builds the canonical relationship input without Memory, derived text, Relationship Signals, or Hybrid", async () => {
+  it("builds a multi-recording exact allowlist only from the selected Person", async () => {
+    const olderEvidence = evidence({
+      id: "older_preference",
+      uploadId: "upload_person_older",
+      segmentId: "segment_person_older",
+      text: "Alice said the blue notebook is in Lisbon."
+    });
+    const newerEvidence = evidence({
+      id: "newer_preference",
+      uploadId: "upload_person_newer",
+      segmentId: "segment_person_newer",
+      text: "Alice said she now prefers tea."
+    });
+    const store = new CanonicalTranscriptStore();
+    store.put(olderEvidence, 5, 10);
+    store.put(newerEvidence, 15, 20);
+
+    const qaInput = await buildPersonRelationshipQaInput({
+      userId: "account_a",
+      personId: "person_a",
+      question: "蓝色笔记本在哪里？",
+      conversation: [],
+      settingsStore: store as never,
+      sourceContext: sourceContext({
+        activeFacts: [
+          fact({ id: "older", evidence: [olderEvidence] }),
+          fact({ id: "newer", evidence: [newerEvidence] })
+        ]
+      })
+    });
+
+    expect(qaInput.segments.map((segment) => segment.uploadId)).toEqual([
+      "upload_person_newer",
+      "upload_person_older"
+    ]);
+    expect(qaInput.retrievalSourceSegmentIds).toEqual([
+      "segment_person_newer",
+      "segment_person_older"
+    ]);
+    expect(retrieveQaEvidence(qaInput).some((item) =>
+      item.sourceSegmentIds.includes("segment_person_older")
+    )).toBe(true);
+  });
+
+  it("fails closed when the caller account or personId does not match the source context", async () => {
+    const factEvidence = evidence({
+      id: "mismatched_person",
+      text: "Alice prefers tea."
+    });
+    const store = new CanonicalTranscriptStore();
+    store.put(factEvidence);
+    const qaInput = await buildPersonRelationshipQaInput({
+      userId: "account_b",
+      personId: "person_other",
+      question: "Alice 喜欢什么？",
+      conversation: [],
+      settingsStore: store as never,
+      sourceContext: sourceContext({
+        activeFacts: [fact({ id: "mismatch", evidence: [factEvidence] })]
+      })
+    });
+
+    expect(qaInput.segments).toEqual([]);
+    expect(qaInput.retrievalSourceSegmentIds).toEqual([]);
+    expect(retrieveQaEvidence(qaInput)).toEqual([]);
+  });
+
+  it("enables Hybrid only over the Person canonical source allowlist without derived context", async () => {
     const factEvidence = evidence({ id: "fact", text: "Alice prefers tea." });
     const store = new CanonicalTranscriptStore();
     store.put(factEvidence, 12, 18);
@@ -738,13 +805,14 @@ describe("Person-scoped Relationship QA Evidence allowlist", () => {
       userId: "account_a",
       uploadId: "person_a",
       relationshipScope: true,
-      disableHybridRetrieval: true,
+      retrievalSourceSegmentIds: [factEvidence.sourceSegmentId],
       failClosedOnModelProviderMismatch: true,
       audioInsights: [],
       semanticSegments: [],
       briefItems: [],
       relationshipSignals: []
     });
+    expect(qaInput.disableHybridRetrieval).toBeUndefined();
     expect(qaInput.memoryContext).toBeUndefined();
     expect(qaInput.segments).toEqual([
       expect.objectContaining({
@@ -954,6 +1022,17 @@ describe("Person-scoped QA Phase 5A trusted snapshot resolver", () => {
     ["purged retention", () => database.prepare(
       "UPDATE dc_retained_uploads SET status = 'purged' WHERE user_id = 'account_a'"
     ).run()],
+    ["non-current Memory", () => database.prepare(
+      "UPDATE memory_items SET status = 'resolved' WHERE id = 'memory_snapshot'"
+    ).run()],
+    ["deleted canonical Memory Evidence", () => database.prepare(
+      "DELETE FROM memory_evidence WHERE id = 'memory_evidence_snapshot'"
+    ).run()],
+    ["unpublished bridge outbox", () => dateCompanionDatabase.prepare(`
+      UPDATE dc_memory_bridge_outbox
+      SET status = 'pending', completed_at = NULL
+      WHERE id = 'outbox_1'
+    `).run()],
     ["retained provenance digest mismatch", () => database.prepare(
       "UPDATE dc_retained_uploads SET provenance_digest = ? WHERE user_id = 'account_a'"
     ).run("0".repeat(64))],

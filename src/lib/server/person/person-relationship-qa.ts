@@ -522,7 +522,17 @@ export async function buildPersonRelationshipQaInput(input: {
   sourceContext: PersonRelationshipQaSourceContext;
   trustedEvidenceResolver?: TrustedPersonQaEvidenceResolver;
 }): Promise<AnswerQuestionWithAIInput> {
-  const context = await buildPersonRelationshipQaContext(input);
+  const sourcePerson = input.sourceContext.person;
+  const context = sourcePerson && (
+    sourcePerson.accountId !== input.userId || sourcePerson.id !== input.personId
+  )
+    ? {
+        segments: [],
+        eligibleSourceSegmentIds: [],
+        blockedByUnavailableSelfRole: false,
+        activeSelfPersonId: null
+      }
+    : await buildPersonRelationshipQaContext(input);
   return {
     userId: input.userId,
     uploadId: input.personId,
@@ -536,7 +546,7 @@ export async function buildPersonRelationshipQaInput(input: {
     semanticSegments: [],
     briefItems: [],
     relationshipSignals: [],
-    disableHybridRetrieval: true,
+    retrievalSourceSegmentIds: context.eligibleSourceSegmentIds,
     failClosedOnModelProviderMismatch: true
   };
 }

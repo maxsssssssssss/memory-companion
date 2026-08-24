@@ -277,10 +277,11 @@ describe("POST /api/people/[personId]/qa", () => {
       userId: "account_a",
       uploadId: "person_confirmed",
       relationshipScope: true,
-      disableHybridRetrieval: true,
+      retrievalSourceSegmentIds: ["segment_old"],
       failClosedOnModelProviderMismatch: true,
       conversation: [{ role: "user", content: "是旧的那本" }]
     });
+    expect(input.disableHybridRetrieval).toBeUndefined();
     expect(input.segments).toEqual([
       expect.objectContaining({
         id: "segment_old",

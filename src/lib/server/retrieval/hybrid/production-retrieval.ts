@@ -1,5 +1,6 @@
 import {
   buildCanonicalQaEvidence,
+  qaEvidenceMatchesRetrievalSourceBoundary,
   type AnswerQuestionWithAIInput,
   type QaEvidenceRetrievalResult
 } from "@/lib/server/retrieval/ai-qa";
@@ -70,6 +71,14 @@ export async function retrieveProductionHybridEvidence(input: {
     );
   }
   const canonicalEvidence = buildCanonicalQaEvidence(input.qaInput);
+  if (input.lexical.evidence.some(
+    (evidence) => !qaEvidenceMatchesRetrievalSourceBoundary(input.qaInput, evidence)
+  )) {
+    throw new ProductionHybridRetrievalError(
+      "candidate_boundary",
+      "Lexical candidates crossed the caller-owned source boundary"
+    );
+  }
   if (canonicalEvidence.length === 0) {
     return {
       evidence: [],
@@ -161,6 +170,15 @@ export async function retrieveProductionHybridEvidence(input: {
         limit: 16,
         experiment: "phase3_1_minimal"
       }).map((candidate) => candidate.evidence);
+      if (selectedEvidence.some(
+        (evidence) => !qaEvidenceMatchesRetrievalSourceBoundary(input.qaInput, evidence)
+      )) {
+        throw new ProductionHybridRetrievalError(
+          "candidate_boundary",
+          "Hybrid ranking crossed the caller-owned source boundary",
+          indexCoverage
+        );
+      }
       return {
         evidence: selectedEvidence,
         denseRetrievalMs,
