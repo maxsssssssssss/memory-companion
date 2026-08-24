@@ -107,6 +107,37 @@ function cardResponse() {
   };
 }
 
+function workingCardResponse(status: "saved" | "archived" | "removed" = "saved") {
+  return {
+    card: {
+      id: "card_1",
+      sourceReflectionIds: ["reflection_1"],
+      title: "一个工作卡片",
+      content: "这张卡片保留了可核对的依据。",
+      cardKind: "insight" as const,
+      evidenceIds: ["segment_1"],
+      status,
+      importance: 0.8,
+      novelty: 0.6,
+      relatedCardIds: [],
+      tags: ["复盘"],
+      visibility: "private" as const,
+      sourceUnavailable: false,
+      version: status === "saved" ? 1 : 2,
+      createdAt: "2026-08-13T08:00:00.000Z",
+      updatedAt: "2026-08-13T08:00:00.000Z",
+      evidence: [{
+        sourceSegmentId: "segment_1",
+        uploadId: "upload_1",
+        effectiveOrigin: "user_reflection" as const,
+        startSeconds: 0,
+        endSeconds: 8,
+        text: "原始复盘依据。"
+      }]
+    }
+  };
+}
+
 describe("createDailyReflectionApi", () => {
   it("exports the exact public file-upload source contract", () => {
     expect(DailyReflectionUploadSourceSchema.options).toEqual([
@@ -832,6 +863,67 @@ describe("createDailyReflectionApi", () => {
       }]
     })).rejects.toMatchObject({ status: 400, code: "invalid_card_update" });
     expect(invalidFetcher).not.toHaveBeenCalled();
+  });
+
+  it("uses strict scoped Working Card list and lifecycle contracts", async () => {
+    const fetcher = vi.fn<typeof fetch>()
+      .mockResolvedValueOnce(jsonResponse({
+        cards: [{ ...workingCardResponse().card, evidence: undefined }].map(({ evidence: _evidence, ...card }) => card),
+        total: 1,
+        limit: 50,
+        offset: 0
+      }))
+      .mockResolvedValueOnce(jsonResponse(workingCardResponse()))
+      .mockResolvedValueOnce(jsonResponse(workingCardResponse()))
+      .mockResolvedValueOnce(jsonResponse(workingCardResponse("archived")))
+      .mockResolvedValueOnce(jsonResponse(workingCardResponse()))
+      .mockResolvedValueOnce(jsonResponse(workingCardResponse("removed")));
+    const api = createDailyReflectionApi(fetcher);
+
+    await expect(api.listWorkingCards({
+      query: "30%",
+      cardKind: "insight",
+      status: "saved",
+      sort: "created_desc",
+      limit: 50,
+      offset: 0
+    })).resolves.toMatchObject({ total: 1, cards: [{ id: "card_1" }] });
+    expect(String(fetcher.mock.calls[0][0])).toBe(
+      "/api/daily-reflections/cards?type=insight&status=saved&q=30%25&sort=created_desc&limit=50&offset=0"
+    );
+
+    await expect(api.getWorkingCard("card_1"))
+      .resolves.toMatchObject({ card: { evidenceIds: ["segment_1"] } });
+    await api.saveWorkingCard("reflection_1", "card_1", { expectedVersion: 0 });
+    await api.archiveWorkingCard("card_1", { expectedVersion: 1 });
+    await api.restoreWorkingCard("card_1", { expectedVersion: 2 });
+    await api.removeWorkingCard("card_1", { expectedVersion: 1 });
+
+    expect(fetcher.mock.calls.slice(2).map(([path, init]) => [path, init?.method])).toEqual([
+      ["/api/daily-reflections/reflection_1/cards/card_1/save", "POST"],
+      ["/api/daily-reflections/cards/card_1/archive", "POST"],
+      ["/api/daily-reflections/cards/card_1/restore", "POST"],
+      ["/api/daily-reflections/cards/card_1", "DELETE"]
+    ]);
+  });
+
+  it("rejects technical fields and unavailable-source Evidence in Working Card responses", async () => {
+    const technical = vi.fn<typeof fetch>().mockResolvedValue(jsonResponse({
+      ...workingCardResponse(),
+      card: { ...workingCardResponse().card, providerModel: "must-not-leak" }
+    }));
+    await expect(createDailyReflectionApi(technical).getWorkingCard("card_1"))
+      .rejects.toMatchObject({ code: "invalid_response" });
+
+    const unavailable = vi.fn<typeof fetch>().mockResolvedValue(jsonResponse({
+      ...workingCardResponse(),
+      card: {
+        ...workingCardResponse().card,
+        sourceUnavailable: true
+      }
+    }));
+    await expect(createDailyReflectionApi(unavailable).getWorkingCard("card_1"))
+      .rejects.toMatchObject({ code: "invalid_response" });
   });
 
   it("strictly parses detail and action responses", async () => {

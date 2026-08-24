@@ -161,7 +161,8 @@ describe("Daily Reflection SQLite schema", () => {
           { version: 6, count: 1 },
           { version: 7, count: 1 },
           { version: 8, count: 1 },
-          { version: 9, count: 1 }
+          { version: 9, count: 1 },
+          { version: 10, count: 1 }
         ]);
       }
       expect((web.prepare("PRAGMA table_info(dr_reflections)").all() as Array<{
@@ -210,7 +211,8 @@ describe("Daily Reflection SQLite schema", () => {
         { version: 6 },
         { version: 7 },
         { version: 8 },
-        { version: 9 }
+        { version: 9 },
+        { version: 10 }
       ]);
       expect((first.prepare("PRAGMA table_info(dr_reflections)").all() as Array<{
         name: string;
@@ -224,6 +226,8 @@ describe("Daily Reflection SQLite schema", () => {
         "SELECT name FROM sqlite_master WHERE type = 'table' AND name LIKE 'dr_%'"
       ).all()).toEqual(expect.arrayContaining([
         { name: "dr_reflections" },
+        { name: "dr_working_cards" },
+        { name: "dr_working_card_events" },
         { name: "dr_candidates" },
         { name: "dr_candidate_sources" },
         { name: "dr_processing_plans" },
@@ -252,14 +256,14 @@ describe("Daily Reflection SQLite schema", () => {
     try {
       expect(reopened.prepare(
         "SELECT COUNT(*) AS count FROM dr_schema_migrations"
-      ).get()).toEqual({ count: 9 });
+      ).get()).toEqual({ count: 10 });
       expect(reopened.prepare(
         "SELECT source_origin FROM dr_reflections WHERE id = 'reflection_reopen'"
       ).get()).toEqual({ source_origin: "unknown" });
       migrateDailyReflectionSchema(reopened);
       expect(reopened.prepare(
         "SELECT COUNT(*) AS count FROM dr_schema_migrations"
-      ).get()).toEqual({ count: 9 });
+      ).get()).toEqual({ count: 10 });
       expect(reopened.pragma("foreign_key_check")).toEqual([]);
       expect(reopened.pragma("integrity_check", { simple: true })).toBe("ok");
     } finally {
@@ -290,7 +294,8 @@ describe("Daily Reflection SQLite schema", () => {
         { version: 6 },
         { version: 7 },
         { version: 8 },
-        { version: 9 }
+        { version: 9 },
+        { version: 10 }
       ]);
       expect(database.prepare(`
         SELECT lease_owner, lease_until, attempt_version, upload_fingerprint
@@ -301,6 +306,187 @@ describe("Daily Reflection SQLite schema", () => {
         attempt_version: 0,
         upload_fingerprint: null
       });
+    } finally {
+      database.close();
+    }
+  });
+
+  it("backfills V9 Cards into additive Working Card snapshots without rewriting history", () => {
+    const database = openDailyReflectionDatabase({ filePath: ":memory:" });
+    try {
+      database.exec(`
+        DROP TABLE dr_working_card_events;
+        DROP TABLE dr_working_cards;
+        DELETE FROM dr_schema_migrations WHERE version = 10;
+        PRAGMA user_version = 9;
+      `);
+      database.prepare(`
+        INSERT INTO dr_reflections (
+          id, account_id, upload_id, input_method, processing_profile,
+          ingestion_context, status, version, idempotency_key,
+          create_fingerprint, error_code, error_message, created_at,
+          updated_at, source_origin
+        ) VALUES (?, ?, ?, ?, ?, 'daily_reflection', 'review_pending', 0, ?, ?, NULL, NULL, ?, ?, ?)
+      `).run(
+        "reflection_v9_card",
+        "account_1",
+        "upload_v9_card",
+        "file_upload",
+        "full_recording",
+        "operation_v9_card",
+        "fingerprint_v9_card",
+        timestamp,
+        timestamp,
+        "user_reflection"
+      );
+      database.prepare(`
+        INSERT INTO dr_candidates (
+          id, account_id, reflection_id, ordinal, proposed_text, user_text,
+          status, candidate_type, subject_person_id, subject_confirmed,
+          version, created_at, updated_at
+        ) VALUES (?, ?, ?, 0, ?, ?, 'kept', 'question', NULL, 0, 2, ?, ?)
+      `).run(
+        "card_v9",
+        "account_1",
+        "reflection_v9_card",
+        "旧标题对应内容",
+        "用户确认后的内容",
+        timestamp,
+        timestamp
+      );
+      database.prepare(`
+        INSERT INTO dr_reflection_cards (
+          id, account_id, reflection_id, card_kind, proposed_title,
+          proposed_text, user_title, user_text, source_candidate_ids_json,
+          evidence_ids_json, cluster_id, cluster_title, display_tier, rank,
+          confidence, importance, durability, novelty, epistemic_status,
+          risk_flags_json, action_claimed, review_status, version,
+          created_at, updated_at
+        ) VALUES (?, ?, ?, 'open_question', ?, ?, ?, ?, ?, ?, ?, ?, 'primary', 0,
+                  0.8, 0.7, 0.6, 0.5, 'explicit_user_statement', '[]', 0,
+                  'kept', 2, ?, ?)
+      `).run(
+        "card_v9",
+        "account_1",
+        "reflection_v9_card",
+        "旧标题",
+        "旧内容",
+        "用户标题",
+        "用户确认后的内容",
+        JSON.stringify(["hidden_v9"]),
+        JSON.stringify(["segment_v9"]),
+        "cluster_v9",
+        "旧主题",
+        timestamp,
+        timestamp
+      );
+      database.prepare(`
+        INSERT INTO dr_asset_publications (
+          account_id, reflection_id, asset_kind, attempt_version,
+          payload_json, published_at
+        ) VALUES (?, ?, 'segments', 1, ?, ?)
+      `).run(
+        "account_1",
+        "reflection_v9_card",
+        JSON.stringify([{ id: "segment_v9" }]),
+        timestamp
+      );
+
+      database.prepare(`
+        INSERT INTO dr_reflections (
+          id, account_id, upload_id, input_method, processing_profile,
+          ingestion_context, status, version, idempotency_key,
+          create_fingerprint, error_code, error_message, created_at,
+          updated_at, source_origin
+        ) VALUES (?, ?, ?, ?, ?, 'daily_reflection', 'cancelled', 0, ?, ?, NULL, NULL, ?, ?, ?)
+      `).run(
+        "reflection_v9_cancelled",
+        "account_1",
+        "upload_v9_cancelled",
+        "file_upload",
+        "full_recording",
+        "operation_v9_cancelled",
+        "fingerprint_v9_cancelled",
+        timestamp,
+        timestamp,
+        "user_reflection"
+      );
+      for (const [id, status] of [
+        ["card_v9_cancelled_saved", "kept"],
+        ["card_v9_cancelled_unsaved", "pending"]
+      ] as const) {
+        database.prepare(`
+          INSERT INTO dr_candidates (
+            id, account_id, reflection_id, ordinal, proposed_text, user_text,
+            status, candidate_type, subject_person_id, subject_confirmed,
+            version, created_at, updated_at
+          ) VALUES (?, 'account_1', 'reflection_v9_cancelled', ?, ?, NULL,
+                    ?, 'summary', NULL, 0, 0, ?, ?)
+        `).run(
+          id,
+          status === "kept" ? 0 : 1,
+          `Legacy ${status}`,
+          status,
+          timestamp,
+          timestamp
+        );
+        database.prepare(`
+          INSERT INTO dr_reflection_cards (
+            id, account_id, reflection_id, card_kind, proposed_title,
+            proposed_text, user_title, user_text, source_candidate_ids_json,
+            evidence_ids_json, cluster_id, cluster_title, display_tier, rank,
+            confidence, importance, durability, novelty, epistemic_status,
+            risk_flags_json, action_claimed, review_status, version,
+            created_at, updated_at
+          ) VALUES (?, 'account_1', 'reflection_v9_cancelled', 'insight', ?, ?,
+                    NULL, NULL, ?, ?, ?, 'Legacy', 'primary', ?, 0.8, 0.7, 0.6,
+                    0.5, 'reported_event', '[]', 0, ?, 0, ?, ?)
+        `).run(
+          id,
+          `Legacy ${status}`,
+          `Legacy ${status} content`,
+          JSON.stringify([id]),
+          JSON.stringify([`segment_${id}`]),
+          `cluster_${id}`,
+          status === "kept" ? 0 : 1,
+          status,
+          timestamp,
+          timestamp
+        );
+      }
+
+      migrateDailyReflectionSchema(database);
+
+      expect(database.prepare(`
+        SELECT id, source_reflection_ids_json, title, content, card_kind,
+               evidence_ids_json, status, source_unavailable, saved_at
+        FROM dr_working_cards WHERE account_id = 'account_1' AND id = 'card_v9'
+      `).get()).toEqual({
+        id: "card_v9",
+        source_reflection_ids_json: JSON.stringify(["reflection_v9_card"]),
+        title: "用户标题",
+        content: "用户确认后的内容",
+        card_kind: "question",
+        evidence_ids_json: JSON.stringify(["segment_v9"]),
+        status: "saved",
+        source_unavailable: 0,
+        saved_at: timestamp
+      });
+      expect(database.prepare(`
+        SELECT review_status, version FROM dr_reflection_cards WHERE id = 'card_v9'
+      `).get()).toEqual({ review_status: "kept", version: 2 });
+      expect(database.prepare(`
+        SELECT id, status, source_unavailable, saved_at
+        FROM dr_working_cards
+        WHERE source_reflection_ids_json = json_array('reflection_v9_cancelled')
+        ORDER BY id
+      `).all()).toEqual([{
+        id: "card_v9_cancelled_saved",
+        status: "saved",
+        source_unavailable: 1,
+        saved_at: timestamp
+      }]);
+      expect(database.pragma("foreign_key_check")).toEqual([]);
     } finally {
       database.close();
     }

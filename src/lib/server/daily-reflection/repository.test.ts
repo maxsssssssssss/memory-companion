@@ -564,6 +564,469 @@ describe("DailyReflectionRepository", () => {
     });
   });
 
+  it("keeps Working Card save independent from review and Memory admission", () => {
+    const review = createReviewPendingCards({
+      id: "reflection_working_save",
+      operationKey: "operation_working_save",
+      cardKind: "open_question"
+    });
+    const primaryId = "reflection_working_save_card_primary";
+    const moreId = "reflection_working_save_card_more";
+
+    expect(repository.listWorkingCards({ accountId: "account_1" })).toMatchObject({
+      cards: [],
+      total: 0
+    });
+    expect(repository.listWorkingCards({
+      accountId: "account_1",
+      reflectionId: review.reflection.id
+    }).cards.map((card) => [card.id, card.status])).toEqual([
+      [moreId, "generated"],
+      [primaryId, "review_pending"]
+    ]);
+
+    const saved = repository.saveWorkingCardFromReflection({
+      accountId: "account_1",
+      reflectionId: review.reflection.id,
+      cardId: primaryId,
+      expectedVersion: 0
+    });
+    expect(saved).toMatchObject({
+      id: primaryId,
+      cardKind: "question",
+      status: "saved",
+      evidenceIds: ["segment_card_1"],
+      sourceReflectionIds: [review.reflection.id],
+      sourceUnavailable: false,
+      version: 1
+    });
+    expect(repository.getWorkingCardWithEvidence("account_1", primaryId).evidence)
+      .toEqual([expect.objectContaining({
+        sourceSegmentId: "segment_card_1",
+        text: "第一段原话。"
+      })]);
+    expect(repository.listWorkingCards({ accountId: "account_1" }).cards)
+      .toHaveLength(1);
+    expect(repository.getAdmissionOperation("account_1", review.reflection.id)).toBeNull();
+    expect((database.prepare("SELECT count(*) AS count FROM dr_reflection_confirmations").get() as { count: number }).count)
+      .toBe(0);
+    expect((database.prepare("SELECT count(*) AS count FROM dr_working_card_events").get() as { count: number }).count)
+      .toBe(1);
+
+    expect(() => repository.getWorkingCard("account_2", primaryId))
+      .toThrow(DailyReflectionNotFoundError);
+    expect(() => repository.saveWorkingCardFromReflection({
+      accountId: "account_2",
+      reflectionId: review.reflection.id,
+      cardId: primaryId,
+      expectedVersion: 0
+    })).toThrow(DailyReflectionNotFoundError);
+  });
+
+  it("supports account-scoped metadata retrieval and recoverable lifecycle changes", () => {
+    const first = createReviewPendingCards({
+      id: "reflection_library_first",
+      operationKey: "operation_library_first"
+    });
+    const second = createReviewPendingCards({
+      id: "reflection_library_second",
+      operationKey: "operation_library_second",
+      cardKind: "decision"
+    });
+    const firstId = "reflection_library_first_card_primary";
+    const secondId = "reflection_library_second_card_primary";
+    const firstSaved = repository.saveWorkingCardFromReflection({
+      accountId: "account_1",
+      reflectionId: first.reflection.id,
+      cardId: firstId,
+      expectedVersion: 0
+    });
+    const secondSaved = repository.saveWorkingCardFromReflection({
+      accountId: "account_1",
+      reflectionId: second.reflection.id,
+      cardId: secondId,
+      expectedVersion: 0
+    });
+    const updated = repository.updateWorkingCard({
+      accountId: "account_1",
+      cardId: firstId,
+      expectedVersion: firstSaved.version,
+      title: "30% 的复盘洞察",
+      content: "用 literal % keyword 检索这张卡。",
+      cardKind: "idea",
+      relatedCardIds: [secondId],
+      tags: ["复盘", "重点"]
+    });
+    expect(updated).toMatchObject({
+      title: "30% 的复盘洞察",
+      cardKind: "idea",
+      relatedCardIds: [secondId],
+      tags: ["复盘", "重点"]
+    });
+    expect(repository.listWorkingCards({
+      accountId: "account_1",
+      query: "%",
+      cardKind: "idea"
+    }).cards.map((card) => card.id)).toEqual([firstId]);
+    expect(repository.listWorkingCards({
+      accountId: "account_1",
+      reflectionId: second.reflection.id,
+      status: "saved"
+    }).cards.map((card) => card.id)).toEqual([secondId]);
+    expect(repository.listWorkingCards({
+      accountId: "account_1",
+      createdFrom: "2026-08-12T00:00:00.000Z",
+      createdTo: "2026-08-14T00:00:00.000Z",
+      sort: "title_asc",
+      limit: 1,
+      offset: 1
+    })).toMatchObject({ total: 2, limit: 1, offset: 1 });
+
+    const archived = repository.archiveWorkingCard({
+      accountId: "account_1",
+      cardId: firstId,
+      expectedVersion: updated.version
+    });
+    expect(archived.status).toBe("archived");
+    expect(repository.archiveWorkingCard({
+      accountId: "account_1",
+      cardId: firstId,
+      expectedVersion: updated.version
+    })).toEqual(archived);
+    const restored = repository.restoreWorkingCard({
+      accountId: "account_1",
+      cardId: firstId,
+      expectedVersion: archived.version
+    });
+    expect(restored.status).toBe("saved");
+    const removed = repository.removeWorkingCard({
+      accountId: "account_1",
+      cardId: firstId,
+      expectedVersion: restored.version
+    });
+    expect(removed.status).toBe("removed");
+    expect(repository.listWorkingCards({ accountId: "account_1" }).cards.map((card) => card.id))
+      .toEqual([secondId]);
+    expect(repository.restoreWorkingCard({
+      accountId: "account_1",
+      cardId: firstId,
+      expectedVersion: removed.version
+    }).status).toBe("saved");
+    for (const operation of [
+      () => repository.updateWorkingCard({
+        accountId: "account_2", cardId: secondId,
+        expectedVersion: secondSaved.version, title: "越权"
+      }),
+      () => repository.archiveWorkingCard({
+        accountId: "account_2", cardId: secondId,
+        expectedVersion: secondSaved.version
+      }),
+      () => repository.restoreWorkingCard({
+        accountId: "account_2", cardId: secondId,
+        expectedVersion: secondSaved.version
+      }),
+      () => repository.removeWorkingCard({
+        accountId: "account_2", cardId: secondId,
+        expectedVersion: secondSaved.version
+      })
+    ]) {
+      expect(operation).toThrow(DailyReflectionNotFoundError);
+    }
+    expect((database.prepare("SELECT count(*) AS count FROM dr_admission_operations").get() as { count: number }).count)
+      .toBe(0);
+    expect((database.prepare("SELECT count(*) AS count FROM dr_reflection_confirmations").get() as { count: number }).count)
+      .toBe(0);
+  });
+
+  it("does not let delayed save revive a removed or excluded Working Card", () => {
+    const review = createReviewPendingCards({
+      id: "reflection_working_delayed_save",
+      operationKey: "operation_working_delayed_save"
+    });
+    const savedId = "reflection_working_delayed_save_card_primary";
+    const excludedId = "reflection_working_delayed_save_card_more";
+    const saved = repository.saveWorkingCardFromReflection({
+      accountId: "account_1",
+      reflectionId: review.reflection.id,
+      cardId: savedId,
+      expectedVersion: 0
+    });
+    const removed = repository.removeWorkingCard({
+      accountId: "account_1",
+      cardId: savedId,
+      expectedVersion: saved.version
+    });
+    expect(() => repository.saveWorkingCardFromReflection({
+      accountId: "account_1",
+      reflectionId: review.reflection.id,
+      cardId: savedId,
+      expectedVersion: 0
+    })).toThrowError(expect.objectContaining({
+      code: "daily_reflection_working_card_restore_required"
+    }));
+    expect(repository.getWorkingCard("account_1", savedId)).toMatchObject({
+      status: "removed",
+      version: removed.version
+    });
+
+    const updated = repository.updateReflectionCards({
+      accountId: "account_1",
+      reflectionId: review.reflection.id,
+      expectedVersion: review.reflection.version,
+      cards: [{
+        cardId: excludedId,
+        reviewStatus: "excluded",
+        userTitle: null,
+        userText: null
+      }]
+    });
+    const excluded = updated.cards.find((card) => card.id === excludedId)!;
+    expect(() => repository.saveWorkingCardFromReflection({
+      accountId: "account_1",
+      reflectionId: review.reflection.id,
+      cardId: excludedId,
+      expectedVersion: excluded.version
+    })).toThrowError(expect.objectContaining({
+      code: "daily_reflection_working_card_restore_required"
+    }));
+    expect(repository.getWorkingCard("account_1", excludedId).status).toBe("removed");
+  });
+
+  it("does not let Reflection review edits overwrite a saved Working Card", () => {
+    const review = createReviewPendingCards({
+      id: "reflection_working_edit_isolation",
+      operationKey: "operation_working_edit_isolation"
+    });
+    const cardId = "reflection_working_edit_isolation_card_primary";
+    const saved = repository.saveWorkingCardFromReflection({
+      accountId: "account_1",
+      reflectionId: review.reflection.id,
+      cardId,
+      expectedVersion: 0
+    });
+    const libraryEdit = repository.updateWorkingCard({
+      accountId: "account_1",
+      cardId,
+      expectedVersion: saved.version,
+      title: "My Cards 独立标题",
+      content: "My Cards 独立内容"
+    });
+
+    const reflectionEdit = repository.updateReflectionCards({
+      accountId: "account_1",
+      reflectionId: review.reflection.id,
+      expectedVersion: review.reflection.version,
+      cards: [{
+        cardId,
+        reviewStatus: "pending",
+        userTitle: "复盘页标题",
+        userText: "复盘页内容"
+      }]
+    });
+
+    expect(reflectionEdit.cards.find((card) => card.id === cardId)).toMatchObject({
+      userTitle: "复盘页标题",
+      userText: "复盘页内容"
+    });
+    expect(repository.getWorkingCard("account_1", cardId)).toMatchObject({
+      title: libraryEdit.title,
+      content: libraryEdit.content,
+      version: libraryEdit.version
+    });
+    expect(repository.getAdmissionOperation("account_1", review.reflection.id)).toBeNull();
+  });
+
+  it("supports Stage 6 Card content through the 20,000 character boundary", () => {
+    const review = createReviewPendingCards({
+      id: "reflection_working_long_content",
+      operationKey: "operation_working_long_content"
+    });
+    const cardId = "reflection_working_long_content_card_primary";
+    const longContent = "长".repeat(5_000);
+    database.prepare(`
+      UPDATE dr_reflection_cards SET proposed_text = ? WHERE account_id = ? AND id = ?
+    `).run(longContent, "account_1", cardId);
+    database.prepare(`
+      UPDATE dr_working_cards SET content = ? WHERE account_id = ? AND id = ?
+    `).run(longContent, "account_1", cardId);
+
+    const saved = repository.saveWorkingCardFromReflection({
+      accountId: "account_1",
+      reflectionId: review.reflection.id,
+      cardId,
+      expectedVersion: 0
+    });
+    expect(saved.content).toHaveLength(5_000);
+    const updated = repository.updateWorkingCard({
+      accountId: "account_1",
+      cardId,
+      expectedVersion: saved.version,
+      content: "界".repeat(20_000)
+    });
+    expect(updated.content).toHaveLength(20_000);
+    expect(() => repository.updateWorkingCard({
+      accountId: "account_1",
+      cardId,
+      expectedVersion: updated.version,
+      content: "界".repeat(20_001)
+    })).toThrow();
+  });
+
+  it("rejects save when Canonical Evidence is unavailable", () => {
+    const review = createReviewPendingCards({
+      id: "reflection_invalid_working_evidence",
+      operationKey: "operation_invalid_working_evidence"
+    });
+    repository.deletePublishedAsset(
+      "account_1",
+      review.reflection.id,
+      "segments"
+    );
+    expect(() => repository.saveWorkingCardFromReflection({
+      accountId: "account_1",
+      reflectionId: review.reflection.id,
+      cardId: "reflection_invalid_working_evidence_card_primary",
+      expectedVersion: 0
+    })).toThrowError(expect.objectContaining({
+      code: "daily_reflection_working_card_evidence_unavailable"
+    }));
+  });
+
+  it("persists source-unavailable state when Canonical segments are invalidated", () => {
+    const review = createReviewPendingCards({
+      id: "reflection_working_source_invalidation",
+      operationKey: "operation_working_source_invalidation"
+    });
+    const cardId = "reflection_working_source_invalidation_card_primary";
+    const saved = repository.saveWorkingCardFromReflection({
+      accountId: "account_1",
+      reflectionId: review.reflection.id,
+      cardId,
+      expectedVersion: 0
+    });
+    repository.deletePublishedAsset("account_1", review.reflection.id, "segments");
+
+    expect(repository.listWorkingCards({ accountId: "account_1" }).cards)
+      .toEqual([expect.objectContaining({
+        id: cardId,
+        sourceUnavailable: true,
+        version: saved.version + 1
+      })]);
+    expect(repository.getWorkingCardWithEvidence("account_1", cardId)).toMatchObject({
+      card: { id: cardId, sourceUnavailable: true },
+      evidence: []
+    });
+    expect(database.prepare(`
+      SELECT event_type, count(*) AS count
+      FROM dr_working_card_events
+      WHERE account_id = ? AND card_id = ?
+      GROUP BY event_type
+      ORDER BY event_type
+    `).all("account_1", cardId)).toEqual([
+      { event_type: "saved", count: 1 },
+      { event_type: "source_unavailable", count: 1 }
+    ]);
+  });
+
+  it("deletes unsaved Cards but preserves saved provenance as source-unavailable", () => {
+    const review = createReviewPendingCards({
+      id: "reflection_working_delete",
+      operationKey: "operation_working_delete"
+    });
+    const savedId = "reflection_working_delete_card_primary";
+    const unsavedId = "reflection_working_delete_card_more";
+    repository.saveWorkingCardFromReflection({
+      accountId: "account_1",
+      reflectionId: review.reflection.id,
+      cardId: savedId,
+      expectedVersion: 0
+    });
+
+    repository.transitionStatus({
+      accountId: "account_1",
+      reflectionId: review.reflection.id,
+      expectedVersion: review.reflection.version,
+      status: "deleted"
+    });
+    expect(() => repository.saveWorkingCardFromReflection({
+      accountId: "account_1",
+      reflectionId: review.reflection.id,
+      cardId: unsavedId,
+      expectedVersion: 0
+    })).toThrowError(expect.objectContaining({ code: "daily_reflection_tombstoned" }));
+    repository.deletePublishedAssets("account_1", review.reflection.id);
+    repository.deleteCandidates("account_1", review.reflection.id);
+
+    expect(() => repository.getWorkingCard("account_1", unsavedId))
+      .toThrow(DailyReflectionNotFoundError);
+    const preserved = repository.getWorkingCardWithEvidence("account_1", savedId);
+    expect(preserved).toMatchObject({
+      card: {
+        id: savedId,
+        status: "saved",
+        sourceReflectionIds: [review.reflection.id],
+        evidenceIds: ["segment_card_1"],
+        sourceUnavailable: true
+      },
+      evidence: []
+    });
+    expect(repository.listWorkingCards({ accountId: "account_1" }).cards.map((card) => card.id))
+      .toEqual([savedId]);
+    expect(repository.getAdmissionOperation("account_1", review.reflection.id)).toBeNull();
+    expect((database.prepare("SELECT count(*) AS count FROM dr_candidate_admission_receipts").get() as { count: number }).count)
+      .toBe(0);
+  });
+
+  it("applies the saved and unsaved Card split to cancellation tombstones", () => {
+    const review = createReviewPendingCards({
+      id: "reflection_working_cancel",
+      operationKey: "operation_working_cancel"
+    });
+    const savedId = "reflection_working_cancel_card_primary";
+    const unsavedId = "reflection_working_cancel_card_more";
+    const saved = repository.saveWorkingCardFromReflection({
+      accountId: "account_1",
+      reflectionId: review.reflection.id,
+      cardId: savedId,
+      expectedVersion: 0
+    });
+
+    repository.transitionStatus({
+      accountId: "account_1",
+      reflectionId: review.reflection.id,
+      expectedVersion: review.reflection.version,
+      status: "cancelled"
+    });
+    expect(() => repository.getWorkingCard("account_1", unsavedId))
+      .toThrow(DailyReflectionNotFoundError);
+    expect(repository.getWorkingCard("account_1", savedId)).toMatchObject({
+      status: "saved",
+      sourceUnavailable: true,
+      version: saved.version + 1
+    });
+    expect(repository.listSavedWorkingCardStatesForReflection(
+      "account_1",
+      review.reflection.id
+    )).toEqual([{
+      id: savedId,
+      status: "saved",
+      version: saved.version + 1
+    }]);
+    expect(() => repository.saveWorkingCardFromReflection({
+      accountId: "account_1",
+      reflectionId: review.reflection.id,
+      cardId: unsavedId,
+      expectedVersion: 0
+    })).toThrowError(expect.objectContaining({ code: "daily_reflection_tombstoned" }));
+    repository.deletePublishedAssets("account_1", review.reflection.id);
+    expect((database.prepare(`
+      SELECT count(*) AS count
+      FROM dr_working_card_events
+      WHERE account_id = ? AND card_id = ? AND event_type = 'source_unavailable'
+    `).get("account_1", savedId) as { count: number }).count).toBe(1);
+    expect(repository.getAdmissionOperation("account_1", review.reflection.id)).toBeNull();
+  });
+
   it("allows only an explicit user update to claim an evidenced user_action Card", () => {
     const review = createReviewPendingCards({
       id: "reflection_action_card",

@@ -52,6 +52,15 @@ import {
   type ReviewPolicy
 } from "@/lib/domain/daily-reflection";
 import {
+  DailyReflectionWorkingCardKindSchema,
+  DailyReflectionWorkingCardSchema,
+  DailyReflectionWorkingCardStatusSchema,
+  workingCardKindForReflectionCard,
+  type DailyReflectionWorkingCard,
+  type DailyReflectionWorkingCardKind,
+  type DailyReflectionWorkingCardStatus
+} from "@/lib/domain/daily-reflection-working-card";
+import {
   DAILY_REFLECTION_FULL_CANDIDATE_LIMIT,
   DAILY_REFLECTION_QUICK_CANDIDATE_LIMIT
 } from "@/lib/domain/daily-reflection-duration";
@@ -163,6 +172,27 @@ type ReflectionCardRow = {
   risk_flags_json: string;
   action_claimed: 0 | 1;
   review_status: "not_proposed" | "pending" | "kept" | "excluded";
+  version: number;
+  created_at: string;
+  updated_at: string;
+};
+
+type WorkingCardRow = {
+  id: string;
+  account_id: string;
+  source_reflection_ids_json: string;
+  title: string;
+  content: string;
+  card_kind: DailyReflectionWorkingCardKind;
+  evidence_ids_json: string;
+  status: DailyReflectionWorkingCardStatus;
+  importance: number;
+  novelty: number;
+  related_card_ids_json: string;
+  tags_json: string;
+  visibility: "private";
+  source_unavailable: 0 | 1;
+  saved_at: string | null;
   version: number;
   created_at: string;
   updated_at: string;
@@ -496,6 +526,81 @@ const UpdateReflectionCardsInputSchema = z.object({
     context.addIssue({ code: z.ZodIssueCode.custom, path: ["cards"], message: "card ids must be unique" });
   }
 });
+
+const WorkingCardListInputSchema = z.object({
+  accountId: DailyReflectionIdSchema,
+  reflectionId: DailyReflectionIdSchema.optional(),
+  cardKind: DailyReflectionWorkingCardKindSchema.optional(),
+  status: DailyReflectionWorkingCardStatusSchema.optional(),
+  query: z.string().trim().max(200).optional(),
+  createdFrom: z.string().datetime().optional(),
+  createdTo: z.string().datetime().optional(),
+  sort: z.enum(["updated_desc", "created_desc", "created_asc", "title_asc"])
+    .default("updated_desc"),
+  limit: z.number().int().min(1).max(100).default(24),
+  offset: z.number().int().nonnegative().default(0)
+}).strict().superRefine((input, context) => {
+  if (input.createdFrom && input.createdTo && input.createdFrom > input.createdTo) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["createdTo"],
+      message: "createdTo must not precede createdFrom"
+    });
+  }
+});
+
+const SaveWorkingCardInputSchema = z.object({
+  accountId: DailyReflectionIdSchema,
+  reflectionId: DailyReflectionIdSchema,
+  cardId: DailyReflectionIdSchema,
+  expectedVersion: z.number().int().nonnegative()
+}).strict();
+
+const UpdateWorkingCardInputSchema = z.object({
+  accountId: DailyReflectionIdSchema,
+  cardId: DailyReflectionIdSchema,
+  expectedVersion: z.number().int().nonnegative(),
+  title: z.string().trim().min(1).max(240).optional(),
+  content: z.string().trim().min(1).max(20_000).optional(),
+  cardKind: DailyReflectionWorkingCardKindSchema.optional(),
+  relatedCardIds: z.array(DailyReflectionIdSchema).max(64).optional(),
+  tags: z.array(z.string().trim().min(1).max(64)).max(24).optional(),
+  visibility: z.literal("private").optional()
+}).strict().superRefine((input, context) => {
+  if (
+    input.title === undefined
+    && input.content === undefined
+    && input.cardKind === undefined
+    && input.relatedCardIds === undefined
+    && input.tags === undefined
+    && input.visibility === undefined
+  ) {
+    context.addIssue({ code: z.ZodIssueCode.custom, message: "an update is required" });
+  }
+  for (const field of ["relatedCardIds", "tags"] as const) {
+    const values = input[field];
+    if (values && new Set(values).size !== values.length) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: [field],
+        message: `${field} must be unique`
+      });
+    }
+  }
+  if (input.relatedCardIds?.includes(input.cardId)) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["relatedCardIds"],
+      message: "a Working Card cannot relate to itself"
+    });
+  }
+});
+
+const WorkingCardLifecycleInputSchema = z.object({
+  accountId: DailyReflectionIdSchema,
+  cardId: DailyReflectionIdSchema,
+  expectedVersion: z.number().int().nonnegative()
+}).strict();
 
 const CandidateDecisionInputSchema = z.object({
   candidateId: DailyReflectionIdSchema,
@@ -1101,6 +1206,551 @@ export class DailyReflectionRepository {
     this.requireReflectionRow(parsedAccountId, parsedReflectionId);
     return this.listCardRows(parsedAccountId, parsedReflectionId)
       .map((row) => this.cardFromRow(row));
+  }
+
+  private workingCardFromRow(row: WorkingCardRow): DailyReflectionWorkingCard {
+    return DailyReflectionWorkingCardSchema.parse({
+      id: row.id,
+      accountId: row.account_id,
+      sourceReflectionIds: JSON.parse(row.source_reflection_ids_json) as unknown,
+      title: row.title,
+      content: row.content,
+      cardKind: row.card_kind,
+      evidenceIds: JSON.parse(row.evidence_ids_json) as unknown,
+      status: row.status,
+      importance: row.importance,
+      novelty: row.novelty,
+      relatedCardIds: JSON.parse(row.related_card_ids_json) as unknown,
+      tags: JSON.parse(row.tags_json) as unknown,
+      visibility: row.visibility,
+      sourceUnavailable: row.source_unavailable === 1,
+      version: row.version,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at
+    });
+  }
+
+  private findWorkingCardRow(accountId: string, cardId: string) {
+    return this.database.prepare(`
+      SELECT id, account_id, source_reflection_ids_json, title, content,
+             card_kind, evidence_ids_json, status, importance, novelty,
+             related_card_ids_json, tags_json, visibility, source_unavailable,
+             saved_at, version, created_at, updated_at
+      FROM dr_working_cards
+      WHERE account_id = ? AND id = ?
+    `).get(accountId, cardId) as WorkingCardRow | undefined;
+  }
+
+  private requireWorkingCardRow(accountId: string, cardId: string) {
+    const row = this.findWorkingCardRow(accountId, cardId);
+    if (!row) throw new DailyReflectionNotFoundError();
+    return row;
+  }
+
+  private recordWorkingCardEvent(input: {
+    accountId: string;
+    cardId: string;
+    eventType: "saved" | "updated" | "archived" | "restored" | "removed" | "source_unavailable";
+    fromStatus: DailyReflectionWorkingCardStatus | null;
+    toStatus: DailyReflectionWorkingCardStatus;
+    cardVersion: number;
+    createdAt: string;
+  }) {
+    this.database.prepare(`
+      INSERT INTO dr_working_card_events (
+        account_id, card_id, event_type, from_status, to_status,
+        card_version, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      input.accountId,
+      input.cardId,
+      input.eventType,
+      input.fromStatus,
+      input.toStatus,
+      input.cardVersion,
+      input.createdAt
+    );
+  }
+
+  private setWorkingCardSourceUnavailable(row: WorkingCardRow, now: string) {
+    if (row.source_unavailable === 1) return row;
+    const updated = this.database.prepare(`
+      UPDATE dr_working_cards
+      SET source_unavailable = 1, version = version + 1, updated_at = ?
+      WHERE account_id = ? AND id = ? AND version = ?
+    `).run(now, row.account_id, row.id, row.version);
+    if (updated.changes !== 1) {
+      throw new DailyReflectionConflictError("daily_reflection_working_card_source_conflict");
+    }
+    const unavailable = this.requireWorkingCardRow(row.account_id, row.id);
+    this.recordWorkingCardEvent({
+      accountId: row.account_id,
+      cardId: row.id,
+      eventType: "source_unavailable",
+      fromStatus: row.status,
+      toStatus: unavailable.status,
+      cardVersion: unavailable.version,
+      createdAt: now
+    });
+    return unavailable;
+  }
+
+  private markSavedWorkingCardSourcesUnavailable(input: {
+    accountId: string;
+    reflectionId: string;
+    now: string;
+  }) {
+    const rows = this.database.prepare(`
+      SELECT id, account_id, source_reflection_ids_json, title, content,
+             card_kind, evidence_ids_json, status, importance, novelty,
+             related_card_ids_json, tags_json, visibility, source_unavailable,
+             saved_at, version, created_at, updated_at
+      FROM dr_working_cards
+      WHERE account_id = ?
+        AND saved_at IS NOT NULL
+        AND source_unavailable = 0
+        AND EXISTS (
+          SELECT 1 FROM json_each(dr_working_cards.source_reflection_ids_json)
+          WHERE json_each.value = ?
+        )
+    `).all(input.accountId, input.reflectionId) as WorkingCardRow[];
+    for (const row of rows) {
+      this.setWorkingCardSourceUnavailable(row, input.now);
+    }
+  }
+
+  private reconcileWorkingCardsForTombstonedReflection(input: {
+    accountId: string;
+    reflectionId: string;
+    now: string;
+  }) {
+    this.database.prepare(`
+      DELETE FROM dr_working_cards
+      WHERE account_id = ?
+        AND saved_at IS NULL
+        AND EXISTS (
+          SELECT 1 FROM json_each(dr_working_cards.source_reflection_ids_json)
+          WHERE json_each.value = ?
+        )
+    `).run(input.accountId, input.reflectionId);
+    this.markSavedWorkingCardSourcesUnavailable(input);
+  }
+
+  getWorkingCard(accountId: string, cardId: string): DailyReflectionWorkingCard {
+    const parsedAccountId = DailyReflectionIdSchema.parse(accountId);
+    const parsedCardId = DailyReflectionIdSchema.parse(cardId);
+    return this.workingCardFromRow(this.requireWorkingCardRow(parsedAccountId, parsedCardId));
+  }
+
+  listWorkingCards(rawInput: {
+    accountId: string;
+    reflectionId?: string;
+    cardKind?: DailyReflectionWorkingCardKind;
+    status?: DailyReflectionWorkingCardStatus;
+    query?: string;
+    createdFrom?: string;
+    createdTo?: string;
+    sort?: "updated_desc" | "created_desc" | "created_asc" | "title_asc";
+    limit?: number;
+    offset?: number;
+  }) {
+    const input = WorkingCardListInputSchema.parse(rawInput);
+    const clauses = ["account_id = ?"];
+    const values: Array<string | number> = [input.accountId];
+    if (input.reflectionId) {
+      clauses.push(`EXISTS (
+        SELECT 1 FROM json_each(dr_working_cards.source_reflection_ids_json)
+        WHERE json_each.value = ?
+      )`);
+      values.push(input.reflectionId);
+    }
+    if (input.status) {
+      clauses.push("status = ?");
+      values.push(input.status);
+    } else if (input.reflectionId) {
+      clauses.push("status <> 'removed'");
+    } else {
+      clauses.push("saved_at IS NOT NULL AND status <> 'removed'");
+    }
+    if (input.cardKind) {
+      clauses.push("card_kind = ?");
+      values.push(input.cardKind);
+    }
+    if (input.query) {
+      clauses.push("instr(lower(title || char(10) || content || char(10) || tags_json), lower(?)) > 0");
+      values.push(input.query);
+    }
+    if (input.createdFrom) {
+      clauses.push("created_at >= ?");
+      values.push(input.createdFrom);
+    }
+    if (input.createdTo) {
+      clauses.push("created_at <= ?");
+      values.push(input.createdTo);
+    }
+    const where = clauses.join(" AND ");
+    const orderBy = {
+      updated_desc: "updated_at DESC, id ASC",
+      created_desc: "created_at DESC, id ASC",
+      created_asc: "created_at ASC, id ASC",
+      title_asc: "lower(title) ASC, created_at DESC, id ASC"
+    }[input.sort];
+    const total = (this.database.prepare(`
+      SELECT count(*) AS count
+      FROM dr_working_cards
+      WHERE ${where}
+    `).get(...values) as { count: number }).count;
+    const rows = this.database.prepare(`
+      SELECT id, account_id, source_reflection_ids_json, title, content,
+             card_kind, evidence_ids_json, status, importance, novelty,
+             related_card_ids_json, tags_json, visibility, source_unavailable,
+             saved_at, version, created_at, updated_at
+      FROM dr_working_cards
+      WHERE ${where}
+      ORDER BY ${orderBy}
+      LIMIT ? OFFSET ?
+    `).all(...values, input.limit, input.offset) as WorkingCardRow[];
+    return {
+      cards: rows.map((row) => this.workingCardFromRow(row)),
+      total,
+      limit: input.limit,
+      offset: input.offset
+    };
+  }
+
+  listSavedWorkingCardStatesForReflection(accountId: string, reflectionId: string) {
+    const parsedAccountId = DailyReflectionIdSchema.parse(accountId);
+    const parsedReflectionId = DailyReflectionIdSchema.parse(reflectionId);
+    this.requireReflectionRow(parsedAccountId, parsedReflectionId);
+    return (this.database.prepare(`
+      SELECT id, status, version
+      FROM dr_working_cards
+      WHERE account_id = ?
+        AND saved_at IS NOT NULL
+        AND EXISTS (
+          SELECT 1 FROM json_each(dr_working_cards.source_reflection_ids_json)
+          WHERE json_each.value = ?
+        )
+      ORDER BY id
+    `).all(parsedAccountId, parsedReflectionId) as Array<{
+      id: string;
+      status: DailyReflectionWorkingCardStatus;
+      version: number;
+    }>).map((row) => ({
+      id: DailyReflectionIdSchema.parse(row.id),
+      status: DailyReflectionWorkingCardStatusSchema.parse(row.status),
+      version: z.number().int().nonnegative().parse(row.version)
+    }));
+  }
+
+  private resolveWorkingCardEvidence(card: DailyReflectionWorkingCard) {
+    if (card.sourceUnavailable) return null;
+    const evidenceById = new Map<string, {
+      sourceSegmentId: string;
+      uploadId: string;
+      effectiveOrigin: ReflectionRow["source_origin"];
+      startSeconds: number;
+      endSeconds: number;
+      text: string;
+    }>();
+    for (const reflectionId of card.sourceReflectionIds) {
+      const plan = this.findPlanRow(card.accountId, reflectionId);
+      if (!plan) return null;
+      const publication = this.database.prepare(`
+        SELECT payload_json
+        FROM dr_asset_publications
+        WHERE account_id = ? AND reflection_id = ? AND asset_kind = 'segments'
+      `).get(card.accountId, reflectionId) as { payload_json: string } | undefined;
+      if (!publication) return null;
+      const segments = parseDailyReflectionCanonicalTranscript(
+        JSON.parse(publication.payload_json) as unknown,
+        plan.upload_id
+      );
+      if (!segments) return null;
+      for (const segment of segments) {
+        if (evidenceById.has(segment.id)) return null;
+        evidenceById.set(segment.id, {
+          sourceSegmentId: segment.id,
+          uploadId: plan.upload_id,
+          effectiveOrigin: plan.source_origin,
+          startSeconds: segment.startSeconds,
+          endSeconds: segment.endSeconds,
+          text: segment.text
+        });
+      }
+    }
+    const evidence = card.evidenceIds.map((evidenceId) => evidenceById.get(evidenceId));
+    return evidence.some((item) => !item) ? null : evidence as Array<NonNullable<typeof evidence[number]>>;
+  }
+
+  getWorkingCardWithEvidence(accountId: string, cardId: string) {
+    let card = this.getWorkingCard(accountId, cardId);
+    const evidence = this.resolveWorkingCardEvidence(card);
+    if (!evidence) {
+      if (!card.sourceUnavailable) {
+        const mark = this.database.transaction(() => {
+          const current = this.requireWorkingCardRow(card.accountId, card.id);
+          return this.setWorkingCardSourceUnavailable(current, this.now());
+        });
+        card = this.workingCardFromRow(mark.immediate());
+      }
+      return {
+        card,
+        evidence: []
+      };
+    }
+    return { card, evidence };
+  }
+
+  saveWorkingCardFromReflection(rawInput: {
+    accountId: string;
+    reflectionId: string;
+    cardId: string;
+    expectedVersion: number;
+  }) {
+    const input = SaveWorkingCardInputSchema.parse(rawInput);
+    const save = this.database.transaction(() => {
+      const reflection = this.requireReflectionRow(input.accountId, input.reflectionId);
+      if (isDailyReflectionTombstone(reflection.status)) {
+        throw new DailyReflectionConflictError("daily_reflection_tombstoned");
+      }
+      const cardRow = this.listCardRows(input.accountId, input.reflectionId)
+        .find((card) => card.id === input.cardId);
+      if (!cardRow) throw new DailyReflectionNotFoundError();
+      const card = this.cardFromRow(cardRow);
+      const working = this.requireWorkingCardRow(input.accountId, input.cardId);
+      if (working.status === "saved") return this.workingCardFromRow(working);
+      if (
+        working.saved_at !== null
+        || (working.status !== "generated" && working.status !== "review_pending")
+      ) {
+        throw new DailyReflectionConflictError(
+          "daily_reflection_working_card_restore_required"
+        );
+      }
+      if (card.version !== input.expectedVersion) {
+        throw new DailyReflectionVersionConflictError(card.version);
+      }
+      const plan = this.findPlanRow(input.accountId, input.reflectionId);
+      if (!plan) {
+        throw new DailyReflectionConflictError("daily_reflection_working_card_evidence_unavailable");
+      }
+      const canonical = parseDailyReflectionCanonicalTranscript(
+        this.readPublishedAsset<unknown>({
+          accountId: input.accountId,
+          reflectionId: input.reflectionId,
+          assetKind: "segments"
+        }),
+        plan.upload_id
+      );
+      const canonicalIds = new Set(canonical?.map((segment) => segment.id) ?? []);
+      if (
+        card.evidenceIds.length === 0
+        || card.evidenceIds.some((evidenceId) => !canonicalIds.has(evidenceId))
+      ) {
+        throw new DailyReflectionConflictError("daily_reflection_working_card_evidence_unavailable");
+      }
+      const now = this.now();
+      const updated = this.database.prepare(`
+        UPDATE dr_working_cards
+        SET title = ?, content = ?, card_kind = ?, evidence_ids_json = ?,
+            status = 'saved', source_unavailable = 0,
+            saved_at = ?, version = version + 1,
+            updated_at = ?
+        WHERE account_id = ? AND id = ? AND version = ?
+          AND saved_at IS NULL
+          AND status IN ('generated', 'review_pending')
+      `).run(
+        card.userTitle ?? card.proposedTitle,
+        card.userText ?? card.proposedText,
+        workingCardKindForReflectionCard(card.cardKind),
+        JSON.stringify(card.evidenceIds),
+        now,
+        now,
+        input.accountId,
+        input.cardId,
+        working.version
+      );
+      if (updated.changes !== 1) {
+        throw new DailyReflectionVersionConflictError(
+          this.requireWorkingCardRow(input.accountId, input.cardId).version
+        );
+      }
+      const saved = this.requireWorkingCardRow(input.accountId, input.cardId);
+      this.recordWorkingCardEvent({
+        accountId: input.accountId,
+        cardId: input.cardId,
+        eventType: "saved",
+        fromStatus: working.status,
+        toStatus: saved.status,
+        cardVersion: saved.version,
+        createdAt: now
+      });
+      return this.workingCardFromRow(saved);
+    });
+    return save.immediate();
+  }
+
+  updateWorkingCard(rawInput: {
+    accountId: string;
+    cardId: string;
+    expectedVersion: number;
+    title?: string;
+    content?: string;
+    cardKind?: DailyReflectionWorkingCardKind;
+    relatedCardIds?: string[];
+    tags?: string[];
+    visibility?: "private";
+  }) {
+    const input = UpdateWorkingCardInputSchema.parse(rawInput);
+    const update = this.database.transaction(() => {
+      const current = this.requireWorkingCardRow(input.accountId, input.cardId);
+      if (current.saved_at === null || current.status === "removed") {
+        throw new DailyReflectionConflictError("daily_reflection_working_card_not_editable");
+      }
+      if (current.version !== input.expectedVersion) {
+        throw new DailyReflectionVersionConflictError(current.version);
+      }
+      if (input.relatedCardIds) {
+        for (const relatedCardId of input.relatedCardIds) {
+          const related = this.findWorkingCardRow(input.accountId, relatedCardId);
+          if (!related || related.saved_at === null || related.status === "removed") {
+            throw new DailyReflectionConflictError("daily_reflection_working_card_relation_invalid");
+          }
+        }
+      }
+      const now = this.now();
+      const updated = this.database.prepare(`
+        UPDATE dr_working_cards
+        SET title = ?, content = ?, card_kind = ?, related_card_ids_json = ?,
+            tags_json = ?, visibility = ?, version = version + 1, updated_at = ?
+        WHERE account_id = ? AND id = ? AND version = ?
+      `).run(
+        input.title ?? current.title,
+        input.content ?? current.content,
+        input.cardKind ?? current.card_kind,
+        JSON.stringify(input.relatedCardIds ?? JSON.parse(current.related_card_ids_json)),
+        JSON.stringify(input.tags ?? JSON.parse(current.tags_json)),
+        input.visibility ?? current.visibility,
+        now,
+        input.accountId,
+        input.cardId,
+        input.expectedVersion
+      );
+      if (updated.changes !== 1) {
+        throw new DailyReflectionVersionConflictError(
+          this.requireWorkingCardRow(input.accountId, input.cardId).version
+        );
+      }
+      const result = this.requireWorkingCardRow(input.accountId, input.cardId);
+      this.recordWorkingCardEvent({
+        accountId: input.accountId,
+        cardId: input.cardId,
+        eventType: "updated",
+        fromStatus: current.status,
+        toStatus: result.status,
+        cardVersion: result.version,
+        createdAt: now
+      });
+      return this.workingCardFromRow(result);
+    });
+    return update.immediate();
+  }
+
+  private transitionWorkingCard(rawInput: {
+    accountId: string;
+    cardId: string;
+    expectedVersion: number;
+    targetStatus: "saved" | "archived" | "removed";
+    eventType: "archived" | "restored" | "removed";
+  }) {
+    const input = WorkingCardLifecycleInputSchema.parse({
+      accountId: rawInput.accountId,
+      cardId: rawInput.cardId,
+      expectedVersion: rawInput.expectedVersion
+    });
+    const transition = this.database.transaction(() => {
+      const current = this.requireWorkingCardRow(input.accountId, input.cardId);
+      if (current.status === rawInput.targetStatus) {
+        return this.workingCardFromRow(current);
+      }
+      if (current.version !== input.expectedVersion) {
+        throw new DailyReflectionVersionConflictError(current.version);
+      }
+      const allowed = rawInput.targetStatus === "archived"
+        ? current.status === "saved"
+        : rawInput.targetStatus === "saved"
+          ? current.status === "archived" || current.status === "removed"
+          : current.status === "saved" || current.status === "archived";
+      if (!allowed || current.saved_at === null) {
+        throw new DailyReflectionConflictError("daily_reflection_working_card_transition_invalid");
+      }
+      const now = this.now();
+      const updated = this.database.prepare(`
+        UPDATE dr_working_cards
+        SET status = ?, version = version + 1, updated_at = ?
+        WHERE account_id = ? AND id = ? AND version = ?
+      `).run(
+        rawInput.targetStatus,
+        now,
+        input.accountId,
+        input.cardId,
+        input.expectedVersion
+      );
+      if (updated.changes !== 1) {
+        throw new DailyReflectionVersionConflictError(
+          this.requireWorkingCardRow(input.accountId, input.cardId).version
+        );
+      }
+      const result = this.requireWorkingCardRow(input.accountId, input.cardId);
+      this.recordWorkingCardEvent({
+        accountId: input.accountId,
+        cardId: input.cardId,
+        eventType: rawInput.eventType,
+        fromStatus: current.status,
+        toStatus: result.status,
+        cardVersion: result.version,
+        createdAt: now
+      });
+      return this.workingCardFromRow(result);
+    });
+    return transition.immediate();
+  }
+
+  archiveWorkingCard(input: {
+    accountId: string;
+    cardId: string;
+    expectedVersion: number;
+  }) {
+    return this.transitionWorkingCard({
+      ...input,
+      targetStatus: "archived",
+      eventType: "archived"
+    });
+  }
+
+  restoreWorkingCard(input: {
+    accountId: string;
+    cardId: string;
+    expectedVersion: number;
+  }) {
+    return this.transitionWorkingCard({
+      ...input,
+      targetStatus: "saved",
+      eventType: "restored"
+    });
+  }
+
+  removeWorkingCard(input: {
+    accountId: string;
+    cardId: string;
+    expectedVersion: number;
+  }) {
+    return this.transitionWorkingCard({
+      ...input,
+      targetStatus: "removed",
+      eventType: "removed"
+    });
   }
 
   private candidateRole(accountId: string, candidateId: string) {
@@ -2282,10 +2932,19 @@ export class DailyReflectionRepository {
 
   deletePublishedAssets(accountId: string, reflectionId: string) {
     this.requireReflectionRow(accountId, reflectionId);
-    return this.database.prepare(`
-      DELETE FROM dr_asset_publications
-      WHERE account_id = ? AND reflection_id = ?
-    `).run(accountId, reflectionId).changes;
+    const remove = this.database.transaction(() => {
+      const changes = this.database.prepare(`
+        DELETE FROM dr_asset_publications
+        WHERE account_id = ? AND reflection_id = ?
+      `).run(accountId, reflectionId).changes;
+      this.markSavedWorkingCardSourcesUnavailable({
+        accountId,
+        reflectionId,
+        now: this.now()
+      });
+      return changes;
+    });
+    return remove.immediate();
   }
 
   deletePublishedAsset(
@@ -2294,10 +2953,21 @@ export class DailyReflectionRepository {
     assetKind: DailyReflectionPublishedAssetKind
   ) {
     this.requireReflectionRow(accountId, reflectionId);
-    return this.database.prepare(`
-      DELETE FROM dr_asset_publications
-      WHERE account_id = ? AND reflection_id = ? AND asset_kind = ?
-    `).run(accountId, reflectionId, assetKind).changes;
+    const remove = this.database.transaction(() => {
+      const changes = this.database.prepare(`
+        DELETE FROM dr_asset_publications
+        WHERE account_id = ? AND reflection_id = ? AND asset_kind = ?
+      `).run(accountId, reflectionId, assetKind).changes;
+      if (assetKind === "segments") {
+        this.markSavedWorkingCardSourcesUnavailable({
+          accountId,
+          reflectionId,
+          now: this.now()
+        });
+      }
+      return changes;
+    });
+    return remove.immediate();
   }
 
   transitionStatus(rawInput: {
@@ -2358,6 +3028,13 @@ export class DailyReflectionRepository {
         throw new DailyReflectionVersionConflictError(
           this.requireReflectionRow(input.accountId, input.reflectionId).version
         );
+      }
+      if (isDailyReflectionTombstone(input.status)) {
+        this.reconcileWorkingCardsForTombstonedReflection({
+          accountId: input.accountId,
+          reflectionId: input.reflectionId,
+          now
+        });
       }
       return reflectionFromRow(
         this.requireReflectionRow(input.accountId, input.reflectionId)
@@ -4580,6 +5257,14 @@ export class DailyReflectionRepository {
           review_status, version, created_at, updated_at
         ) VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, 0, ?, ?)
       `);
+      const insertWorkingCard = this.database.prepare(`
+        INSERT INTO dr_working_cards (
+          id, account_id, source_reflection_ids_json, title, content, card_kind,
+          evidence_ids_json, status, importance, novelty, related_card_ids_json,
+          tags_json, visibility, source_unavailable, saved_at, version,
+          created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '[]', '[]', 'private', 0, NULL, 0, ?, ?)
+      `);
       for (const card of input.cards) {
         const projectionStatus = card.reviewStatus === "kept"
           ? "kept"
@@ -4611,6 +5296,22 @@ export class DailyReflectionRepository {
           card.confidence, card.importance, card.durability, card.novelty,
           card.epistemicStatus, JSON.stringify(card.riskFlags), card.reviewStatus,
           now, now
+        );
+        insertWorkingCard.run(
+          card.id!,
+          input.accountId,
+          JSON.stringify([input.reflectionId]),
+          card.proposedTitle,
+          card.proposedText,
+          workingCardKindForReflectionCard(card.cardKind),
+          JSON.stringify(card.evidenceIds),
+          card.reviewStatus === "not_proposed"
+            ? "generated"
+            : card.reviewStatus === "excluded" ? "removed" : "review_pending",
+          card.importance,
+          card.novelty,
+          now,
+          now
         );
       }
       this.database.prepare(`
@@ -4716,6 +5417,23 @@ export class DailyReflectionRepository {
         if (updatedCard.changes !== 1) {
           throw new DailyReflectionConflictError("daily_reflection_card_update_conflict");
         }
+        const workingStatus = decision.reviewStatus === "not_proposed"
+          ? "generated"
+          : decision.reviewStatus === "excluded" ? "removed" : "review_pending";
+        this.database.prepare(`
+          UPDATE dr_working_cards
+          SET title = ?, content = ?,
+              status = ?,
+              version = version + 1, updated_at = ?
+          WHERE account_id = ? AND id = ? AND saved_at IS NULL
+        `).run(
+          decision.userTitle ?? card.proposedTitle,
+          decision.userText ?? card.proposedText,
+          workingStatus,
+          now,
+          input.accountId,
+          decision.cardId
+        );
         const candidateStatus = decision.reviewStatus === "kept"
           ? "kept"
           : decision.reviewStatus === "excluded" ? "excluded" : "pending";

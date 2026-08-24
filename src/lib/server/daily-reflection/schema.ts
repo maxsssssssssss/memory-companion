@@ -1,6 +1,6 @@
 import type Database from "better-sqlite3";
 
-export const DAILY_REFLECTION_SCHEMA_VERSION = 9;
+export const DAILY_REFLECTION_SCHEMA_VERSION = 10;
 
 // Version one intentionally represents the pre-provenance workflow shape.
 // Version two adds source_origin with a fail-closed legacy backfill and the
@@ -718,6 +718,111 @@ const DAILY_REFLECTION_SCHEMA_V9 = `
   END;
 `;
 
+// V10 adds an account-scoped Working Card snapshot inside the Daily Reflection
+// workflow database. It deliberately has no foreign key to transient
+// Reflections or Candidates: saved Cards must survive Reflection deletion while
+// retaining their original, immutable provenance ids.
+const DAILY_REFLECTION_SCHEMA_V10 = `
+  CREATE TABLE dr_working_cards (
+    id TEXT PRIMARY KEY,
+    account_id TEXT NOT NULL,
+    source_reflection_ids_json TEXT NOT NULL CHECK (json_valid(source_reflection_ids_json)),
+    title TEXT NOT NULL CHECK (length(trim(title)) > 0),
+    content TEXT NOT NULL CHECK (length(trim(content)) > 0),
+    card_kind TEXT NOT NULL CHECK (
+      card_kind IN ('idea', 'insight', 'question', 'decision', 'event', 'action')
+    ),
+    evidence_ids_json TEXT NOT NULL CHECK (json_valid(evidence_ids_json)),
+    status TEXT NOT NULL CHECK (
+      status IN ('generated', 'review_pending', 'saved', 'archived', 'removed')
+    ),
+    importance REAL NOT NULL CHECK (importance >= 0 AND importance <= 1),
+    novelty REAL NOT NULL CHECK (novelty >= 0 AND novelty <= 1),
+    related_card_ids_json TEXT NOT NULL CHECK (json_valid(related_card_ids_json)),
+    tags_json TEXT NOT NULL CHECK (json_valid(tags_json)),
+    visibility TEXT NOT NULL CHECK (visibility = 'private'),
+    source_unavailable INTEGER NOT NULL DEFAULT 0 CHECK (source_unavailable IN (0, 1)),
+    saved_at TEXT,
+    version INTEGER NOT NULL DEFAULT 0 CHECK (version >= 0),
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE (id, account_id)
+  );
+
+  CREATE INDEX idx_dr_working_cards_library
+    ON dr_working_cards(account_id, status, updated_at DESC, id);
+
+  CREATE INDEX idx_dr_working_cards_kind_created
+    ON dr_working_cards(account_id, card_kind, created_at DESC, id);
+
+  CREATE TABLE dr_working_card_events (
+    event_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    account_id TEXT NOT NULL,
+    card_id TEXT NOT NULL,
+    event_type TEXT NOT NULL CHECK (
+      event_type IN ('saved', 'updated', 'archived', 'restored', 'removed', 'source_unavailable')
+    ),
+    from_status TEXT,
+    to_status TEXT NOT NULL,
+    card_version INTEGER NOT NULL CHECK (card_version >= 0),
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (card_id, account_id)
+      REFERENCES dr_working_cards(id, account_id) ON DELETE CASCADE
+  );
+
+  CREATE INDEX idx_dr_working_card_events_card
+    ON dr_working_card_events(account_id, card_id, event_id);
+
+  INSERT INTO dr_working_cards (
+    id, account_id, source_reflection_ids_json, title, content, card_kind,
+    evidence_ids_json, status, importance, novelty, related_card_ids_json,
+    tags_json, visibility, source_unavailable, saved_at, version,
+    created_at, updated_at
+  )
+  SELECT
+    card.id,
+    card.account_id,
+    json_array(card.reflection_id),
+    COALESCE(NULLIF(trim(card.user_title), ''), card.proposed_title),
+    COALESCE(NULLIF(trim(card.user_text), ''), card.proposed_text),
+    CASE card.card_kind
+      WHEN 'open_question' THEN 'question'
+      WHEN 'user_action' THEN 'action'
+      ELSE card.card_kind
+    END,
+    card.evidence_ids_json,
+    CASE card.review_status
+      WHEN 'not_proposed' THEN 'generated'
+      WHEN 'pending' THEN 'review_pending'
+      WHEN 'kept' THEN 'saved'
+      ELSE 'removed'
+    END,
+    card.importance,
+    card.novelty,
+    json_array(),
+    json_array(),
+    'private',
+    CASE WHEN reflection.status IN ('cancelled', 'deleted')
+      OR NOT EXISTS (
+        SELECT 1
+        FROM dr_asset_publications AS publication
+        WHERE publication.account_id = card.account_id
+          AND publication.reflection_id = card.reflection_id
+          AND publication.asset_kind = 'segments'
+      )
+      THEN 1 ELSE 0 END,
+    CASE WHEN card.review_status = 'kept' THEN card.updated_at ELSE NULL END,
+    0,
+    card.created_at,
+    card.updated_at
+  FROM dr_reflection_cards AS card
+  JOIN dr_reflections AS reflection
+    ON reflection.id = card.reflection_id
+   AND reflection.account_id = card.account_id
+  WHERE card.review_status = 'kept'
+     OR reflection.status NOT IN ('cancelled', 'deleted');
+`;
+
 const MIGRATIONS = [
   { version: 1, sql: DAILY_REFLECTION_SCHEMA_V1 },
   { version: 2, sql: DAILY_REFLECTION_SCHEMA_V2 },
@@ -727,7 +832,8 @@ const MIGRATIONS = [
   { version: 6, sql: DAILY_REFLECTION_SCHEMA_V6 },
   { version: 7, sql: DAILY_REFLECTION_SCHEMA_V7 },
   { version: 8, sql: DAILY_REFLECTION_SCHEMA_V8 },
-  { version: 9, sql: DAILY_REFLECTION_SCHEMA_V9 }
+  { version: 9, sql: DAILY_REFLECTION_SCHEMA_V9 },
+  { version: 10, sql: DAILY_REFLECTION_SCHEMA_V10 }
 ] as const;
 
 export function migrateDailyReflectionSchema(database: Database.Database) {

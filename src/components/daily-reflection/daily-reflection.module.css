@@ -322,6 +322,25 @@
 .historyMeta { margin-top: auto; color: var(--dr-faint); font-size: 8px; }
 .historyEmpty { margin: 22px 0 0; padding: 24px; border-radius: 20px; background: rgba(255,253,249,.62); color: var(--dr-muted); font-size: 11px; line-height: 1.7; }
 
+.cardLibraryPage { display: grid; gap: 24px; }
+.cardLibraryFilters { display: grid; grid-template-columns: minmax(220px, 2fr) repeat(4, minmax(120px, 1fr)) auto; align-items: end; padding: 18px; gap: 12px; border: 1px solid var(--dr-line); border-radius: 20px; background: rgba(255,253,249,.82); }
+.cardLibraryFilters label { display: grid; gap: 7px; color: var(--dr-muted); font-size: 9px; font-weight: 750; }
+.cardLibraryFilters input,
+.cardLibraryFilters select { min-height: 42px; width: 100%; padding: 9px 11px; border: 1px solid var(--dr-line); border-radius: 12px; background: rgba(255,255,255,.82); color: var(--dr-ink); font: inherit; }
+.cardLibraryLayout { display: grid; grid-template-columns: minmax(0, 1.2fr) minmax(300px, .8fr); align-items: start; gap: 18px; }
+.cardLibraryList,
+.cardLibraryDetail { min-width: 0; padding: clamp(20px, 2.5vw, 30px); border: 1px solid rgba(255,255,255,.8); border-radius: 28px 13px 28px 13px; background: rgba(255,253,249,.82); box-shadow: 0 25px 65px -58px rgba(55,45,39,.75); }
+.cardLibraryDetail { position: sticky; top: 18px; display: grid; gap: 18px; }
+.cardLibraryDetail h2,
+.cardLibraryDetail h3 { margin: 0; font-family: "Noto Serif SC", "Songti SC", Georgia, serif; }
+.cardLibraryDetail > p { margin: 0; font-size: 13px; line-height: 1.8; }
+.cardLibraryMeta { display: flex; align-items: center; justify-content: space-between; gap: 12px; color: var(--dr-faint); font-size: 9px; }
+.cardLibraryDefinitionList { display: grid; margin: 0; gap: 8px; }
+.cardLibraryDefinitionList > div { display: grid; grid-template-columns: 80px minmax(0, 1fr); gap: 10px; }
+.cardLibraryDefinitionList dt { color: var(--dr-faint); font-size: 9px; }
+.cardLibraryDefinitionList dd { display: flex; flex-wrap: wrap; margin: 0; gap: 8px; color: var(--dr-ink); font-size: 10px; }
+.cardLibraryDefinitionList a { color: var(--dr-accent-dark); }
+
 .searchField { margin-top: 20px; }
 .transcriptScroller { max-height: 610px; margin-top: 14px; overflow-y: auto; overscroll-behavior: contain; padding-right: 5px; scrollbar-color: #b8afa3 transparent; }
 .transcriptList { display: grid; margin: 0; padding: 0; gap: 8px; list-style: none; }
@@ -341,6 +360,9 @@
   .reviewGrid { grid-template-columns: 1fr; }
   .transcriptScroller { max-height: 520px; }
   .historyList { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .cardLibraryFilters { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .cardLibraryLayout { grid-template-columns: 1fr; }
+  .cardLibraryDetail { position: static; }
 }
 
 @media (max-width: 620px) {
@@ -382,6 +404,7 @@
   .uploadActions > button,
   .statusActions > button { width: 100%; min-height: 46px; }
   .candidateEditor textarea { min-height: 150px; }
+  .cardLibraryFilters { grid-template-columns: 1fr; }
 }
 
 @media (prefers-reduced-motion: reduce) {

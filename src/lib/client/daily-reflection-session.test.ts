@@ -4,7 +4,8 @@ import type {
   DailyReflectionCardUpdateRequest,
   DailyReflectionCardView,
   DailyReflectionCandidateView,
-  DailyReflectionDetailResponse
+  DailyReflectionDetailResponse,
+  DailyReflectionWorkingCardDetailResponse
 } from "@/lib/domain/daily-reflection-api";
 import type { DailyReflectionStatus } from "@/lib/domain/daily-reflection";
 
@@ -251,6 +252,40 @@ function reviewCard(
   };
 }
 
+function workingCardDetail(
+  status: "saved" | "archived" | "removed",
+  version: number
+): DailyReflectionWorkingCardDetailResponse {
+  return {
+    card: {
+      id: "card_working",
+      sourceReflectionIds: ["reflection_1"],
+      title: "工作卡片",
+      content: "工作卡片内容",
+      cardKind: "insight",
+      evidenceIds: ["segment_1"],
+      status,
+      importance: 0.8,
+      novelty: 0.7,
+      relatedCardIds: [],
+      tags: [],
+      visibility: "private",
+      sourceUnavailable: false,
+      version,
+      createdAt: NOW,
+      updatedAt: NOW,
+      evidence: [{
+        sourceSegmentId: "segment_1",
+        uploadId: "upload_1",
+        effectiveOrigin: "user_reflection",
+        startSeconds: 0,
+        endSeconds: 8,
+        text: "Canonical Evidence"
+      }]
+    }
+  };
+}
+
 function reviewDetail(
   version: number,
   candidates: DailyReflectionCandidateView[] = [reviewCandidate("pending")]
@@ -376,6 +411,25 @@ function fakeApi(overrides: Partial<DailyReflectionApi> = {}): DailyReflectionAp
       reflection: { ...detail("reflection_1", "review_pending").reflection, version: input.expectedVersion + 1 },
       cards: []
     }),
+    listWorkingCards: async () => ({ cards: [], total: 0, limit: 24, offset: 0 }),
+    getWorkingCard: async () => {
+      throw new Error("working card detail is not configured for this test");
+    },
+    saveWorkingCard: async () => {
+      throw new Error("working card save is not configured for this test");
+    },
+    updateWorkingCard: async () => {
+      throw new Error("working card update is not configured for this test");
+    },
+    archiveWorkingCard: async () => {
+      throw new Error("working card archive is not configured for this test");
+    },
+    restoreWorkingCard: async () => {
+      throw new Error("working card restore is not configured for this test");
+    },
+    removeWorkingCard: async () => {
+      throw new Error("working card remove is not configured for this test");
+    },
     updateCandidates: async (_reflectionId, input) => ({
       reflection: { ...detail("reflection_1", "review_pending").reflection, version: input.expectedVersion + 1 },
       candidates: []
@@ -978,6 +1032,198 @@ describe("DailyReflectionSessionController", () => {
     expect(updateCards.mock.calls[0]?.[1].cards).not.toEqual(
       expect.arrayContaining([expect.objectContaining({ cardId: moreInsight.id })])
     );
+  });
+
+  it("saves a Working Card without invoking finalize or Memory admission", async () => {
+    const card = reviewCard("card_working", "primary", "insight");
+    const ready = { ...reviewDetail(3, []), cards: [card] };
+    const saveWorkingCard = vi.fn(async () => workingCardDetail("saved", 1));
+    const archiveWorkingCard = vi.fn(async () => workingCardDetail("archived", 2));
+    const restoreWorkingCard = vi.fn(async () => workingCardDetail("saved", 3));
+    const removeWorkingCard = vi.fn(async () => workingCardDetail("removed", 4));
+    const finalize = vi.fn(async () => {
+      throw new Error("finalize must not run for Working Card save");
+    });
+    const controller = new DailyReflectionSessionController({
+      api: fakeApi({
+        get: async () => ready,
+        saveWorkingCard,
+        archiveWorkingCard,
+        restoreWorkingCard,
+        removeWorkingCard,
+        finalize
+      })
+    });
+    await controller.initialize("reflection_1");
+
+    await controller.saveWorkingCard(card.id);
+
+    expect(saveWorkingCard).toHaveBeenCalledWith(
+      "reflection_1",
+      card.id,
+      { expectedVersion: card.version },
+      expect.any(AbortSignal)
+    );
+    expect(finalize).not.toHaveBeenCalled();
+    await controller.archiveWorkingCard(card.id);
+    await controller.restoreWorkingCard(card.id);
+    await controller.removeWorkingCard(card.id);
+    expect(archiveWorkingCard).toHaveBeenCalledWith(
+      card.id,
+      { expectedVersion: 1 },
+      expect.any(AbortSignal)
+    );
+    expect(restoreWorkingCard).toHaveBeenCalledWith(
+      card.id,
+      { expectedVersion: 2 },
+      expect.any(AbortSignal)
+    );
+    expect(removeWorkingCard).toHaveBeenCalledWith(
+      card.id,
+      { expectedVersion: 3 },
+      expect.any(AbortSignal)
+    );
+    expect(finalize).not.toHaveBeenCalled();
+    expect(controller.getSnapshot()).toMatchObject({
+      operation: "idle",
+      activeCandidateId: null,
+      workingCardStates: { [card.id]: { status: "removed", version: 4 } },
+      errorMessage: null
+    });
+  });
+
+  it("hydrates saved Working Card lifecycle state and replaces it on reload", async () => {
+    const card = reviewCard("card_working", "primary", "insight");
+    const get = vi.fn()
+      .mockResolvedValueOnce({
+        ...reviewDetail(3, []),
+        cards: [card],
+        workingCards: [{ id: card.id, status: "archived", version: 7 }]
+      })
+      .mockResolvedValueOnce({
+        ...reviewDetail(3, []),
+        cards: [card],
+        workingCards: [{ id: card.id, status: "removed", version: 8 }]
+      })
+      .mockResolvedValueOnce({
+        ...reviewDetail(3, []),
+        cards: [card],
+        workingCards: []
+      });
+    const restoreWorkingCard = vi.fn(async () => workingCardDetail("saved", 8));
+    const controller = new DailyReflectionSessionController({
+      api: fakeApi({ get, restoreWorkingCard })
+    });
+
+    await controller.initialize("reflection_1");
+    expect(controller.getSnapshot().workingCardStates).toEqual({
+      [card.id]: { status: "archived", version: 7 }
+    });
+    await controller.restoreWorkingCard(card.id);
+    expect(restoreWorkingCard).toHaveBeenCalledWith(
+      card.id,
+      { expectedVersion: 7 },
+      expect.any(AbortSignal)
+    );
+
+    await controller.reload("reflection_1");
+    expect(controller.getSnapshot().workingCardStates).toEqual({
+      [card.id]: { status: "removed", version: 8 }
+    });
+    await controller.reload("reflection_1");
+    expect(controller.getSnapshot().workingCardStates).toEqual({});
+  });
+
+  it("persists edited Card text before saving it without finalizing", async () => {
+    const card = reviewCard("card_working", "primary", "insight");
+    const ready = { ...reviewDetail(3, []), cards: [card], workingCards: [] };
+    const editedCard = {
+      ...card,
+      userTitle: "用户编辑后的标题",
+      userText: "用户编辑后的内容",
+      version: 1
+    };
+    const updateCards = vi.fn(async () => ({
+      reflection: { ...ready.reflection, version: 4 },
+      cards: [editedCard]
+    }));
+    const saveWorkingCard = vi.fn(async () => workingCardDetail("saved", 2));
+    const finalize = vi.fn(async () => {
+      throw new Error("finalize must not run for Working Card save");
+    });
+    const controller = new DailyReflectionSessionController({
+      api: fakeApi({
+        get: async () => ready,
+        updateCards,
+        saveWorkingCard,
+        finalize
+      })
+    });
+    await controller.initialize("reflection_1");
+
+    await controller.saveWorkingCard(card.id, {
+      userTitle: editedCard.userTitle,
+      userText: editedCard.userText
+    });
+
+    expect(updateCards).toHaveBeenCalledWith("reflection_1", {
+      expectedVersion: 3,
+      cards: [{
+        cardId: card.id,
+        reviewStatus: card.reviewStatus,
+        userTitle: editedCard.userTitle,
+        userText: editedCard.userText
+      }]
+    }, expect.any(AbortSignal));
+    expect(saveWorkingCard).toHaveBeenCalledWith(
+      "reflection_1",
+      card.id,
+      { expectedVersion: editedCard.version },
+      expect.any(AbortSignal)
+    );
+    expect(controller.getSnapshot()).toMatchObject({
+      detail: {
+        reflection: { version: 4 },
+        cards: [{
+          id: card.id,
+          userTitle: editedCard.userTitle,
+          userText: editedCard.userText
+        }]
+      },
+      workingCardStates: { [card.id]: { status: "saved", version: 2 } }
+    });
+    expect(finalize).not.toHaveBeenCalled();
+  });
+
+  it("does not save stale text when the pre-save Card update conflicts", async () => {
+    const card = reviewCard("card_working", "primary", "insight");
+    const ready = { ...reviewDetail(3, []), cards: [card], workingCards: [] };
+    const fresh = {
+      ...reviewDetail(4, []),
+      cards: [{ ...card, userText: "其他页面的内容", version: 1 }],
+      workingCards: []
+    };
+    const get = vi.fn().mockResolvedValueOnce(ready).mockResolvedValueOnce(fresh);
+    const updateCards = vi.fn(async () => {
+      throw new DailyReflectionApiError(409, "version_conflict");
+    });
+    const saveWorkingCard = vi.fn(async () => workingCardDetail("saved", 1));
+    const controller = new DailyReflectionSessionController({
+      api: fakeApi({ get, updateCards, saveWorkingCard })
+    });
+    await controller.initialize("reflection_1");
+
+    await controller.saveWorkingCard(card.id, {
+      userTitle: null,
+      userText: "本页尚未保存的内容"
+    });
+
+    expect(saveWorkingCard).not.toHaveBeenCalled();
+    expect(get).toHaveBeenCalledTimes(2);
+    expect(controller.getSnapshot()).toMatchObject({
+      detail: { reflection: { version: 4 } },
+      workingCardStates: {}
+    });
   });
 
   it("reloads authoritative truth and shows the exact safe message after a stale update", async () => {

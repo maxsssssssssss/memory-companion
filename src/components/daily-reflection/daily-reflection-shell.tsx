@@ -490,18 +490,37 @@ const CARD_RISK_LABELS: Record<DailyReflectionCardView["riskFlags"][number], str
   sensitive: "可能包含敏感内容"
 };
 
+function activeWorkingCardStatus(status: string | undefined) {
+  return status === "saved" || status === "archived" || status === "removed"
+    ? status
+    : undefined;
+}
+
 type ReflectionCardReviewProps = Readonly<{
   card: DailyReflectionCardView;
   busy: boolean;
   onDecision(decision: DailyReflectionCardDecision): void;
+  onArchiveFromCards(cardId: string): void;
+  onRemoveFromCards(cardId: string): void;
+  onRestoreToCards(cardId: string): void;
+  onSaveToCards(
+    cardId: string,
+    draft: Pick<DailyReflectionCardDecision, "userTitle" | "userText">
+  ): void;
   onSource(segmentId: string): void;
+  workingCardStatus?: "saved" | "archived" | "removed";
 }>;
 
 function ReflectionCardReview({
   card,
   busy,
   onDecision,
-  onSource
+  onArchiveFromCards,
+  onRemoveFromCards,
+  onRestoreToCards,
+  onSaveToCards,
+  onSource,
+  workingCardStatus
 }: ReflectionCardReviewProps) {
   const [draftTitle, setDraftTitle] = useState(card.userTitle ?? card.proposedTitle);
   const [draftText, setDraftText] = useState(card.userText ?? card.proposedText);
@@ -603,6 +622,24 @@ function ReflectionCardReview({
         </ol>
       ) : null}
       <div className={styles.candidateActions}>
+        {!workingCardStatus && card.reviewStatus !== "excluded" ? (
+          <button
+            className={styles.secondaryButton}
+            disabled={busy}
+            onClick={() => onSaveToCards(card.id, {
+              userTitle: normalizedCandidateText(draftTitle, card.proposedTitle),
+              userText: normalizedCandidateText(draftText, card.proposedText)
+            })}
+            type="button"
+          >保存到我的 Cards</button>
+        ) : workingCardStatus === "saved" ? (
+          <>
+            <button className={styles.secondaryButton} disabled={busy} onClick={() => onArchiveFromCards(card.id)} type="button">从 My Cards 归档</button>
+            <button className={styles.textButton} disabled={busy} onClick={() => onRemoveFromCards(card.id)} type="button">从 My Cards 移除</button>
+          </>
+        ) : workingCardStatus ? (
+          <button className={styles.secondaryButton} disabled={busy} onClick={() => onRestoreToCards(card.id)} type="button">恢复到 My Cards</button>
+        ) : null}
         {card.displayTier === "more" ? (
           <button
             className={styles.textButton}
@@ -1389,6 +1426,7 @@ export function DailyReflectionShellContent({
         <nav className={styles.productNav} aria-label="产品空间">
           <Link href="/date-companion/a">约会陪伴</Link>
           <Link aria-current="page" className={styles.activeProductNav} href={REFLECTION_PATH}>日常复盘</Link>
+          <Link href={`${REFLECTION_PATH}/cards`}>My Cards</Link>
         </nav>
         <div className={styles.headerTools}>
           <span title={userLabel}>{userLabel}</span>
@@ -1754,7 +1792,14 @@ export function DailyReflectionShellContent({
                             card={card}
                             key={card.id}
                             onDecision={(decision) => decideCard(card, decision)}
+                            onArchiveFromCards={(cardId) => void session.archiveWorkingCard(cardId)}
+                            onRemoveFromCards={(cardId) => void session.removeWorkingCard(cardId)}
+                            onRestoreToCards={(cardId) => void session.restoreWorkingCard(cardId)}
+                            onSaveToCards={(cardId, draft) => void session.saveWorkingCard(cardId, draft)}
                             onSource={requestTranscriptSegmentFocus}
+                            workingCardStatus={activeWorkingCardStatus(
+                              session.workingCardStates[card.id]?.status
+                            )}
                           />
                         ))}
                       </ol>
@@ -1776,7 +1821,14 @@ export function DailyReflectionShellContent({
                                   card={card}
                                   key={card.id}
                                   onDecision={(decision) => decideCard(card, decision)}
+                                  onArchiveFromCards={(cardId) => void session.archiveWorkingCard(cardId)}
+                                  onRemoveFromCards={(cardId) => void session.removeWorkingCard(cardId)}
+                                  onRestoreToCards={(cardId) => void session.restoreWorkingCard(cardId)}
+                                  onSaveToCards={(cardId, draft) => void session.saveWorkingCard(cardId, draft)}
                                   onSource={requestTranscriptSegmentFocus}
+                                  workingCardStatus={activeWorkingCardStatus(
+                                    session.workingCardStates[card.id]?.status
+                                  )}
                                 />
                               ))}
                             </ol>
@@ -1904,6 +1956,25 @@ export function DailyReflectionShellContent({
                             onClick={() => requestTranscriptSegmentFocus(card.evidenceIds[0])}
                             type="button"
                           >查看依据</button>
+                          {session.workingCardStates[card.id]?.status === "saved" ? (
+                            <div className={styles.candidateActions}>
+                              <button className={styles.secondaryButton} disabled={busy} onClick={() => void session.archiveWorkingCard(card.id)} type="button">从 My Cards 归档</button>
+                              <button className={styles.textButton} disabled={busy} onClick={() => void session.removeWorkingCard(card.id)} type="button">从 My Cards 移除</button>
+                            </div>
+                          ) : session.workingCardStates[card.id]?.status === "archived"
+                            || session.workingCardStates[card.id]?.status === "removed" ? (
+                              <button className={styles.secondaryButton} disabled={busy} onClick={() => void session.restoreWorkingCard(card.id)} type="button">恢复到 My Cards</button>
+                            ) : card.reviewStatus !== "excluded" ? (
+                              <button
+                                className={styles.secondaryButton}
+                                disabled={busy}
+                                onClick={() => void session.saveWorkingCard(card.id, {
+                                  userTitle: card.userTitle,
+                                  userText: card.userText
+                                })}
+                                type="button"
+                              >保存到我的 Cards</button>
+                            ) : null}
                         </li>
                       ))}
                     </ol>

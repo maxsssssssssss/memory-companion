@@ -23,6 +23,11 @@ import {
   SourceOriginSchema
 } from "./daily-reflection";
 import {
+  DailyReflectionWorkingCardKindSchema,
+  DailyReflectionWorkingCardBaseSchema,
+  DailyReflectionWorkingCardStatusSchema
+} from "./daily-reflection-working-card";
+import {
   AudioUploadSchema,
   PipelineExecutionModeSchema,
   SceneLabelSchema,
@@ -216,6 +221,101 @@ export const DailyReflectionCardUpdateResponseSchema = z.object({
   cards: z.array(ReflectionCardSchema)
 }).strict();
 
+export const DailyReflectionWorkingCardViewSchema = DailyReflectionWorkingCardBaseSchema
+  .omit({ accountId: true })
+  .strict();
+
+export const DailyReflectionWorkingCardDetailViewSchema = DailyReflectionWorkingCardViewSchema
+  .extend({
+    evidence: z.array(DailyReflectionCandidateEvidenceSchema).max(64)
+  })
+  .strict()
+  .superRefine((card, context) => {
+    if (card.sourceUnavailable) {
+      if (card.evidence.length > 0) {
+        addIssue(context, ["evidence"], "source-unavailable Cards cannot expose Evidence");
+      }
+      return;
+    }
+    if (
+      card.evidence.length !== card.evidenceIds.length
+      || card.evidence.some(
+        (evidence, index) => evidence.sourceSegmentId !== card.evidenceIds[index]
+      )
+    ) {
+      addIssue(context, ["evidence"], "Working Card Evidence must exactly cover evidenceIds");
+    }
+  });
+
+export const DailyReflectionWorkingCardListQuerySchema = z.object({
+  reflectionId: DailyReflectionIdSchema.optional(),
+  cardKind: DailyReflectionWorkingCardKindSchema.optional(),
+  status: DailyReflectionWorkingCardStatusSchema.optional(),
+  query: z.string().trim().max(200).optional(),
+  createdFrom: z.string().datetime().optional(),
+  createdTo: z.string().datetime().optional(),
+  sort: z.enum(["updated_desc", "created_desc", "created_asc", "title_asc"])
+    .default("updated_desc"),
+  limit: z.coerce.number().int().min(1).max(100).default(24),
+  offset: z.coerce.number().int().nonnegative().default(0)
+}).strict().superRefine((input, context) => {
+  if (input.createdFrom && input.createdTo && input.createdFrom > input.createdTo) {
+    addIssue(context, ["createdTo"], "createdTo must not precede createdFrom");
+  }
+});
+
+export const DailyReflectionWorkingCardListResponseSchema = z.object({
+  cards: z.array(DailyReflectionWorkingCardViewSchema).max(100),
+  total: z.number().int().nonnegative(),
+  limit: z.number().int().min(1).max(100),
+  offset: z.number().int().nonnegative()
+}).strict();
+
+export const DailyReflectionWorkingCardDetailResponseSchema = z.object({
+  card: DailyReflectionWorkingCardDetailViewSchema
+}).strict();
+
+export const DailyReflectionWorkingCardStateViewSchema = z.object({
+  id: DailyReflectionIdSchema,
+  status: DailyReflectionWorkingCardStatusSchema,
+  version: DailyReflectionVersionSchema
+}).strict();
+
+export const DailyReflectionWorkingCardSaveRequestSchema = z.object({
+  expectedVersion: DailyReflectionVersionSchema
+}).strict();
+
+export const DailyReflectionWorkingCardUpdateRequestSchema = z.object({
+  expectedVersion: DailyReflectionVersionSchema,
+  title: z.string().trim().min(1).max(240).optional(),
+  content: z.string().trim().min(1).max(20_000).optional(),
+  cardKind: DailyReflectionWorkingCardKindSchema.optional(),
+  relatedCardIds: z.array(DailyReflectionIdSchema).max(64).optional(),
+  tags: z.array(z.string().trim().min(1).max(64)).max(24).optional(),
+  visibility: z.literal("private").optional()
+}).strict().superRefine((input, context) => {
+  if (
+    input.title === undefined
+    && input.content === undefined
+    && input.cardKind === undefined
+    && input.relatedCardIds === undefined
+    && input.tags === undefined
+    && input.visibility === undefined
+  ) {
+    addIssue(context, [], "an update is required");
+  }
+  for (const field of ["relatedCardIds", "tags"] as const) {
+    const values = input[field];
+    if (values && new Set(values).size !== values.length) {
+      addIssue(context, [field], `${field} must be unique`);
+    }
+  }
+});
+
+export const DailyReflectionWorkingCardLifecycleRequestSchema = z.object({
+  expectedVersion: DailyReflectionVersionSchema
+}).strict();
+
 export const DailyReflectionCandidateDecisionSchema = z.object({
   candidateId: DailyReflectionIdSchema,
   status: CandidateStatusSchema,
@@ -363,6 +463,7 @@ export const DailyReflectionDetailResponseSchema = z.object({
   effectiveOrigin: SourceOriginSchema.nullable(),
   candidates: z.array(DailyReflectionCandidateViewSchema),
   cards: z.array(DailyReflectionCardViewSchema).default([]),
+  workingCards: z.array(DailyReflectionWorkingCardStateViewSchema).max(100).optional(),
   confirmation: ReflectionConfirmationSchema.nullable().default(null),
   admissionOperation: DailyReflectionAdmissionOperationSchema.nullable().default(null),
   admissionResults: z.array(CandidateAdmissionResultSchema).default([]),
@@ -371,6 +472,13 @@ export const DailyReflectionDetailResponseSchema = z.object({
 }).strict().superRefine((detail, context) => {
   const plan = detail.processingPlan;
   const segmentById = new Map(detail.segments.map((segment) => [segment.id, segment]));
+
+  if (
+    detail.workingCards
+    && new Set(detail.workingCards.map((card) => card.id)).size !== detail.workingCards.length
+  ) {
+    addIssue(context, ["workingCards"], "Working Card ids must be unique");
+  }
 
   if (segmentById.size !== detail.segments.length) {
     addIssue(context, ["segments"], "segment ids must be unique");
@@ -637,6 +745,30 @@ export type DailyReflectionCardUpdateRequest = z.infer<
 >;
 export type DailyReflectionCardUpdateResponse = z.infer<
   typeof DailyReflectionCardUpdateResponseSchema
+>;
+export type DailyReflectionWorkingCardView = z.infer<
+  typeof DailyReflectionWorkingCardViewSchema
+>;
+export type DailyReflectionWorkingCardDetailView = z.infer<
+  typeof DailyReflectionWorkingCardDetailViewSchema
+>;
+export type DailyReflectionWorkingCardListQuery = z.infer<
+  typeof DailyReflectionWorkingCardListQuerySchema
+>;
+export type DailyReflectionWorkingCardListResponse = z.infer<
+  typeof DailyReflectionWorkingCardListResponseSchema
+>;
+export type DailyReflectionWorkingCardDetailResponse = z.infer<
+  typeof DailyReflectionWorkingCardDetailResponseSchema
+>;
+export type DailyReflectionWorkingCardSaveRequest = z.infer<
+  typeof DailyReflectionWorkingCardSaveRequestSchema
+>;
+export type DailyReflectionWorkingCardUpdateRequest = z.infer<
+  typeof DailyReflectionWorkingCardUpdateRequestSchema
+>;
+export type DailyReflectionWorkingCardLifecycleRequest = z.infer<
+  typeof DailyReflectionWorkingCardLifecycleRequestSchema
 >;
 export type DailyReflectionCandidateDecision = z.infer<
   typeof DailyReflectionCandidateDecisionSchema

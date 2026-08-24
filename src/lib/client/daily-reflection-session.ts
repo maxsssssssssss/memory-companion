@@ -13,6 +13,7 @@ import type {
   DailyReflectionStatus,
   DailyReflectionV2Input
 } from "@/lib/domain/daily-reflection";
+import type { DailyReflectionWorkingCardStatus } from "@/lib/domain/daily-reflection-working-card";
 
 import {
   DailyReflectionApiError,
@@ -44,6 +45,7 @@ export type DailyReflectionSessionOperation =
   | "cancelling"
   | "deleting"
   | "saving_candidate"
+  | "saving_working_card"
   | "creating_candidate"
   | "excluding_candidate"
   | "finalizing"
@@ -70,6 +72,10 @@ export type DailyReflectionSessionSnapshot = {
   historyState: DailyReflectionHistoryState;
   historyErrorMessage: string | null;
   activeCandidateId: string | null;
+  workingCardStates: Readonly<Record<string, Readonly<{
+    status: DailyReflectionWorkingCardStatus;
+    version: number;
+  }>>>;
   errorMessage: string | null;
 };
 
@@ -111,6 +117,13 @@ export type DailyReflectionSessionValue = DailyReflectionSessionSnapshot & {
   updateCandidates(decisions: readonly DailyReflectionCandidateDecision[]): Promise<void>;
   updateCard(decision: DailyReflectionCardDecision): Promise<void>;
   updateCards(decisions: readonly DailyReflectionCardDecision[]): Promise<void>;
+  saveWorkingCard(
+    cardId: string,
+    draft?: Pick<DailyReflectionCardDecision, "userTitle" | "userText">
+  ): Promise<void>;
+  archiveWorkingCard(cardId: string): Promise<void>;
+  restoreWorkingCard(cardId: string): Promise<void>;
+  removeWorkingCard(cardId: string): Promise<void>;
   acceptAllCandidates(): Promise<void>;
   createManualCandidate(candidate: DailyReflectionManualCandidateDraft): Promise<void>;
   excludeCandidate(candidateId: string): Promise<void>;
@@ -137,6 +150,7 @@ const INITIAL_SNAPSHOT: DailyReflectionSessionSnapshot = {
   historyState: "idle",
   historyErrorMessage: null,
   activeCandidateId: null,
+  workingCardStates: {},
   errorMessage: null
 };
 
@@ -378,6 +392,7 @@ export class DailyReflectionSessionController {
           }
         : {}),
       activeCandidateId: null,
+      workingCardStates: {},
       errorMessage: null,
       ...(resetForm
         ? { selectedFile: null, sourceOrigin: null, recordingDate: "" }
@@ -765,6 +780,12 @@ export class DailyReflectionSessionController {
       operation: "idle",
       activeCandidateId,
       detail,
+      workingCardStates: Object.fromEntries(
+        (detail.workingCards ?? []).map((card) => [card.id, {
+          status: card.status,
+          version: card.version
+        }])
+      ),
       operationReceipt: this.readOperationReceipt(detail.reflection.id),
       errorMessage: null
     });
@@ -1040,6 +1061,7 @@ export class DailyReflectionSessionController {
       state: "loading",
       operation: "loading",
       ...(changed ? { detail: null } : {}),
+      ...(changed ? { workingCardStates: {} } : {}),
       errorMessage: null
     });
     try {
@@ -1207,6 +1229,181 @@ export class DailyReflectionSessionController {
   readonly updateCard = async (
     decision: DailyReflectionCardDecision
   ): Promise<void> => this.updateCards([decision]);
+
+  readonly saveWorkingCard = async (
+    cardId: string,
+    draft?: Pick<DailyReflectionCardDecision, "userTitle" | "userText">
+  ): Promise<void> => {
+    const detail = this.snapshot.detail;
+    const reflectionId = this.snapshot.reflectionId;
+    const card = detail?.cards.find((item) => item.id === cardId);
+    if (
+      this.snapshot.auth.status !== "authenticated"
+      || !reflectionId
+      || !detail
+      || !card
+      || this.snapshot.operation !== "idle"
+    ) return;
+    const { controller, generation } = this.beginWork();
+    this.update({
+      operation: "saving_working_card",
+      activeCandidateId: cardId,
+      errorMessage: null
+    });
+    try {
+      let cardVersion = card.version;
+      let latestDetail = detail;
+      if (
+        draft
+        && (draft.userTitle !== card.userTitle || draft.userText !== card.userText)
+      ) {
+        const updated = await this.api.updateCards(reflectionId, {
+          expectedVersion: detail.reflection.version,
+          cards: [{
+            cardId,
+            reviewStatus: card.reviewStatus,
+            userTitle: draft.userTitle,
+            userText: draft.userText
+          }]
+        }, controller.signal);
+        if (!this.isCurrentWork(controller, generation)) return;
+        const updatedCard = updated.cards.find((item) => item.id === cardId);
+        if (!updatedCard) throw new Error("Daily Reflection Card update response mismatch");
+        cardVersion = updatedCard.version;
+        const previousById = new Map(detail.cards.map((item) => [item.id, item]));
+        latestDetail = {
+          ...detail,
+          reflection: updated.reflection,
+          cards: updated.cards.map((item) => ({
+            ...item,
+            evidence: previousById.get(item.id)?.evidence ?? []
+          }))
+        };
+        this.update({ detail: latestDetail, state: updated.reflection.status });
+      }
+      const result = await this.api.saveWorkingCard(
+        reflectionId,
+        cardId,
+        { expectedVersion: cardVersion },
+        controller.signal
+      );
+      if (!this.isCurrentWork(controller, generation)) return;
+      const nextWorkingCards = [
+        ...(latestDetail.workingCards ?? []).filter((item) => item.id !== cardId),
+        { id: cardId, status: result.card.status, version: result.card.version }
+      ].sort((left, right) => left.id.localeCompare(right.id));
+      this.update({
+        operation: "idle",
+        activeCandidateId: null,
+        detail: { ...latestDetail, workingCards: nextWorkingCards },
+        workingCardStates: {
+          ...this.snapshot.workingCardStates,
+          [cardId]: {
+            status: result.card.status,
+            version: result.card.version
+          }
+        },
+        errorMessage: null
+      });
+    } catch (error) {
+      if (isAbortError(error) || !this.isCurrentWork(controller, generation)) return;
+      if (isUnauthorized(error)) {
+        this.expireAuthentication();
+        return;
+      }
+      if (error instanceof DailyReflectionApiError && error.status === 409) {
+        try {
+          await this.readServerTruth(reflectionId, controller, generation);
+          if (this.isCurrentWork(controller, generation)) {
+            this.update({
+              operation: "idle",
+              activeCandidateId: null,
+              errorMessage: STALE_MESSAGE
+            });
+          }
+        } catch (refreshError) {
+          if (isUnauthorized(refreshError)) this.expireAuthentication();
+        }
+        return;
+      }
+      this.update({
+        operation: "idle",
+        activeCandidateId: null,
+        errorMessage: friendlyError(error, "这张卡片没有保存到 My Cards，请稍后重试。")
+      });
+    } finally {
+      if (this.workController === controller) this.workController = null;
+    }
+  };
+
+  private updateWorkingCardLifecycle = async (
+    cardId: string,
+    operation: "archive" | "restore" | "remove"
+  ): Promise<void> => {
+    const state = this.snapshot.workingCardStates[cardId];
+    if (
+      this.snapshot.auth.status !== "authenticated"
+      || !state
+      || this.snapshot.operation !== "idle"
+    ) return;
+    const { controller, generation } = this.beginWork();
+    this.update({
+      operation: "saving_working_card",
+      activeCandidateId: cardId,
+      errorMessage: null
+    });
+    try {
+      const input = { expectedVersion: state.version };
+      const result = operation === "archive"
+        ? await this.api.archiveWorkingCard(cardId, input, controller.signal)
+        : operation === "restore"
+          ? await this.api.restoreWorkingCard(cardId, input, controller.signal)
+          : await this.api.removeWorkingCard(cardId, input, controller.signal);
+      if (!this.isCurrentWork(controller, generation)) return;
+      const detail = this.snapshot.detail;
+      const nextWorkingCards = detail ? [
+        ...(detail.workingCards ?? []).filter((item) => item.id !== cardId),
+        { id: cardId, status: result.card.status, version: result.card.version }
+      ].sort((left, right) => left.id.localeCompare(right.id)) : undefined;
+      this.update({
+        operation: "idle",
+        activeCandidateId: null,
+        ...(detail && nextWorkingCards
+          ? { detail: { ...detail, workingCards: nextWorkingCards } }
+          : {}),
+        workingCardStates: {
+          ...this.snapshot.workingCardStates,
+          [cardId]: {
+            status: result.card.status,
+            version: result.card.version
+          }
+        },
+        errorMessage: null
+      });
+    } catch (error) {
+      if (isAbortError(error) || !this.isCurrentWork(controller, generation)) return;
+      if (isUnauthorized(error)) {
+        this.expireAuthentication();
+        return;
+      }
+      this.update({
+        operation: "idle",
+        activeCandidateId: null,
+        errorMessage: friendlyError(error, "这张 Card 的状态没有更新成功，请稍后重试。")
+      });
+    } finally {
+      if (this.workController === controller) this.workController = null;
+    }
+  };
+
+  readonly archiveWorkingCard = async (cardId: string) =>
+    this.updateWorkingCardLifecycle(cardId, "archive");
+
+  readonly restoreWorkingCard = async (cardId: string) =>
+    this.updateWorkingCardLifecycle(cardId, "restore");
+
+  readonly removeWorkingCard = async (cardId: string) =>
+    this.updateWorkingCardLifecycle(cardId, "remove");
 
   readonly acceptAllCandidates = async (): Promise<void> => {
     const cards = this.snapshot.detail?.cards ?? [];
@@ -1724,6 +1921,10 @@ export function useDailyReflectionSession(
     updateCandidates: controller.updateCandidates,
     updateCard: controller.updateCard,
     updateCards: controller.updateCards,
+    saveWorkingCard: controller.saveWorkingCard,
+    archiveWorkingCard: controller.archiveWorkingCard,
+    restoreWorkingCard: controller.restoreWorkingCard,
+    removeWorkingCard: controller.removeWorkingCard,
     acceptAllCandidates: controller.acceptAllCandidates,
     createManualCandidate: controller.createManualCandidate,
     excludeCandidate: controller.excludeCandidate,

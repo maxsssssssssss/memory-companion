@@ -265,6 +265,7 @@ function session(
     historyState: "ready",
     historyErrorMessage: null,
     activeCandidateId: null,
+    workingCardStates: {},
     errorMessage: null,
     initialize: vi.fn(async () => undefined),
     setSelectedFile: vi.fn(),
@@ -279,6 +280,10 @@ function session(
     updateCandidates: vi.fn(async () => undefined),
     updateCard: vi.fn(async () => undefined),
     updateCards: vi.fn(async () => undefined),
+    saveWorkingCard: vi.fn(async () => undefined),
+    archiveWorkingCard: vi.fn(async () => undefined),
+    restoreWorkingCard: vi.fn(async () => undefined),
+    removeWorkingCard: vi.fn(async () => undefined),
     acceptAllCandidates: vi.fn(async () => undefined),
     createManualCandidate: vi.fn(async () => undefined),
     excludeCandidate: vi.fn(async () => undefined),
@@ -1143,6 +1148,8 @@ describe("DailyReflectionShellContent", () => {
 
   it("presents Card digest with Primary first, More collapsed, risks conditional, and Evidence before Transcript", async () => {
     const updateCard = vi.fn(async () => undefined);
+    const saveWorkingCard = vi.fn(async () => undefined);
+    const finalize = vi.fn(async () => undefined);
     const acceptAllCandidates = vi.fn(async () => undefined);
     const onLocalReviewMetric = vi.fn();
     const primaryAction = card(0, "user_action", ["segment-early"], {
@@ -1165,6 +1172,8 @@ describe("DailyReflectionShellContent", () => {
           reflectionId: "reflection-1",
           detail: detail({ candidates: [], cards: [more, primaryInsight, primaryAction] }),
           updateCard,
+          saveWorkingCard,
+          finalize,
           acceptAllCandidates
         })}
       />
@@ -1177,6 +1186,8 @@ describe("DailyReflectionShellContent", () => {
     expect(screen.getByText("含 AI 推断，请核对")).toBeVisible();
     expect(screen.getByText("可核对依据较少")).toBeVisible();
     expect(screen.queryByText("0.9")).not.toBeInTheDocument();
+    expect(container.textContent).not.toContain("Provider");
+    expect(container.textContent).not.toContain("Candidate #");
     expect(screen.queryByText("第一段真实原话。")).not.toBeInTheDocument();
     await waitFor(() => expect(onLocalReviewMetric).toHaveBeenCalledWith({
       name: "cards_shown",
@@ -1218,8 +1229,53 @@ describe("DailyReflectionShellContent", () => {
       cardId: primaryAction.id,
       actionClaimed: true
     }));
+    fireEvent.change(screen.getByRole("textbox", { name: "编辑标题：确认明天的安排" }), {
+      target: { value: "我编辑后的安排" }
+    });
+    fireEvent.change(screen.getByRole("textbox", { name: "编辑内容：确认明天的安排" }), {
+      target: { value: "我编辑后的散步计划。" }
+    });
+    fireEvent.click(screen.getAllByRole("button", { name: "保存到我的 Cards" })[0]);
+    expect(saveWorkingCard).toHaveBeenCalledWith(primaryAction.id, {
+      userTitle: "我编辑后的安排",
+      userText: "我编辑后的散步计划。"
+    });
+    expect(finalize).not.toHaveBeenCalled();
     fireEvent.click(screen.getByRole("button", { name: "记住这些重点" }));
     expect(acceptAllCandidates).toHaveBeenCalledOnce();
+  });
+
+  it("offers archive, restore, and remove for a saved Working Card without finalizing", () => {
+    const savedCard = card(0, "insight", ["segment-early"]);
+    const archiveWorkingCard = vi.fn(async () => undefined);
+    const restoreWorkingCard = vi.fn(async () => undefined);
+    const removeWorkingCard = vi.fn(async () => undefined);
+    const finalize = vi.fn(async () => undefined);
+    const base = session({
+      state: "review_pending",
+      reflectionId: "reflection-1",
+      detail: detail({ candidates: [], cards: [savedCard] }),
+      workingCardStates: { [savedCard.id]: { status: "saved", version: 1 } },
+      archiveWorkingCard,
+      restoreWorkingCard,
+      removeWorkingCard,
+      finalize
+    });
+    const { rerender } = render(<DailyReflectionShellContent session={base} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "从 My Cards 归档" }));
+    fireEvent.click(screen.getByRole("button", { name: "从 My Cards 移除" }));
+    expect(archiveWorkingCard).toHaveBeenCalledWith(savedCard.id);
+    expect(removeWorkingCard).toHaveBeenCalledWith(savedCard.id);
+    expect(finalize).not.toHaveBeenCalled();
+
+    rerender(<DailyReflectionShellContent session={{
+      ...base,
+      workingCardStates: { [savedCard.id]: { status: "archived", version: 2 } }
+    }} />);
+    fireEvent.click(screen.getByRole("button", { name: "恢复到 My Cards" }));
+    expect(restoreWorkingCard).toHaveBeenCalledWith(savedCard.id);
+    expect(finalize).not.toHaveBeenCalled();
   });
 
   it("does not invent source or recording date while a recovered record is loading", () => {

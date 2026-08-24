@@ -20,6 +20,12 @@ import {
   DailyReflectionHistoryResponseSchema,
   DailyReflectionOperationLookupResponseSchema,
   DailyReflectionUploadSourceSchema,
+  DailyReflectionWorkingCardDetailResponseSchema,
+  DailyReflectionWorkingCardLifecycleRequestSchema,
+  DailyReflectionWorkingCardListQuerySchema,
+  DailyReflectionWorkingCardListResponseSchema,
+  DailyReflectionWorkingCardSaveRequestSchema,
+  DailyReflectionWorkingCardUpdateRequestSchema,
   DailyReflectionV2FinalizeRequestSchema,
   DailyReflectionV2FinalizeResponseSchema,
   type DailyReflectionCandidateUpdateRequest,
@@ -32,6 +38,12 @@ import {
   type DailyReflectionHistoryItem,
   type DailyReflectionOperationLookupResponse,
   type DailyReflectionUploadSource,
+  type DailyReflectionWorkingCardDetailResponse,
+  type DailyReflectionWorkingCardLifecycleRequest,
+  type DailyReflectionWorkingCardListQuery,
+  type DailyReflectionWorkingCardListResponse,
+  type DailyReflectionWorkingCardSaveRequest,
+  type DailyReflectionWorkingCardUpdateRequest,
   type DailyReflectionV2FinalizeRequest,
   type DailyReflectionV2FinalizeResponse
 } from "@/lib/domain/daily-reflection-api";
@@ -180,6 +192,40 @@ export interface DailyReflectionApi {
     input: DailyReflectionCardUpdateRequest,
     signal?: AbortSignal
   ): Promise<DailyReflectionCardUpdateResponse>;
+  listWorkingCards(
+    input?: Partial<DailyReflectionWorkingCardListQuery>,
+    signal?: AbortSignal
+  ): Promise<DailyReflectionWorkingCardListResponse>;
+  getWorkingCard(
+    cardId: string,
+    signal?: AbortSignal
+  ): Promise<DailyReflectionWorkingCardDetailResponse>;
+  saveWorkingCard(
+    reflectionId: string,
+    cardId: string,
+    input: DailyReflectionWorkingCardSaveRequest,
+    signal?: AbortSignal
+  ): Promise<DailyReflectionWorkingCardDetailResponse>;
+  updateWorkingCard(
+    cardId: string,
+    input: DailyReflectionWorkingCardUpdateRequest,
+    signal?: AbortSignal
+  ): Promise<DailyReflectionWorkingCardDetailResponse>;
+  archiveWorkingCard(
+    cardId: string,
+    input: DailyReflectionWorkingCardLifecycleRequest,
+    signal?: AbortSignal
+  ): Promise<DailyReflectionWorkingCardDetailResponse>;
+  restoreWorkingCard(
+    cardId: string,
+    input: DailyReflectionWorkingCardLifecycleRequest,
+    signal?: AbortSignal
+  ): Promise<DailyReflectionWorkingCardDetailResponse>;
+  removeWorkingCard(
+    cardId: string,
+    input: DailyReflectionWorkingCardLifecycleRequest,
+    signal?: AbortSignal
+  ): Promise<DailyReflectionWorkingCardDetailResponse>;
   updateCandidates(
     reflectionId: string,
     input: DailyReflectionCandidateUpdateRequest,
@@ -262,6 +308,12 @@ const ERROR_MESSAGES: Readonly<Record<string, string>> = {
   daily_reflection_candidate_revocation_memory_failed: "这条内容暂时没有撤销成功，请稍后重试。",
   daily_reflection_candidate_revocation_receipt_failed: "撤销结果暂时没有确认，请稍后重试。",
   daily_reflection_candidate_revocation_index_refresh_failed: "这条内容已开始撤销，请稍后重试确认结果。",
+  daily_reflection_working_card_not_found: "这张卡片不存在或已不可用。",
+  daily_reflection_working_card_evidence_unavailable: "这张卡片的原始依据已不可用，无法保存。",
+  daily_reflection_working_card_archived: "这张卡片已归档，请先恢复后再操作。",
+  daily_reflection_working_card_not_editable: "这张卡片当前不能编辑。",
+  daily_reflection_working_card_relation_invalid: "关联的卡片不存在或已移除。",
+  daily_reflection_working_card_transition_invalid: "这张卡片当前不能执行该操作。",
   invalid_response: "服务器返回了无法识别的数据，请稍后重试。",
   network_error: "网络连接失败，请检查网络后重试。"
 };
@@ -356,6 +408,14 @@ function candidatePath(reflectionId: string, candidateId: string): string {
     throw new DailyReflectionApiError(400, "invalid_candidate_revocation_target");
   }
   return `${reflectionPath(reflectionId)}/candidates/${encodeURIComponent(parsed.data)}`;
+}
+
+function workingCardPath(cardId: string): string {
+  const parsed = DailyReflectionIdSchema.safeParse(cardId);
+  if (!parsed.success) {
+    throw new DailyReflectionApiError(400, "invalid_working_card_id");
+  }
+  return `/api/daily-reflections/cards/${encodeURIComponent(parsed.data)}`;
 }
 
 export function createDailyReflectionApi(
@@ -528,6 +588,109 @@ export function createDailyReflectionApi(
         signal
       });
       return parseJsonResponse(response, DailyReflectionCardUpdateResponseSchema);
+    },
+
+    async listWorkingCards(input = {}, signal) {
+      const parsedInput = DailyReflectionWorkingCardListQuerySchema.safeParse(input);
+      if (!parsedInput.success) {
+        throw new DailyReflectionApiError(400, "invalid_working_card_query");
+      }
+      const query = new URLSearchParams();
+      if (parsedInput.data.reflectionId) query.set("reflectionId", parsedInput.data.reflectionId);
+      if (parsedInput.data.cardKind) query.set("type", parsedInput.data.cardKind);
+      if (parsedInput.data.status) query.set("status", parsedInput.data.status);
+      if (parsedInput.data.query) query.set("q", parsedInput.data.query);
+      if (parsedInput.data.createdFrom) query.set("from", parsedInput.data.createdFrom);
+      if (parsedInput.data.createdTo) query.set("to", parsedInput.data.createdTo);
+      query.set("sort", parsedInput.data.sort);
+      query.set("limit", String(parsedInput.data.limit));
+      query.set("offset", String(parsedInput.data.offset));
+      const response = await sameOrigin(`/api/daily-reflections/cards?${query}`, {
+        method: "GET",
+        signal
+      });
+      return parseJsonResponse(response, DailyReflectionWorkingCardListResponseSchema);
+    },
+
+    async getWorkingCard(cardId, signal) {
+      const response = await sameOrigin(workingCardPath(cardId), {
+        method: "GET",
+        signal
+      });
+      return parseJsonResponse(response, DailyReflectionWorkingCardDetailResponseSchema);
+    },
+
+    async saveWorkingCard(reflectionId, cardId, input, signal) {
+      const parsedInput = DailyReflectionWorkingCardSaveRequestSchema.safeParse(input);
+      if (!parsedInput.success) {
+        throw new DailyReflectionApiError(400, "invalid_working_card_save");
+      }
+      const path = `${reflectionPath(reflectionId)}/cards/${encodeURIComponent(
+        DailyReflectionIdSchema.parse(cardId)
+      )}/save`;
+      const response = await sameOrigin(path, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(parsedInput.data),
+        signal
+      });
+      return parseJsonResponse(response, DailyReflectionWorkingCardDetailResponseSchema);
+    },
+
+    async updateWorkingCard(cardId, input, signal) {
+      const parsedInput = DailyReflectionWorkingCardUpdateRequestSchema.safeParse(input);
+      if (!parsedInput.success) {
+        throw new DailyReflectionApiError(400, "invalid_working_card_update");
+      }
+      const response = await sameOrigin(workingCardPath(cardId), {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(parsedInput.data),
+        signal
+      });
+      return parseJsonResponse(response, DailyReflectionWorkingCardDetailResponseSchema);
+    },
+
+    async archiveWorkingCard(cardId, input, signal) {
+      const parsedInput = DailyReflectionWorkingCardLifecycleRequestSchema.safeParse(input);
+      if (!parsedInput.success) {
+        throw new DailyReflectionApiError(400, "invalid_working_card_archive");
+      }
+      const response = await sameOrigin(`${workingCardPath(cardId)}/archive`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(parsedInput.data),
+        signal
+      });
+      return parseJsonResponse(response, DailyReflectionWorkingCardDetailResponseSchema);
+    },
+
+    async restoreWorkingCard(cardId, input, signal) {
+      const parsedInput = DailyReflectionWorkingCardLifecycleRequestSchema.safeParse(input);
+      if (!parsedInput.success) {
+        throw new DailyReflectionApiError(400, "invalid_working_card_restore");
+      }
+      const response = await sameOrigin(`${workingCardPath(cardId)}/restore`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(parsedInput.data),
+        signal
+      });
+      return parseJsonResponse(response, DailyReflectionWorkingCardDetailResponseSchema);
+    },
+
+    async removeWorkingCard(cardId, input, signal) {
+      const parsedInput = DailyReflectionWorkingCardLifecycleRequestSchema.safeParse(input);
+      if (!parsedInput.success) {
+        throw new DailyReflectionApiError(400, "invalid_working_card_remove");
+      }
+      const response = await sameOrigin(workingCardPath(cardId), {
+        method: "DELETE",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(parsedInput.data),
+        signal
+      });
+      return parseJsonResponse(response, DailyReflectionWorkingCardDetailResponseSchema);
     },
 
     async updateCandidates(reflectionId, input, signal) {

@@ -190,6 +190,10 @@ export async function GET(
       resolved.reflectionId
     ),
     revokedCandidateIds,
+    workingCards: repository.listSavedWorkingCardStatesForReflection(
+      resolved.authContext.user.id,
+      resolved.reflectionId
+    ),
     candidates: view.cards.length > 0 ? [] : view.candidates.map((candidate) => ({
       ...candidate,
       evidence: candidate.sourceSegmentIds.map((sourceSegmentId) => {
