@@ -123,6 +123,9 @@ function workingCardResponse(status: "saved" | "archived" | "removed" = "saved")
       tags: ["复盘"],
       visibility: "private" as const,
       sourceUnavailable: false,
+      memoryLifecycleStatus: "active" as const,
+      memoryLifecycleVersion: 1,
+      memoryLifecycleUpdatedAt: "2026-08-13T08:00:00.000Z",
       version: status === "saved" ? 1 : 2,
       createdAt: "2026-08-13T08:00:00.000Z",
       updatedAt: "2026-08-13T08:00:00.000Z",
@@ -924,6 +927,73 @@ describe("createDailyReflectionApi", () => {
     }));
     await expect(createDailyReflectionApi(unavailable).getWorkingCard("card_1"))
       .rejects.toMatchObject({ code: "invalid_response" });
+  });
+
+  it("uses strict Card Memory revoke and Return read contracts", async () => {
+    const { evidence: _evidence, ...card } = workingCardResponse().card;
+    const revokedCard = {
+      ...card,
+      memoryLifecycleStatus: "revoked" as const,
+      memoryLifecycleVersion: 2
+    };
+    const revocation = {
+      card: revokedCard,
+      lifecycleStatus: "revoked" as const,
+      operation: {
+        status: "completed" as const,
+        attemptVersion: 1,
+        requestedMemoryLifecycleVersion: 1,
+        indexRefreshStatus: "not_required" as const,
+        errorCode: null,
+        updatedAt: "2026-08-13T08:00:00.000Z",
+        completedAt: "2026-08-13T08:00:00.000Z"
+      },
+      receipt: {
+        cardId: "card_1",
+        proposalId: "proposal_1",
+        outcome: "revoked" as const,
+        historicalMemoryId: "memory_1",
+        removedMemoryEvidenceCount: 1,
+        removedPersonSourceCount: 0,
+        createdAt: "2026-08-13T08:00:00.000Z"
+      },
+      reused: false
+    };
+    const fetcher = vi.fn<typeof fetch>()
+      .mockResolvedValueOnce(jsonResponse({ found: true, result: revocation }))
+      .mockResolvedValueOnce(jsonResponse(revocation))
+      .mockResolvedValueOnce(jsonResponse({
+        referenceDate: "2026-08-24",
+        timeZone: "Asia/Shanghai",
+        openLoops: [], resurfacedMemories: [], reflectionPrompts: []
+      }))
+      .mockResolvedValueOnce(jsonResponse({
+        startDate: "2026-08-18",
+        endDate: "2026-08-24",
+        timeZone: "Asia/Shanghai",
+        repeatedThemes: [], changedDecisions: [], openCommitments: [], emergingIdeas: []
+      }));
+    const api = createDailyReflectionApi(fetcher);
+
+    await expect(api.getWorkingCardMemoryRevocation("card_1"))
+      .resolves.toMatchObject({ found: true });
+    await expect(api.revokeWorkingCardMemory("card_1", {
+      expectedMemoryLifecycleVersion: 1,
+      idempotencyKey: "revoke_card_1"
+    })).resolves.toMatchObject({ lifecycleStatus: "revoked" });
+    await api.getDailyReturn({ date: "2026-08-24" });
+    await api.getWeeklyReflection({ endDate: "2026-08-24" });
+
+    expect(fetcher.mock.calls.map(([path, init]) => [path, init?.method])).toEqual([
+      ["/api/daily-reflections/cards/card_1/revoke", "GET"],
+      ["/api/daily-reflections/cards/card_1/revoke", "POST"],
+      ["/api/daily-reflections/returns/daily?date=2026-08-24", "GET"],
+      ["/api/daily-reflections/returns/weekly?endDate=2026-08-24", "GET"]
+    ]);
+    expect(JSON.parse(String(fetcher.mock.calls[1]?.[1]?.body))).toEqual({
+      expectedMemoryLifecycleVersion: 1,
+      idempotencyKey: "revoke_card_1"
+    });
   });
 
   it("strictly parses detail and action responses", async () => {

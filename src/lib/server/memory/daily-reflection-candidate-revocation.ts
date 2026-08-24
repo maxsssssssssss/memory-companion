@@ -26,6 +26,14 @@ export type DailyReflectionMemoryCandidateRevocationResult = {
   reused: boolean;
 };
 
+export type DailyReflectionMemoryCardAuthority = {
+  reflectionId: string;
+  confirmationId: string;
+  candidateId: string;
+  currentMemoryId: string;
+  publicationStatus: "unpublished" | "published";
+};
+
 export type DailyReflectionMemoryCandidateRevocationErrorCode =
   | "daily_reflection_candidate_revocation_not_found"
   | "daily_reflection_candidate_revocation_conflict"
@@ -190,6 +198,68 @@ export function createDailyReflectionMemoryCandidateRevocationRepository(
 ) {
   const memoryRepository = createMemoryRepository(database);
 
+  function findActiveAuthority(
+    rawUserId: string,
+    rawCandidateId: string
+  ): DailyReflectionMemoryCardAuthority | null {
+    const userId = identifier(rawUserId, "user id");
+    const candidateId = identifier(rawCandidateId, "candidate id");
+    const rows = database.prepare(`
+      SELECT publication.reflection_id, publication.status AS publication_status,
+             current.confirmation_id, current.candidate_id,
+             current.current_memory_id
+      FROM memory_daily_reflection_candidate_current_memories current
+      INNER JOIN memory_daily_reflection_publications publication
+        ON publication.id = current.publication_id
+       AND publication.user_id = current.user_id
+       AND publication.status IN ('unpublished', 'published')
+      INNER JOIN memory_daily_reflection_candidate_receipts receipt
+        ON receipt.user_id = current.user_id
+       AND receipt.publication_id = current.publication_id
+       AND receipt.candidate_id = current.candidate_id
+       AND receipt.status = 'admitted'
+      INNER JOIN memory_daily_reflection_candidate_payloads payload
+        ON payload.user_id = current.user_id
+       AND payload.publication_id = current.publication_id
+       AND payload.candidate_id = current.candidate_id
+       AND payload.confirmation_id = current.confirmation_id
+      WHERE current.user_id = ? AND current.candidate_id = ?
+        AND current.status = 'active' AND current.current_memory_id IS NOT NULL
+        AND NOT EXISTS (
+          SELECT 1 FROM memory_upload_tombstones tombstone
+          WHERE tombstone.user_id = publication.user_id
+            AND tombstone.upload_id = publication.upload_id
+        )
+        AND NOT EXISTS (
+          SELECT 1 FROM memory_daily_reflection_candidate_revocations revocation
+          WHERE revocation.user_id = current.user_id
+            AND revocation.publication_id = current.publication_id
+            AND revocation.candidate_id = current.candidate_id
+        )
+      ORDER BY publication.id
+    `).all(userId, candidateId) as Array<{
+      reflection_id: string;
+      publication_status: "unpublished" | "published";
+      confirmation_id: string;
+      candidate_id: string;
+      current_memory_id: string;
+    }>;
+    if (rows.length === 0) return null;
+    if (rows.length !== 1) {
+      throw new DailyReflectionMemoryCandidateRevocationError(
+        "daily_reflection_candidate_revocation_conflict"
+      );
+    }
+    const row = rows[0]!;
+    return {
+      reflectionId: row.reflection_id,
+      confirmationId: row.confirmation_id,
+      candidateId: row.candidate_id,
+      currentMemoryId: row.current_memory_id,
+      publicationStatus: row.publication_status
+    };
+  }
+
   const apply = database.transaction((rawInput: DailyReflectionMemoryCandidateRevocationInput) => {
     const input = {
       id: identifier(rawInput.id, "revocation id"),
@@ -229,7 +299,7 @@ export function createDailyReflectionMemoryCandidateRevocationRepository(
     `).get(input.userId, input.reflectionId) as PublicationRow | undefined;
     if (
       !publication
-      || publication.status !== "published"
+      || publication.status === "deleted"
     ) {
       throw new DailyReflectionMemoryCandidateRevocationError(
         "daily_reflection_candidate_revocation_not_found"
@@ -501,7 +571,8 @@ export function createDailyReflectionMemoryCandidateRevocationRepository(
   });
 
   return {
-    apply: (input: DailyReflectionMemoryCandidateRevocationInput) => apply.immediate(input)
+    apply: (input: DailyReflectionMemoryCandidateRevocationInput) => apply.immediate(input),
+    findActiveAuthority
   };
 }
 

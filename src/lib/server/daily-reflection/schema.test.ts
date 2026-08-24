@@ -167,7 +167,8 @@ describe("Daily Reflection SQLite schema", () => {
           { version: 8, count: 1 },
           { version: 9, count: 1 },
           { version: 10, count: 1 },
-          { version: 11, count: 1 }
+          { version: 11, count: 1 },
+          { version: 12, count: 1 }
         ]);
       }
       expect((web.prepare("PRAGMA table_info(dr_reflections)").all() as Array<{
@@ -218,7 +219,8 @@ describe("Daily Reflection SQLite schema", () => {
         { version: 8 },
         { version: 9 },
         { version: 10 },
-        { version: 11 }
+        { version: 11 },
+        { version: 12 }
       ]);
       expect((first.prepare("PRAGMA table_info(dr_reflections)").all() as Array<{
         name: string;
@@ -234,6 +236,8 @@ describe("Daily Reflection SQLite schema", () => {
         { name: "dr_reflections" },
         { name: "dr_working_cards" },
         { name: "dr_working_card_events" },
+        { name: "dr_working_card_memory_revocation_operations" },
+        { name: "dr_working_card_memory_revocation_receipts" },
         { name: "dr_memory_proposals" },
         { name: "dr_memory_proposal_events" },
         { name: "dr_candidates" },
@@ -264,14 +268,14 @@ describe("Daily Reflection SQLite schema", () => {
     try {
       expect(reopened.prepare(
         "SELECT COUNT(*) AS count FROM dr_schema_migrations"
-      ).get()).toEqual({ count: 11 });
+      ).get()).toEqual({ count: 12 });
       expect(reopened.prepare(
         "SELECT source_origin FROM dr_reflections WHERE id = 'reflection_reopen'"
       ).get()).toEqual({ source_origin: "unknown" });
       migrateDailyReflectionSchema(reopened);
       expect(reopened.prepare(
         "SELECT COUNT(*) AS count FROM dr_schema_migrations"
-      ).get()).toEqual({ count: 11 });
+      ).get()).toEqual({ count: 12 });
       expect(reopened.pragma("foreign_key_check")).toEqual([]);
       expect(reopened.pragma("integrity_check", { simple: true })).toBe("ok");
     } finally {
@@ -304,7 +308,8 @@ describe("Daily Reflection SQLite schema", () => {
         { version: 8 },
         { version: 9 },
         { version: 10 },
-        { version: 11 }
+        { version: 11 },
+        { version: 12 }
       ]);
       expect(database.prepare(`
         SELECT lease_owner, lease_until, attempt_version, upload_fingerprint
@@ -324,11 +329,13 @@ describe("Daily Reflection SQLite schema", () => {
     const database = openDailyReflectionDatabase({ filePath: ":memory:" });
     try {
       database.exec(`
+        DROP TABLE dr_working_card_memory_revocation_receipts;
+        DROP TABLE dr_working_card_memory_revocation_operations;
         DROP TABLE dr_memory_proposal_events;
         DROP TABLE dr_memory_proposals;
         DROP TABLE dr_working_card_events;
         DROP TABLE dr_working_cards;
-        DELETE FROM dr_schema_migrations WHERE version IN (10, 11);
+        DELETE FROM dr_schema_migrations WHERE version IN (10, 11, 12);
         PRAGMA user_version = 9;
       `);
       database.prepare(`
@@ -470,7 +477,8 @@ describe("Daily Reflection SQLite schema", () => {
 
       expect(database.prepare(`
         SELECT id, source_reflection_ids_json, title, content, card_kind,
-               evidence_ids_json, status, source_unavailable, saved_at
+               evidence_ids_json, status, source_unavailable, saved_at,
+               memory_lifecycle_status, memory_lifecycle_version
         FROM dr_working_cards WHERE account_id = 'account_1' AND id = 'card_v9'
       `).get()).toEqual({
         id: "card_v9",
@@ -481,7 +489,9 @@ describe("Daily Reflection SQLite schema", () => {
         evidence_ids_json: JSON.stringify(["segment_v9"]),
         status: "saved",
         source_unavailable: 0,
-        saved_at: timestamp
+        saved_at: timestamp,
+        memory_lifecycle_status: "not_admitted",
+        memory_lifecycle_version: 0
       });
       expect(database.prepare(`
         SELECT review_status, version FROM dr_reflection_cards WHERE id = 'card_v9'
@@ -503,7 +513,7 @@ describe("Daily Reflection SQLite schema", () => {
     }
   });
 
-  it("migrates V10 Working Cards additively into the V11 proposal ledger", () => {
+  it("restores a missing V11 proposal ledger under the V12 Card lifecycle", () => {
     const database = openDailyReflectionDatabase({ filePath: ":memory:" });
     try {
       database.exec(`
@@ -529,7 +539,7 @@ describe("Daily Reflection SQLite schema", () => {
 
       expect(database.prepare(
         "SELECT version FROM dr_schema_migrations ORDER BY version DESC LIMIT 2"
-      ).all()).toEqual([{ version: 11 }, { version: 10 }]);
+      ).all()).toEqual([{ version: 12 }, { version: 11 }]);
       expect(database.prepare(`
         SELECT id, title, content, status, version
         FROM dr_working_cards WHERE id = 'card_v10_proposal'

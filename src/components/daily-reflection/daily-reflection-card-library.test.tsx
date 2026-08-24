@@ -27,6 +27,9 @@ function card(status: "saved" | "archived" | "removed" = "saved", sourceUnavaila
     tags: ["散步"],
     visibility: "private" as const,
     sourceUnavailable,
+    memoryLifecycleStatus: "not_admitted" as const,
+    memoryLifecycleVersion: 0,
+    memoryLifecycleUpdatedAt: null,
     version: status === "saved" ? 1 : status === "archived" ? 2 : 3,
     createdAt: "2026-08-13T08:00:00.000Z",
     updatedAt: "2026-08-13T08:00:00.000Z"
@@ -50,6 +53,30 @@ function detail(status: "saved" | "archived" | "removed" = "saved", sourceUnavai
 }
 
 describe("DailyReflectionCardLibrary", () => {
+  it("opens a deep-linked Card without exposing the id as page text", async () => {
+    const fetcher = vi.fn<typeof fetch>(async (input, init) => {
+      const path = String(input);
+      if (path.startsWith("/api/daily-reflections/cards?")) {
+        return jsonResponse({ cards: [card()], total: 1, limit: 50, offset: 0 });
+      }
+      if (path === "/api/daily-reflections/cards/card_1" && init?.method === "GET") {
+        return jsonResponse(detail());
+      }
+      return jsonResponse({ error: "not_found" }, 404);
+    });
+    render(<DailyReflectionCardLibrary
+      api={createDailyReflectionApi(fetcher)}
+      initialCardId="card_1"
+    />);
+
+    expect(await screen.findByText("散步以后，我觉得思路更清楚了。")).toBeVisible();
+    expect(fetcher.mock.calls.filter(([path, init]) => (
+      String(path) === "/api/daily-reflections/cards/card_1" && init?.method === "GET"
+    ))).toHaveLength(1);
+    expect(screen.getByRole("link", { name: "查看来源复盘" }))
+      .toHaveAttribute("href", "/date-companion/reflection?reflectionId=reflection_1");
+  });
+
   it("searches and filters scoped Cards, edits details, and shows Canonical Evidence", async () => {
     let current = detail();
     const fetcher = vi.fn<typeof fetch>(async (input, init) => {
@@ -158,5 +185,71 @@ describe("DailyReflectionCardLibrary", () => {
         ["/api/daily-reflections/cards/card_1/restore", "POST"],
         ["/api/daily-reflections/cards/card_1", "DELETE"]
       ]));
+  });
+
+  it("revokes an active long-term source and then shows the authoritative state", async () => {
+    let current = {
+      card: {
+        ...detail().card,
+        memoryLifecycleStatus: "active" as "active" | "revoked",
+        memoryLifecycleVersion: 1,
+        memoryLifecycleUpdatedAt: "2026-08-24T08:00:00.000Z"
+      }
+    };
+    const fetcher = vi.fn<typeof fetch>(async (input, init) => {
+      const path = String(input);
+      if (path.startsWith("/api/daily-reflections/cards?")) {
+        const { evidence: _evidence, ...summary } = current.card;
+        return jsonResponse({ cards: [summary], total: 1, limit: 50, offset: 0 });
+      }
+      if (path === "/api/daily-reflections/cards/card_1/revoke") {
+        current = {
+          card: {
+            ...current.card,
+            memoryLifecycleStatus: "revoked",
+            memoryLifecycleVersion: 2
+          }
+        };
+        const { evidence: _evidence, ...publicCard } = current.card;
+        return jsonResponse({
+          card: publicCard,
+          lifecycleStatus: "revoked",
+          operation: {
+            status: "completed",
+            attemptVersion: 1,
+            requestedMemoryLifecycleVersion: 1,
+            indexRefreshStatus: "not_required",
+            errorCode: null,
+            updatedAt: "2026-08-24T08:00:00.000Z",
+            completedAt: "2026-08-24T08:00:00.000Z"
+          },
+          receipt: {
+            cardId: "card_1",
+            proposalId: "proposal_1",
+            outcome: "revoked",
+            historicalMemoryId: "memory_1",
+            removedMemoryEvidenceCount: 1,
+            removedPersonSourceCount: 0,
+            createdAt: "2026-08-24T08:00:00.000Z"
+          },
+          reused: false
+        });
+      }
+      if (path === "/api/daily-reflections/cards/card_1" && init?.method === "GET") {
+        return jsonResponse(current);
+      }
+      return jsonResponse({ error: "not_found" }, 404);
+    });
+    render(<DailyReflectionCardLibrary api={createDailyReflectionApi(fetcher)} />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "查看详情" }));
+    fireEvent.click(await screen.findByRole("button", { name: "撤销长期记忆来源" }));
+    expect(await screen.findByText("长期记忆来源已撤销")).toBeVisible();
+    const revokeCall = fetcher.mock.calls.find(([path]) => String(path).endsWith("/revoke"));
+    expect(revokeCall?.[1]?.method).toBe("POST");
+    expect(JSON.parse(String(revokeCall?.[1]?.body))).toEqual({
+      expectedMemoryLifecycleVersion: 1,
+      idempotencyKey: "daily-reflection-card-revoke:card_1"
+    });
   });
 });

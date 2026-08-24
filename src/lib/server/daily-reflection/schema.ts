@@ -1,6 +1,6 @@
 import type Database from "better-sqlite3";
 
-export const DAILY_REFLECTION_SCHEMA_VERSION = 11;
+export const DAILY_REFLECTION_SCHEMA_VERSION = 12;
 
 // Version one intentionally represents the pre-provenance workflow shape.
 // Version two adds source_origin with a fail-closed legacy backfill and the
@@ -980,6 +980,220 @@ const DAILY_REFLECTION_SCHEMA_V11 = `
     ON dr_memory_proposal_events(account_id, proposal_id, created_at, id);
 `;
 
+// V12 closes the Working Card -> Durable Memory lifecycle without adding a
+// second Memory delete system. The operation and immutable receipt only fence
+// the cross-database orchestration; Existing Memory remains authoritative for
+// the actual revocation, Evidence cleanup, publication and index lifecycle.
+const DAILY_REFLECTION_SCHEMA_V12 = `
+  ALTER TABLE dr_working_cards
+    ADD COLUMN memory_lifecycle_status TEXT NOT NULL DEFAULT 'not_admitted'
+      CHECK (memory_lifecycle_status IN (
+        'not_admitted', 'active', 'revocation_requested', 'revoked'
+      ));
+
+  ALTER TABLE dr_working_cards
+    ADD COLUMN memory_lifecycle_version INTEGER NOT NULL DEFAULT 0
+      CHECK (memory_lifecycle_version >= 0);
+
+  ALTER TABLE dr_working_cards
+    ADD COLUMN memory_lifecycle_updated_at TEXT;
+
+  UPDATE dr_working_cards
+  SET memory_lifecycle_status = CASE
+        WHEN EXISTS (
+          SELECT 1 FROM dr_memory_proposals proposal
+          WHERE proposal.account_id = dr_working_cards.account_id
+            AND proposal.card_id = dr_working_cards.id
+            AND proposal.status = 'admitted'
+            AND EXISTS (
+              SELECT 1 FROM dr_memory_proposal_events event
+              WHERE event.account_id = proposal.account_id
+                AND event.proposal_id = proposal.id
+                AND event.event_type = 'revoked'
+            )
+        ) OR EXISTS (
+          SELECT 1 FROM dr_candidate_revocation_receipts legacy_revocation
+          WHERE legacy_revocation.account_id = dr_working_cards.account_id
+            AND legacy_revocation.candidate_id = dr_working_cards.id
+            AND legacy_revocation.outcome = 'revoked'
+            AND EXISTS (
+              SELECT 1 FROM json_each(
+                dr_working_cards.source_reflection_ids_json
+              ) source_reflection
+              WHERE source_reflection.value = legacy_revocation.reflection_id
+            )
+        ) THEN 'revoked'
+        WHEN EXISTS (
+          SELECT 1 FROM dr_memory_proposals proposal
+          WHERE proposal.account_id = dr_working_cards.account_id
+            AND proposal.card_id = dr_working_cards.id
+            AND proposal.status = 'admitted'
+        ) OR EXISTS (
+          SELECT 1 FROM dr_candidate_admission_receipts legacy_admission
+          WHERE legacy_admission.account_id = dr_working_cards.account_id
+            AND legacy_admission.candidate_id = dr_working_cards.id
+            AND legacy_admission.status IN ('admitted', 'already_admitted')
+            AND EXISTS (
+              SELECT 1 FROM json_each(
+                dr_working_cards.source_reflection_ids_json
+              ) source_reflection
+              WHERE source_reflection.value = legacy_admission.reflection_id
+            )
+            AND NOT EXISTS (
+              SELECT 1 FROM dr_candidate_revocation_receipts legacy_revocation
+              WHERE legacy_revocation.account_id = legacy_admission.account_id
+                AND legacy_revocation.candidate_id = legacy_admission.candidate_id
+                AND legacy_revocation.reflection_id = legacy_admission.reflection_id
+                AND legacy_revocation.outcome = 'revoked'
+            )
+        ) THEN 'active'
+        ELSE 'not_admitted'
+      END,
+      memory_lifecycle_version = CASE
+        WHEN EXISTS (
+          SELECT 1 FROM dr_memory_proposals proposal
+          WHERE proposal.account_id = dr_working_cards.account_id
+            AND proposal.card_id = dr_working_cards.id
+            AND proposal.status = 'admitted'
+        ) OR EXISTS (
+          SELECT 1 FROM dr_candidate_admission_receipts legacy_admission
+          WHERE legacy_admission.account_id = dr_working_cards.account_id
+            AND legacy_admission.candidate_id = dr_working_cards.id
+            AND legacy_admission.status IN ('admitted', 'already_admitted')
+            AND EXISTS (
+              SELECT 1 FROM json_each(
+                dr_working_cards.source_reflection_ids_json
+              ) source_reflection
+              WHERE source_reflection.value = legacy_admission.reflection_id
+            )
+        ) THEN 1 ELSE 0 END,
+      memory_lifecycle_updated_at = COALESCE(
+        (
+          SELECT MAX(legacy_revocation.created_at)
+          FROM dr_candidate_revocation_receipts legacy_revocation
+          WHERE legacy_revocation.account_id = dr_working_cards.account_id
+            AND legacy_revocation.candidate_id = dr_working_cards.id
+            AND legacy_revocation.outcome = 'revoked'
+            AND EXISTS (
+              SELECT 1 FROM json_each(
+                dr_working_cards.source_reflection_ids_json
+              ) source_reflection
+              WHERE source_reflection.value = legacy_revocation.reflection_id
+            )
+        ),
+        (
+          SELECT MAX(proposal.updated_at)
+          FROM dr_memory_proposals proposal
+          WHERE proposal.account_id = dr_working_cards.account_id
+            AND proposal.card_id = dr_working_cards.id
+            AND proposal.status = 'admitted'
+        ),
+        (
+          SELECT MAX(legacy_admission.updated_at)
+          FROM dr_candidate_admission_receipts legacy_admission
+          WHERE legacy_admission.account_id = dr_working_cards.account_id
+            AND legacy_admission.candidate_id = dr_working_cards.id
+            AND legacy_admission.status IN ('admitted', 'already_admitted')
+            AND EXISTS (
+              SELECT 1 FROM json_each(
+                dr_working_cards.source_reflection_ids_json
+              ) source_reflection
+              WHERE source_reflection.value = legacy_admission.reflection_id
+            )
+        )
+      );
+
+  CREATE TABLE dr_working_card_memory_revocation_operations (
+    id TEXT PRIMARY KEY,
+    account_id TEXT NOT NULL,
+    card_id TEXT NOT NULL,
+    reflection_id TEXT NOT NULL,
+    proposal_id TEXT,
+    authority_confirmation_id TEXT,
+    authority_memory_id TEXT,
+    operation_key TEXT NOT NULL CHECK (
+      operation_key = 'daily-reflection-card-revocation:' || card_id
+    ),
+    idempotency_key TEXT NOT NULL CHECK (
+      length(trim(idempotency_key)) > 0 AND length(idempotency_key) <= 512
+    ),
+    request_fingerprint TEXT NOT NULL CHECK (
+      length(request_fingerprint) = 64
+      AND request_fingerprint NOT GLOB '*[^0-9a-f]*'
+    ),
+    requested_lifecycle_version INTEGER NOT NULL CHECK (
+      requested_lifecycle_version >= 0
+    ),
+    status TEXT NOT NULL CHECK (
+      status IN ('ready', 'revoking', 'completed', 'failed')
+    ),
+    attempt_version INTEGER NOT NULL DEFAULT 0 CHECK (attempt_version >= 0),
+    lease_owner TEXT,
+    lease_until TEXT,
+    error_code TEXT CHECK (
+      error_code IS NULL OR (length(trim(error_code)) > 0 AND length(error_code) <= 128)
+    ),
+    index_refresh_status TEXT NOT NULL DEFAULT 'not_required' CHECK (
+      index_refresh_status IN ('not_required', 'pending', 'enqueued', 'failed')
+    ),
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    completed_at TEXT,
+    UNIQUE (id, account_id),
+    UNIQUE (account_id, card_id),
+    UNIQUE (account_id, operation_key),
+    UNIQUE (account_id, idempotency_key),
+    CHECK ((lease_owner IS NULL) = (lease_until IS NULL)),
+    CHECK (
+      (authority_confirmation_id IS NULL AND authority_memory_id IS NULL)
+      OR
+      (authority_confirmation_id IS NOT NULL AND authority_memory_id IS NOT NULL)
+    ),
+    CHECK ((status = 'completed') = (completed_at IS NOT NULL)),
+    FOREIGN KEY (card_id, account_id)
+      REFERENCES dr_working_cards(id, account_id) ON DELETE RESTRICT,
+    FOREIGN KEY (proposal_id, account_id)
+      REFERENCES dr_memory_proposals(id, account_id) ON DELETE RESTRICT
+  );
+
+  CREATE INDEX idx_dr_working_card_memory_revocation_claim
+    ON dr_working_card_memory_revocation_operations(status, lease_until, updated_at);
+
+  CREATE TABLE dr_working_card_memory_revocation_receipts (
+    account_id TEXT NOT NULL,
+    operation_id TEXT NOT NULL,
+    card_id TEXT NOT NULL,
+    proposal_id TEXT,
+    outcome TEXT NOT NULL CHECK (
+      outcome IN ('revoked', 'no_long_term_object')
+    ),
+    historical_memory_id TEXT,
+    removed_memory_evidence_count INTEGER NOT NULL DEFAULT 0 CHECK (
+      removed_memory_evidence_count >= 0
+    ),
+    removed_person_source_count INTEGER NOT NULL DEFAULT 0 CHECK (
+      removed_person_source_count >= 0
+    ),
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (account_id, operation_id),
+    UNIQUE (account_id, card_id),
+    CHECK (
+      (outcome = 'revoked' AND historical_memory_id IS NOT NULL)
+      OR
+      (outcome = 'no_long_term_object' AND historical_memory_id IS NULL)
+    ),
+    FOREIGN KEY (operation_id, account_id)
+      REFERENCES dr_working_card_memory_revocation_operations(id, account_id)
+      ON DELETE RESTRICT
+  );
+
+  CREATE TRIGGER dr_working_card_memory_revocation_receipt_immutable
+  BEFORE UPDATE ON dr_working_card_memory_revocation_receipts
+  BEGIN
+    SELECT RAISE(ABORT, 'daily_reflection_card_memory_revocation_receipt_immutable');
+  END;
+`;
+
 const MIGRATIONS = [
   { version: 1, sql: DAILY_REFLECTION_SCHEMA_V1 },
   { version: 2, sql: DAILY_REFLECTION_SCHEMA_V2 },
@@ -991,7 +1205,8 @@ const MIGRATIONS = [
   { version: 8, sql: DAILY_REFLECTION_SCHEMA_V8 },
   { version: 9, sql: DAILY_REFLECTION_SCHEMA_V9 },
   { version: 10, sql: DAILY_REFLECTION_SCHEMA_V10 },
-  { version: 11, sql: DAILY_REFLECTION_SCHEMA_V11 }
+  { version: 11, sql: DAILY_REFLECTION_SCHEMA_V11 },
+  { version: 12, sql: DAILY_REFLECTION_SCHEMA_V12 }
 ] as const;
 
 export function migrateDailyReflectionSchema(database: Database.Database) {

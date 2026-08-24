@@ -1427,6 +1427,7 @@ export function DailyReflectionShellContent({
           <Link href="/date-companion/a">约会陪伴</Link>
           <Link aria-current="page" className={styles.activeProductNav} href={REFLECTION_PATH}>日常复盘</Link>
           <Link href={`${REFLECTION_PATH}/cards`}>My Cards</Link>
+          <Link href={`${REFLECTION_PATH}/return`}>回看</Link>
         </nav>
         <div className={styles.headerTools}>
           <span title={userLabel}>{userLabel}</span>

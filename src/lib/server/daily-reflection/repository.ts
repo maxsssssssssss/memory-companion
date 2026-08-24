@@ -192,6 +192,9 @@ type WorkingCardRow = {
   tags_json: string;
   visibility: "private";
   source_unavailable: 0 | 1;
+  memory_lifecycle_status: DailyReflectionWorkingCard["memoryLifecycleStatus"];
+  memory_lifecycle_version: number;
+  memory_lifecycle_updated_at: string | null;
   saved_at: string | null;
   version: number;
   created_at: string;
@@ -1224,6 +1227,9 @@ export class DailyReflectionRepository {
       tags: JSON.parse(row.tags_json) as unknown,
       visibility: row.visibility,
       sourceUnavailable: row.source_unavailable === 1,
+      memoryLifecycleStatus: row.memory_lifecycle_status,
+      memoryLifecycleVersion: row.memory_lifecycle_version,
+      memoryLifecycleUpdatedAt: row.memory_lifecycle_updated_at,
       version: row.version,
       createdAt: row.created_at,
       updatedAt: row.updated_at
@@ -1235,7 +1241,8 @@ export class DailyReflectionRepository {
       SELECT id, account_id, source_reflection_ids_json, title, content,
              card_kind, evidence_ids_json, status, importance, novelty,
              related_card_ids_json, tags_json, visibility, source_unavailable,
-             saved_at, version, created_at, updated_at
+             memory_lifecycle_status, memory_lifecycle_version,
+             memory_lifecycle_updated_at, saved_at, version, created_at, updated_at
       FROM dr_working_cards
       WHERE account_id = ? AND id = ?
     `).get(accountId, cardId) as WorkingCardRow | undefined;
@@ -1304,7 +1311,8 @@ export class DailyReflectionRepository {
       SELECT id, account_id, source_reflection_ids_json, title, content,
              card_kind, evidence_ids_json, status, importance, novelty,
              related_card_ids_json, tags_json, visibility, source_unavailable,
-             saved_at, version, created_at, updated_at
+             memory_lifecycle_status, memory_lifecycle_version,
+             memory_lifecycle_updated_at, saved_at, version, created_at, updated_at
       FROM dr_working_cards
       WHERE account_id = ?
         AND saved_at IS NOT NULL
@@ -1404,7 +1412,8 @@ export class DailyReflectionRepository {
       SELECT id, account_id, source_reflection_ids_json, title, content,
              card_kind, evidence_ids_json, status, importance, novelty,
              related_card_ids_json, tags_json, visibility, source_unavailable,
-             saved_at, version, created_at, updated_at
+             memory_lifecycle_status, memory_lifecycle_version,
+             memory_lifecycle_updated_at, saved_at, version, created_at, updated_at
       FROM dr_working_cards
       WHERE ${where}
       ORDER BY ${orderBy}
@@ -1681,6 +1690,14 @@ export class DailyReflectionRepository {
       );
       if (rawInput.targetStatus === "removed") {
         this.assertNoActiveAdmittedMemoryProposal(input.accountId, input.cardId);
+        if (
+          current.memory_lifecycle_status === "active"
+          || current.memory_lifecycle_status === "revocation_requested"
+        ) {
+          throw new DailyReflectionConflictError(
+            "daily_reflection_working_card_memory_revocation_required"
+          );
+        }
       }
       if (current.status === rawInput.targetStatus) {
         return this.workingCardFromRow(current);
@@ -4552,6 +4569,26 @@ export class DailyReflectionRepository {
             error_code = 'daily_reflection_delete_requested', updated_at = ?
         WHERE account_id = ? AND reflection_id = ?
           AND status IN ('ready', 'revoking', 'failed')
+      `).run(now, parsedAccountId, parsedReflectionId);
+      this.database.prepare(`
+        UPDATE dr_working_card_memory_revocation_operations
+        SET status = 'failed', lease_owner = NULL, lease_until = NULL,
+            error_code = 'daily_reflection_delete_requested', updated_at = ?
+        WHERE account_id = ? AND reflection_id = ?
+          AND status IN ('ready', 'revoking', 'failed')
+      `).run(now, parsedAccountId, parsedReflectionId);
+
+      this.database.prepare(`
+        UPDATE dr_working_cards
+        SET memory_lifecycle_status = 'revoked',
+            memory_lifecycle_version = memory_lifecycle_version + 1,
+            memory_lifecycle_updated_at = ?
+        WHERE account_id = ?
+          AND memory_lifecycle_status IN ('active', 'revocation_requested')
+          AND EXISTS (
+            SELECT 1 FROM json_each(dr_working_cards.source_reflection_ids_json)
+            WHERE json_each.value = ?
+          )
       `).run(now, parsedAccountId, parsedReflectionId);
 
       const proposalRows = this.database.prepare(`

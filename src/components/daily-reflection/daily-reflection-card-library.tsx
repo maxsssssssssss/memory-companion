@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { type FormEvent, useCallback, useEffect, useMemo, useState } from "react";
+import { type FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import {
   createDailyReflectionApi,
@@ -37,6 +37,7 @@ const STATUS_LABELS: Record<DailyReflectionWorkingCardStatus, string> = {
 
 type DailyReflectionCardLibraryProps = Readonly<{
   api?: DailyReflectionApi;
+  initialCardId?: string | null;
   now?: () => Date;
 }>;
 
@@ -54,6 +55,7 @@ function formatTime(value: string) {
 
 export function DailyReflectionCardLibrary({
   api: providedApi,
+  initialCardId = null,
   now = defaultNow
 }: DailyReflectionCardLibraryProps) {
   const api = useMemo(() => providedApi ?? createDailyReflectionApi(), [providedApi]);
@@ -71,6 +73,7 @@ export function DailyReflectionCardLibrary({
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const openedInitialCardId = useRef<string | null>(null);
 
   const loadCards = useCallback(async (signal?: AbortSignal) => {
     setLoading(true);
@@ -104,7 +107,7 @@ export function DailyReflectionCardLibrary({
     return () => controller.abort();
   }, [loadCards]);
 
-  const openCard = async (cardId: string) => {
+  const openCard = useCallback(async (cardId: string) => {
     setBusy(true);
     setError(null);
     try {
@@ -117,7 +120,13 @@ export function DailyReflectionCardLibrary({
     } finally {
       setBusy(false);
     }
-  };
+  }, [api]);
+
+  useEffect(() => {
+    if (!initialCardId || openedInitialCardId.current === initialCardId) return;
+    openedInitialCardId.current = initialCardId;
+    void openCard(initialCardId);
+  }, [initialCardId, openCard]);
 
   const saveEdits = async () => {
     const card = selected?.card;
@@ -164,6 +173,42 @@ export function DailyReflectionCardLibrary({
     }
   };
 
+  const revokeMemorySource = async () => {
+    const card = selected?.card;
+    if (
+      !card
+      || busy
+      || (card.memoryLifecycleStatus !== "active"
+        && card.memoryLifecycleStatus !== "revocation_requested")
+    ) return;
+    setBusy(true);
+    setError(null);
+    try {
+      let expectedMemoryLifecycleVersion = card.memoryLifecycleVersion;
+      if (card.memoryLifecycleStatus === "revocation_requested") {
+        const recovery = await api.getWorkingCardMemoryRevocation(card.id);
+        if (!recovery.found) {
+          throw new Error("撤销进度无法恢复，请重新加载后再试。");
+        }
+        expectedMemoryLifecycleVersion =
+          recovery.result.operation.requestedMemoryLifecycleVersion;
+      }
+      await api.revokeWorkingCardMemory(card.id, {
+        expectedMemoryLifecycleVersion,
+        idempotencyKey: `daily-reflection-card-revoke:${card.id}`
+      });
+      const refreshed = await api.getWorkingCard(card.id);
+      setSelected(refreshed);
+      await loadCards();
+    } catch (cause) {
+      setError(cause instanceof Error
+        ? cause.message
+        : "长期记忆来源暂时没有撤销成功。");
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const submitSearch = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     setQuery(queryDraft.normalize("NFKC").trim());
@@ -179,6 +224,7 @@ export function DailyReflectionCardLibrary({
         <nav className={styles.productNav} aria-label="产品空间">
           <Link href="/date-companion/reflection">日常复盘</Link>
           <Link aria-current="page" className={styles.activeProductNav} href="/date-companion/reflection/cards">My Cards</Link>
+          <Link href="/date-companion/reflection/return">回看</Link>
         </nav>
       </header>
 
@@ -325,6 +371,20 @@ export function DailyReflectionCardLibrary({
                   )}
                 </section>
                 <div className={styles.candidateActions}>
+                  {selected.card.memoryLifecycleStatus === "active"
+                    || selected.card.memoryLifecycleStatus === "revocation_requested" ? (
+                    <button
+                      className={styles.dangerButton}
+                      disabled={busy}
+                      onClick={() => void revokeMemorySource()}
+                      type="button"
+                    >{selected.card.memoryLifecycleStatus === "revocation_requested"
+                        ? "继续撤销长期记忆来源"
+                        : "撤销长期记忆来源"}</button>
+                  ) : null}
+                  {selected.card.memoryLifecycleStatus === "revoked" ? (
+                    <span className={styles.pendingBadge}>长期记忆来源已撤销</span>
+                  ) : null}
                   {selected.card.status === "saved" ? (
                     <button className={styles.secondaryButton} disabled={busy} onClick={() => void applyLifecycle("archive")} type="button">归档</button>
                   ) : null}

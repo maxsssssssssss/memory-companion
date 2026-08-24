@@ -25,6 +25,13 @@ export const DailyReflectionWorkingCardStatusSchema = z.enum([
 
 export const DailyReflectionWorkingCardVisibilitySchema = z.literal("private");
 
+export const DailyReflectionWorkingCardMemoryLifecycleStatusSchema = z.enum([
+  "not_admitted",
+  "active",
+  "revocation_requested",
+  "revoked"
+]);
+
 export const DailyReflectionWorkingCardBaseSchema = z.object({
   id: DailyReflectionIdSchema,
   accountId: DailyReflectionIdSchema,
@@ -40,6 +47,10 @@ export const DailyReflectionWorkingCardBaseSchema = z.object({
   tags: z.array(z.string().trim().min(1).max(64)).max(24),
   visibility: DailyReflectionWorkingCardVisibilitySchema,
   sourceUnavailable: z.boolean(),
+  memoryLifecycleStatus: DailyReflectionWorkingCardMemoryLifecycleStatusSchema
+    .default("not_admitted"),
+  memoryLifecycleVersion: DailyReflectionVersionSchema.default(0),
+  memoryLifecycleUpdatedAt: z.string().datetime().nullable().default(null),
   version: DailyReflectionVersionSchema,
   createdAt: z.string().datetime(),
   updatedAt: z.string().datetime()
@@ -89,4 +100,7 @@ export type DailyReflectionWorkingCardKind = z.infer<
 >;
 export type DailyReflectionWorkingCardStatus = z.infer<
   typeof DailyReflectionWorkingCardStatusSchema
+>;
+export type DailyReflectionWorkingCardMemoryLifecycleStatus = z.infer<
+  typeof DailyReflectionWorkingCardMemoryLifecycleStatusSchema
 >;

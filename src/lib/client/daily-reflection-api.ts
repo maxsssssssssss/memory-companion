@@ -56,6 +56,20 @@ import {
   DailyReflectionV2SourceOriginSchema,
   type DailyReflectionV2Input
 } from "@/lib/domain/daily-reflection";
+import {
+  DailyReflectionCardMemoryRevocationLookupResponseSchema,
+  DailyReflectionCardMemoryRevocationRequestSchema,
+  DailyReflectionCardMemoryRevocationResponseSchema,
+  type DailyReflectionCardMemoryRevocationLookupResponse,
+  type DailyReflectionCardMemoryRevocationRequest,
+  type DailyReflectionCardMemoryRevocationResponse
+} from "@/lib/domain/daily-reflection-memory-revocation";
+import {
+  DailyReflectionDailyReturnResponseSchema,
+  DailyReflectionWeeklyReflectionResponseSchema,
+  type DailyReflectionDailyReturnResponse,
+  type DailyReflectionWeeklyReflectionResponse
+} from "@/lib/domain/daily-reflection-return";
 import type { AuthUser } from "@/lib/domain/date-companion";
 import { PipelineExecutionModeSchema } from "@/lib/domain/types";
 
@@ -226,6 +240,23 @@ export interface DailyReflectionApi {
     input: DailyReflectionWorkingCardLifecycleRequest,
     signal?: AbortSignal
   ): Promise<DailyReflectionWorkingCardDetailResponse>;
+  getWorkingCardMemoryRevocation(
+    cardId: string,
+    signal?: AbortSignal
+  ): Promise<DailyReflectionCardMemoryRevocationLookupResponse>;
+  revokeWorkingCardMemory(
+    cardId: string,
+    input: DailyReflectionCardMemoryRevocationRequest,
+    signal?: AbortSignal
+  ): Promise<DailyReflectionCardMemoryRevocationResponse>;
+  getDailyReturn(
+    input?: { date?: string },
+    signal?: AbortSignal
+  ): Promise<DailyReflectionDailyReturnResponse>;
+  getWeeklyReflection(
+    input?: { endDate?: string },
+    signal?: AbortSignal
+  ): Promise<DailyReflectionWeeklyReflectionResponse>;
   updateCandidates(
     reflectionId: string,
     input: DailyReflectionCandidateUpdateRequest,
@@ -314,6 +345,11 @@ const ERROR_MESSAGES: Readonly<Record<string, string>> = {
   daily_reflection_working_card_not_editable: "这张卡片当前不能编辑。",
   daily_reflection_working_card_relation_invalid: "关联的卡片不存在或已移除。",
   daily_reflection_working_card_transition_invalid: "这张卡片当前不能执行该操作。",
+  invalid_working_card_memory_revocation: "撤销长期记忆来源的请求无效，请重新加载后再试。",
+  daily_reflection_card_memory_revocation_failed: "这张卡片的长期记忆来源暂时没有撤销成功，请稍后重试。",
+  daily_reflection_card_memory_revocation_index_refresh_failed: "撤销已完成，检索刷新仍在重试中。",
+  invalid_daily_return_query: "回看日期无效，请刷新后再试。",
+  invalid_weekly_reflection_query: "周回顾日期无效，请刷新后再试。",
   invalid_response: "服务器返回了无法识别的数据，请稍后重试。",
   network_error: "网络连接失败，请检查网络后重试。"
 };
@@ -691,6 +727,67 @@ export function createDailyReflectionApi(
         signal
       });
       return parseJsonResponse(response, DailyReflectionWorkingCardDetailResponseSchema);
+    },
+
+    async getWorkingCardMemoryRevocation(cardId, signal) {
+      const response = await sameOrigin(`${workingCardPath(cardId)}/revoke`, {
+        method: "GET",
+        signal
+      });
+      return parseJsonResponse(
+        response,
+        DailyReflectionCardMemoryRevocationLookupResponseSchema
+      );
+    },
+
+    async revokeWorkingCardMemory(cardId, input, signal) {
+      const parsedInput = DailyReflectionCardMemoryRevocationRequestSchema.safeParse(input);
+      if (!parsedInput.success) {
+        throw new DailyReflectionApiError(
+          400,
+          "invalid_working_card_memory_revocation"
+        );
+      }
+      const response = await sameOrigin(`${workingCardPath(cardId)}/revoke`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(parsedInput.data),
+        signal
+      });
+      return parseJsonResponse(
+        response,
+        DailyReflectionCardMemoryRevocationResponseSchema
+      );
+    },
+
+    async getDailyReturn(input = {}, signal) {
+      const parsed = z.object({ date: z.string().date().optional() }).strict()
+        .safeParse(input);
+      if (!parsed.success) throw new DailyReflectionApiError(400, "invalid_daily_return_query");
+      const query = new URLSearchParams();
+      if (parsed.data.date) query.set("date", parsed.data.date);
+      const suffix = query.size > 0 ? `?${query}` : "";
+      const response = await sameOrigin(`/api/daily-reflections/returns/daily${suffix}`, {
+        method: "GET",
+        signal
+      });
+      return parseJsonResponse(response, DailyReflectionDailyReturnResponseSchema);
+    },
+
+    async getWeeklyReflection(input = {}, signal) {
+      const parsed = z.object({ endDate: z.string().date().optional() }).strict()
+        .safeParse(input);
+      if (!parsed.success) {
+        throw new DailyReflectionApiError(400, "invalid_weekly_reflection_query");
+      }
+      const query = new URLSearchParams();
+      if (parsed.data.endDate) query.set("endDate", parsed.data.endDate);
+      const suffix = query.size > 0 ? `?${query}` : "";
+      const response = await sameOrigin(`/api/daily-reflections/returns/weekly${suffix}`, {
+        method: "GET",
+        signal
+      });
+      return parseJsonResponse(response, DailyReflectionWeeklyReflectionResponseSchema);
     },
 
     async updateCandidates(reflectionId, input, signal) {

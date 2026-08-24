@@ -271,6 +271,9 @@ function workingCardDetail(
       tags: [],
       visibility: "private",
       sourceUnavailable: false,
+      memoryLifecycleStatus: "not_admitted",
+      memoryLifecycleVersion: 0,
+      memoryLifecycleUpdatedAt: null,
       version,
       createdAt: NOW,
       updatedAt: NOW,
@@ -429,6 +432,16 @@ function fakeApi(overrides: Partial<DailyReflectionApi> = {}): DailyReflectionAp
     },
     removeWorkingCard: async () => {
       throw new Error("working card remove is not configured for this test");
+    },
+    getWorkingCardMemoryRevocation: async () => ({ found: false }),
+    revokeWorkingCardMemory: async () => {
+      throw new Error("working card Memory revocation is not configured for this test");
+    },
+    getDailyReturn: async () => {
+      throw new Error("Daily Return is not configured for this test");
+    },
+    getWeeklyReflection: async () => {
+      throw new Error("Weekly Reflection is not configured for this test");
     },
     updateCandidates: async (_reflectionId, input) => ({
       reflection: { ...detail("reflection_1", "review_pending").reflection, version: input.expectedVersion + 1 },

@@ -692,6 +692,21 @@ export class DailyReflectionMemoryProposalRepository {
         );
       }
       const now = parsed.now ?? this.now();
+      const cardLifecycle = this.database.prepare(`
+        SELECT memory_lifecycle_status
+        FROM dr_working_cards
+        WHERE account_id = ? AND id = ?
+      `).get(parsed.accountId, current.card_id) as
+        { memory_lifecycle_status: string } | undefined;
+      if (
+        !cardLifecycle
+        || cardLifecycle.memory_lifecycle_status === "revocation_requested"
+        || cardLifecycle.memory_lifecycle_status === "revoked"
+      ) {
+        throw new DailyReflectionConflictError(
+          "daily_reflection_card_memory_revocation_requested"
+        );
+      }
       if (
         current.lease_owner
         && current.lease_until
@@ -708,6 +723,14 @@ export class DailyReflectionMemoryProposalRepository {
             version = version + 1, updated_at = ?, error_code = NULL
         WHERE account_id = ? AND id = ? AND status = 'approved'
           AND (lease_owner IS NULL OR lease_until <= ?)
+          AND EXISTS (
+            SELECT 1 FROM dr_working_cards card
+            WHERE card.account_id = dr_memory_proposals.account_id
+              AND card.id = dr_memory_proposals.card_id
+              AND card.memory_lifecycle_status NOT IN (
+                'revocation_requested', 'revoked'
+              )
+          )
       `).run(
         parsed.leaseOwner,
         leaseUntil,
@@ -772,6 +795,14 @@ export class DailyReflectionMemoryProposalRepository {
             version = version + 1, updated_at = ?
         WHERE account_id = ? AND id = ? AND status = 'approved'
           AND lease_owner = ? AND attempt_version = ? AND lease_until > ?
+          AND EXISTS (
+            SELECT 1 FROM dr_working_cards card
+            WHERE card.account_id = dr_memory_proposals.account_id
+              AND card.id = dr_memory_proposals.card_id
+              AND card.memory_lifecycle_status NOT IN (
+                'revocation_requested', 'revoked'
+              )
+          )
       `).run(
         parsed.memoryId,
         now,
@@ -786,6 +817,14 @@ export class DailyReflectionMemoryProposalRepository {
         throw new DailyReflectionMemoryProposalLeaseLostError();
       }
       const row = this.requireRow(parsed.accountId, parsed.proposalId);
+      this.database.prepare(`
+        UPDATE dr_working_cards
+        SET memory_lifecycle_status = 'active',
+            memory_lifecycle_version = memory_lifecycle_version + 1,
+            memory_lifecycle_updated_at = ?
+        WHERE account_id = ? AND id = ?
+          AND memory_lifecycle_status IN ('not_admitted', 'active')
+      `).run(now, parsed.accountId, row.card_id);
       this.recordEvent({
         row,
         eventType: parsed.recovered ? "recovered" : "admitted",
