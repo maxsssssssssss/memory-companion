@@ -25,6 +25,8 @@ export * from "./repository";
 export * from "./return-service";
 export * from "./return-source-repository";
 export * from "./return-time";
+export * from "./reflection-query-intent";
+export * from "./reflection-query-service";
 export * from "./runtime-config";
 export * from "./schema";
 export * from "./service";

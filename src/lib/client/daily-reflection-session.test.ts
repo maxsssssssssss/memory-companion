@@ -443,6 +443,9 @@ function fakeApi(overrides: Partial<DailyReflectionApi> = {}): DailyReflectionAp
     getWeeklyReflection: async () => {
       throw new Error("Weekly Reflection is not configured for this test");
     },
+    queryReflection: async () => {
+      throw new Error("Daily Reflection query is not configured for this test");
+    },
     updateCandidates: async (_reflectionId, input) => ({
       reflection: { ...detail("reflection_1", "review_pending").reflection, version: input.expectedVersion + 1 },
       candidates: []

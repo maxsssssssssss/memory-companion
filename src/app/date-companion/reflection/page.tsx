@@ -14,15 +14,23 @@ type DailyReflectionPageProps = {
 export default async function DailyReflectionPage({ searchParams }: DailyReflectionPageProps) {
   if (!isDailyReflectionUploadEnabled()) notFound();
 
-  const rawReflectionId = (await searchParams)?.reflectionId;
+  const resolvedSearchParams = await searchParams;
+  const rawReflectionId = resolvedSearchParams?.reflectionId;
+  const rawSegmentId = resolvedSearchParams?.segmentId;
   const initialReflectionId = typeof rawReflectionId === "string" && rawReflectionId.trim()
     ? rawReflectionId.trim()
+    : null;
+  const initialSegmentId = initialReflectionId
+    && typeof rawSegmentId === "string"
+    && rawSegmentId.trim()
+    ? rawSegmentId.trim()
     : null;
 
   return (
     <DailyReflectionShell
       browserRecordingEnabled={isDailyReflectionBrowserRecordingEnabled()}
       initialReflectionId={initialReflectionId}
+      initialSegmentId={initialSegmentId}
       toySyncEnabled={isDailyReflectionToySyncEnabled()}
     />
   );

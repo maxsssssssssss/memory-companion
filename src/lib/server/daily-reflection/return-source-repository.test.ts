@@ -427,6 +427,11 @@ function createHarness(options: HarnessOptions = {}) {
         WHERE user_id = ? AND candidate_id = ?
       `).run(created.id, accountId, cardId);
       memoryDatabase.prepare(`
+        UPDATE memory_daily_reflection_publications
+        SET confirmation_id = ?, updated_at = ?
+        WHERE user_id = ? AND reflection_id = ?
+      `).run(created.id, NOW, accountId, reflectionId);
+      memoryDatabase.prepare(`
         UPDATE memory_daily_reflection_candidate_current_memories
         SET confirmation_id = ?
         WHERE user_id = ? AND candidate_id = ?
@@ -467,7 +472,12 @@ describe("Daily Reflection Return source authority", () => {
       "account_2",
       "2026-08-18",
       "2026-08-24"
-    )).toEqual({ admitted: [], emergingCards: [], relations: [] });
+    )).toEqual({
+      admitted: [],
+      workingCards: [],
+      emergingCards: [],
+      relations: []
+    });
   });
 
   it.each([
@@ -520,6 +530,44 @@ describe("Daily Reflection Return source authority", () => {
   it("fails closed when the Canonical Transcript no longer matches immutable provenance", () => {
     const fixture = createHarness();
     fixture.changeCanonicalText("被修改后的文字不应进入 Return。");
+    expect(fixture.repository.snapshot(
+      fixture.accountId,
+      "2026-08-18",
+      "2026-08-24"
+    ).admitted).toEqual([]);
+  });
+
+  it("requires the immutable Candidate payload authority", () => {
+    const fixture = createHarness();
+    fixture.memoryDatabase.prepare(`
+      DELETE FROM memory_daily_reflection_candidate_payloads
+      WHERE user_id = ? AND candidate_id = ?
+    `).run(fixture.accountId, fixture.cardId);
+    expect(fixture.repository.snapshot(
+      fixture.accountId,
+      "2026-08-18",
+      "2026-08-24"
+    ).admitted).toEqual([]);
+  });
+
+  it("requires an admitted Proposal to point at the current Memory and exact Evidence", () => {
+    const fixture = createHarness();
+    const proposal = fixture.createProposal("pending");
+    fixture.dailyReflectionDatabase.prepare(`
+      UPDATE dr_memory_proposals
+      SET status = 'admitted', memory_id = ?, admitted_at = ?, version = version + 1,
+          updated_at = ?
+      WHERE id = ?
+    `).run(fixture.memoryId, NOW, NOW, proposal.id);
+    expect(fixture.repository.snapshot(
+      fixture.accountId,
+      "2026-08-18",
+      "2026-08-24"
+    ).admitted).toHaveLength(1);
+
+    fixture.dailyReflectionDatabase.prepare(`
+      UPDATE dr_memory_proposals SET memory_id = 'memory_drift' WHERE id = ?
+    `).run(proposal.id);
     expect(fixture.repository.snapshot(
       fixture.accountId,
       "2026-08-18",
@@ -594,6 +642,30 @@ describe("Daily Reflection Return source authority", () => {
       recordingDates: ["2026-08-24"],
       evidence: [expect.objectContaining({ sourceSegmentId: "segment_1" })]
     })]);
+    expect(result.workingCards).toEqual([expect.objectContaining({
+      cardId: fixture.cardId,
+      relatedCardIds: [],
+      tags: [],
+      riskFlags: []
+    })]);
+  });
+
+  it("keeps a saved decision Card queryable without misclassifying it as Emerging Ideas", () => {
+    const fixture = createHarness({
+      cardKind: "decision",
+      reflectionCardKind: "decision",
+      memoryType: "summary"
+    });
+    fixture.showWorkingCard();
+    const result = fixture.repository.snapshot(
+      fixture.accountId,
+      "2026-08-18",
+      "2026-08-24"
+    );
+    expect(result.workingCards).toEqual([
+      expect.objectContaining({ cardId: fixture.cardId, cardKind: "decision" })
+    ]);
+    expect(result.emergingCards).toEqual([]);
   });
 
   it("excludes a revoked Working Card from Emerging Ideas", () => {
@@ -609,5 +681,18 @@ describe("Daily Reflection Return source authority", () => {
       "2026-08-18",
       "2026-08-24"
     ).emergingCards).toEqual([]);
+  });
+
+  it("rechecks the saved Card detail instead of trusting a stale list summary", () => {
+    const fixture = createHarness({ cardKind: "idea", reflectionCardKind: "insight" });
+    fixture.showWorkingCard();
+    fixture.workingCard.status = "archived";
+    const result = fixture.repository.snapshot(
+      fixture.accountId,
+      "2026-08-18",
+      "2026-08-24"
+    );
+    expect(result.workingCards).toEqual([]);
+    expect(result.emergingCards).toEqual([]);
   });
 });

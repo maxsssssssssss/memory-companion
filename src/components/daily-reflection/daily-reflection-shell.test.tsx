@@ -1245,6 +1245,46 @@ describe("DailyReflectionShellContent", () => {
     expect(acceptAllCandidates).toHaveBeenCalledOnce();
   });
 
+  it("opens and highlights a valid deep-linked Transcript segment", async () => {
+    const { container } = render(<DailyReflectionShellContent
+      initialReflectionId="reflection-1"
+      initialSegmentId="segment-second"
+      session={session({
+        state: "review_pending",
+        reflectionId: "reflection-1",
+        detail: detail()
+      })}
+    />);
+
+    await waitFor(() => {
+      const source = container.querySelector('[data-segment-id="segment-second"]');
+      expect(source).toHaveAttribute("data-highlighted", "true");
+    });
+    expect(screen.getByLabelText("完整文字稿")).toBeVisible();
+  });
+
+  it.each([
+    ["another-reflection", "segment-second"],
+    ["reflection-1", "segment-missing"]
+  ])("does not focus an invalid Transcript deep link (%s, %s)", async (
+    initialReflectionId,
+    initialSegmentId
+  ) => {
+    render(<DailyReflectionShellContent
+      initialReflectionId={initialReflectionId}
+      initialSegmentId={initialSegmentId}
+      session={session({
+        state: "review_pending",
+        reflectionId: "reflection-1",
+        detail: detail()
+      })}
+    />);
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "展开 5 段" })).toBeVisible();
+    });
+    expect(screen.queryByLabelText("完整文字稿")).not.toBeInTheDocument();
+  });
+
   it("offers archive, restore, and remove for a saved Working Card without finalizing", () => {
     const savedCard = card(0, "insight", ["segment-early"]);
     const archiveWorkingCard = vi.fn(async () => undefined);

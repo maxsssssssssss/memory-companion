@@ -16,6 +16,7 @@ vi.mock("@/components/daily-reflection/daily-reflection-shell", () => ({
   DailyReflectionShell: (props: {
     browserRecordingEnabled: boolean;
     initialReflectionId?: string | null;
+    initialSegmentId?: string | null;
     toySyncEnabled: boolean;
   }) => ({
     type: "daily-reflection-shell",
@@ -82,6 +83,7 @@ describe("Daily Reflection page", () => {
       expect(element.props).toMatchObject({
         browserRecordingEnabled: expected,
         initialReflectionId: null,
+        initialSegmentId: null,
         toySyncEnabled: true
       });
     }
@@ -94,15 +96,32 @@ describe("Daily Reflection page", () => {
     delete process.env.DAILY_BRIEF_TOY_SYNC_ENABLED;
 
     const element = await DailyReflectionPage({
-      searchParams: Promise.resolve({ reflectionId: "  reflection-1  " })
+      searchParams: Promise.resolve({
+        reflectionId: "  reflection-1  ",
+        segmentId: "  segment-1  "
+      })
     });
     expect(element.props.initialReflectionId).toBe("reflection-1");
+    expect(element.props.initialSegmentId).toBe("segment-1");
     expect(element.props.browserRecordingEnabled).toBe(false);
     expect(element.props.toySyncEnabled).toBe(false);
 
     const arrayElement = await DailyReflectionPage({
-      searchParams: Promise.resolve({ reflectionId: ["reflection-1", "reflection-2"] })
+      searchParams: Promise.resolve({
+        reflectionId: ["reflection-1", "reflection-2"],
+        segmentId: ["segment-1", "segment-2"]
+      })
     });
     expect(arrayElement.props.initialReflectionId).toBeNull();
+    expect(arrayElement.props.initialSegmentId).toBeNull();
+
+    const repeatedSegment = await DailyReflectionPage({
+      searchParams: Promise.resolve({
+        reflectionId: "reflection-1",
+        segmentId: ["segment-1", "segment-2"]
+      })
+    });
+    expect(repeatedSegment.props.initialReflectionId).toBe("reflection-1");
+    expect(repeatedSegment.props.initialSegmentId).toBeNull();
   });
 });

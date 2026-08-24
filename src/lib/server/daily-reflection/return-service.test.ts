@@ -29,7 +29,10 @@ function admitted(input: {
     memoryType: input.memoryType ?? "event",
     cardKind: input.cardKind ?? "event",
     actionClaimed: input.actionClaimed ?? false,
+    subjectPersonId: null,
     epistemicStatus: input.epistemicStatus ?? "explicit_user_statement",
+    epistemicCaution: null,
+    riskFlags: [],
     title: input.title,
     content: input.content ?? `${input.title}内容`,
     importance: input.importance ?? 0.7,
@@ -59,9 +62,12 @@ function emerging(input: {
     recordingDates: [input.date],
     cardKind: input.cardKind ?? "idea",
     epistemicStatuses: ["explicit_user_statement"],
+    riskFlags: [],
     title: input.title,
     content: `${input.title}内容`,
     importance: input.importance ?? 0.7,
+    relatedCardIds: [],
+    tags: [],
     evidence: [{
       reflectionId: `reflection_${input.cardId}`,
       cardId: input.cardId,
@@ -131,6 +137,7 @@ describe("Daily Reflection deterministic return service", () => {
           importance: 0.6
         })
       ],
+      workingCards: [],
       emergingCards: [],
       relations: []
     };
@@ -207,6 +214,7 @@ describe("Daily Reflection deterministic return service", () => {
     });
     const snapshot: DailyReflectionReturnSourceSnapshot = {
       admitted: [decisionLate, themeLate, commitment, decisionEarly, themeEarly],
+      workingCards: [],
       emergingCards: [emerging({
         cardId: "card_idea",
         date: "2026-08-22",
@@ -275,6 +283,7 @@ describe("Daily Reflection deterministic return service", () => {
         flip = !flip;
         return {
           admitted: flip ? [first, second] : [second, first],
+          workingCards: [],
           emergingCards: [],
           relations: []
         } satisfies DailyReflectionReturnSourceSnapshot;

@@ -225,6 +225,7 @@ export function DailyReflectionCardLibrary({
           <Link href="/date-companion/reflection">日常复盘</Link>
           <Link aria-current="page" className={styles.activeProductNav} href="/date-companion/reflection/cards">My Cards</Link>
           <Link href="/date-companion/reflection/return">回看</Link>
+          <Link href="/date-companion/reflection/query">问问</Link>
         </nav>
       </header>
 

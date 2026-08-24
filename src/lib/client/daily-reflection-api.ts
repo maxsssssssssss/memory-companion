@@ -70,6 +70,12 @@ import {
   type DailyReflectionDailyReturnResponse,
   type DailyReflectionWeeklyReflectionResponse
 } from "@/lib/domain/daily-reflection-return";
+import {
+  DailyReflectionQueryRequestSchema,
+  DailyReflectionQueryResponseSchema,
+  type DailyReflectionQueryRequest,
+  type DailyReflectionQueryResponse
+} from "@/lib/domain/daily-reflection-query";
 import type { AuthUser } from "@/lib/domain/date-companion";
 import { PipelineExecutionModeSchema } from "@/lib/domain/types";
 
@@ -257,6 +263,10 @@ export interface DailyReflectionApi {
     input?: { endDate?: string },
     signal?: AbortSignal
   ): Promise<DailyReflectionWeeklyReflectionResponse>;
+  queryReflection(
+    input: DailyReflectionQueryRequest,
+    signal?: AbortSignal
+  ): Promise<DailyReflectionQueryResponse>;
   updateCandidates(
     reflectionId: string,
     input: DailyReflectionCandidateUpdateRequest,
@@ -788,6 +798,20 @@ export function createDailyReflectionApi(
         signal
       });
       return parseJsonResponse(response, DailyReflectionWeeklyReflectionResponseSchema);
+    },
+
+    async queryReflection(input, signal) {
+      const parsed = DailyReflectionQueryRequestSchema.safeParse(input);
+      if (!parsed.success) {
+        throw new DailyReflectionApiError(400, "invalid_daily_reflection_query");
+      }
+      const response = await sameOrigin("/api/daily-reflections/query", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(parsed.data),
+        signal
+      });
+      return parseJsonResponse(response, DailyReflectionQueryResponseSchema);
     },
 
     async updateCandidates(reflectionId, input, signal) {

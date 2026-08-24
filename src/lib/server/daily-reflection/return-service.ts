@@ -60,7 +60,15 @@ function sortSources(sources: DailyReflectionAdmittedReturnSource[]) {
 }
 
 function safeSource(source: DailyReflectionAdmittedReturnSource) {
-  if (!SAFE_EPISTEMIC.has(source.epistemicStatus)) return false;
+  if (
+    !SAFE_EPISTEMIC.has(source.epistemicStatus)
+    || source.epistemicCaution !== null
+    || source.riskFlags.some((flag) => (
+      flag === "ai_inference"
+      || flag === "attribution_uncertain"
+      || flag === "low_evidence"
+    ))
+  ) return false;
   if (source.memoryType === "commitment") {
     return source.cardKind === "action"
       && source.actionClaimed

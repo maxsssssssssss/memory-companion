@@ -972,6 +972,15 @@ describe("createDailyReflectionApi", () => {
         endDate: "2026-08-24",
         timeZone: "Asia/Shanghai",
         repeatedThemes: [], changedDecisions: [], openCommitments: [], emergingIdeas: []
+      }))
+      .mockResolvedValueOnce(jsonResponse({
+        answer: "现有可信记录里没有足够证据回答这个问题。",
+        intent: "memory_exploration",
+        confidence: 0,
+        insufficientEvidence: true,
+        claims: [],
+        resurfacing: null,
+        createdAt: "2026-08-24T12:00:00.000Z"
       }));
     const api = createDailyReflectionApi(fetcher);
 
@@ -983,17 +992,31 @@ describe("createDailyReflectionApi", () => {
     })).resolves.toMatchObject({ lifecycleStatus: "revoked" });
     await api.getDailyReturn({ date: "2026-08-24" });
     await api.getWeeklyReflection({ endDate: "2026-08-24" });
+    await api.queryReflection({ query: "回顾晨间写作", scope: "all" });
 
     expect(fetcher.mock.calls.map(([path, init]) => [path, init?.method])).toEqual([
       ["/api/daily-reflections/cards/card_1/revoke", "GET"],
       ["/api/daily-reflections/cards/card_1/revoke", "POST"],
       ["/api/daily-reflections/returns/daily?date=2026-08-24", "GET"],
-      ["/api/daily-reflections/returns/weekly?endDate=2026-08-24", "GET"]
+      ["/api/daily-reflections/returns/weekly?endDate=2026-08-24", "GET"],
+      ["/api/daily-reflections/query", "POST"]
     ]);
     expect(JSON.parse(String(fetcher.mock.calls[1]?.[1]?.body))).toEqual({
       expectedMemoryLifecycleVersion: 1,
       idempotencyKey: "revoke_card_1"
     });
+    expect(JSON.parse(String(fetcher.mock.calls[4]?.[1]?.body))).toEqual({
+      query: "回顾晨间写作",
+      scope: "all"
+    });
+  });
+
+  it("fails before transport for an invalid explainable query", async () => {
+    const fetcher = vi.fn<typeof fetch>();
+    const api = createDailyReflectionApi(fetcher);
+    await expect(api.queryReflection({ query: " ", scope: "all" }))
+      .rejects.toMatchObject({ code: "invalid_daily_reflection_query" });
+    expect(fetcher).not.toHaveBeenCalled();
   });
 
   it("strictly parses detail and action responses", async () => {

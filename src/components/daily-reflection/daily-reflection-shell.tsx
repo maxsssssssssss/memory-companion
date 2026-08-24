@@ -96,6 +96,7 @@ export type DailyReflectionLocalReviewMetric = Readonly<{
 
 type DailyReflectionShellProps = {
   initialReflectionId?: string | null;
+  initialSegmentId?: string | null;
   browserRecordingEnabled?: boolean;
   toySyncEnabled?: boolean;
   onLocalReviewMetric?: (metric: DailyReflectionLocalReviewMetric) => void;
@@ -955,6 +956,7 @@ function ReflectionResultList({
 
 export function DailyReflectionShell({
   initialReflectionId = null,
+  initialSegmentId = null,
   browserRecordingEnabled = false,
   onLocalReviewMetric,
   toySyncEnabled = false
@@ -964,6 +966,7 @@ export function DailyReflectionShell({
     <DailyReflectionShellContent
       browserRecordingEnabled={browserRecordingEnabled}
       initialReflectionId={initialReflectionId}
+      initialSegmentId={initialSegmentId}
       onLocalReviewMetric={onLocalReviewMetric}
       session={session}
       toySyncEnabled={toySyncEnabled}
@@ -976,6 +979,7 @@ export function DailyReflectionShellContent({
   createBrowserRecorder = defaultBrowserRecorderFactory,
   createOperationKey = defaultOperationKey,
   initialReflectionId = null,
+  initialSegmentId = null,
   onLocalReviewMetric,
   session,
   toySyncEnabled = false
@@ -999,6 +1003,7 @@ export function DailyReflectionShellContent({
   const lastUrlReflectionId = useRef<string | null>(initialReflectionId);
   const observedReflectionId = useRef(false);
   const lastCardExposureKey = useRef<string | null>(null);
+  const appliedInitialSegmentKey = useRef<string | null>(null);
   const reviewStartedAt = useRef<number | null>(null);
 
   useEffect(() => {
@@ -1360,6 +1365,19 @@ export function DailyReflectionShellContent({
     }));
   };
 
+  useEffect(() => {
+    if (
+      !initialSegmentId
+      || !detail
+      || (initialReflectionId !== null && detail.reflection.id !== initialReflectionId)
+      || !detail.segments.some((segment) => segment.id === initialSegmentId)
+    ) return;
+    const focusKey = `${detail.reflection.id}:${initialSegmentId}`;
+    if (appliedInitialSegmentKey.current === focusKey) return;
+    appliedInitialSegmentKey.current = focusKey;
+    requestTranscriptSegmentFocus(initialSegmentId);
+  }, [detail, initialReflectionId, initialSegmentId]);
+
   if (session.auth.status === "checking") {
     return (
       <div className={styles.root}>
@@ -1428,6 +1446,7 @@ export function DailyReflectionShellContent({
           <Link aria-current="page" className={styles.activeProductNav} href={REFLECTION_PATH}>日常复盘</Link>
           <Link href={`${REFLECTION_PATH}/cards`}>My Cards</Link>
           <Link href={`${REFLECTION_PATH}/return`}>回看</Link>
+          <Link href={`${REFLECTION_PATH}/query`}>问问</Link>
         </nav>
         <div className={styles.headerTools}>
           <span title={userLabel}>{userLabel}</span>

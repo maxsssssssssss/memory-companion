@@ -7,6 +7,7 @@ import type {
 import type {
   DailyReflectionMemoryProposal
 } from "@/lib/domain/daily-reflection-memory-proposal";
+import type { ReflectionCard } from "@/lib/domain/daily-reflection";
 import type {
   DailyReflectionWorkingCardKind
 } from "@/lib/domain/daily-reflection-working-card";
@@ -55,24 +56,33 @@ export type DailyReflectionAdmittedReturnSource = {
   memoryType: DailyReflectionMemoryProposal["memoryType"] | "question";
   cardKind: DailyReflectionWorkingCardKind;
   actionClaimed: boolean;
+  subjectPersonId: string | null;
   epistemicStatus: DailyReflectionMemoryProposal["epistemicStatus"];
+  epistemicCaution: DailyReflectionMemoryProposal["epistemicCaution"];
+  riskFlags: ReflectionCard["riskFlags"];
   title: string;
   content: string;
   importance: number;
   evidence: DailyReflectionReturnEvidence[];
 };
 
-export type DailyReflectionEmergingCardSource = {
+export type DailyReflectionGroundedCardSource = {
   cardId: string;
   reflectionIds: string[];
   recordingDates: string[];
-  cardKind: "idea" | "insight";
+  cardKind: DailyReflectionWorkingCardKind;
   epistemicStatuses: DailyReflectionMemoryProposal["epistemicStatus"][];
+  riskFlags: ReflectionCard["riskFlags"];
   title: string;
   content: string;
   importance: number;
+  relatedCardIds: string[];
+  tags: string[];
   evidence: DailyReflectionReturnEvidence[];
 };
+
+export type DailyReflectionEmergingCardSource =
+  DailyReflectionGroundedCardSource & { cardKind: "idea" | "insight" };
 
 export type DailyReflectionReturnRelation = {
   sourceMemoryId: string;
@@ -83,6 +93,7 @@ export type DailyReflectionReturnRelation = {
 
 export type DailyReflectionReturnSourceSnapshot = {
   admitted: DailyReflectionAdmittedReturnSource[];
+  workingCards: DailyReflectionGroundedCardSource[];
   emergingCards: DailyReflectionEmergingCardSource[];
   relations: DailyReflectionReturnRelation[];
 };
@@ -159,6 +170,12 @@ export class DailyReflectionReturnSourceRepository {
         AND current.reflection_id = publication.reflection_id
         AND current.confirmation_id = publication.confirmation_id
         AND current.status = 'active'
+      INNER JOIN memory_daily_reflection_candidate_payloads payload
+        ON payload.user_id = current.user_id
+        AND payload.publication_id = current.publication_id
+        AND payload.reflection_id = publication.reflection_id
+        AND payload.confirmation_id = current.confirmation_id
+        AND payload.candidate_id = current.candidate_id
       INNER JOIN memory_items memory
         ON memory.user_id = current.user_id
         AND memory.id = current.current_memory_id
@@ -264,9 +281,11 @@ export class DailyReflectionReturnSourceRepository {
         if (
           proposal.id !== first.proposal_id
           || proposal.status !== "admitted"
+          || proposal.memoryId !== first.current_memory_id
           || proposal.cardId !== card.id
           || proposal.reflectionId !== first.reflection_id
           || proposal.recordingDate !== first.recording_date
+          || !exactSet(proposal.evidenceIds, card.evidenceIds)
           || this.proposalRevoked(accountId, proposal.id)
         ) {
           return null;
@@ -340,7 +359,10 @@ export class DailyReflectionReturnSourceRepository {
         actionClaimed: proposal?.actionClaimed
           ?? Boolean(reflectionCard?.cardKind === "user_action"
             && reflectionCard.actionClaimed),
+        subjectPersonId: proposal?.subjectPersonId ?? null,
         epistemicStatus,
+        epistemicCaution: proposal?.epistemicCaution ?? null,
+        riskFlags: [...(proposal?.riskFlags ?? reflectionCard!.riskFlags)].sort(),
         title: proposal?.title
           ?? (reflectionCard!.userTitle ?? reflectionCard!.proposedTitle),
         content: proposal?.content
@@ -426,23 +448,41 @@ export class DailyReflectionReturnSourceRepository {
     }
   }
 
-  private emergingCards(accountId: string, startDate: string, endDate: string) {
-    const cards = this.sourceRepository.listWorkingCards({
-      accountId,
-      status: "saved",
-      sort: "created_asc",
-      limit: 100,
-      offset: 0
-    }).cards;
-    return cards.flatMap((summary): DailyReflectionEmergingCardSource[] => {
-      if (summary.cardKind !== "idea" && summary.cardKind !== "insight") return [];
+  private groundedCards(accountId: string, startDate: string, endDate: string) {
+    const cards = [] as ReturnType<DailyReflectionRepository["listWorkingCards"]>["cards"];
+    let offset = 0;
+    let total = 0;
+    do {
+      const page = this.sourceRepository.listWorkingCards({
+        accountId,
+        status: "saved",
+        sort: "created_asc",
+        limit: 100,
+        offset
+      });
+      total = page.total;
+      if (total > 1_000 || page.offset !== offset || page.cards.length > page.limit) {
+        return [];
+      }
+      cards.push(...page.cards);
+      offset += page.cards.length;
+      if (page.cards.length === 0 && offset < total) return [];
+    } while (offset < total);
+    if (cards.length !== total || new Set(cards.map((card) => card.id)).size !== total) {
+      return [];
+    }
+    return cards.flatMap((summary): DailyReflectionGroundedCardSource[] => {
       try {
         const detail = this.sourceRepository.getWorkingCardWithEvidence(
           accountId,
           summary.id
         );
         if (
-          detail.card.sourceUnavailable
+          detail.card.id !== summary.id
+          || detail.card.accountId !== accountId
+          || detail.card.cardKind !== summary.cardKind
+          || detail.card.status !== "saved"
+          || detail.card.sourceUnavailable
           || detail.evidence.length === 0
           || detail.card.memoryLifecycleStatus === "revocation_requested"
           || detail.card.memoryLifecycleStatus === "revoked"
@@ -454,6 +494,7 @@ export class DailyReflectionReturnSourceRepository {
           recordingDate: string;
           sourceOrigin: "user_reflection" | "direct_conversation";
           epistemicStatus: DailyReflectionMemoryProposal["epistemicStatus"];
+          riskFlags: ReflectionCard["riskFlags"];
         }>();
         for (const reflectionId of detail.card.sourceReflectionIds) {
           const input = this.sourceRepository.getReflectionV2Input(accountId, reflectionId);
@@ -475,7 +516,8 @@ export class DailyReflectionReturnSourceRepository {
             reflectionId,
             recordingDate: input.recordingDate,
             sourceOrigin: plan.sourceOrigin,
-            epistemicStatus: card.epistemicStatus
+            epistemicStatus: card.epistemicStatus,
+            riskFlags: card.riskFlags
           });
         }
         const evidence = detail.evidence.map((item) => {
@@ -500,6 +542,9 @@ export class DailyReflectionReturnSourceRepository {
         const epistemicStatuses = [...new Set(
           [...sourceByUpload.values()].map((item) => item.epistemicStatus)
         )].sort();
+        const riskFlags = [...new Set(
+          [...sourceByUpload.values()].flatMap((item) => item.riskFlags)
+        )].sort();
         if (epistemicStatuses.some(
           (status) => status === "ai_inference" || status === "unknown"
         )) {
@@ -511,9 +556,12 @@ export class DailyReflectionReturnSourceRepository {
           recordingDates: [...new Set(evidence.map((item) => item.recordingDate))].sort(),
           cardKind: summary.cardKind,
           epistemicStatuses,
+          riskFlags,
           title: detail.card.title,
           content: detail.card.content,
           importance: detail.card.importance,
+          relatedCardIds: [...detail.card.relatedCardIds].sort(),
+          tags: [...detail.card.tags].sort(),
           evidence
         }];
       } catch {
@@ -522,20 +570,8 @@ export class DailyReflectionReturnSourceRepository {
     });
   }
 
-  snapshot(accountId: string, startDate: string, endDate: string) {
-    const before = this.authorityRows(accountId);
-    const dailyReflectionBefore = this.dailyReflectionAuthorityToken(accountId, before);
-    const admittedProjection = this.admitted(accountId, before);
-    const after = this.authorityRows(accountId);
-    const dailyReflectionAfter = this.dailyReflectionAuthorityToken(accountId, after);
-    const authorityStable = dailyReflectionBefore !== null
-      && dailyReflectionBefore === dailyReflectionAfter
-      && digest(before) === digest(after);
-    const admitted = (authorityStable ? admittedProjection : []).filter(
-      (source) => source.recordingDate >= startDate && source.recordingDate <= endDate
-    );
-    const activeMemoryIds = new Set(admitted.map((source) => source.memoryId));
-    const relations = (this.memoryDatabase.prepare(`
+  private relationRows(accountId: string) {
+    return this.memoryDatabase.prepare(`
       SELECT relation.source_memory_id, relation.target_memory_id,
              relation.relation_type, relation.confidence
       FROM memory_relations relation
@@ -543,7 +579,36 @@ export class DailyReflectionReturnSourceRepository {
       INNER JOIN memory_items target ON target.id = relation.target_memory_id
       WHERE source.user_id = ? AND target.user_id = ?
       ORDER BY relation.created_at, relation.id
-    `).all(accountId, accountId) as RelationRow[])
+    `).all(accountId, accountId) as RelationRow[];
+  }
+
+  snapshot(accountId: string, startDate: string, endDate: string) {
+    const before = this.authorityRows(accountId);
+    const dailyReflectionBefore = this.dailyReflectionAuthorityToken(accountId, before);
+    const admittedProjection = this.admitted(accountId, before);
+    const workingCardsBefore = this.groundedCards(accountId, startDate, endDate);
+    const activeProjectionMemoryIds = new Set(
+      admittedProjection.map((source) => source.memoryId)
+    );
+    const relationRows = this.relationRows(accountId)
+      .filter((row) => activeProjectionMemoryIds.has(row.source_memory_id)
+        && activeProjectionMemoryIds.has(row.target_memory_id));
+    const after = this.authorityRows(accountId);
+    const dailyReflectionAfter = this.dailyReflectionAuthorityToken(accountId, after);
+    const workingCardsAfter = this.groundedCards(accountId, startDate, endDate);
+    const relationRowsAfter = this.relationRows(accountId)
+      .filter((row) => activeProjectionMemoryIds.has(row.source_memory_id)
+        && activeProjectionMemoryIds.has(row.target_memory_id));
+    const authorityStable = dailyReflectionBefore !== null
+      && dailyReflectionBefore === dailyReflectionAfter
+      && digest(before) === digest(after)
+      && digest(workingCardsBefore) === digest(workingCardsAfter)
+      && digest(relationRows) === digest(relationRowsAfter);
+    const admitted = (authorityStable ? admittedProjection : []).filter(
+      (source) => source.recordingDate >= startDate && source.recordingDate <= endDate
+    );
+    const activeMemoryIds = new Set(admitted.map((source) => source.memoryId));
+    const relations = (authorityStable ? relationRows : [])
       .filter((row) => activeMemoryIds.has(row.source_memory_id)
         && activeMemoryIds.has(row.target_memory_id))
       .map((row) => ({
@@ -552,13 +617,16 @@ export class DailyReflectionReturnSourceRepository {
         relationType: row.relation_type,
         confidence: row.confidence
       }));
-    const emergingBefore = this.emergingCards(accountId, startDate, endDate);
-    const emergingAfter = this.emergingCards(accountId, startDate, endDate);
+    const workingCards = authorityStable ? workingCardsBefore : [];
+    const emergingCards = workingCards.filter(
+      (card): card is DailyReflectionEmergingCardSource => (
+        card.cardKind === "idea" || card.cardKind === "insight"
+      )
+    );
     return {
       admitted,
-      emergingCards: digest(emergingBefore) === digest(emergingAfter)
-        ? emergingBefore
-        : [],
+      workingCards,
+      emergingCards,
       relations
     } satisfies DailyReflectionReturnSourceSnapshot;
   }
