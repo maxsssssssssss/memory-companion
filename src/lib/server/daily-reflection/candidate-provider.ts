@@ -12,7 +12,10 @@ import {
 } from "@/lib/domain/daily-reflection";
 import { TranscriptSegmentSchema, type TranscriptSegment } from "@/lib/domain/types";
 import { createOpenAIClient } from "@/lib/server/openai/client";
-import { parseStructuredJsonResponse } from "@/lib/server/openai/structured-json";
+import {
+  parseStructuredJsonResponse,
+  type StructuredJsonDiagnostics
+} from "@/lib/server/openai/structured-json";
 import { getOpenAIClientRuntimeConfig } from "@/lib/server/settings/provider-config";
 import {
   dailyReflectionCardDisplayPlan,
@@ -45,6 +48,7 @@ export type DailyReflectionCandidateProviderInput = {
   windowCount?: number;
   maxOutputTokens?: number;
   signal?: AbortSignal;
+  onDiagnostics?: (diagnostics: DailyReflectionCandidateProviderDiagnostics) => void;
 };
 
 export type DailyReflectionHiddenCandidate = PendingCandidateV2Input & {
@@ -97,6 +101,7 @@ export type DailyReflectionCardOrganizerInput = {
   displayPlan: DailyReflectionCardDisplayPlan;
   maxOutputTokens: number;
   signal?: AbortSignal;
+  onDiagnostics?: (diagnostics: DailyReflectionCandidateProviderDiagnostics) => void;
 };
 
 export interface DailyReflectionCardOrganizerProvider {
@@ -118,10 +123,156 @@ export class DailyReflectionCandidateProviderUnavailableError extends Error {
 export class DailyReflectionCandidateProviderFailedError extends Error {
   readonly name = "DailyReflectionCandidateProviderFailedError";
   readonly code = "daily_reflection_candidate_provider_failed";
+  readonly diagnostics: DailyReflectionCandidateProviderDiagnostics | null;
 
-  constructor(options?: ErrorOptions) {
-    super("Daily Reflection Candidate Provider failed", options);
+  constructor(options?: {
+    cause?: unknown;
+    diagnostics?: DailyReflectionCandidateProviderDiagnostics | null;
+  }) {
+    super(
+      "Daily Reflection Candidate Provider failed",
+      options?.cause === undefined ? undefined : { cause: options.cause }
+    );
+    this.diagnostics = options?.diagnostics ?? null;
   }
+}
+
+export type DailyReflectionCandidateProviderDiagnostics = {
+  responseStatus?: string;
+  incompleteReason?: string;
+  responseTextLength: number;
+  parseResult: StructuredJsonDiagnostics["parseResult"];
+  validationResult: StructuredJsonDiagnostics["validationResult"];
+  responseCompleteDurationMs?: number;
+  parseDurationMs?: number;
+  validationDurationMs?: number;
+  totalDurationMs?: number;
+  validationIssueCount?: number;
+  validationIssues?: Array<{ path: string; code: string }>;
+  validationIssueSummary?: Array<{ code: string; count: number }>;
+  validationIssuesTruncated?: boolean;
+  inputTokens?: number;
+  outputTokens?: number;
+  totalTokens?: number;
+};
+
+const SAFE_RESPONSE_STATUSES = new Set([
+  "completed",
+  "incomplete",
+  "failed",
+  "cancelled",
+  "queued",
+  "in_progress"
+]);
+const SAFE_INCOMPLETE_REASONS = new Set(["max_output_tokens", "content_filter"]);
+
+function safeDiagnosticLabel(value: string | undefined, allowed: Set<string>) {
+  if (value === undefined) return undefined;
+  return allowed.has(value) ? value : "other";
+}
+
+function safeDiagnosticNumber(value: number | undefined) {
+  return value === undefined || !Number.isFinite(value)
+    ? undefined
+    : Math.max(0, Math.round(value));
+}
+
+function safeValidationCode(value: string) {
+  return /^[a-z_]{1,64}$/u.test(value) ? value : "schema_validation_error";
+}
+
+function safeValidationPath(value: string) {
+  return value.replace(/[^A-Za-z0-9_.\[\]-]/gu, "_").slice(0, 240) || "$";
+}
+
+export function safeDailyReflectionProviderDiagnostics(
+  diagnostics: StructuredJsonDiagnostics | undefined
+): DailyReflectionCandidateProviderDiagnostics | null {
+  if (!diagnostics) return null;
+
+  return {
+    ...(diagnostics.responseStatus === undefined
+      ? {}
+      : { responseStatus: safeDiagnosticLabel(diagnostics.responseStatus, SAFE_RESPONSE_STATUSES) }),
+    ...(diagnostics.incompleteReason === undefined
+      ? {}
+      : {
+          incompleteReason: safeDiagnosticLabel(
+            diagnostics.incompleteReason,
+            SAFE_INCOMPLETE_REASONS
+          )
+        }),
+    responseTextLength: safeDiagnosticNumber(diagnostics.responseTextLength) ?? 0,
+    parseResult: diagnostics.parseResult,
+    validationResult: diagnostics.validationResult,
+    ...(safeDiagnosticNumber(diagnostics.responseCompleteDurationMs) === undefined
+      ? {}
+      : { responseCompleteDurationMs: safeDiagnosticNumber(diagnostics.responseCompleteDurationMs) }),
+    ...(safeDiagnosticNumber(diagnostics.parseDurationMs) === undefined
+      ? {}
+      : { parseDurationMs: safeDiagnosticNumber(diagnostics.parseDurationMs) }),
+    ...(safeDiagnosticNumber(diagnostics.validationDurationMs) === undefined
+      ? {}
+      : { validationDurationMs: safeDiagnosticNumber(diagnostics.validationDurationMs) }),
+    ...(safeDiagnosticNumber(diagnostics.totalDurationMs) === undefined
+      ? {}
+      : { totalDurationMs: safeDiagnosticNumber(diagnostics.totalDurationMs) }),
+    ...(safeDiagnosticNumber(diagnostics.validationIssueCount) === undefined
+      ? {}
+      : { validationIssueCount: safeDiagnosticNumber(diagnostics.validationIssueCount) }),
+    ...(diagnostics.validationIssues
+      ? {
+          validationIssues: diagnostics.validationIssues.slice(0, 10).map((issue) => ({
+            path: safeValidationPath(issue.path),
+            code: safeValidationCode(issue.code)
+          }))
+        }
+      : {}),
+    ...(diagnostics.validationIssueSummary
+      ? {
+          validationIssueSummary: diagnostics.validationIssueSummary.slice(0, 10).map((issue) => ({
+            code: safeValidationCode(issue.code),
+            count: safeDiagnosticNumber(issue.count) ?? 0
+          }))
+        }
+      : {}),
+    ...(diagnostics.validationIssuesTruncated === undefined
+      ? {}
+      : { validationIssuesTruncated: diagnostics.validationIssuesTruncated }),
+    ...(safeDiagnosticNumber(diagnostics.inputTokens) === undefined
+      ? {}
+      : { inputTokens: safeDiagnosticNumber(diagnostics.inputTokens) }),
+    ...(safeDiagnosticNumber(diagnostics.outputTokens) === undefined
+      ? {}
+      : { outputTokens: safeDiagnosticNumber(diagnostics.outputTokens) }),
+    ...(safeDiagnosticNumber(diagnostics.totalTokens) === undefined
+      ? {}
+      : { totalTokens: safeDiagnosticNumber(diagnostics.totalTokens) })
+  };
+}
+
+function captureDailyReflectionProviderDiagnostics(
+  diagnostics: StructuredJsonDiagnostics,
+  observer: ((diagnostics: DailyReflectionCandidateProviderDiagnostics) => void) | undefined
+) {
+  const safe = safeDailyReflectionProviderDiagnostics(diagnostics);
+  if (!safe || !observer) return;
+  try {
+    observer(safe);
+  } catch {
+    console.warn("[daily-reflection-provider] diagnostics_observer_failed");
+  }
+}
+
+function reportDailyReflectionProviderFailure(
+  stage: "extraction" | "organization",
+  diagnostics: DailyReflectionCandidateProviderDiagnostics | null
+) {
+  if (!diagnostics) return;
+  console.warn("[daily-reflection-provider] structured_json_failed", {
+    stage,
+    diagnostics
+  });
 }
 
 export class DailyReflectionCandidateValidationError extends Error {
@@ -386,6 +537,21 @@ function candidateModel() {
   return process.env.OPENAI_TEXT_MODEL?.trim() || "gpt-4.1-mini";
 }
 
+export const DAILY_REFLECTION_CANDIDATE_JSON_INSTRUCTION =
+  "输出严格的 {items:[...]} JSON 对象。" +
+  "candidateKind 只能是 insight、open_question、decision、user_action；" +
+  "每项必须包含 proposedText、evidenceIds、confidence、caution，actionClaimed 与 topicHint 可省略。" +
+  "evidenceIds 只能使用输入中的 segment id；confidence 必须是 0 到 1 的数字。";
+
+export const DAILY_REFLECTION_CARD_ORGANIZER_JSON_INSTRUCTION =
+  "输出严格的 {items:[...]} JSON 对象。" +
+  "每项必须包含 cardKind、proposedTitle、proposedText、sourceCandidateIds、clusterTitle、" +
+  "confidence、importance、durability、novelty、epistemicStatus、riskFlags；actionClaimed 可省略。" +
+  "cardKind 只能是 insight、open_question、decision、user_action；" +
+  "epistemicStatus 只能是 explicit_user_statement、reported_event、ai_inference、unknown；" +
+  "riskFlags 只能包含 ai_inference、attribution_uncertain、low_evidence、sensitive；" +
+  "sourceCandidateIds 只能使用输入 Candidate id，所有分数字段必须是 0 到 1 的数字。";
+
 export function dailyReflectionCandidateModelName() {
   return candidateModel();
 }
@@ -399,6 +565,7 @@ export const structuredDailyReflectionCandidateProvider: DailyReflectionCandidat
     } catch (error) {
       throw new DailyReflectionCandidateProviderUnavailableError({ cause: error });
     }
+    let structuredDiagnostics: StructuredJsonDiagnostics | undefined;
     try {
       return await parseStructuredJsonResponse({
         client,
@@ -423,14 +590,19 @@ export const structuredDailyReflectionCandidateProvider: DailyReflectionCandidat
               transcriptPrompt(input.segments)
           }
         ],
-        jsonInstruction:
-          "输出 {items:[...]}。每项包含 candidateKind、proposedText、evidenceIds、confidence、caution，可选 actionClaimed、topicHint。",
+        jsonInstruction: DAILY_REFLECTION_CANDIDATE_JSON_INSTRUCTION,
+        onDiagnostics: (diagnostics) => {
+          structuredDiagnostics = diagnostics;
+          captureDailyReflectionProviderDiagnostics(diagnostics, input.onDiagnostics);
+        },
         ...(input.maxOutputTokens ? { maxOutputTokens: input.maxOutputTokens } : {}),
         ...(input.signal ? { requestOptions: { signal: input.signal } } : {})
       });
     } catch (error) {
       if (input.signal?.aborted) throw error;
-      throw new DailyReflectionCandidateProviderFailedError({ cause: error });
+      const diagnostics = safeDailyReflectionProviderDiagnostics(structuredDiagnostics);
+      reportDailyReflectionProviderFailure("extraction", diagnostics);
+      throw new DailyReflectionCandidateProviderFailedError({ cause: error, diagnostics });
     }
   }
 };
@@ -473,6 +645,7 @@ DailyReflectionCardOrganizerProvider = {
     } catch (error) {
       throw new DailyReflectionCandidateProviderUnavailableError({ cause: error });
     }
+    let structuredDiagnostics: StructuredJsonDiagnostics | undefined;
     try {
       return await parseStructuredJsonResponse({
         client,
@@ -501,14 +674,19 @@ DailyReflectionCardOrganizerProvider = {
               compressedCandidatePrompt(input)
           }
         ],
-        jsonInstruction:
-          "输出 {items:[...]}。每项严格包含 cardKind、proposedTitle、proposedText、sourceCandidateIds、clusterTitle、confidence、importance、durability、novelty、epistemicStatus、riskFlags；actionClaimed 可省略。",
+        jsonInstruction: DAILY_REFLECTION_CARD_ORGANIZER_JSON_INSTRUCTION,
+        onDiagnostics: (diagnostics) => {
+          structuredDiagnostics = diagnostics;
+          captureDailyReflectionProviderDiagnostics(diagnostics, input.onDiagnostics);
+        },
         maxOutputTokens: input.maxOutputTokens,
         ...(input.signal ? { requestOptions: { signal: input.signal } } : {})
       });
     } catch (error) {
       if (input.signal?.aborted) throw error;
-      throw new DailyReflectionCandidateProviderFailedError({ cause: error });
+      const diagnostics = safeDailyReflectionProviderDiagnostics(structuredDiagnostics);
+      reportDailyReflectionProviderFailure("organization", diagnostics);
+      throw new DailyReflectionCandidateProviderFailedError({ cause: error, diagnostics });
     }
   }
 };

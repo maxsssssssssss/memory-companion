@@ -3,7 +3,11 @@ import { describe, expect, it } from "vitest";
 import type { TranscriptSegment } from "@/lib/domain/types";
 
 import {
+  DAILY_REFLECTION_CANDIDATE_JSON_INSTRUCTION,
+  DAILY_REFLECTION_CARD_ORGANIZER_JSON_INSTRUCTION,
+  DailyReflectionCandidateProviderFailedError,
   DailyReflectionCandidateValidationError,
+  safeDailyReflectionProviderDiagnostics,
   validateDailyReflectionOrganizedCards,
   validateDailyReflectionProviderCandidates
 } from "./candidate-provider";
@@ -21,6 +25,70 @@ function segments(count = 8): TranscriptSegment[] {
     valueLabels: []
   }));
 }
+
+describe("Daily Reflection Provider JSON contracts", () => {
+  it("pins the exact Candidate and Card enums without accepting observed aliases", () => {
+    expect(DAILY_REFLECTION_CANDIDATE_JSON_INSTRUCTION).toContain(
+      "insight、open_question、decision、user_action"
+    );
+    expect(DAILY_REFLECTION_CARD_ORGANIZER_JSON_INSTRUCTION).toContain(
+      "explicit_user_statement、reported_event、ai_inference、unknown"
+    );
+    expect(DAILY_REFLECTION_CARD_ORGANIZER_JSON_INSTRUCTION).toContain(
+      "ai_inference、attribution_uncertain、low_evidence、sensitive"
+    );
+    expect(DAILY_REFLECTION_CARD_ORGANIZER_JSON_INSTRUCTION)
+      .not.toContain("explicit_user_reflection");
+  });
+
+  it("exposes only bounded schema diagnostics without provider text, URLs or secrets", () => {
+    const diagnostics = safeDailyReflectionProviderDiagnostics({
+      responseStatus: "sk-0123456789abcdef0123456789abcdef",
+      incompleteReason: "https://internal.example/path?key=secret-value",
+      responseTextLength: 2_048,
+      parseResult: "success",
+      validationResult: "failed",
+      totalDurationMs: 1_234.4,
+      validationIssueCount: 1,
+      validationIssues: [{
+        path: "items[0].epistemicStatus",
+        code: "invalid_enum_value",
+        message: "secret-value explicit_user_reflection"
+      }],
+      validationIssueSummary: [{ code: "invalid_enum_value", count: 1 }],
+      validationIssuesTruncated: false,
+      inputTokens: 321,
+      outputTokens: 87,
+      totalTokens: 408
+    });
+    const failure = new DailyReflectionCandidateProviderFailedError({
+      cause: new Error("secret-value transcript body"),
+      diagnostics
+    });
+    const serialized = JSON.stringify(failure);
+
+    expect(diagnostics).toEqual(expect.objectContaining({
+      responseStatus: "other",
+      incompleteReason: "other",
+      responseTextLength: 2_048,
+      parseResult: "success",
+      validationResult: "failed",
+      totalDurationMs: 1_234,
+      validationIssues: [{
+        path: "items[0].epistemicStatus",
+        code: "invalid_enum_value"
+      }],
+      inputTokens: 321,
+      outputTokens: 87,
+      totalTokens: 408
+    }));
+    expect(serialized).not.toContain("secret-value");
+    expect(serialized).not.toContain("internal.example");
+    expect(serialized).not.toContain("explicit_user_reflection");
+    expect(failure.message).toBe("Daily Reflection Candidate Provider failed");
+    expect(failure.code).toBe("daily_reflection_candidate_provider_failed");
+  });
+});
 
 describe("validateDailyReflectionProviderCandidates", () => {
   it("allows an individual extraction window to contain no review-worthy item", () => {

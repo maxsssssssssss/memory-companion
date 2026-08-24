@@ -23,6 +23,7 @@ type ResponseTextCandidate = {
   output?: unknown;
   status?: unknown;
   incomplete_details?: unknown;
+  usage?: unknown;
 };
 
 export type StructuredJsonFailureCode =
@@ -56,6 +57,9 @@ export type StructuredJsonDiagnostics = {
   validationIssues?: StructuredJsonValidationIssue[];
   validationIssueSummary?: StructuredJsonValidationIssueSummary[];
   validationIssuesTruncated?: boolean;
+  inputTokens?: number;
+  outputTokens?: number;
+  totalTokens?: number;
 };
 
 export type StructuredJsonValidationFailureRawResponse = {
@@ -308,7 +312,23 @@ function responseMetadata(response: ResponseTextCandidate) {
     details && typeof details === "object" && "reason" in details && typeof details.reason === "string"
       ? details.reason
       : undefined;
-  return { responseStatus, incompleteReason };
+  const usage = response.usage && typeof response.usage === "object"
+    ? response.usage as Record<string, unknown>
+    : null;
+  const tokenCount = (value: unknown) =>
+    typeof value === "number" && Number.isFinite(value) && value >= 0
+      ? Math.round(value)
+      : undefined;
+  const inputTokens = tokenCount(usage?.input_tokens);
+  const outputTokens = tokenCount(usage?.output_tokens);
+  const totalTokens = tokenCount(usage?.total_tokens);
+  return {
+    responseStatus,
+    incompleteReason,
+    ...(inputTokens === undefined ? {} : { inputTokens }),
+    ...(outputTokens === undefined ? {} : { outputTokens }),
+    ...(totalTokens === undefined ? {} : { totalTokens })
+  };
 }
 
 export function jsonOnlyInstruction(instruction: string) {

@@ -87,6 +87,7 @@ describe("parseStructuredJsonResponse", () => {
         parse: vi.fn(),
         create: vi.fn().mockResolvedValue({
           status: "completed",
+          usage: { input_tokens: 41, output_tokens: 17, total_tokens: 58 },
           output_text: JSON.stringify({ items: [{ value: "ok" }] })
         })
       }
@@ -111,7 +112,10 @@ describe("parseStructuredJsonResponse", () => {
       validationDurationMs: expect.any(Number),
       totalDurationMs: expect.any(Number),
       parseResult: "success",
-      validationResult: "success"
+      validationResult: "success",
+      inputTokens: 41,
+      outputTokens: 17,
+      totalTokens: 58
     }));
   });
 
