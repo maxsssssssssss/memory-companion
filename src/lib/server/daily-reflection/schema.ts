@@ -1,6 +1,6 @@
 import type Database from "better-sqlite3";
 
-export const DAILY_REFLECTION_SCHEMA_VERSION = 10;
+export const DAILY_REFLECTION_SCHEMA_VERSION = 11;
 
 // Version one intentionally represents the pre-provenance workflow shape.
 // Version two adds source_origin with a fail-closed legacy backfill and the
@@ -823,6 +823,163 @@ const DAILY_REFLECTION_SCHEMA_V10 = `
      OR reflection.status NOT IN ('cancelled', 'deleted');
 `;
 
+// V11 adds a Daily Reflection-local proposal ledger between saved Working
+// Cards and the existing Memory admission boundary. It freezes the reviewed
+// Card and canonical Evidence snapshot used by policy evaluation; it neither
+// changes the Memory schema nor duplicates the admission receipt.
+const DAILY_REFLECTION_SCHEMA_V11 = `
+  CREATE TABLE dr_memory_proposals (
+    id TEXT PRIMARY KEY,
+    account_id TEXT NOT NULL,
+    card_id TEXT NOT NULL,
+    reflection_id TEXT NOT NULL,
+    title TEXT NOT NULL CHECK (length(trim(title)) > 0 AND length(title) <= 240),
+    card_kind TEXT NOT NULL CHECK (
+      card_kind IN ('idea', 'insight', 'question', 'decision', 'event', 'action')
+    ),
+    action_claimed INTEGER NOT NULL CHECK (action_claimed IN (0, 1)),
+    memory_type TEXT NOT NULL CHECK (
+      memory_type IN ('decision', 'commitment', 'preference', 'person_fact', 'event')
+    ),
+    content TEXT NOT NULL CHECK (
+      length(trim(content)) > 0 AND length(content) <= 20000
+    ),
+    evidence_ids_json TEXT NOT NULL CHECK (
+      json_valid(evidence_ids_json)
+      AND json_type(evidence_ids_json) = 'array'
+      AND json_array_length(evidence_ids_json) > 0
+      AND json_array_length(evidence_ids_json) <= 64
+    ),
+    evidence_snapshots_json TEXT NOT NULL CHECK (
+      json_valid(evidence_snapshots_json)
+      AND json_type(evidence_snapshots_json) = 'array'
+      AND json_array_length(evidence_snapshots_json) = json_array_length(evidence_ids_json)
+    ),
+    risk_flags_json TEXT NOT NULL CHECK (
+      json_valid(risk_flags_json)
+      AND json_type(risk_flags_json) = 'array'
+      AND json_array_length(risk_flags_json) <= 8
+    ),
+    subject_person_id TEXT,
+    importance REAL NOT NULL CHECK (importance >= 0 AND importance <= 1),
+    durability REAL NOT NULL CHECK (durability >= 0 AND durability <= 1),
+    novelty REAL NOT NULL CHECK (novelty >= 0 AND novelty <= 1),
+    sensitivity REAL NOT NULL CHECK (sensitivity >= 0 AND sensitivity <= 1),
+    epistemic_status TEXT NOT NULL CHECK (
+      epistemic_status IN (
+        'explicit_user_statement', 'reported_event', 'ai_inference', 'unknown'
+      )
+    ),
+    epistemic_caution TEXT CHECK (
+      epistemic_caution IS NULL OR epistemic_caution = 'reported_inference'
+    ),
+    status TEXT NOT NULL CHECK (
+      status IN ('pending', 'approved', 'rejected', 'admitted')
+    ),
+    policy_version TEXT NOT NULL CHECK (
+      length(trim(policy_version)) > 0 AND length(policy_version) <= 128
+    ),
+    score REAL NOT NULL CHECK (score >= 0 AND score <= 1),
+    reasons_json TEXT NOT NULL CHECK (
+      json_valid(reasons_json)
+      AND json_type(reasons_json) = 'array'
+      AND json_array_length(reasons_json) <= 32
+    ),
+    operation_key TEXT NOT NULL CHECK (
+      length(trim(operation_key)) > 0 AND length(operation_key) <= 512
+      AND operation_key = 'daily-reflection-card:' || card_id
+    ),
+    request_fingerprint TEXT NOT NULL CHECK (
+      length(request_fingerprint) = 64
+      AND request_fingerprint NOT GLOB '*[^0-9a-f]*'
+    ),
+    memory_id TEXT,
+    source_origin TEXT NOT NULL CHECK (
+      source_origin IN ('user_reflection', 'direct_conversation')
+    ),
+    input_adapter TEXT NOT NULL CHECK (
+      input_adapter IN ('file_picker', 'browser_recorder', 'toy_sync')
+    ),
+    capture_purpose TEXT NOT NULL CHECK (
+      capture_purpose = 'inspiration_capture'
+    ),
+    recording_date TEXT NOT NULL CHECK (
+      recording_date GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]'
+    ),
+    created_by TEXT NOT NULL CHECK (created_by = 'user'),
+    admission_method TEXT NOT NULL CHECK (
+      admission_method = 'daily_reflection_memory_proposal_v1'
+    ),
+    card_version INTEGER NOT NULL CHECK (card_version >= 0),
+    version INTEGER NOT NULL CHECK (version >= 0),
+    lease_owner TEXT CHECK (
+      lease_owner IS NULL OR (length(trim(lease_owner)) > 0 AND length(lease_owner) <= 512)
+    ),
+    lease_until TEXT,
+    attempt_version INTEGER NOT NULL DEFAULT 0 CHECK (attempt_version >= 0),
+    error_code TEXT CHECK (
+      error_code IS NULL OR (length(trim(error_code)) > 0 AND length(error_code) <= 128)
+    ),
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    admitted_at TEXT,
+    UNIQUE (id, account_id),
+    UNIQUE (account_id, card_id),
+    UNIQUE (account_id, operation_key),
+    FOREIGN KEY (card_id, account_id)
+      REFERENCES dr_working_cards(id, account_id) ON DELETE RESTRICT,
+    CHECK (
+      (status = 'admitted' AND memory_id IS NOT NULL AND admitted_at IS NOT NULL)
+      OR
+      (status <> 'admitted' AND memory_id IS NULL AND admitted_at IS NULL)
+    ),
+    CHECK (status <> 'rejected' OR json_array_length(reasons_json) > 0),
+    CHECK (
+      (lease_owner IS NULL AND lease_until IS NULL)
+      OR
+      (lease_owner IS NOT NULL AND lease_until IS NOT NULL)
+    ),
+    CHECK (card_kind = 'action' OR action_claimed = 0),
+    CHECK (
+      status NOT IN ('approved', 'admitted')
+      OR memory_type <> 'commitment'
+      OR (card_kind = 'action' AND action_claimed = 1)
+    ),
+    CHECK (
+      status NOT IN ('approved', 'admitted')
+      OR memory_type <> 'person_fact'
+      OR subject_person_id IS NOT NULL
+    )
+  );
+
+  CREATE INDEX idx_dr_memory_proposals_status
+    ON dr_memory_proposals(account_id, status, updated_at DESC, id);
+
+  CREATE TABLE dr_memory_proposal_events (
+    id TEXT PRIMARY KEY,
+    account_id TEXT NOT NULL,
+    proposal_id TEXT NOT NULL,
+    proposal_version INTEGER NOT NULL CHECK (proposal_version >= 0),
+    event_type TEXT NOT NULL CHECK (
+      event_type IN (
+        'created', 'evaluated', 'admission_started', 'admission_failed',
+        'admitted', 'recovered', 'revoked'
+      )
+    ),
+    reason_metadata_json TEXT NOT NULL DEFAULT '{}' CHECK (
+      json_valid(reason_metadata_json)
+      AND json_type(reason_metadata_json) = 'object'
+    ),
+    created_at TEXT NOT NULL,
+    UNIQUE (id, account_id),
+    FOREIGN KEY (proposal_id, account_id)
+      REFERENCES dr_memory_proposals(id, account_id) ON DELETE RESTRICT
+  );
+
+  CREATE INDEX idx_dr_memory_proposal_events_proposal
+    ON dr_memory_proposal_events(account_id, proposal_id, created_at, id);
+`;
+
 const MIGRATIONS = [
   { version: 1, sql: DAILY_REFLECTION_SCHEMA_V1 },
   { version: 2, sql: DAILY_REFLECTION_SCHEMA_V2 },
@@ -833,7 +990,8 @@ const MIGRATIONS = [
   { version: 7, sql: DAILY_REFLECTION_SCHEMA_V7 },
   { version: 8, sql: DAILY_REFLECTION_SCHEMA_V8 },
   { version: 9, sql: DAILY_REFLECTION_SCHEMA_V9 },
-  { version: 10, sql: DAILY_REFLECTION_SCHEMA_V10 }
+  { version: 10, sql: DAILY_REFLECTION_SCHEMA_V10 },
+  { version: 11, sql: DAILY_REFLECTION_SCHEMA_V11 }
 ] as const;
 
 export function migrateDailyReflectionSchema(database: Database.Database) {

@@ -49,6 +49,7 @@ type PublicationRow = {
 };
 
 type PayloadRow = {
+  confirmation_id: string;
   candidate_id: string;
   memory_json: string;
   owner_attribution_json: string;
@@ -228,7 +229,6 @@ export function createDailyReflectionMemoryCandidateRevocationRepository(
     `).get(input.userId, input.reflectionId) as PublicationRow | undefined;
     if (
       !publication
-      || publication.confirmation_id !== input.confirmationId
       || publication.status !== "published"
     ) {
       throw new DailyReflectionMemoryCandidateRevocationError(
@@ -249,17 +249,28 @@ export function createDailyReflectionMemoryCandidateRevocationRepository(
     `).get(input.userId, publication.id, input.candidateId) as
       { memory_id: string } | undefined;
     const payload = database.prepare(`
-      SELECT candidate_id, memory_json, owner_attribution_json
+      SELECT confirmation_id, candidate_id, memory_json, owner_attribution_json
       FROM memory_daily_reflection_candidate_payloads
       WHERE user_id = ? AND publication_id = ? AND candidate_id = ?
     `).get(input.userId, publication.id, input.candidateId) as PayloadRow | undefined;
     const current = database.prepare(`
-      SELECT status, current_memory_id
+      SELECT confirmation_id, status, current_memory_id
       FROM memory_daily_reflection_candidate_current_memories
       WHERE user_id = ? AND publication_id = ? AND candidate_id = ?
     `).get(input.userId, publication.id, input.candidateId) as
-      { status: "active" | "revoked"; current_memory_id: string | null } | undefined;
-    if (!receipt || !payload || !current || current.status !== "active") {
+      {
+        confirmation_id: string;
+        status: "active" | "revoked";
+        current_memory_id: string | null;
+      } | undefined;
+    if (
+      !receipt
+      || !payload
+      || !current
+      || payload.confirmation_id !== input.confirmationId
+      || current.confirmation_id !== input.confirmationId
+      || current.status !== "active"
+    ) {
       throw new DailyReflectionMemoryCandidateRevocationError(
         "daily_reflection_candidate_revocation_payload_missing"
       );
@@ -268,8 +279,14 @@ export function createDailyReflectionMemoryCandidateRevocationRepository(
     const targetEvidenceCount = (database.prepare(`
       SELECT COUNT(*) AS count
       FROM memory_daily_reflection_evidence_provenance
-      WHERE user_id = ? AND publication_id = ? AND candidate_id = ?
-    `).get(input.userId, publication.id, input.candidateId) as { count: number }).count;
+      WHERE user_id = ? AND publication_id = ? AND confirmation_id = ?
+        AND candidate_id = ?
+    `).get(
+      input.userId,
+      publication.id,
+      input.confirmationId,
+      input.candidateId
+    ) as { count: number }).count;
     if (targetEvidenceCount === 0) {
       throw new DailyReflectionMemoryCandidateRevocationError(
         "daily_reflection_candidate_revocation_payload_missing"
@@ -282,19 +299,27 @@ export function createDailyReflectionMemoryCandidateRevocationRepository(
         owns_subject_observation, previous_subject_admission_json,
         previous_subject_observation_json
       FROM memory_daily_reflection_candidate_person_sources
-      WHERE user_id = ? AND publication_id = ? AND candidate_id = ? AND status = 'active'
+      WHERE user_id = ? AND publication_id = ? AND confirmation_id = ?
+        AND candidate_id = ? AND status = 'active'
       ORDER BY id
-    `).all(input.userId, publication.id, input.candidateId) as PersonSourceRow[];
+    `).all(
+      input.userId,
+      publication.id,
+      input.confirmationId,
+      input.candidateId
+    ) as PersonSourceRow[];
     database.prepare(`
       UPDATE memory_daily_reflection_candidate_person_sources
       SET status = 'revoked', revocation_id = ?, revoked_at = ?, updated_at = ?
-      WHERE user_id = ? AND publication_id = ? AND candidate_id = ? AND status = 'active'
+      WHERE user_id = ? AND publication_id = ? AND confirmation_id = ?
+        AND candidate_id = ? AND status = 'active'
     `).run(
       input.id,
       input.now,
       input.now,
       input.userId,
       publication.id,
+      input.confirmationId,
       input.candidateId
     );
 
@@ -377,18 +402,21 @@ export function createDailyReflectionMemoryCandidateRevocationRepository(
       UPDATE memory_daily_reflection_candidate_current_memories
       SET status = 'revoked', current_memory_id = NULL, revocation_id = ?,
           revoked_at = ?, updated_at = ?
-      WHERE user_id = ? AND publication_id = ? AND candidate_id = ? AND status = 'active'
+      WHERE user_id = ? AND publication_id = ? AND confirmation_id = ?
+        AND candidate_id = ? AND status = 'active'
     `).run(
       input.id,
       input.now,
       input.now,
       input.userId,
       publication.id,
+      input.confirmationId,
       input.candidateId
     );
 
     const remainingPayloads = database.prepare(`
-      SELECT payload.candidate_id, payload.memory_json, payload.owner_attribution_json
+      SELECT payload.confirmation_id, payload.candidate_id, payload.memory_json,
+             payload.owner_attribution_json
       FROM memory_daily_reflection_candidate_payloads payload
       INNER JOIN memory_daily_reflection_candidate_current_memories current
         ON current.user_id = payload.user_id
@@ -434,8 +462,14 @@ export function createDailyReflectionMemoryCandidateRevocationRepository(
     }
     database.prepare(`
       DELETE FROM memory_daily_reflection_candidate_payloads
-      WHERE user_id = ? AND publication_id = ? AND candidate_id = ?
-    `).run(input.userId, publication.id, input.candidateId);
+      WHERE user_id = ? AND publication_id = ? AND confirmation_id = ?
+        AND candidate_id = ?
+    `).run(
+      input.userId,
+      publication.id,
+      input.confirmationId,
+      input.candidateId
+    );
 
     database.prepare(`
       INSERT INTO memory_daily_reflection_candidate_revocations (

@@ -5,6 +5,10 @@ import Database from "better-sqlite3";
 import { afterEach, describe, expect, it } from "vitest";
 
 import {
+  DailyReflectionMemoryProposalEventSchema,
+  DailyReflectionMemoryProposalSchema
+} from "../../domain/daily-reflection-memory-proposal";
+import {
   getDailyReflectionDatabasePath,
   openDailyReflectionDatabase
 } from "./db";
@@ -162,7 +166,8 @@ describe("Daily Reflection SQLite schema", () => {
           { version: 7, count: 1 },
           { version: 8, count: 1 },
           { version: 9, count: 1 },
-          { version: 10, count: 1 }
+          { version: 10, count: 1 },
+          { version: 11, count: 1 }
         ]);
       }
       expect((web.prepare("PRAGMA table_info(dr_reflections)").all() as Array<{
@@ -212,7 +217,8 @@ describe("Daily Reflection SQLite schema", () => {
         { version: 7 },
         { version: 8 },
         { version: 9 },
-        { version: 10 }
+        { version: 10 },
+        { version: 11 }
       ]);
       expect((first.prepare("PRAGMA table_info(dr_reflections)").all() as Array<{
         name: string;
@@ -228,6 +234,8 @@ describe("Daily Reflection SQLite schema", () => {
         { name: "dr_reflections" },
         { name: "dr_working_cards" },
         { name: "dr_working_card_events" },
+        { name: "dr_memory_proposals" },
+        { name: "dr_memory_proposal_events" },
         { name: "dr_candidates" },
         { name: "dr_candidate_sources" },
         { name: "dr_processing_plans" },
@@ -256,14 +264,14 @@ describe("Daily Reflection SQLite schema", () => {
     try {
       expect(reopened.prepare(
         "SELECT COUNT(*) AS count FROM dr_schema_migrations"
-      ).get()).toEqual({ count: 10 });
+      ).get()).toEqual({ count: 11 });
       expect(reopened.prepare(
         "SELECT source_origin FROM dr_reflections WHERE id = 'reflection_reopen'"
       ).get()).toEqual({ source_origin: "unknown" });
       migrateDailyReflectionSchema(reopened);
       expect(reopened.prepare(
         "SELECT COUNT(*) AS count FROM dr_schema_migrations"
-      ).get()).toEqual({ count: 10 });
+      ).get()).toEqual({ count: 11 });
       expect(reopened.pragma("foreign_key_check")).toEqual([]);
       expect(reopened.pragma("integrity_check", { simple: true })).toBe("ok");
     } finally {
@@ -295,7 +303,8 @@ describe("Daily Reflection SQLite schema", () => {
         { version: 7 },
         { version: 8 },
         { version: 9 },
-        { version: 10 }
+        { version: 10 },
+        { version: 11 }
       ]);
       expect(database.prepare(`
         SELECT lease_owner, lease_until, attempt_version, upload_fingerprint
@@ -315,9 +324,11 @@ describe("Daily Reflection SQLite schema", () => {
     const database = openDailyReflectionDatabase({ filePath: ":memory:" });
     try {
       database.exec(`
+        DROP TABLE dr_memory_proposal_events;
+        DROP TABLE dr_memory_proposals;
         DROP TABLE dr_working_card_events;
         DROP TABLE dr_working_cards;
-        DELETE FROM dr_schema_migrations WHERE version = 10;
+        DELETE FROM dr_schema_migrations WHERE version IN (10, 11);
         PRAGMA user_version = 9;
       `);
       database.prepare(`
@@ -490,6 +501,265 @@ describe("Daily Reflection SQLite schema", () => {
     } finally {
       database.close();
     }
+  });
+
+  it("migrates V10 Working Cards additively into the V11 proposal ledger", () => {
+    const database = openDailyReflectionDatabase({ filePath: ":memory:" });
+    try {
+      database.exec(`
+        DROP TABLE dr_memory_proposal_events;
+        DROP TABLE dr_memory_proposals;
+        DELETE FROM dr_schema_migrations WHERE version = 11;
+        PRAGMA user_version = 10;
+
+        INSERT INTO dr_working_cards (
+          id, account_id, source_reflection_ids_json, title, content, card_kind,
+          evidence_ids_json, status, importance, novelty, related_card_ids_json,
+          tags_json, visibility, source_unavailable, saved_at, version,
+          created_at, updated_at
+        ) VALUES (
+          'card_v10_proposal', 'account_1', '["reflection_v10"]',
+          'V10 title', 'V10 content', 'insight', '["segment_v10"]', 'saved',
+          0.8, 0.7, '[]', '[]', 'private', 0, '${timestamp}', 3,
+          '${timestamp}', '${timestamp}'
+        );
+      `);
+
+      migrateDailyReflectionSchema(database);
+
+      expect(database.prepare(
+        "SELECT version FROM dr_schema_migrations ORDER BY version DESC LIMIT 2"
+      ).all()).toEqual([{ version: 11 }, { version: 10 }]);
+      expect(database.prepare(`
+        SELECT id, title, content, status, version
+        FROM dr_working_cards WHERE id = 'card_v10_proposal'
+      `).get()).toEqual({
+        id: "card_v10_proposal",
+        title: "V10 title",
+        content: "V10 content",
+        status: "saved",
+        version: 3
+      });
+      expect(database.prepare(`
+        SELECT name FROM sqlite_master
+        WHERE type = 'table' AND name IN (
+          'dr_memory_proposals', 'dr_memory_proposal_events'
+        ) ORDER BY name
+      `).all()).toEqual([
+        { name: "dr_memory_proposal_events" },
+        { name: "dr_memory_proposals" }
+      ]);
+      expect(database.pragma("foreign_key_check")).toEqual([]);
+    } finally {
+      database.close();
+    }
+  });
+
+  it("enforces the V11 proposal snapshot, uniqueness, status, and audit checks", () => {
+    const database = openDailyReflectionDatabase({ filePath: ":memory:" });
+    try {
+      const insertCard = database.prepare(`
+        INSERT INTO dr_working_cards (
+          id, account_id, source_reflection_ids_json, title, content, card_kind,
+          evidence_ids_json, status, importance, novelty, related_card_ids_json,
+          tags_json, visibility, source_unavailable, saved_at, version,
+          created_at, updated_at
+        ) VALUES (
+          ?, 'account_1', '["reflection_v11"]', 'Frozen title',
+          'Frozen content', 'action', '["segment_v11"]', 'saved', 0.8, 0.7,
+          '[]', '[]', 'private', 0, ?, 4, ?, ?
+        )
+      `);
+      for (const cardId of [
+        "card_valid",
+        "card_same_operation",
+        "card_bad_admitted",
+        "card_bad_rejected",
+        "card_bad_epistemic"
+      ]) {
+        insertCard.run(cardId, timestamp, timestamp, timestamp);
+      }
+
+      const insertProposal = database.prepare(`
+        INSERT INTO dr_memory_proposals (
+          id, account_id, card_id, reflection_id, title, card_kind,
+          action_claimed, memory_type, content, evidence_ids_json,
+          evidence_snapshots_json, risk_flags_json, subject_person_id,
+          importance, durability, novelty, sensitivity, epistemic_status,
+          epistemic_caution, status, policy_version, score, reasons_json,
+          operation_key, request_fingerprint, memory_id, source_origin,
+          input_adapter, capture_purpose, recording_date, created_by,
+          admission_method, card_version, version, lease_owner, lease_until,
+          attempt_version, error_code, created_at, updated_at, admitted_at
+        ) VALUES (
+          @id, 'account_1', @cardId, 'reflection_v11', 'Frozen title', 'action',
+          1, 'commitment', 'Frozen content', '["segment_v11"]',
+          '[{"sourceSegmentId":"segment_v11","uploadId":"upload_v11","startSeconds":0,"endSeconds":1,"effectiveOrigin":"user_reflection","contentDigest":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"}]',
+          '["sensitive"]', NULL, 0.8, 0.7, 0.6, 0.5, @epistemicStatus,
+          'reported_inference', @status, 'proposal-policy-v1', 0.75,
+          @reasons, @operationKey, @requestFingerprint, @memoryId,
+          'user_reflection', 'file_picker', 'inspiration_capture', '2026-08-13',
+          'user', 'daily_reflection_memory_proposal_v1', 4, 0, NULL, NULL,
+          0, NULL, @createdAt, @updatedAt, @admittedAt
+        )
+      `);
+      const valid = {
+        id: "proposal_valid",
+        cardId: "card_valid",
+        epistemicStatus: "reported_event",
+        status: "pending",
+        reasons: JSON.stringify(["policy_score_passed"]),
+        operationKey: "daily-reflection-card:card_valid",
+        requestFingerprint: "a".repeat(64),
+        memoryId: null,
+        createdAt: timestamp,
+        updatedAt: timestamp,
+        admittedAt: null
+      };
+      expect(() => insertProposal.run(valid)).not.toThrow();
+      expect(database.prepare(`
+        SELECT title, card_kind, action_claimed, epistemic_status,
+               epistemic_caution, card_version, attempt_version
+        FROM dr_memory_proposals WHERE id = 'proposal_valid'
+      `).get()).toEqual({
+        title: "Frozen title",
+        card_kind: "action",
+        action_claimed: 1,
+        epistemic_status: "reported_event",
+        epistemic_caution: "reported_inference",
+        card_version: 4,
+        attempt_version: 0
+      });
+
+      expect(() => insertProposal.run({
+        ...valid,
+        id: "proposal_duplicate_card",
+        operationKey: "daily-reflection-card:card_valid"
+      })).toThrow(/UNIQUE/u);
+      expect(() => insertProposal.run({
+        ...valid,
+        id: "proposal_duplicate_operation",
+        cardId: "card_same_operation",
+        operationKey: "daily-reflection-card:card_valid"
+      })).toThrow(/CHECK constraint/u);
+      expect(() => insertProposal.run({
+        ...valid,
+        id: "proposal_bad_admitted",
+        cardId: "card_bad_admitted",
+        operationKey: "daily-reflection-card:card_bad_admitted",
+        status: "admitted"
+      })).toThrow(/CHECK constraint/u);
+      expect(() => insertProposal.run({
+        ...valid,
+        id: "proposal_bad_rejected",
+        cardId: "card_bad_rejected",
+        operationKey: "daily-reflection-card:card_bad_rejected",
+        status: "rejected",
+        reasons: "[]"
+      })).toThrow(/CHECK constraint/u);
+      expect(() => insertProposal.run({
+        ...valid,
+        id: "proposal_bad_epistemic",
+        cardId: "card_bad_epistemic",
+        operationKey: "daily-reflection-card:card_bad_epistemic",
+        epistemicStatus: "reported_inference"
+      })).toThrow(/CHECK constraint/u);
+
+      expect(() => database.prepare(`
+        INSERT INTO dr_memory_proposal_events (
+          id, account_id, proposal_id, proposal_version, event_type,
+          reason_metadata_json, created_at
+        ) VALUES (?, 'account_1', 'proposal_valid', 0, ?, ?, ?)
+      `).run(
+        "event_created",
+        "created",
+        JSON.stringify({ reasonCode: "policy.created" }),
+        timestamp
+      )).not.toThrow();
+      expect(() => database.prepare(`
+        INSERT INTO dr_memory_proposal_events (
+          id, account_id, proposal_id, proposal_version, event_type,
+          reason_metadata_json, created_at
+        ) VALUES (?, 'account_1', 'proposal_valid', 0, ?, '{}', ?)
+      `).run("event_invalid", "receipt_replayed", timestamp))
+        .toThrow(/CHECK constraint/u);
+      expect(database.pragma("foreign_key_check")).toEqual([]);
+      expect(database.pragma("integrity_check", { simple: true })).toBe("ok");
+    } finally {
+      database.close();
+    }
+  });
+
+  it("keeps the public proposal DTO strict and metadata-only", () => {
+    const proposal = {
+      id: "proposal_dto",
+      cardId: "card_dto",
+      reflectionId: "reflection_dto",
+      accountId: "account_1",
+      title: "确定性标题",
+      cardKind: "insight",
+      actionClaimed: false,
+      memoryType: "preference",
+      content: "用户明确认可的偏好",
+      evidenceIds: ["segment_dto"],
+      evidenceSnapshots: [{
+        sourceSegmentId: "segment_dto",
+        uploadId: "upload_dto",
+        startSeconds: 1,
+        endSeconds: 2,
+        effectiveOrigin: "user_reflection"
+      }],
+      riskFlags: [],
+      subjectPersonId: null,
+      importance: 0.7,
+      durability: 0.8,
+      novelty: 0.6,
+      sensitivity: 0.2,
+      epistemicStatus: "reported_event",
+      epistemicCaution: "reported_inference",
+      status: "pending",
+      policyVersion: "proposal-policy-v1",
+      score: 0.75,
+      reasons: ["policy_score_passed"],
+      operationKey: "daily-reflection-card:card_dto",
+      requestFingerprint: "b".repeat(64),
+      memoryId: null,
+      sourceOrigin: "user_reflection",
+      inputAdapter: "file_picker",
+      capturePurpose: "inspiration_capture",
+      recordingDate: "2026-08-13",
+      createdBy: "user",
+      admissionMethod: "daily_reflection_memory_proposal_v1",
+      cardVersion: 4,
+      version: 0,
+      createdAt: timestamp,
+      updatedAt: timestamp,
+      admittedAt: null
+    } as const;
+
+    expect(DailyReflectionMemoryProposalSchema.parse(proposal)).toEqual(proposal);
+    expect(DailyReflectionMemoryProposalSchema.safeParse({
+      ...proposal,
+      epistemicStatus: "reported_inference"
+    }).success).toBe(false);
+    expect(DailyReflectionMemoryProposalSchema.safeParse({
+      ...proposal,
+      evidenceSnapshots: [{ ...proposal.evidenceSnapshots[0], text: "not public" }]
+    }).success).toBe(false);
+    expect(DailyReflectionMemoryProposalSchema.safeParse({
+      ...proposal,
+      status: "rejected",
+      reasons: []
+    }).success).toBe(false);
+    expect(DailyReflectionMemoryProposalEventSchema.safeParse({
+      id: "event_dto",
+      proposalId: proposal.id,
+      accountId: proposal.accountId,
+      proposalVersion: 0,
+      eventType: "evaluated",
+      reasonMetadata: { reasonCode: "policy.accepted", transcript: "not allowed" },
+      createdAt: timestamp
+    }).success).toBe(false);
   });
 
   it("rolls a migration back completely when legacy upload bindings conflict", () => {

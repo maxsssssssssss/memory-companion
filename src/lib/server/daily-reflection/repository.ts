@@ -1605,6 +1605,10 @@ export class DailyReflectionRepository {
     const input = UpdateWorkingCardInputSchema.parse(rawInput);
     const update = this.database.transaction(() => {
       const current = this.requireWorkingCardRow(input.accountId, input.cardId);
+      this.assertNoActiveMemoryProposalLease(
+        input.accountId,
+        input.cardId
+      );
       if (current.saved_at === null || current.status === "removed") {
         throw new DailyReflectionConflictError("daily_reflection_working_card_not_editable");
       }
@@ -1671,6 +1675,13 @@ export class DailyReflectionRepository {
     });
     const transition = this.database.transaction(() => {
       const current = this.requireWorkingCardRow(input.accountId, input.cardId);
+      this.assertNoActiveMemoryProposalLease(
+        input.accountId,
+        input.cardId
+      );
+      if (rawInput.targetStatus === "removed") {
+        this.assertNoActiveAdmittedMemoryProposal(input.accountId, input.cardId);
+      }
       if (current.status === rawInput.targetStatus) {
         return this.workingCardFromRow(current);
       }
@@ -1751,6 +1762,45 @@ export class DailyReflectionRepository {
       targetStatus: "removed",
       eventType: "removed"
     });
+  }
+
+  private assertNoActiveMemoryProposalLease(
+    accountId: string,
+    cardId: string
+  ) {
+    const active = this.database.prepare(`
+      SELECT 1 FROM dr_memory_proposals
+      WHERE account_id = ? AND card_id = ?
+        AND status IN ('pending', 'approved')
+    `).get(accountId, cardId);
+    if (active) {
+      throw new DailyReflectionConflictError(
+        "daily_reflection_memory_proposal_busy"
+      );
+    }
+  }
+
+  private assertNoActiveAdmittedMemoryProposal(
+    accountId: string,
+    cardId: string
+  ) {
+    const active = this.database.prepare(`
+      SELECT 1
+      FROM dr_memory_proposals proposal
+      WHERE proposal.account_id = ? AND proposal.card_id = ?
+        AND proposal.status = 'admitted'
+        AND NOT EXISTS (
+          SELECT 1 FROM dr_memory_proposal_events event
+          WHERE event.account_id = proposal.account_id
+            AND event.proposal_id = proposal.id
+            AND event.event_type = 'revoked'
+        )
+    `).get(accountId, cardId);
+    if (active) {
+      throw new DailyReflectionConflictError(
+        "daily_reflection_working_card_memory_revocation_required"
+      );
+    }
   }
 
   private candidateRole(accountId: string, candidateId: string) {
@@ -4487,14 +4537,15 @@ export class DailyReflectionRepository {
     const parsedReflectionId = DailyReflectionIdSchema.parse(reflectionId);
     const run = this.database.transaction(() => {
       const operation = this.getAdmissionOperation(parsedAccountId, parsedReflectionId);
-      if (!operation || operation.status === "delete_requested") return operation;
       const now = this.now();
-      this.database.prepare(`
-        UPDATE dr_admission_operations
-        SET status = 'delete_requested', lease_owner = NULL, lease_until = NULL,
-            updated_at = ?
-        WHERE id = ? AND account_id = ?
-      `).run(now, operation.id, parsedAccountId);
+      if (operation && operation.status !== "delete_requested") {
+        this.database.prepare(`
+          UPDATE dr_admission_operations
+          SET status = 'delete_requested', lease_owner = NULL, lease_until = NULL,
+              updated_at = ?
+          WHERE id = ? AND account_id = ?
+        `).run(now, operation.id, parsedAccountId);
+      }
       this.database.prepare(`
         UPDATE dr_candidate_revocation_operations
         SET status = 'failed', lease_owner = NULL, lease_until = NULL,
@@ -4502,9 +4553,94 @@ export class DailyReflectionRepository {
         WHERE account_id = ? AND reflection_id = ?
           AND status IN ('ready', 'revoking', 'failed')
       `).run(now, parsedAccountId, parsedReflectionId);
+
+      const proposalRows = this.database.prepare(`
+        SELECT id, version, status
+        FROM dr_memory_proposals
+        WHERE account_id = ? AND reflection_id = ?
+          AND status IN ('pending', 'approved')
+        ORDER BY id
+      `).all(parsedAccountId, parsedReflectionId) as Array<{
+        id: string;
+        version: number;
+        status: "pending" | "approved";
+      }>;
+      for (const proposal of proposalRows) {
+        const updated = this.database.prepare(`
+          UPDATE dr_memory_proposals
+          SET status = 'rejected',
+              policy_version = CASE WHEN status = 'pending'
+                THEN 'daily_reflection_memory_proposal_deletion_v1'
+                ELSE policy_version END,
+              reasons_json = '["reflection_deleted"]',
+              lease_owner = NULL, lease_until = NULL,
+              error_code = 'daily_reflection_delete_requested',
+              version = version + 1, updated_at = ?
+          WHERE account_id = ? AND id = ? AND version = ?
+            AND status IN ('pending', 'approved')
+        `).run(
+          now,
+          parsedAccountId,
+          proposal.id,
+          proposal.version
+        );
+        if (updated.changes !== 1) {
+          throw new DailyReflectionConflictError(
+            "daily_reflection_memory_proposal_delete_conflict"
+          );
+        }
+        const current = this.database.prepare(`
+          SELECT version FROM dr_memory_proposals
+          WHERE account_id = ? AND id = ?
+        `).get(parsedAccountId, proposal.id) as { version: number };
+        this.database.prepare(`
+          INSERT INTO dr_memory_proposal_events (
+            id, account_id, proposal_id, proposal_version, event_type,
+            reason_metadata_json, created_at
+          ) VALUES (?, ?, ?, ?, 'revoked', ?, ?)
+        `).run(
+          this.idFactory(),
+          parsedAccountId,
+          proposal.id,
+          current.version,
+          JSON.stringify({ reasonCode: "reflection_deleted" }),
+          now
+        );
+      }
+      const admittedRows = this.database.prepare(`
+        SELECT proposal.id, proposal.version
+        FROM dr_memory_proposals proposal
+        WHERE proposal.account_id = ? AND proposal.reflection_id = ?
+          AND proposal.status = 'admitted'
+          AND NOT EXISTS (
+            SELECT 1 FROM dr_memory_proposal_events event
+            WHERE event.account_id = proposal.account_id
+              AND event.proposal_id = proposal.id
+              AND event.event_type = 'revoked'
+          )
+        ORDER BY proposal.id
+      `).all(parsedAccountId, parsedReflectionId) as Array<{
+        id: string;
+        version: number;
+      }>;
+      for (const proposal of admittedRows) {
+        this.database.prepare(`
+          INSERT INTO dr_memory_proposal_events (
+            id, account_id, proposal_id, proposal_version, event_type,
+            reason_metadata_json, created_at
+          ) VALUES (?, ?, ?, ?, 'revoked', ?, ?)
+        `).run(
+          this.idFactory(),
+          parsedAccountId,
+          proposal.id,
+          proposal.version,
+          JSON.stringify({ reasonCode: "reflection_deleted" }),
+          now
+        );
+      }
       return this.getAdmissionOperation(parsedAccountId, parsedReflectionId);
     });
-    return run();
+    return run.immediate();
   }
 
   deleteConfirmationArtifacts(accountId: string, reflectionId: string) {
