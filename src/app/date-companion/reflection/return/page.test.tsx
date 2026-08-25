@@ -5,13 +5,11 @@ import DailyReflectionReturnPage from "./page";
 const navigation = vi.hoisted(() => ({
   notFound: vi.fn(() => {
     throw new Error("NEXT_NOT_FOUND");
-  })
+  }),
+  redirect: vi.fn((path: string) => { throw new Error(`NEXT_REDIRECT:${path}`); })
 }));
 
-vi.mock("next/navigation", () => ({ notFound: navigation.notFound }));
-vi.mock("@/components/daily-reflection/daily-reflection-return", () => ({
-  DailyReflectionReturn: () => ({ type: "daily-reflection-return", props: {}, key: null })
-}));
+vi.mock("next/navigation", () => navigation);
 
 const originalFlag = process.env.DAILY_REFLECTION_UPLOAD_ENABLED;
 
@@ -27,8 +25,6 @@ describe("Daily Reflection Return page", () => {
     expect(() => DailyReflectionReturnPage()).toThrow("NEXT_NOT_FOUND");
 
     process.env.DAILY_REFLECTION_UPLOAD_ENABLED = "true";
-    expect(DailyReflectionReturnPage()).toMatchObject({
-      type: expect.any(Function)
-    });
+    expect(() => DailyReflectionReturnPage()).toThrow("NEXT_REDIRECT:/reflection/reflect");
   });
 });

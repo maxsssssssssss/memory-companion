@@ -420,6 +420,12 @@ function controlledRecorderFactory(startError?: DOMException) {
   return { factory, instances };
 }
 
+function chooseBrowserRecordingSource() {
+  const section = screen.getByRole("heading", { name: "开始说" }).closest("section");
+  if (!section) throw new Error("recording section is missing");
+  fireEvent.click(within(section).getByRole("radio", { name: "我自己的复盘" }));
+}
+
 describe("DailyReflectionShellContent", () => {
   afterEach(() => {
     cleanup();
@@ -433,9 +439,9 @@ describe("DailyReflectionShellContent", () => {
       <DailyReflectionShellContent session={session()} />
     );
 
-    expect(screen.queryByRole("button", { name: "开始快速复盘" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "开始说" })).not.toBeInTheDocument();
     expect(screen.getByRole("form", { name: "上传日常复盘录音" })).toBeVisible();
-    expect(screen.getByText("选择已有录音并说明来源。", { exact: false })).toBeVisible();
+    expect(screen.getByText("来源需要由你明确选择；初始不会替你预选。")).toBeVisible();
 
     rerender(
       <DailyReflectionShellContent
@@ -445,7 +451,7 @@ describe("DailyReflectionShellContent", () => {
       />
     );
 
-    const recordingButton = screen.getByRole("button", { name: "开始快速复盘" });
+    const recordingButton = screen.getByRole("button", { name: "开始说" });
     const uploadForm = screen.getByRole("form", { name: "上传日常复盘录音" });
     expect(recordingButton).toBeVisible();
     expect(uploadForm).toBeVisible();
@@ -475,10 +481,11 @@ describe("DailyReflectionShellContent", () => {
       />
     );
 
-    fireEvent.click(screen.getByRole("button", { name: "开始快速复盘" }));
+    chooseBrowserRecordingSource();
+    fireEvent.click(screen.getByRole("button", { name: "开始说" }));
     await waitFor(() => expect(screen.getByRole("alert")).toHaveTextContent(message));
     expect(screen.getByRole("form", { name: "上传日常复盘录音" })).toBeVisible();
-    expect(screen.getByRole("button", { name: "开始快速复盘" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "开始说" })).toBeEnabled();
     expect(screen.queryByText("private detail")).not.toBeInTheDocument();
   });
 
@@ -493,27 +500,28 @@ describe("DailyReflectionShellContent", () => {
     );
     const recorder = instances[0]!;
 
-    fireEvent.click(screen.getByRole("button", { name: "开始快速复盘" }));
-    await waitFor(() => expect(screen.getByRole("button", { name: "停止录音" })).toBeVisible());
-    fireEvent.click(screen.getByRole("button", { name: "取消录音" }));
+    chooseBrowserRecordingSource();
+    fireEvent.click(screen.getByRole("button", { name: "开始说" }));
+    await waitFor(() => expect(screen.getByRole("button", { name: "结束表达" })).toBeVisible());
+    fireEvent.click(screen.getByRole("button", { name: "取消这次表达" }));
     expect(recorder.cancel).toHaveBeenCalledTimes(1);
-    expect(screen.getByRole("button", { name: "开始快速复盘" })).toBeVisible();
+    expect(screen.getByRole("button", { name: "开始说" })).toBeVisible();
 
-    fireEvent.click(screen.getByRole("button", { name: "开始快速复盘" }));
-    await waitFor(() => expect(screen.getByRole("button", { name: "停止录音" })).toBeVisible());
-    fireEvent.click(screen.getByRole("button", { name: "停止录音" }));
+    fireEvent.click(screen.getByRole("button", { name: "开始说" }));
+    await waitFor(() => expect(screen.getByRole("button", { name: "结束表达" })).toBeVisible());
+    fireEvent.click(screen.getByRole("button", { name: "结束表达" }));
     expect(screen.getByText("正在整理这次复盘……")).toBeVisible();
     act(() => recorder.finishStop(181_000));
     await waitFor(() => expect(screen.getByText("本地录音已准备好")).toBeVisible());
 
     fireEvent.click(screen.getByRole("button", { name: "重新录制" }));
-    await waitFor(() => expect(screen.getByRole("button", { name: "停止录音" })).toBeVisible());
+    await waitFor(() => expect(screen.getByRole("button", { name: "结束表达" })).toBeVisible());
     expect(recorder.rerecord).toHaveBeenCalledTimes(1);
-    fireEvent.click(screen.getByRole("button", { name: "停止录音" }));
+    fireEvent.click(screen.getByRole("button", { name: "结束表达" }));
     act(() => recorder.finishStop(182_000));
     await waitFor(() => expect(screen.getByRole("button", { name: "删除本地录音" })).toBeVisible());
     fireEvent.click(screen.getByRole("button", { name: "删除本地录音" }));
-    expect(screen.getByRole("button", { name: "开始快速复盘" })).toBeVisible();
+    expect(screen.getByRole("button", { name: "开始说" })).toBeVisible();
 
     view.unmount();
     expect(recorder.dispose).toHaveBeenCalledTimes(1);
@@ -534,8 +542,9 @@ describe("DailyReflectionShellContent", () => {
     );
     const recorder = instances[0]!;
 
-    fireEvent.click(screen.getByRole("button", { name: "开始快速复盘" }));
-    await waitFor(() => expect(screen.getByRole("button", { name: "停止录音" })).toBeVisible());
+    chooseBrowserRecordingSource();
+    fireEvent.click(screen.getByRole("button", { name: "开始说" }));
+    await waitFor(() => expect(screen.getByRole("button", { name: "结束表达" })).toBeVisible());
     fireEvent.click(screen.getByRole("button", { name: "退出" }));
 
     expect(recorder.cancel).toHaveBeenCalledTimes(1);
@@ -559,10 +568,11 @@ describe("DailyReflectionShellContent", () => {
     const recorder = instances[0]!;
 
     await act(async () => {
-      fireEvent.click(screen.getByRole("button", { name: "开始快速复盘" }));
+      chooseBrowserRecordingSource();
+      fireEvent.click(screen.getByRole("button", { name: "开始说" }));
       await Promise.resolve();
     });
-    expect(screen.getByRole("button", { name: "停止录音" })).toBeVisible();
+    expect(screen.getByRole("button", { name: "结束表达" })).toBeVisible();
 
     act(() => {
       recorder.setDuration(1_000, false);
@@ -581,7 +591,7 @@ describe("DailyReflectionShellContent", () => {
 
     expect(recorder.stop).not.toHaveBeenCalled();
     expect(uploadBrowserRecording).not.toHaveBeenCalled();
-    expect(screen.getByRole("button", { name: "停止录音" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "结束表达" })).toBeEnabled();
   });
 
   it("submits one ready recording with one stable key and the user's editable source", async () => {
@@ -607,13 +617,14 @@ describe("DailyReflectionShellContent", () => {
     );
     const recorder = instances[0]!;
 
-    fireEvent.click(screen.getByRole("button", { name: "开始快速复盘" }));
-    await waitFor(() => expect(screen.getByRole("button", { name: "停止录音" })).toBeVisible());
-    fireEvent.click(screen.getByRole("button", { name: "停止录音" }));
+    chooseBrowserRecordingSource();
+    fireEvent.click(screen.getByRole("button", { name: "开始说" }));
+    await waitFor(() => expect(screen.getByRole("button", { name: "结束表达" })).toBeVisible());
+    fireEvent.click(screen.getByRole("button", { name: "结束表达" }));
     act(() => recorder.finishStop(181_000, "audio/webm;codecs=opus"));
-    const submitButton = await screen.findByRole("button", { name: "提交并开始整理" });
-    const recorderSection = screen.getByRole("heading", { name: "开始快速复盘" })
+    const recorderSection = screen.getByRole("heading", { name: "开始说" })
       .closest("section")!;
+    const submitButton = await within(recorderSection).findByRole("button", { name: "开始整理" });
     fireEvent.click(within(recorderSection).getByRole("radio", {
       name: "我和其他人的真实交流"
     }));
@@ -645,17 +656,17 @@ describe("DailyReflectionShellContent", () => {
     expect(screen.getByText("我自己的复盘")).toBeInTheDocument();
     expect(screen.getByText("我和其他人的真实交流")).toBeInTheDocument();
     expect(screen.queryByText("其他或暂时无法确定")).not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "开始上传" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "开始整理" })).toBeDisabled();
 
     const audioFile = new File(["audio"], "reflection.m4a", { type: "audio/mp4" });
     fireEvent.change(screen.getByLabelText(/选择一段已有录音/u), {
       target: { files: [audioFile] }
     });
     expect(screen.getByText("reflection.m4a")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "开始上传" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "开始整理" })).toBeDisabled();
 
     fireEvent.click(screen.getByRole("radio", { name: "我自己的复盘" }));
-    const submit = screen.getByRole("button", { name: "开始上传" });
+    const submit = screen.getByRole("button", { name: "开始整理" });
     expect(submit).toBeEnabled();
     fireEvent.click(submit);
 
@@ -696,9 +707,9 @@ describe("DailyReflectionShellContent", () => {
       />
     );
 
-    expect(screen.getByText("周三散步.m4a")).toBeInTheDocument();
+    expect(screen.getByText(/周三散步\.m4a/u)).toBeInTheDocument();
     expect(screen.getByText("我和其他人的真实交流")).toBeInTheDocument();
-    expect(screen.getByText("本次复盘概览")).toBeInTheDocument();
+    expect(screen.getByText("这次表达里有什么值得带走")).toBeInTheDocument();
     expect(screen.getAllByRole("button", { name: "展开全部原话" })).toHaveLength(5);
     expect(screen.queryByRole("button", { name: "查看全部" })).not.toBeInTheDocument();
     expect(screen.getByDisplayValue("待确认内容 4")).toBeVisible();
@@ -766,21 +777,20 @@ describe("DailyReflectionShellContent", () => {
       finalize
     })} />);
 
-    expect(screen.getByRole("button", { name: "只保存这次复盘" })).toBeEnabled();
-    expect(screen.getByRole("button", { name: "保存复盘并长期保留所选" })).toBeDisabled();
-    expect(screen.getByText(/还有 1 条没有特别选择/u)).toBeVisible();
-    expect(screen.getByRole("button", { name: "记住" })).toHaveAttribute("aria-pressed", "false");
-    expect(screen.getByRole("button", { name: "不记" })).toHaveAttribute("aria-pressed", "false");
+    expect(screen.getByRole("button", { name: "完成这次复盘" })).toBeEnabled();
+    expect(screen.getByText(/还有 1 条可以以后再看/u)).toBeVisible();
+    expect(screen.getByRole("button", { name: "长期记住" })).toHaveAttribute("aria-pressed", "false");
+    expect(screen.getByRole("button", { name: "不保存" })).toHaveAttribute("aria-pressed", "false");
     expect(screen.queryByRole("combobox")).not.toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole("button", { name: "记住这些重点" }));
+    fireEvent.click(screen.getByRole("button", { name: "长期记住这些重点" }));
     expect(acceptAllCandidates).toHaveBeenCalledOnce();
 
-    fireEvent.click(screen.getByRole("button", { name: "只保存这次复盘" }));
+    fireEvent.click(screen.getByRole("button", { name: "完成这次复盘" }));
     expect(finalize).toHaveBeenCalledWith("recap_only");
 
     fireEvent.change(screen.getByLabelText("编辑发生的事"), { target: { value: "我重新写过的内容" } });
-    fireEvent.click(screen.getByRole("button", { name: "记住" }));
+    fireEvent.click(screen.getByRole("button", { name: "长期记住" }));
     expect(updateCandidate).toHaveBeenLastCalledWith({
       candidateId: "candidate-0",
       status: "kept",
@@ -789,7 +799,7 @@ describe("DailyReflectionShellContent", () => {
     });
 
     fireEvent.change(screen.getByLabelText("编辑发生的事"), { target: { value: "   " } });
-    fireEvent.click(screen.getByRole("button", { name: "不记" }));
+    fireEvent.click(screen.getByRole("button", { name: "不保存" }));
     expect(updateCandidate).toHaveBeenLastCalledWith({
       candidateId: "candidate-0",
       status: "excluded",
@@ -892,8 +902,8 @@ describe("DailyReflectionShellContent", () => {
     })} />);
 
     expect(screen.getByText("有 1 条手写内容没有原话，只能随本次复盘保存。")).toBeVisible();
-    expect(screen.getByRole("button", { name: "只保存这次复盘" })).toBeEnabled();
-    expect(screen.getByRole("button", { name: "保存复盘并长期保留所选" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "完成这次复盘" })).toBeEnabled();
+    expect(screen.queryByRole("button", { name: /长期保留所选/u })).not.toBeInTheDocument();
   });
 
   it("requires an explicit action claim before a kept action can be retained", () => {
@@ -901,24 +911,29 @@ describe("DailyReflectionShellContent", () => {
       status: "kept",
       actionClaimed: false
     });
+    const finalize = vi.fn(async () => undefined);
     const { rerender } = render(<DailyReflectionShellContent session={session({
       state: "review_pending",
       reflectionId: "reflection-1",
-      detail: detail({ candidates: [action] })
+      detail: detail({ candidates: [action] }),
+      finalize
     })} />);
 
     expect(screen.getByText("有 1 条行动还没有由你认领，只能随本次复盘保存。")).toBeVisible();
-    expect(screen.getByRole("button", { name: "保存复盘并长期保留所选" })).toBeDisabled();
+    fireEvent.click(screen.getByRole("button", { name: "完成这次复盘" }));
+    expect(finalize).toHaveBeenLastCalledWith("recap_only");
 
     rerender(<DailyReflectionShellContent session={session({
       state: "review_pending",
       reflectionId: "reflection-1",
       detail: detail({
         candidates: [{ ...action, actionClaimed: true, candidateType: "commitment" }]
-      })
+      }),
+      finalize
     })} />);
     expect(screen.queryByText(/行动还没有由你认领/u)).not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "保存复盘并长期保留所选" })).toBeEnabled();
+    fireEvent.click(screen.getByRole("button", { name: "完成这次复盘" }));
+    expect(finalize).toHaveBeenLastCalledWith("retain_selected");
   });
 
   it("shows completed counts in user language without internal admission terms", () => {
@@ -1060,7 +1075,7 @@ describe("DailyReflectionShellContent", () => {
       detail: quickDetail
     })} />);
 
-    expect(screen.getByText("本次复盘概览")).toBeVisible();
+    expect(screen.getByText("这次表达里有什么值得带走")).toBeVisible();
     expect(screen.getAllByRole("button", { name: "展开全部原话" })).toHaveLength(5);
     expect(screen.queryByRole("button", { name: "查看全部" })).not.toBeInTheDocument();
     expect(screen.getByDisplayValue("待确认内容 4")).toBeVisible();
@@ -1081,7 +1096,7 @@ describe("DailyReflectionShellContent", () => {
     expect(screen.getByLabelText("整理进度 37%")).toBeInTheDocument();
     expect(screen.getByText("37%")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "取消整理" })).toBeVisible();
-    expect(screen.getByRole("button", { name: "删除本次复盘" })).toBeVisible();
+    expect(screen.getByRole("button", { name: "删除原始记录" })).toBeVisible();
     expect(screen.queryByRole("button", { name: "重试整理" })).not.toBeInTheDocument();
   });
 
@@ -1137,7 +1152,7 @@ describe("DailyReflectionShellContent", () => {
     })} />);
 
     expect(screen.getByText("这次整理还不完整")).toBeVisible();
-    expect(screen.getByRole("button", { name: "重新整理候选卡" })).toBeVisible();
+    expect(screen.getByRole("button", { name: "重新整理重点" })).toBeVisible();
     expect(screen.getByRole("button", { name: "手写补充一张卡片" })).toBeVisible();
     expect(screen.getByText("完整文字记录")).toBeVisible();
     expect(screen.queryByText("第一段真实原话。")).not.toBeInTheDocument();
@@ -1179,7 +1194,7 @@ describe("DailyReflectionShellContent", () => {
       />
     );
 
-    expect(screen.getByText("本次复盘概览")).toBeVisible();
+    expect(screen.getByText("这次表达里有什么值得带走")).toBeVisible();
     expect(screen.getByDisplayValue("确认明天的安排")).toBeVisible();
     expect(screen.getByDisplayValue("散步让我更放松")).toBeVisible();
     expect(screen.queryByDisplayValue("还要想清楚的事")).not.toBeInTheDocument();
@@ -1195,7 +1210,7 @@ describe("DailyReflectionShellContent", () => {
       reflectionId: "reflection-1"
     }));
 
-    fireEvent.click(screen.getByRole("button", { name: /还有 1 条整理结果/u }));
+    fireEvent.click(screen.getByRole("button", { name: /还有 1 条可能有用的内容/u }));
     expect(screen.getByDisplayValue("还要想清楚的事")).toBeVisible();
     expect(onLocalReviewMetric).toHaveBeenCalledWith({
       name: "more_expanded",
@@ -1216,9 +1231,9 @@ describe("DailyReflectionShellContent", () => {
       tier: "more"
     });
 
-    fireEvent.click(screen.getAllByRole("button", { name: "查看依据" })[0]);
+    fireEvent.click(screen.getAllByRole("button", { name: "查看来源" })[0]);
     expect(screen.getByText("第一段真实原话。")).toBeVisible();
-    fireEvent.click(screen.getByRole("button", { name: "跳到完整文字记录" }));
+    fireEvent.click(screen.getByRole("button", { name: "在完整文字记录中查看" }));
     await waitFor(() => {
       const source = container.querySelector('[data-segment-id="segment-early"]');
       expect(source).toHaveAttribute("data-highlighted", "true");
@@ -1235,14 +1250,18 @@ describe("DailyReflectionShellContent", () => {
     fireEvent.change(screen.getByRole("textbox", { name: "编辑内容：确认明天的安排" }), {
       target: { value: "我编辑后的散步计划。" }
     });
-    fireEvent.click(screen.getAllByRole("button", { name: "保存到我的 Cards" })[0]);
+    fireEvent.click(screen.getAllByRole("button", { name: "保存为卡片" })[0]);
     expect(saveWorkingCard).toHaveBeenCalledWith(primaryAction.id, {
       userTitle: "我编辑后的安排",
       userText: "我编辑后的散步计划。"
     });
     expect(finalize).not.toHaveBeenCalled();
-    fireEvent.click(screen.getByRole("button", { name: "记住这些重点" }));
-    expect(acceptAllCandidates).toHaveBeenCalledOnce();
+    fireEvent.click(screen.getByRole("button", { name: "保存这些重点为卡片" }));
+    await waitFor(() => expect(saveWorkingCard).toHaveBeenCalledWith(primaryInsight.id, {
+      userTitle: primaryInsight.userTitle,
+      userText: primaryInsight.userText
+    }));
+    expect(acceptAllCandidates).not.toHaveBeenCalled();
   });
 
   it("opens and highlights a valid deep-linked Transcript segment", async () => {
@@ -1285,7 +1304,7 @@ describe("DailyReflectionShellContent", () => {
     expect(screen.queryByLabelText("完整文字稿")).not.toBeInTheDocument();
   });
 
-  it("offers archive, restore, and remove for a saved Working Card without finalizing", () => {
+  it("offers archive and restore for a saved Card without finalizing", () => {
     const savedCard = card(0, "insight", ["segment-early"]);
     const archiveWorkingCard = vi.fn(async () => undefined);
     const restoreWorkingCard = vi.fn(async () => undefined);
@@ -1303,17 +1322,16 @@ describe("DailyReflectionShellContent", () => {
     });
     const { rerender } = render(<DailyReflectionShellContent session={base} />);
 
-    fireEvent.click(screen.getByRole("button", { name: "从 My Cards 归档" }));
-    fireEvent.click(screen.getByRole("button", { name: "从 My Cards 移除" }));
+    fireEvent.click(screen.getByRole("button", { name: "归档" }));
     expect(archiveWorkingCard).toHaveBeenCalledWith(savedCard.id);
-    expect(removeWorkingCard).toHaveBeenCalledWith(savedCard.id);
+    expect(removeWorkingCard).not.toHaveBeenCalled();
     expect(finalize).not.toHaveBeenCalled();
 
     rerender(<DailyReflectionShellContent session={{
       ...base,
       workingCardStates: { [savedCard.id]: { status: "archived", version: 2 } }
     }} />);
-    fireEvent.click(screen.getByRole("button", { name: "恢复到 My Cards" }));
+    fireEvent.click(screen.getByRole("button", { name: "恢复卡片" }));
     expect(restoreWorkingCard).toHaveBeenCalledWith(savedCard.id);
     expect(finalize).not.toHaveBeenCalled();
   });
@@ -1325,7 +1343,7 @@ describe("DailyReflectionShellContent", () => {
       reflectionId: "reflection-1"
     })} />);
 
-    expect(screen.getAllByText("正在读取")).toHaveLength(3);
+    expect(screen.getAllByText("正在读取")).toHaveLength(2);
     const now = new Date();
     const local = new Date(now.getTime() - now.getTimezoneOffset() * 60_000)
       .toISOString()
@@ -1351,12 +1369,12 @@ describe("DailyReflectionShellContent", () => {
       detail: detail()
     })} />);
     await waitFor(() => expect(routerMocks.replace).toHaveBeenCalledWith(
-      "/date-companion/reflection?reflectionId=reflection-1"
+      "/reflection/sessions/reflection-1"
     ));
 
     rerender(<DailyReflectionShellContent session={session()} />);
     await waitFor(() => expect(routerMocks.replace).toHaveBeenCalledWith(
-      "/date-companion/reflection"
+      "/reflection"
     ));
   });
 
@@ -1391,7 +1409,7 @@ describe("DailyReflectionShellContent", () => {
       })}
     />);
 
-    expect(screen.getByRole("button", { name: "开始快速复盘" })).toBeVisible();
+    expect(screen.getByRole("button", { name: "开始说" })).toBeVisible();
     expect(screen.getByRole("form", { name: "上传日常复盘录音" })).toBeVisible();
     expect(screen.getByRole("navigation", { name: "产品空间" })).toHaveTextContent("约会陪伴日常复盘");
     expect(screen.getByText("你在 2026-08-12 的复盘中提到……")).toBeVisible();
@@ -1460,7 +1478,7 @@ describe("DailyReflectionShellContent", () => {
     expect(screen.getByRole("alertdialog", { name: "只撤销这一条保存？" })).toHaveTextContent(
       "不会修改原始复盘文字，也不会删除整次复盘"
     );
-    expect(screen.getByRole("button", { name: "删除本次复盘" })).toBeVisible();
+    expect(screen.getByRole("button", { name: "删除原始记录" })).toBeVisible();
     expect(revokeCandidate).not.toHaveBeenCalled();
     fireEvent.click(screen.getByRole("button", { name: "确认撤销" }));
     expect(revokeCandidate).toHaveBeenCalledWith(remembered.id);
@@ -1588,9 +1606,9 @@ describe("DailyReflectionShellContent", () => {
       delete: deleteReflection
     })} />);
 
-    fireEvent.click(screen.getByRole("button", { name: "删除本次复盘" }));
+    fireEvent.click(screen.getByRole("button", { name: "删除原始记录" }));
     expect(deleteReflection).not.toHaveBeenCalled();
-    expect(screen.getByRole("alertdialog", { name: "确定删除这次复盘吗？" })).toBeVisible();
+    expect(screen.getByRole("alertdialog", { name: "删除这次复盘和原始记录？" })).toBeVisible();
     expect(screen.getByText("删除没有完成，请稍后再试。")).toBeVisible();
     fireEvent.click(screen.getByRole("button", { name: "确认删除" }));
     expect(deleteReflection).toHaveBeenCalledOnce();

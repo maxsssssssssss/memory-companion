@@ -1,11 +1,6 @@
-import { notFound } from "next/navigation";
+import { notFound, redirect } from "next/navigation";
 
-import { DailyReflectionShell } from "@/components/daily-reflection/daily-reflection-shell";
-import {
-  isDailyReflectionBrowserRecordingEnabled,
-  isDailyReflectionToySyncEnabled,
-  isDailyReflectionUploadEnabled
-} from "@/lib/server/daily-reflection/runtime-config";
+import { isDailyReflectionUploadEnabled } from "@/lib/server/daily-reflection/runtime-config";
 
 type DailyReflectionPageProps = {
   searchParams?: Promise<Record<string, string | string[] | undefined>>;
@@ -14,24 +9,15 @@ type DailyReflectionPageProps = {
 export default async function DailyReflectionPage({ searchParams }: DailyReflectionPageProps) {
   if (!isDailyReflectionUploadEnabled()) notFound();
 
-  const resolvedSearchParams = await searchParams;
-  const rawReflectionId = resolvedSearchParams?.reflectionId;
-  const rawSegmentId = resolvedSearchParams?.segmentId;
-  const initialReflectionId = typeof rawReflectionId === "string" && rawReflectionId.trim()
-    ? rawReflectionId.trim()
-    : null;
-  const initialSegmentId = initialReflectionId
-    && typeof rawSegmentId === "string"
-    && rawSegmentId.trim()
-    ? rawSegmentId.trim()
-    : null;
-
-  return (
-    <DailyReflectionShell
-      browserRecordingEnabled={isDailyReflectionBrowserRecordingEnabled()}
-      initialReflectionId={initialReflectionId}
-      initialSegmentId={initialSegmentId}
-      toySyncEnabled={isDailyReflectionToySyncEnabled()}
-    />
-  );
+  const query = await searchParams;
+  const rawReflectionId = Array.isArray(query?.reflectionId)
+    ? query?.reflectionId[0]
+    : query?.reflectionId;
+  const reflectionId = rawReflectionId?.trim();
+  if (!reflectionId) redirect("/reflection");
+  const rawSegment = Array.isArray(query?.segmentId) ? query?.segmentId[0] : query?.segmentId;
+  const segment = rawSegment?.trim();
+  redirect(`/reflection/sessions/${encodeURIComponent(reflectionId)}${segment
+    ? `?segment=${encodeURIComponent(segment)}`
+    : ""}`);
 }

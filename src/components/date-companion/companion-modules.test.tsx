@@ -18,7 +18,7 @@ describe("CompanionModules", () => {
     render(<CompanionModules dailyReflectionEnabled onLogout={vi.fn()} userLabel="user@example.com" />);
 
     const reflectionLink = screen.getByRole("link", { name: /日常复盘/u });
-    expect(reflectionLink).toHaveAttribute("href", "/date-companion/reflection");
+    expect(reflectionLink).toHaveAttribute("href", "/reflection");
     expect(screen.getByText("先选择一个空间。日常复盘目前仅作内部开放。")).toBeInTheDocument();
     expect(screen.queryByRole("heading", { name: "日常闲聊" })).not.toBeInTheDocument();
     expect(screen.getByRole("link", { name: /约会陪伴/u })).toHaveAttribute("href", "/date-companion/a");

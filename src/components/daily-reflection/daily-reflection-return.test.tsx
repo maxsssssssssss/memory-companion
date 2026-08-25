@@ -102,20 +102,20 @@ describe("DailyReflectionReturn", () => {
     const returnApi = api();
     const { container } = render(<DailyReflectionReturn api={returnApi} />);
 
-    expect(await screen.findByRole("heading", { name: "继续思考" })).toBeVisible();
-    expect(screen.getByRole("heading", { name: "回看过去" })).toBeVisible();
-    expect(screen.getByRole("heading", { name: "想一想" })).toBeVisible();
-    expect(screen.getByRole("heading", { name: "重复主题" })).toBeVisible();
-    expect(screen.getByRole("heading", { name: "变化" })).toBeVisible();
-    expect(screen.getByRole("heading", { name: "未完成事项" })).toBeVisible();
-    expect(screen.getByRole("heading", { name: "新想法" })).toBeVisible();
+    expect(await screen.findByRole("heading", { name: "一个未解决问题" })).toBeVisible();
+    expect(screen.getByRole("heading", { name: "一个相关旧想法" })).toBeVisible();
+    expect(screen.getByRole("heading", { name: "一个值得核对的变化" })).toBeVisible();
+    expect(screen.getByRole("heading", { name: "反复出现了什么" })).toBeVisible();
+    expect(screen.getByRole("heading", { name: "什么发生变化" })).toBeVisible();
+    expect(screen.getByRole("heading", { name: "什么仍未解决" })).toBeVisible();
+    expect(screen.getByRole("heading", { name: "什么可能形成方向" })).toBeVisible();
     expect(screen.queryByText("我决定先把这件事做完，再开始下一项。")).not.toBeInTheDocument();
 
     fireEvent.click(screen.getAllByRole("button", { name: "查看依据" })[0]);
     expect(screen.getByText("我决定先把这件事做完，再开始下一项。")).toBeVisible();
-    expect(screen.getByText("2026-08-24 · 1:05")).toBeVisible();
-    expect(screen.getByRole("link", { name: "查看来源 Card" }))
-      .toHaveAttribute("href", "/date-companion/reflection/cards?cardId=card_1");
+    expect(screen.getByText("你在 2026-08-24 的复盘中提到 · 1:05")).toBeVisible();
+    expect(screen.getByRole("link", { name: "查看原话" }))
+      .toHaveAttribute("href", "/reflection/sessions/reflection_1?segment=segment_1");
     expect(returnApi.getDailyReturn).toHaveBeenCalledWith({}, expect.any(AbortSignal));
     expect(returnApi.getWeeklyReflection).toHaveBeenCalledWith({}, expect.any(AbortSignal));
 
@@ -161,7 +161,7 @@ describe("DailyReflectionReturn", () => {
     expect(screen.getByText("本周没有足够的重复来源。")).toBeVisible();
     expect(screen.getByText("本周没有发现有先后依据支持的变化。")).toBeVisible();
     expect(screen.getByText("本周没有仍未完成的确认事项。")).toBeVisible();
-    expect(screen.getByText("本周没有新的、可核对的工作想法。")).toBeVisible();
+    expect(screen.getByText("本周没有新的、可核对的想法。")).toBeVisible();
     expect(screen.queryByText("不应展示")).not.toBeInTheDocument();
   });
 

@@ -1038,6 +1038,50 @@ describe("createDailyReflectionApi", () => {
       .rejects.toMatchObject({ code: "invalid_response" });
   });
 
+  it("reads account-scoped memory views through strict list and detail contracts", async () => {
+    const memory = {
+      id: "memory_1",
+      cardId: "card_1",
+      reflectionId: "reflection_1",
+      recordingDate: "2026-08-13",
+      memoryType: "decision",
+      cardKind: "decision",
+      epistemicStatus: "explicit_user_statement",
+      epistemicCaution: null,
+      title: "决定先完成一个小版本",
+      content: "先把最小版本完成，再继续扩展。",
+      sourceCount: 1,
+      evidence: [{
+        reflectionId: "reflection_1",
+        cardId: "card_1",
+        recordingDate: "2026-08-13",
+        sourceOrigin: "user_reflection",
+        sourceSegmentId: "segment_1",
+        startSeconds: 4,
+        endSeconds: 12,
+        snippet: "我决定先完成一个小版本。"
+      }]
+    };
+    const fetcher = vi.fn<typeof fetch>(async (input) => String(input).endsWith("/memory_1")
+      ? jsonResponse({ memory })
+      : jsonResponse({ memories: [memory], total: 1 }));
+    const api = createDailyReflectionApi(fetcher);
+
+    await expect(api.listMemories()).resolves.toEqual({ memories: [memory], total: 1 });
+    await expect(api.getMemory("memory_1")).resolves.toEqual({ memory });
+    expect(fetcher.mock.calls.map(([input, init]) => [String(input), init?.method])).toEqual([
+      ["/api/daily-reflections/memories", "GET"],
+      ["/api/daily-reflections/memories/memory_1", "GET"]
+    ]);
+
+    const unsafe = vi.fn<typeof fetch>().mockResolvedValue(jsonResponse({
+      memories: [{ ...memory, confidence: 0.99 }],
+      total: 1
+    }));
+    await expect(createDailyReflectionApi(unsafe).listMemories())
+      .rejects.toMatchObject({ code: "invalid_response" });
+  });
+
   it("maps 401 and known failures to bounded user-facing errors", async () => {
     const unauthorized = vi.fn<typeof fetch>().mockResolvedValue(jsonResponse({
       error: "unauthenticated",

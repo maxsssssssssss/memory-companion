@@ -65,6 +65,12 @@ import {
   type DailyReflectionCardMemoryRevocationResponse
 } from "@/lib/domain/daily-reflection-memory-revocation";
 import {
+  DailyReflectionMemoryDetailResponseSchema,
+  DailyReflectionMemoryListResponseSchema,
+  type DailyReflectionMemoryDetailResponse,
+  type DailyReflectionMemoryListResponse
+} from "@/lib/domain/daily-reflection-memory-view";
+import {
   DailyReflectionDailyReturnResponseSchema,
   DailyReflectionWeeklyReflectionResponseSchema,
   type DailyReflectionDailyReturnResponse,
@@ -255,6 +261,11 @@ export interface DailyReflectionApi {
     input: DailyReflectionCardMemoryRevocationRequest,
     signal?: AbortSignal
   ): Promise<DailyReflectionCardMemoryRevocationResponse>;
+  listMemories(signal?: AbortSignal): Promise<DailyReflectionMemoryListResponse>;
+  getMemory(
+    memoryId: string,
+    signal?: AbortSignal
+  ): Promise<DailyReflectionMemoryDetailResponse>;
   getDailyReturn(
     input?: { date?: string },
     signal?: AbortSignal
@@ -768,6 +779,23 @@ export function createDailyReflectionApi(
         response,
         DailyReflectionCardMemoryRevocationResponseSchema
       );
+    },
+
+    async listMemories(signal) {
+      const response = await sameOrigin("/api/daily-reflections/memories", {
+        method: "GET",
+        signal
+      });
+      return parseJsonResponse(response, DailyReflectionMemoryListResponseSchema);
+    },
+
+    async getMemory(memoryId, signal) {
+      const id = DailyReflectionIdSchema.parse(memoryId);
+      const response = await sameOrigin(`/api/daily-reflections/memories/${encodeURIComponent(id)}`, {
+        method: "GET",
+        signal
+      });
+      return parseJsonResponse(response, DailyReflectionMemoryDetailResponseSchema);
     },
 
     async getDailyReturn(input = {}, signal) {

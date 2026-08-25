@@ -653,6 +653,7 @@ export function ToyAudioSync({
 
   return (
     <section
+      id="reflection-capture-toy"
       className={`${styles.uploadCard} ${styles.toySyncCard}${className ? ` ${className}` : ""}`}
       aria-labelledby={titleId}
     >

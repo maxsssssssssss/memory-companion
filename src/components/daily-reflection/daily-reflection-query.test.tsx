@@ -88,11 +88,12 @@ describe("DailyReflectionQuery", () => {
     );
     fireEvent.click(sourceButton);
     expect(screen.getByText("我最开始考虑继续原来的方向，后来决定换一个方向。")).toBeVisible();
-    expect(screen.getByText("2026-08-20 · 录音 1:05")).toBeVisible();
+    expect(screen.getByText("你在 2026-08-20 的复盘中提到 · 录音 1:05")).toBeVisible();
     expect(screen.getByRole("link", { name: "在原复盘中查看" })).toHaveAttribute(
       "href",
-      "/date-companion/reflection?reflectionId=reflection_1&segmentId=segment_1"
+      "/reflection/sessions/reflection_1?segment=segment_1"
     );
+    expect(screen.getByText("这次回答参考了 1 张卡片、1 次复盘和 1 条长期记忆。")).toBeVisible();
 
     expect(screen.getByRole("heading", { name: "也可以回看最初的考虑" })).toBeVisible();
     fireEvent.click(screen.getByRole("button", { name: "关闭回看提示" }));

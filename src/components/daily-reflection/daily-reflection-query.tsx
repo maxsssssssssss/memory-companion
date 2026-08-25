@@ -16,11 +16,14 @@ import {
 import type { DailyReflectionReturnEvidence } from "@/lib/domain/daily-reflection-return";
 
 import styles from "./daily-reflection.module.css";
+import { REFLECTION_ASK_EXAMPLES, reflectionSessionPath } from "./reflection-product";
 
 export type DailyReflectionQueryApi = Pick<DailyReflectionApi, "queryReflection">;
 
 type DailyReflectionQueryProps = Readonly<{
   api?: DailyReflectionQueryApi;
+  embedded?: boolean;
+  initialQuestion?: string;
 }>;
 
 const INTENT_LABELS: Record<DailyReflectionQueryIntent, string> = {
@@ -42,9 +45,13 @@ function formatTimestamp(seconds: number) {
 }
 
 function safeSourceLink(evidence: DailyReflectionReturnEvidence) {
-  return `/date-companion/reflection?reflectionId=${encodeURIComponent(
-    evidence.reflectionId
-  )}&segmentId=${encodeURIComponent(evidence.sourceSegmentId)}`;
+  return `${reflectionSessionPath(evidence.reflectionId)}?segment=${encodeURIComponent(evidence.sourceSegmentId)}`;
+}
+
+function sourceContext(evidence: DailyReflectionReturnEvidence) {
+  return evidence.sourceOrigin === "user_reflection"
+    ? `你在 ${evidence.recordingDate} 的复盘中提到`
+    : `在 ${evidence.recordingDate} 的交流中提到`;
 }
 
 function EvidenceDisclosure({
@@ -74,7 +81,7 @@ function EvidenceDisclosure({
           {evidence.map((source) => (
             <li key={`${source.cardId}:${source.sourceSegmentId}`}>
               <p>{source.snippet}</p>
-              <small>{source.recordingDate} · 录音 {formatTimestamp(source.startSeconds)}</small>
+              <small>{sourceContext(source)} · 录音 {formatTimestamp(source.startSeconds)}</small>
               <Link className={styles.textButton} href={safeSourceLink(source)}>
                 在原复盘中查看
               </Link>
@@ -86,9 +93,9 @@ function EvidenceDisclosure({
   );
 }
 
-export function DailyReflectionQuery({ api: providedApi }: DailyReflectionQueryProps) {
+export function DailyReflectionQuery({ api: providedApi, embedded = false, initialQuestion = "" }: DailyReflectionQueryProps) {
   const api = useMemo(() => providedApi ?? createDailyReflectionApi(), [providedApi]);
-  const [query, setQuery] = useState("");
+  const [query, setQuery] = useState(initialQuestion);
   const [scope, setScope] = useState<DailyReflectionQueryScope>("all");
   const [result, setResult] = useState<DailyReflectionQueryResponse | null>(null);
   const [busy, setBusy] = useState(false);
@@ -127,26 +134,32 @@ export function DailyReflectionQuery({ api: providedApi }: DailyReflectionQueryP
     }
   };
 
+  const sourceCounts = result ? {
+    cards: new Set(result.claims.flatMap((claim) => claim.sourceCardIds)).size,
+    reflections: new Set(result.claims.flatMap((claim) => claim.evidence.map((item) => item.reflectionId))).size,
+    memories: new Set(result.claims.flatMap((claim) => claim.sourceMemoryIds)).size
+  } : null;
+
   return (
-    <div className={styles.root}>
-      <header className={styles.header}>
+    <div className={embedded ? styles.embeddedRoot : styles.root}>
+      {!embedded ? <header className={styles.header}>
         <Link className={styles.wordmark} href="/date-companion/modules" aria-label="返回空间选择">
           <span className={styles.wordmarkMark}>DB</span>
           <b>问问复盘</b>
         </Link>
         <nav className={styles.productNav} aria-label="产品空间">
-          <Link href="/date-companion/reflection">日常复盘</Link>
-          <Link href="/date-companion/reflection/cards">My Cards</Link>
-          <Link href="/date-companion/reflection/return">回看</Link>
-          <Link aria-current="page" className={styles.activeProductNav} href="/date-companion/reflection/query">问问</Link>
+          <Link href="/reflection">今天</Link>
+          <Link href="/reflection/cards">卡片</Link>
+          <Link href="/reflection/reflect">回看</Link>
+          <Link aria-current="page" className={styles.activeProductNav} href="/reflection/ask">问问过去</Link>
         </nav>
-      </header>
+      </header> : null}
 
-      <main className={`${styles.page} ${styles.cardLibraryPage}`}>
-        <section className={styles.intro}>
+      <main className={`${embedded ? styles.productPage : styles.page} ${styles.cardLibraryPage}`}>
+        <section className={embedded ? styles.productIntro : styles.intro}>
           <div>
-            <p className={styles.eyebrow}>只查找有来源的内容</p>
-            <h1>从过去的复盘里，找回一条线索。</h1>
+            <p className={styles.eyebrow}>基于你的真实表达</p>
+            <h1>问问过去</h1>
           </div>
           <p className={styles.introText}>每次只回答当前这一问，不保存聊天记录。依据不足时会明确告诉你。</p>
         </section>
@@ -154,11 +167,11 @@ export function DailyReflectionQuery({ api: providedApi }: DailyReflectionQueryP
         <form className={styles.candidateSection} onSubmit={(event) => void submit(event)}>
           <div className={styles.sectionHeading}>
             <div>
-              <p>ASK YOUR REFLECTIONS</p>
+               <p>一次只问一个问题</p>
               <h2>你想找什么？</h2>
             </div>
           </div>
-          <label className={styles.candidateEditor}>
+           <label className={styles.candidateEditor}>
             <span>问题</span>
             <textarea
               aria-label="你想问什么"
@@ -169,7 +182,12 @@ export function DailyReflectionQuery({ api: providedApi }: DailyReflectionQueryP
               rows={4}
               value={query}
             />
-          </label>
+           </label>
+           <div className={styles.questionChips} aria-label="问题示例">
+             {REFLECTION_ASK_EXAMPLES.map((example) => (
+               <button disabled={busy} key={example} onClick={() => setQuery(example)} type="button">{example}</button>
+             ))}
+           </div>
           <label className={styles.candidateEditor}>
             <span>查找范围</span>
             <select
@@ -208,7 +226,13 @@ export function DailyReflectionQuery({ api: providedApi }: DailyReflectionQueryP
                 <h2 id="daily-reflection-query-answer">回答</h2>
               </div>
             </div>
-            <p className={styles.candidateText}>{result.answer}</p>
+             <p className={styles.candidateText}>{result.answer}</p>
+             {sourceCounts ? (
+               <p className={styles.answerSourceSummary}>
+                 这次回答参考了 {sourceCounts.cards} 张卡片、{sourceCounts.reflections} 次复盘
+                 {sourceCounts.memories > 0 ? `和 ${sourceCounts.memories} 条长期记忆` : ""}。
+               </p>
+             ) : null}
             {result.insufficientEvidence ? (
               <p className={styles.evidenceUnavailable}>现有记录还不足以支持确定结论。</p>
             ) : null}

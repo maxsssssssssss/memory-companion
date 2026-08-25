@@ -437,6 +437,10 @@ function fakeApi(overrides: Partial<DailyReflectionApi> = {}): DailyReflectionAp
     revokeWorkingCardMemory: async () => {
       throw new Error("working card Memory revocation is not configured for this test");
     },
+    listMemories: async () => ({ memories: [], total: 0 }),
+    getMemory: async () => {
+      throw new Error("Daily Reflection Memory is not configured for this test");
+    },
     getDailyReturn: async () => {
       throw new Error("Daily Return is not configured for this test");
     },

@@ -66,15 +66,20 @@ describe("DailyReflectionCardLibrary", () => {
     });
     render(<DailyReflectionCardLibrary
       api={createDailyReflectionApi(fetcher)}
+      detailOnly
       initialCardId="card_1"
     />);
 
+    expect(await screen.findByRole("heading", { name: "散步后的洞察" })).toBeVisible();
+    fireEvent.click(screen.getByText("查看来源 · 1 段"));
     expect(await screen.findByText("散步以后，我觉得思路更清楚了。")).toBeVisible();
     expect(fetcher.mock.calls.filter(([path, init]) => (
       String(path) === "/api/daily-reflections/cards/card_1" && init?.method === "GET"
     ))).toHaveLength(1);
     expect(screen.getByRole("link", { name: "查看来源复盘" }))
-      .toHaveAttribute("href", "/date-companion/reflection?reflectionId=reflection_1");
+      .toHaveAttribute("href", "/reflection/sessions/reflection_1");
+    expect(screen.getByRole("link", { name: "在完整文字记录中查看" }))
+      .toHaveAttribute("href", "/reflection/sessions/reflection_1?segment=segment_1");
   });
 
   it("searches and filters scoped Cards, edits details, and shows Canonical Evidence", async () => {
@@ -112,11 +117,11 @@ describe("DailyReflectionCardLibrary", () => {
     />);
 
     expect(await screen.findByText("散步后的洞察")).toBeVisible();
-    fireEvent.change(screen.getByLabelText("搜索 My Cards"), { target: { value: "散步" } });
+    fireEvent.change(screen.getByLabelText("搜索卡片"), { target: { value: "散步" } });
     fireEvent.change(screen.getByLabelText("按类型筛选"), { target: { value: "insight" } });
     fireEvent.change(screen.getByLabelText("按状态筛选"), { target: { value: "removed" } });
     fireEvent.change(screen.getByLabelText("按时间筛选"), { target: { value: "30d" } });
-    fireEvent.click(screen.getByRole("button", { name: "搜索" }));
+    fireEvent.click(screen.getByRole("button", { name: "筛选" }));
     await waitFor(() => {
       const listCall = [...fetcher.mock.calls].reverse().find(([path]) => String(path).includes("cards?"));
       expect(String(listCall?.[0])).toContain("type=insight");
@@ -125,14 +130,15 @@ describe("DailyReflectionCardLibrary", () => {
       expect(String(listCall?.[0])).toContain("from=2026-07-25T00%3A00%3A00.000Z");
     });
 
-    fireEvent.click(screen.getByRole("button", { name: "查看详情" }));
+    fireEvent.click(screen.getByRole("button", { name: "快速查看" }));
+    fireEvent.click(await screen.findByText("查看来源 · 1 段"));
     expect(await screen.findByText("散步以后，我觉得思路更清楚了。")).toBeVisible();
     expect(screen.getByRole("link", { name: "查看来源复盘" }))
-      .toHaveAttribute("href", "/date-companion/reflection?reflectionId=reflection_1");
-    fireEvent.change(screen.getByLabelText("编辑 Card 标题"), {
+      .toHaveAttribute("href", "/reflection/sessions/reflection_1");
+    fireEvent.change(screen.getByLabelText("编辑卡片标题"), {
       target: { value: "更新后的洞察" }
     });
-    fireEvent.change(screen.getByLabelText("编辑 Card 内容"), {
+    fireEvent.change(screen.getByLabelText("编辑卡片正文"), {
       target: { value: "更新后的内容。" }
     });
     fireEvent.click(screen.getByRole("button", { name: "保存修改" }));
@@ -168,7 +174,8 @@ describe("DailyReflectionCardLibrary", () => {
     });
     render(<DailyReflectionCardLibrary api={createDailyReflectionApi(fetcher)} />);
 
-    fireEvent.click(await screen.findByRole("button", { name: "查看详情" }));
+    fireEvent.click(await screen.findByRole("button", { name: "快速查看" }));
+    fireEvent.click(await screen.findByText("查看来源 · 0 段"));
     expect(await screen.findByText(/原始来源已不可用/u)).toBeVisible();
     expect(screen.queryByRole("link", { name: /查看来源复盘/u })).not.toBeInTheDocument();
     expect(screen.queryByText("散步以后，我觉得思路更清楚了。")).not.toBeInTheDocument();
@@ -177,7 +184,9 @@ describe("DailyReflectionCardLibrary", () => {
     expect(await screen.findByRole("button", { name: "恢复" })).toBeVisible();
     fireEvent.click(screen.getByRole("button", { name: "恢复" }));
     expect(await screen.findByRole("button", { name: "归档" })).toBeVisible();
-    fireEvent.click(screen.getByRole("button", { name: "从 My Cards 移除" }));
+    fireEvent.click(screen.getByRole("button", { name: "从卡片库移除" }));
+    expect(screen.getByRole("dialog", { name: "从卡片库移除？" })).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "确认移除" }));
     expect(await screen.findByRole("button", { name: "恢复" })).toBeVisible();
     expect(fetcher.mock.calls.map(([path, init]) => [String(path), init?.method]))
       .toEqual(expect.arrayContaining([
@@ -242,14 +251,16 @@ describe("DailyReflectionCardLibrary", () => {
     });
     render(<DailyReflectionCardLibrary api={createDailyReflectionApi(fetcher)} />);
 
-    fireEvent.click(await screen.findByRole("button", { name: "查看详情" }));
-    fireEvent.click(await screen.findByRole("button", { name: "撤销长期记忆来源" }));
-    expect(await screen.findByText("长期记忆来源已撤销")).toBeVisible();
+    fireEvent.click(await screen.findByRole("button", { name: "快速查看" }));
+    fireEvent.click(await screen.findByRole("button", { name: "撤销这条记忆" }));
+    expect(screen.getByRole("dialog", { name: "撤销这条长期记忆？" })).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "确认撤销" }));
+    expect(await screen.findByText("已撤销")).toBeVisible();
     const revokeCall = fetcher.mock.calls.find(([path]) => String(path).endsWith("/revoke"));
     expect(revokeCall?.[1]?.method).toBe("POST");
     expect(JSON.parse(String(revokeCall?.[1]?.body))).toEqual({
       expectedMemoryLifecycleVersion: 1,
-      idempotencyKey: "daily-reflection-card-revoke:card_1"
+      idempotencyKey: "daily-reflection-card-revoke:card_1:v1"
     });
   });
 });

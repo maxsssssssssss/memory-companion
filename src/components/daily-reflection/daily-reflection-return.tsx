@@ -13,6 +13,7 @@ import type {
 } from "@/lib/domain/daily-reflection-return";
 
 import styles from "./daily-reflection.module.css";
+import { reflectionSessionPath } from "./reflection-product";
 
 type DailyReflectionReturnApi = Readonly<{
   getDailyReturn(
@@ -27,6 +28,7 @@ type DailyReflectionReturnApi = Readonly<{
 
 type DailyReflectionReturnProps = Readonly<{
   api?: DailyReflectionReturnApi;
+  embedded?: boolean;
 }>;
 
 type DisplayItem = DailyReflectionReturnItem | DailyReflectionWeeklyItem;
@@ -46,6 +48,12 @@ function formatTimestamp(seconds: number) {
     : `${minutes}:${String(remaining).padStart(2, "0")}`;
 }
 
+function sourceContext(item: DailyReflectionReturnEvidence) {
+  return item.sourceOrigin === "user_reflection"
+    ? `你在 ${item.recordingDate} 的复盘中提到`
+    : `在 ${item.recordingDate} 的交流中提到`;
+}
+
 function isDisplayable(item: DisplayItem) {
   return item.sourceCardIds.length > 0
     && item.evidence.length > 0
@@ -59,11 +67,11 @@ function EvidenceList({ evidence }: { evidence: DailyReflectionReturnEvidence[] 
       {evidence.map((item) => (
         <li key={`${item.cardId}:${item.sourceSegmentId}`}>
           <p>{item.snippet}</p>
-          <small>{item.recordingDate} · {formatTimestamp(item.startSeconds)}</small>
+          <small>{sourceContext(item)} · {formatTimestamp(item.startSeconds)}</small>
           <Link
             className={styles.textButton}
-            href={`/date-companion/reflection/cards?cardId=${encodeURIComponent(item.cardId)}`}
-          >查看来源 Card</Link>
+            href={`${reflectionSessionPath(item.reflectionId)}?segment=${encodeURIComponent(item.sourceSegmentId)}`}
+          >查看原话</Link>
         </li>
       ))}
     </ol>
@@ -91,6 +99,10 @@ function ReturnItem({ item }: { item: DisplayItem }) {
         >{evidenceExpanded ? "收起依据" : "查看依据"}</button>
       </div>
       {evidenceExpanded ? <EvidenceList evidence={item.evidence} /> : null}
+      <Link
+        className={styles.secondaryButton}
+        href={`/reflection/capture?new=1&prompt=${encodeURIComponent(`${item.title}：${item.body}`)}`}
+      >继续想</Link>
     </li>
   );
 }
@@ -129,7 +141,7 @@ function ReturnGroup({
   );
 }
 
-export function DailyReflectionReturn({ api: providedApi }: DailyReflectionReturnProps) {
+export function DailyReflectionReturn({ api: providedApi, embedded = false }: DailyReflectionReturnProps) {
   const api = useMemo(
     () => (providedApi ?? createDailyReflectionApi()) as unknown as DailyReflectionReturnApi,
     [providedApi]
@@ -161,22 +173,22 @@ export function DailyReflectionReturn({ api: providedApi }: DailyReflectionRetur
   }, [api]);
 
   return (
-    <div className={styles.root}>
-      <header className={styles.header}>
+    <div className={embedded ? styles.embeddedRoot : styles.root}>
+      {!embedded ? <header className={styles.header}>
         <Link className={styles.wordmark} href="/date-companion/modules" aria-label="返回空间选择">
           <span className={styles.wordmarkMark}>DB</span>
           <b>回看</b>
         </Link>
         <nav className={styles.productNav} aria-label="产品空间">
-          <Link href="/date-companion/reflection">日常复盘</Link>
-          <Link href="/date-companion/reflection/cards">My Cards</Link>
-          <Link aria-current="page" className={styles.activeProductNav} href="/date-companion/reflection/return">回看</Link>
-          <Link href="/date-companion/reflection/query">问问</Link>
+          <Link href="/reflection">今天</Link>
+          <Link href="/reflection/cards">卡片</Link>
+          <Link aria-current="page" className={styles.activeProductNav} href="/reflection/reflect">回看</Link>
+          <Link href="/reflection/ask">问问过去</Link>
         </nav>
-      </header>
+      </header> : null}
 
-      <main className={`${styles.page} ${styles.cardLibraryPage}`}>
-        <section className={styles.intro}>
+      <main className={`${embedded ? styles.productPage : styles.page} ${styles.cardLibraryPage}`}>
+        <section className={embedded ? styles.productIntro : styles.intro}>
           <div>
             <p className={styles.eyebrow}>有来源的回顾</p>
             <h1>今天，回看一点重要的事</h1>
@@ -187,7 +199,7 @@ export function DailyReflectionReturn({ api: providedApi }: DailyReflectionRetur
         <section className={styles.historySection} aria-labelledby="daily-return-today-title">
           <div className={styles.historyHeading}>
             <div>
-              <p className={styles.eyebrow}>DAILY RETURN</p>
+              <p className={styles.eyebrow}>今天值得再想一想</p>
               <h2 id="daily-return-today-title">今天</h2>
             </div>
             {daily ? <span>{daily.referenceDate}</span> : null}
@@ -196,9 +208,9 @@ export function DailyReflectionReturn({ api: providedApi }: DailyReflectionRetur
             <p className={styles.inlineError} role="alert">{dailyError}</p>
           ) : daily ? (
             <div className={styles.cardLibraryPage}>
-              <ReturnGroup eyebrow="OPEN LOOPS" emptyText="目前没有仍待确认的事项。" id="daily-return-open-loops" items={daily.openLoops} title="继续思考" />
-              <ReturnGroup eyebrow="RESURFACED" emptyText="今天没有适合重新回看的记录。" id="daily-return-resurfaced" items={daily.resurfacedMemories} title="回看过去" />
-              <ReturnGroup eyebrow="REFLECTION PROMPTS" emptyText="目前没有有依据的核对问题。" id="daily-return-prompts" items={daily.reflectionPrompts} title="想一想" />
+              <ReturnGroup eyebrow="仍未解决" emptyText="目前没有仍待确认的事项。" id="daily-return-open-loops" items={daily.openLoops.slice(0, 1)} title="一个未解决问题" />
+              <ReturnGroup eyebrow="过去回来" emptyText="今天没有适合重新回看的记录。" id="daily-return-resurfaced" items={daily.resurfacedMemories.slice(0, 1)} title="一个相关旧想法" />
+              <ReturnGroup eyebrow="今天的变化" emptyText="目前没有有依据的核对问题。" id="daily-return-prompts" items={daily.reflectionPrompts.slice(0, 1)} title="一个值得核对的变化" />
             </div>
           ) : (
             <p className={styles.historyEmpty}>今天暂时没有需要回看的内容。</p>
@@ -208,7 +220,7 @@ export function DailyReflectionReturn({ api: providedApi }: DailyReflectionRetur
         <section className={styles.historySection} aria-labelledby="weekly-reflection-title">
           <div className={styles.historyHeading}>
             <div>
-              <p className={styles.eyebrow}>WEEKLY REFLECTION</p>
+              <p className={styles.eyebrow}>这一周在变化</p>
               <h2 id="weekly-reflection-title">本周回顾</h2>
             </div>
             {weekly ? <span>{weekly.startDate} 至 {weekly.endDate}</span> : null}
@@ -217,10 +229,10 @@ export function DailyReflectionReturn({ api: providedApi }: DailyReflectionRetur
             <p className={styles.inlineError} role="alert">{weeklyError}</p>
           ) : weekly ? (
             <div className={styles.cardLibraryPage}>
-              <ReturnGroup eyebrow="REPEATED THEMES" emptyText="本周没有足够的重复来源。" id="weekly-repeated-themes" items={weekly.repeatedThemes} title="重复主题" />
-              <ReturnGroup eyebrow="CHANGES" emptyText="本周没有发现有先后依据支持的变化。" id="weekly-changed-decisions" items={weekly.changedDecisions} title="变化" />
-              <ReturnGroup eyebrow="OPEN COMMITMENTS" emptyText="本周没有仍未完成的确认事项。" id="weekly-open-commitments" items={weekly.openCommitments} title="未完成事项" />
-              <ReturnGroup eyebrow="EMERGING IDEAS" emptyText="本周没有新的、可核对的工作想法。" id="weekly-emerging-ideas" items={weekly.emergingIdeas} title="新想法" />
+              <ReturnGroup eyebrow="反复出现" emptyText="本周没有足够的重复来源。" id="weekly-repeated-themes" items={weekly.repeatedThemes} title="反复出现了什么" />
+              <ReturnGroup eyebrow="前后变化" emptyText="本周没有发现有先后依据支持的变化。" id="weekly-changed-decisions" items={weekly.changedDecisions} title="什么发生变化" />
+              <ReturnGroup eyebrow="仍待继续" emptyText="本周没有仍未完成的确认事项。" id="weekly-open-commitments" items={weekly.openCommitments} title="什么仍未解决" />
+              <ReturnGroup eyebrow="可能形成方向" emptyText="本周没有新的、可核对的想法。" id="weekly-emerging-ideas" items={weekly.emergingIdeas} title="什么可能形成方向" />
             </div>
           ) : (
             <p className={styles.historyEmpty}>过去七天暂无足够、有来源的回顾内容。</p>

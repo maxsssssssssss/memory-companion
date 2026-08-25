@@ -31,9 +31,10 @@ import {
 } from "./daily-reflection-transcript";
 import { DailyReflectionToySync } from "./daily-reflection-toy-sync";
 import styles from "./daily-reflection.module.css";
+import { REFLECTION_ROUTES, reflectionSessionPath } from "./reflection-product";
+import { ReflectionConfirmDialog } from "./reflection-confirm-dialog";
 
 const MAX_CLIENT_FILE_BYTES = 300 * 1024 * 1024;
-const REFLECTION_PATH = "/date-companion/reflection";
 const RECORDING_HINT_AFTER_MS = 150_000;
 const LONG_RECORDING_HINT_AFTER_MS = 180_000;
 
@@ -95,11 +96,13 @@ export type DailyReflectionLocalReviewMetric = Readonly<{
 }>;
 
 type DailyReflectionShellProps = {
+  embedded?: boolean;
   initialReflectionId?: string | null;
   initialSegmentId?: string | null;
   browserRecordingEnabled?: boolean;
   toySyncEnabled?: boolean;
   onLocalReviewMetric?: (metric: DailyReflectionLocalReviewMetric) => void;
+  surface?: "legacy" | "capture" | "session";
 };
 
 export type DailyReflectionBrowserRecorder = Pick<
@@ -136,6 +139,14 @@ function formatRecordingDuration(durationMs: number | null) {
   const minutes = Math.floor(totalSeconds / 60);
   const seconds = totalSeconds % 60;
   return `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
+}
+
+function formatDurationSeconds(durationSeconds: number | null | undefined) {
+  if (!durationSeconds || durationSeconds <= 0) return "暂未读取";
+  const minutes = Math.floor(durationSeconds / 60);
+  const seconds = Math.round(durationSeconds % 60);
+  if (minutes === 0) return `${seconds} 秒`;
+  return seconds > 0 ? `${minutes} 分 ${seconds} 秒` : `${minutes} 分钟`;
 }
 
 export function recordingDurationCopy(durationMs: number | null) {
@@ -272,14 +283,18 @@ function processingCopy(detail: DailyReflectionDetailResponse | null, state: Dai
   if (
     status === "created"
     || status === "uploading"
-    || status === "transcribing"
-    || status === "extracting"
     || state === "uploading"
-  ) return "正在整理这次复盘……";
-  if (status === "review_pending" || state === "review_pending") return "整理好了，待你确认";
-  if (status === "confirmation_ready" || state === "confirmation_ready") return "正在整理你确认的内容";
-  if (status === "admitting" || state === "admitting") return "正在把确认结果整理好";
-  if (status === "completed" || state === "completed") return "这次复盘已确认";
+  ) return "正在接收录音";
+  if (status === "transcribing") return "正在转成文字";
+  if (status === "extracting") return "正在整理重点";
+  if (status === "review_pending" || state === "review_pending") return "等你看看";
+  if (
+    status === "confirmation_ready"
+    || state === "confirmation_ready"
+    || status === "admitting"
+    || state === "admitting"
+  ) return "正在保存你选择的内容";
+  if (status === "completed" || state === "completed") return "已完成";
   if (status === "admission_failed" || state === "admission_failed") return "有些内容还没有整理好";
   if (status === "failed" || state === "failed") return "这次整理没有完成";
   if (status === "cancelled" || state === "cancelled") return "这次记录已取消";
@@ -308,9 +323,9 @@ function sortedCards(detail: DailyReflectionDetailResponse) {
 }
 
 function candidateStatusLabel(status: DailyReflectionCandidateView["status"]) {
-  if (status === "kept") return "会记住";
-  if (status === "excluded") return "不会记住";
-  return "待你选择";
+  if (status === "kept") return "已选择长期记住";
+  if (status === "excluded") return "不保存";
+  return "稍后再看";
 }
 
 function completedAdmissionCopy(
@@ -458,19 +473,26 @@ function CandidateReviewCard({
       ) : null}
       <div className={styles.candidateActions}>
         <button
+          aria-pressed={candidate.status === "pending"}
+          className={styles.secondaryButton}
+          disabled={busy}
+          onClick={() => decide("pending")}
+          type="button"
+        >稍后再看</button>
+        <button
           aria-pressed={candidate.status === "excluded"}
           className={styles.secondaryButton}
           disabled={busy}
           onClick={() => decide("excluded")}
           type="button"
-        >不记</button>
+        >不保存</button>
         <button
           aria-pressed={candidate.status === "kept"}
           className={styles.primaryButton}
           disabled={busy}
           onClick={() => decide("kept")}
           type="button"
-        >{candidate.status === "kept" ? "保存修改" : "记住"}</button>
+        >{candidate.status === "kept" ? "保存修改" : "长期记住"}</button>
         {"contractVersion" in candidate ? (
           <button
             className={styles.textButton}
@@ -502,7 +524,6 @@ type ReflectionCardReviewProps = Readonly<{
   busy: boolean;
   onDecision(decision: DailyReflectionCardDecision): void;
   onArchiveFromCards(cardId: string): void;
-  onRemoveFromCards(cardId: string): void;
   onRestoreToCards(cardId: string): void;
   onSaveToCards(
     cardId: string,
@@ -517,7 +538,6 @@ function ReflectionCardReview({
   busy,
   onDecision,
   onArchiveFromCards,
-  onRemoveFromCards,
   onRestoreToCards,
   onSaveToCards,
   onSource,
@@ -559,8 +579,8 @@ function ReflectionCardReview({
           : card.reviewStatus === "excluded"
             ? styles.excludedBadge
             : ""}`}>{card.reviewStatus === "kept"
-            ? "会记住"
-            : card.reviewStatus === "excluded" ? "不进入长期记忆" : "待你选择"}</span>
+          ? "已选择长期记住"
+          : card.reviewStatus === "excluded" ? "不保存" : "稍后再看"}</span>
       </div>
       <label className={styles.candidateEditor}>
         <span>短标题</span>
@@ -600,13 +620,13 @@ function ReflectionCardReview({
         </label>
       ) : null}
       <div className={styles.candidateSource}>
-        <span>{card.evidence.length} 段依据</span>
+        <span>{card.evidence.length} 段来源</span>
         <button
           aria-expanded={evidenceExpanded}
           className={styles.sourceButton}
           onClick={() => setEvidenceExpanded((current) => !current)}
           type="button"
-        >{evidenceExpanded ? "收起依据" : "查看依据"}</button>
+        >{evidenceExpanded ? "收起来源" : "查看来源"}</button>
       </div>
       {evidenceExpanded ? (
         <ol className={styles.evidenceList}>
@@ -617,7 +637,7 @@ function ReflectionCardReview({
                 className={styles.textButton}
                 onClick={() => onSource(evidence.sourceSegmentId)}
                 type="button"
-              >跳到完整文字记录</button>
+              >在完整文字记录中查看</button>
             </li>
           ))}
         </ol>
@@ -632,14 +652,14 @@ function ReflectionCardReview({
               userText: normalizedCandidateText(draftText, card.proposedText)
             })}
             type="button"
-          >保存到我的 Cards</button>
+          >保存为卡片</button>
         ) : workingCardStatus === "saved" ? (
           <>
-            <button className={styles.secondaryButton} disabled={busy} onClick={() => onArchiveFromCards(card.id)} type="button">从 My Cards 归档</button>
-            <button className={styles.textButton} disabled={busy} onClick={() => onRemoveFromCards(card.id)} type="button">从 My Cards 移除</button>
+            <Link className={styles.secondaryButton} href={`/reflection/cards/${encodeURIComponent(card.id)}`}>打开卡片</Link>
+            <button className={styles.textButton} disabled={busy} onClick={() => onArchiveFromCards(card.id)} type="button">归档</button>
           </>
         ) : workingCardStatus ? (
-          <button className={styles.secondaryButton} disabled={busy} onClick={() => onRestoreToCards(card.id)} type="button">恢复到 My Cards</button>
+          <button className={styles.secondaryButton} disabled={busy} onClick={() => onRestoreToCards(card.id)} type="button">恢复卡片</button>
         ) : null}
         {card.displayTier === "more" ? (
           <button
@@ -649,20 +669,32 @@ function ReflectionCardReview({
             type="button"
           >设为重点</button>
         ) : null}
-        <button
-          aria-pressed={card.reviewStatus === "excluded"}
-          className={styles.secondaryButton}
-          disabled={busy}
-          onClick={() => decide("excluded")}
-          type="button"
-        >不进入长期记忆</button>
-        <button
-          aria-pressed={card.reviewStatus === "kept"}
-          className={styles.primaryButton}
-          disabled={busy}
-          onClick={() => decide("kept")}
-          type="button"
-        >{card.reviewStatus === "kept" ? "保存修改" : "记住"}</button>
+        <details className={styles.cardAdvancedActions}>
+          <summary>更多选择</summary>
+          <div>
+            <button
+              aria-pressed={card.reviewStatus === "pending"}
+              className={styles.secondaryButton}
+              disabled={busy}
+              onClick={() => decide("pending")}
+              type="button"
+            >稍后再看</button>
+            <button
+              aria-pressed={card.reviewStatus === "excluded"}
+              className={styles.secondaryButton}
+              disabled={busy}
+              onClick={() => decide("excluded")}
+              type="button"
+            >不保存</button>
+            <button
+              aria-pressed={card.reviewStatus === "kept"}
+              className={styles.primaryButton}
+              disabled={busy}
+              onClick={() => decide("kept")}
+              type="button"
+            >{card.reviewStatus === "kept" ? "保存长期记忆修改" : "长期记住"}</button>
+          </div>
+        </details>
       </div>
     </li>
   );
@@ -872,8 +904,21 @@ function ReflectionResultList({
   if (candidates.length === 0) {
     return <p className={styles.emptyCandidates}>这次没有需要保存的内容。</p>;
   }
+  const confirmingCandidate = confirmingCandidateId
+    ? candidates.find((candidate) => candidate.id === confirmingCandidateId) ?? null
+    : null;
+  const confirmingIsPersisted = confirmingCandidate
+    ? confirmingCandidate.status === "kept"
+      && (resultByCandidate.get(confirmingCandidate.id)?.status === "admitted"
+        || resultByCandidate.get(confirmingCandidate.id)?.status === "already_admitted")
+      && !revoked.has(confirmingCandidate.id)
+    : false;
+  const confirmingRetry = confirmingCandidateId === activeCandidateId && Boolean(errorMessage);
+  const confirmingBusy = confirmingCandidateId === activeCandidateId
+    && operation === "revoking_candidate";
   return (
-    <ol className={styles.resultList}>
+    <>
+      <ol className={styles.resultList}>
       {candidates.map((candidate) => {
         const result = resultByCandidate.get(candidate.id);
         const persisted = candidate.status === "kept"
@@ -925,50 +970,49 @@ function ReflectionResultList({
                 >{revoking ? "正在撤销…" : retrying ? "重试撤销" : "撤销保存"}</button>
               </div>
             ) : null}
-            {confirmingCandidateId === candidate.id && canRevoke ? (
-              <div className={styles.revocationConfirmation} role="alertdialog" aria-labelledby={`revoke-${candidate.id}`}>
-                <div>
-                  <b id={`revoke-${candidate.id}`}>只撤销这一条保存？</b>
-                  <p>这只会撤销这一条长期保存，不会修改原始复盘文字，也不会删除整次复盘。查看原话仍会保留。</p>
-                </div>
-                <div>
-                  <button
-                    className={styles.secondaryButton}
-                    disabled={busy}
-                    onClick={() => setConfirmingCandidateId(null)}
-                    type="button"
-                  >先保留</button>
-                  <button
-                    className={styles.dangerButton}
-                    disabled={busy}
-                    onClick={() => onRevoke(candidate.id)}
-                    type="button"
-                  >{revoking ? "正在撤销…" : retrying ? "重试撤销" : "确认撤销"}</button>
-                </div>
-              </div>
-            ) : null}
           </li>
         );
       })}
-    </ol>
+      </ol>
+      <ReflectionConfirmDialog
+        busy={confirmingBusy}
+        busyLabel="正在撤销…"
+        cancelLabel="先保留"
+        confirmLabel={confirmingRetry ? "重试撤销" : "确认撤销"}
+        onCancel={() => setConfirmingCandidateId(null)}
+        onConfirm={() => {
+          if (confirmingCandidate) onRevoke(confirmingCandidate.id);
+        }}
+        open={Boolean(confirmingCandidate && confirmingIsPersisted)}
+        role="alertdialog"
+        title="只撤销这一条保存？"
+      >
+        <p>这只会撤销这一条长期保存，不会修改原始复盘文字，也不会删除整次复盘。查看原话仍会保留。</p>
+        {confirmingRetry && errorMessage ? <p className={styles.inlineError} role="alert">{safeErrorMessage(errorMessage)}</p> : null}
+      </ReflectionConfirmDialog>
+    </>
   );
 }
 
 export function DailyReflectionShell({
+  embedded = false,
   initialReflectionId = null,
   initialSegmentId = null,
   browserRecordingEnabled = false,
   onLocalReviewMetric,
-  toySyncEnabled = false
+  toySyncEnabled = false,
+  surface = "legacy"
 }: DailyReflectionShellProps) {
   const session = useDailyReflectionSession({ initialReflectionId });
   return (
     <DailyReflectionShellContent
       browserRecordingEnabled={browserRecordingEnabled}
+      embedded={embedded}
       initialReflectionId={initialReflectionId}
       initialSegmentId={initialSegmentId}
       onLocalReviewMetric={onLocalReviewMetric}
       session={session}
+      surface={surface}
       toySyncEnabled={toySyncEnabled}
     />
   );
@@ -978,16 +1022,18 @@ export function DailyReflectionShellContent({
   browserRecordingEnabled = false,
   createBrowserRecorder = defaultBrowserRecorderFactory,
   createOperationKey = defaultOperationKey,
+  embedded = false,
   initialReflectionId = null,
   initialSegmentId = null,
   onLocalReviewMetric,
   session,
+  surface = "legacy",
   toySyncEnabled = false
 }: DailyReflectionShellContentProps) {
   const router = useRouter();
   const [file, setFile] = useState<File | null>(null);
   const [sourceOrigin, setSourceOrigin] = useState<DailyReflectionUploadSource | null>(null);
-  const [browserSourceOrigin, setBrowserSourceOrigin] = useState<DailyReflectionUploadSource>("user_reflection");
+  const [browserSourceOrigin, setBrowserSourceOrigin] = useState<DailyReflectionUploadSource | null>(null);
   const [recordingDate, setRecordingDate] = useState(() => localDateValue());
   const [fileError, setFileError] = useState<string | null>(null);
   const [recorderSnapshot, setRecorderSnapshot] = useState(EMPTY_RECORDER_SNAPSHOT);
@@ -1066,7 +1112,7 @@ export function DailyReflectionShellContent({
     if (reflectionId && reflectionId !== lastUrlReflectionId.current) {
       observedReflectionId.current = true;
       lastUrlReflectionId.current = reflectionId;
-      router.replace(`${REFLECTION_PATH}?reflectionId=${encodeURIComponent(reflectionId)}`);
+      router.replace(reflectionSessionPath(reflectionId));
       return;
     }
     if (reflectionId) observedReflectionId.current = true;
@@ -1078,9 +1124,9 @@ export function DailyReflectionShellContent({
       && session.operation === "idle"
     ) {
       lastUrlReflectionId.current = null;
-      router.replace(REFLECTION_PATH);
+      router.replace(REFLECTION_ROUTES.home);
     }
-  }, [router, session.auth.status, session.operation, session.reflectionId, session.state]);
+  }, [embedded, router, session.auth.status, session.operation, session.reflectionId, session.state]);
 
   const busy = session.operation !== "idle";
   const detail = session.detail;
@@ -1157,6 +1203,13 @@ export function DailyReflectionShellContent({
   const retainedCandidateCount = keptCandidateCount
     - keptWithoutEvidenceCount
     - keptUnclaimedActionCount;
+  const recapOnlyRequired = keptWithoutEvidenceCount > 0 || keptUnclaimedActionCount > 0;
+  const savedCardCount = Object.values(session.workingCardStates)
+    .filter((item) => item.status === "saved").length;
+  const unsavedPrimaryCards = primaryCards.filter(
+    (card) => session.workingCardStates[card.id]?.status !== "saved"
+      && card.reviewStatus !== "excluded"
+  );
 
   const decideCard = (
     card: DailyReflectionCardView,
@@ -1202,6 +1255,15 @@ export function DailyReflectionShellContent({
       });
     }
     setMoreCardsExpanded((current) => !current);
+  };
+
+  const savePrimaryCards = async () => {
+    for (const card of unsavedPrimaryCards) {
+      await session.saveWorkingCard(card.id, {
+        userTitle: card.userTitle,
+        userText: card.userText
+      });
+    }
   };
 
   const finalizeReview = (saveIntent: "recap_only" | "retain_selected") => {
@@ -1267,6 +1329,10 @@ export function DailyReflectionShellContent({
   };
 
   const startBrowserRecording = async () => {
+    if (!browserSourceOrigin) {
+      setRecorderError("先确认这段声音来自自己的复盘，还是一段真实交流。");
+      return;
+    }
     const recorder = recorderRef.current;
     if (!recorder) return;
     setRecorderError(null);
@@ -1326,7 +1392,7 @@ export function DailyReflectionShellContent({
 
   const submitBrowserRecording = async () => {
     const recording = recorderSnapshot.recording;
-    if (!recording || busy || browserSubmitLatch.current) return;
+    if (!recording || !browserSourceOrigin || busy || browserSubmitLatch.current) return;
     const operationKey = browserReadyOperationKey.current
       ?? createOperationKey("browser_recorder");
     browserReadyOperationKey.current = operationKey;
@@ -1435,18 +1501,19 @@ export function DailyReflectionShellContent({
     ?? (session.sourceOrigin ?? (file ? sourceOrigin : browserSubmitting ? browserSourceOrigin : null));
 
   return (
-    <div className={styles.root}>
-      <header className={styles.header}>
+    <div className={embedded ? styles.embeddedRoot : styles.root}>
+      {!embedded ? <header className={styles.header}>
         <Link className={styles.wordmark} href="/date-companion/modules" aria-label="返回空间选择">
           <span className={styles.wordmarkMark}>DB</span>
           <b>日常复盘</b>
         </Link>
         <nav className={styles.productNav} aria-label="产品空间">
           <Link href="/date-companion/a">约会陪伴</Link>
-          <Link aria-current="page" className={styles.activeProductNav} href={REFLECTION_PATH}>日常复盘</Link>
-          <Link href={`${REFLECTION_PATH}/cards`}>My Cards</Link>
-          <Link href={`${REFLECTION_PATH}/return`}>回看</Link>
-          <Link href={`${REFLECTION_PATH}/query`}>问问</Link>
+          <Link aria-current="page" className={styles.activeProductNav} href={REFLECTION_ROUTES.home}>日常复盘</Link>
+          <Link href="/reflection/cards">卡片</Link>
+          <Link href="/reflection/memory">记忆</Link>
+          <Link href="/reflection/reflect">回看</Link>
+          <Link href="/reflection/ask">问问过去</Link>
         </nav>
         <div className={styles.headerTools}>
           <span title={userLabel}>{userLabel}</span>
@@ -1462,22 +1529,20 @@ export function DailyReflectionShellContent({
             type="button"
           >退出</button>
         </div>
-      </header>
+      </header> : null}
 
       <main className={styles.page}>
-        <section className={styles.intro}>
+        {!showRecord && surface !== "session" ? <section className={styles.intro}>
           <div>
-            <p className={styles.eyebrow}>{browserRecordingEnabled
-              ? "快速复盘 · 已有录音 · 先看再确认"
-              : "已有录音 · 先看再确认"}</p>
-            <h1>把一天里值得回看的话，慢慢整理出来。</h1>
+            <p className={styles.eyebrow}>真实表达 · 由你决定留下什么</p>
+            <h1>{surface === "capture" ? "今天想留下什么？" : "把一天里值得回看的话，慢慢整理出来。"}</h1>
           </div>
           <p className={styles.introText}>{browserRecordingEnabled
-            ? "你可以直接说一段快速复盘，也可以上传已有录音并说明来源。整理完成后，先看复盘重点，需要时再展开完整文字记录；本页不会替你做最后决定。"
-            : "选择已有录音并说明来源。整理完成后，先看复盘重点，需要时再展开完整文字记录；本页不会替你做最后决定。"}</p>
-        </section>
+            ? "开始说、上传一段已有录音，或从玩偶录音中选择一段。整理出的卡片不会自动成为长期记忆。"
+            : "上传一段已有录音并确认来源。整理出的卡片不会自动成为长期记忆。"}</p>
+        </section> : null}
 
-        {!showRecord ? (
+        {!showRecord && surface !== "session" ? (
           <div className={styles.workspace}>
             {toySyncEnabled ? (
               <DailyReflectionToySync
@@ -1493,10 +1558,10 @@ export function DailyReflectionShellContent({
               />
             ) : null}
             {browserRecordingEnabled ? (
-              <section className={`${styles.uploadCard} ${styles.recordingCard}`} aria-labelledby="daily-reflection-recording-title">
+              <section id="reflection-capture-record" className={`${styles.uploadCard} ${styles.recordingCard}`} aria-labelledby="daily-reflection-recording-title">
                 <div>
                   <p className={styles.eyebrow}>现在说一说</p>
-                  <h2 id="daily-reflection-recording-title">开始快速复盘</h2>
+                  <h2 id="daily-reflection-recording-title">开始说</h2>
                 </div>
                 <p className={styles.cardLead}>只录下这次复盘。停止后先留在本地，由你确认后再提交整理。</p>
 
@@ -1520,7 +1585,7 @@ export function DailyReflectionShellContent({
                   <div className={styles.recorderState} role="status">
                     <b>正在请求麦克风权限…</b>
                     <p>请在浏览器提示中选择是否允许。</p>
-                    <button className={styles.secondaryButton} onClick={cancelBrowserRecording} type="button">取消录音</button>
+                    <button className={styles.secondaryButton} onClick={cancelBrowserRecording} type="button">取消这次表达</button>
                   </div>
                 ) : recorderSnapshot.state === "recording" ? (
                   <div className={styles.recorderState}>
@@ -1532,8 +1597,8 @@ export function DailyReflectionShellContent({
                       {recordingDurationCopy(recorderSnapshot.clientReportedDurationMs)}
                     </p>
                     <div className={styles.recorderActions}>
-                      <button className={styles.primaryButton} onClick={() => void stopBrowserRecording()} type="button">停止录音</button>
-                      <button className={styles.secondaryButton} onClick={cancelBrowserRecording} type="button">取消录音</button>
+                      <button className={styles.primaryButton} onClick={() => void stopBrowserRecording()} type="button">结束表达</button>
+                      <button className={styles.secondaryButton} onClick={cancelBrowserRecording} type="button">取消这次表达</button>
                     </div>
                   </div>
                 ) : recorderSnapshot.state === "stopping" ? (
@@ -1555,7 +1620,7 @@ export function DailyReflectionShellContent({
                         disabled={busy || browserSubmitting}
                         onClick={() => void submitBrowserRecording()}
                         type="button"
-                      >{browserSubmitting ? "正在整理这次复盘……" : "提交并开始整理"}</button>
+                      >{browserSubmitting ? "正在开始整理……" : "开始整理"}</button>
                       <button className={styles.secondaryButton} disabled={browserSubmitting} onClick={() => void rerecordBrowserRecording()} type="button">重新录制</button>
                       <button className={styles.dangerButton} disabled={browserSubmitting} onClick={cancelBrowserRecording} type="button">删除本地录音</button>
                     </div>
@@ -1563,7 +1628,7 @@ export function DailyReflectionShellContent({
                 ) : (
                   <div className={styles.recorderState}>
                     <p>准备好后开始，说完由你自己停止；录到三分钟也不会被中断。</p>
-                    <button className={styles.primaryButton} onClick={() => void startBrowserRecording()} type="button">开始快速复盘</button>
+                    <button className={styles.primaryButton} disabled={!browserSourceOrigin} onClick={() => void startBrowserRecording()} type="button">开始说</button>
                   </div>
                 )}
 
@@ -1571,10 +1636,10 @@ export function DailyReflectionShellContent({
                 <p className={styles.localOnlyNote}>提交前请不要刷新或离开，本地录音不会自动恢复。提交成功后可以稍后从“最近复盘”回来。</p>
               </section>
             ) : null}
-            <form className={styles.uploadCard} aria-label="上传日常复盘录音" onSubmit={submit}>
+            <form id="reflection-capture-upload" className={styles.uploadCard} aria-label="上传日常复盘录音" onSubmit={submit}>
               <div>
-                <p className={styles.eyebrow}>第一步</p>
-                <h2>上传已有录音</h2>
+                  <p className={styles.eyebrow}>已有一段声音</p>
+                  <h2>上传录音</h2>
               </div>
               <p className={styles.cardLead}>来源需要由你明确选择；初始不会替你预选。</p>
 
@@ -1637,15 +1702,18 @@ export function DailyReflectionShellContent({
                   className={styles.primaryButton}
                   disabled={!file || !sourceOrigin || !recordingDate || Boolean(fileError) || busy}
                   type="submit"
-                >开始上传</button>
+                >开始整理</button>
               </div>
             </form>
           </div>
-        ) : (
+        ) : showRecord ? (
           <div className={styles.statusColumn}>
             <div className={styles.detailToolbar}>
-              <button className={styles.secondaryButton} disabled={busy} onClick={session.startNew} type="button">
-                返回日常复盘首页
+              <button className={styles.secondaryButton} disabled={busy} onClick={() => {
+                session.startNew();
+                if (embedded) router.push(REFLECTION_ROUTES.home);
+              }} type="button">
+                返回今天
               </button>
               <span>这条记录会一直保留在最近复盘中，直到你明确删除。</span>
             </div>
@@ -1656,11 +1724,11 @@ export function DailyReflectionShellContent({
                   <h2>{browserSubmitting ? "正在整理这次复盘……" : processingCopy(detail, session.state)}</h2>
                 </div>
                 <span className={styles.statusBadge}>{status === "review_pending"
-                  ? "待你确认"
+                  ? "等你看看"
                   : status === "confirmation_ready" || status === "admitting"
-                    ? "正在整理"
+                    ? "正在保存"
                     : status === "completed"
-                      ? "已确认"
+                      ? "已完成"
                       : status === "admission_failed"
                         ? "需要查看"
                   : status === "failed"
@@ -1673,10 +1741,11 @@ export function DailyReflectionShellContent({
               </div>
 
               <div className={styles.recordMeta}>
-                <div><span>文件</span><b title={recordFileName}>{recordFileName}</b></div>
+                <div><span>日期</span><b>{recordDate}</b></div>
                 <div><span>来源</span><b>{sourceLabel(recordSource)}</b></div>
-                <div><span>录音日期</span><b>{recordDate}</b></div>
+                <div><span>时长</span><b>{formatDurationSeconds(detail?.upload?.durationSeconds)}</b></div>
               </div>
+              <p className={styles.recordFileName} title={recordFileName}>原始录音：{recordFileName}</p>
               <p className={styles.sourceAttribution}>{sourceStatement(recordSource, recordDate)}</p>
 
               {isIndeterminateUpload ? (
@@ -1725,24 +1794,23 @@ export function DailyReflectionShellContent({
                 ) : null}
                 {session.reflectionId ? (
                   <button className={styles.dangerButton} disabled={busy} onClick={() => setDeleteConfirmation(true)} type="button">
-                    删除本次复盘
+                    删除原始记录
                   </button>
                 ) : null}
               </div>
-              {deleteConfirmation && session.reflectionId ? (
-                <div className={styles.deleteConfirmation} role="alertdialog" aria-labelledby="daily-reflection-delete-title">
-                  <div>
-                    <b id="daily-reflection-delete-title">确定删除这次复盘吗？</b>
-                    <p>这会删除这条复盘、查看原话所需记录，以及由本次复盘保存的内容。删除失败时页面会保留，方便你重试。</p>
-                  </div>
-                  <div>
-                    <button className={styles.secondaryButton} disabled={busy} onClick={() => setDeleteConfirmation(false)} type="button">先保留</button>
-                    <button className={styles.dangerButton} disabled={busy} onClick={() => void session.delete()} type="button">
-                      {session.operation === "deleting" ? "正在删除…" : "确认删除"}
-                    </button>
-                  </div>
-                </div>
-              ) : null}
+              <ReflectionConfirmDialog
+                busy={session.operation === "deleting"}
+                busyLabel="正在删除…"
+                cancelLabel="先保留"
+                confirmLabel="确认删除"
+                onCancel={() => setDeleteConfirmation(false)}
+                onConfirm={() => void session.delete()}
+                open={deleteConfirmation && Boolean(session.reflectionId)}
+                role="alertdialog"
+                title="删除这次复盘和原始记录？"
+              >
+                <p>这会删除录音、完整文字记录和由本次复盘产生的长期记忆。已经保存到卡片库的卡片可以保留，但会明确显示原始来源已不可用。删除失败时页面会保留，方便你重试。</p>
+              </ReflectionConfirmDialog>
             </section>
 
             {detail && detail.reflection.status === "failed" && detail.segments.length > 0 ? (
@@ -1754,13 +1822,13 @@ export function DailyReflectionShellContent({
                       <h2 id="daily-reflection-incomplete-title">这次整理还不完整</h2>
                     </div>
                   </div>
-                  <p className={styles.outcomeCopy}>你仍然可以回看完整文字记录。稍后重试时，会继续整理候选卡，不会把当前的不完整结果当成最终内容。</p>
+                  <p className={styles.outcomeCopy}>你仍然可以回看完整文字记录。稍后重试时，会继续整理重点，不会把当前的不完整结果当成最终内容。</p>
                   <button
                     className={styles.secondaryButton}
                     disabled={busy}
                     onClick={() => void session.retry()}
                     type="button"
-                  >{session.operation === "retrying" ? "正在重试…" : "重新整理候选卡"}</button>
+                  >{session.operation === "retrying" ? "正在重试…" : "重新整理重点"}</button>
                   <ManualCandidateComposer
                     busy={busy}
                     onCreate={(candidate) => void session.createManualCandidate(candidate)}
@@ -1777,7 +1845,7 @@ export function DailyReflectionShellContent({
                   <div className={styles.sectionHeading}>
                     <div>
                       <p>先查看，不会自动进入长期记忆</p>
-                      <h2 id="daily-reflection-candidates-title">本次复盘概览</h2>
+                      <h2 id="daily-reflection-candidates-title">这次表达里有什么值得带走</h2>
                     </div>
                     <span>{cards.length > 0 ? cards.length : candidates.length} 条</span>
                   </div>
@@ -1786,25 +1854,25 @@ export function DailyReflectionShellContent({
                       <p>{[...new Set(cards.map((card) => card.clusterTitle))].join(" · ")}</p>
                       <button
                         className={styles.secondaryButton}
-                        disabled={busy || primaryCards.every((card) => card.reviewStatus === "kept")}
-                        onClick={() => void session.acceptAllCandidates()}
+                        disabled={busy || unsavedPrimaryCards.length === 0}
+                        onClick={() => void savePrimaryCards()}
                         type="button"
-                      >记住这些重点</button>
+                      >保存这些重点为卡片</button>
                     </div>
                   ) : candidates.length > 0 ? (
                     <div className={styles.reviewToolbar}>
-                      <p>这是旧版复盘记录，可逐条确认。</p>
+                      <p>这是较早保存的复盘记录，可以逐条确认。</p>
                       <button
                         className={styles.secondaryButton}
                         disabled={busy || candidates.every((candidate) => candidate.status === "kept")}
                         onClick={() => void session.acceptAllCandidates()}
                         type="button"
-                      >记住这些重点</button>
+                      >长期记住这些重点</button>
                     </div>
                   ) : null}
                   {cards.length > 0 ? (
                     <>
-                      <h3>重点</h3>
+                      <h3>值得带走</h3>
                       <ol className={styles.candidateList}>
                         {primaryCards.map((card) => (
                           <ReflectionCardReview
@@ -1813,7 +1881,6 @@ export function DailyReflectionShellContent({
                             key={card.id}
                             onDecision={(decision) => decideCard(card, decision)}
                             onArchiveFromCards={(cardId) => void session.archiveWorkingCard(cardId)}
-                            onRemoveFromCards={(cardId) => void session.removeWorkingCard(cardId)}
                             onRestoreToCards={(cardId) => void session.restoreWorkingCard(cardId)}
                             onSaveToCards={(cardId, draft) => void session.saveWorkingCard(cardId, draft)}
                             onSource={requestTranscriptSegmentFocus}
@@ -1832,7 +1899,7 @@ export function DailyReflectionShellContent({
                             type="button"
                           >{moreCardsExpanded
                             ? "收起更多整理结果"
-                            : `还有 ${moreCards.length} 条整理结果 · 查看全部`}</button>
+                            : `还有 ${moreCards.length} 条可能有用的内容`}</button>
                           {moreCardsExpanded ? (
                             <ol className={styles.candidateList}>
                               {moreCards.map((card) => (
@@ -1842,7 +1909,6 @@ export function DailyReflectionShellContent({
                                   key={card.id}
                                   onDecision={(decision) => decideCard(card, decision)}
                                   onArchiveFromCards={(cardId) => void session.archiveWorkingCard(cardId)}
-                                  onRemoveFromCards={(cardId) => void session.removeWorkingCard(cardId)}
                                   onRestoreToCards={(cardId) => void session.restoreWorkingCard(cardId)}
                                   onSaveToCards={(cardId, draft) => void session.saveWorkingCard(cardId, draft)}
                                   onSource={requestTranscriptSegmentFocus}
@@ -1883,12 +1949,11 @@ export function DailyReflectionShellContent({
                   ) : null}
                   <div className={styles.finalizePanel}>
                     <div>
-                      <b>{retainedCandidateCount > 0
-                        ? `已选择 ${retainedCandidateCount} 条长期保留`
-                        : "你可以只保存这次复盘"}</b>
-                      <p>{pendingCandidateCount > 0
-                        ? `还有 ${pendingCandidateCount} 条没有特别选择；只保存复盘时会保留在本次记录中，长期保留时不会加入。`
-                        : "提交意图会单独记录，不会把“只保存复盘”当成全部排除。"}</p>
+                      <b>完成这次复盘</b>
+                      <p>已保存 {savedCardCount} 张卡片；{retainedCandidateCount > 0
+                        ? `将长期记住 ${retainedCandidateCount} 条你明确选择的内容。`
+                        : "其余整理内容只会留在这次复盘里。"}
+                        {pendingCandidateCount > 0 ? ` 还有 ${pendingCandidateCount} 条可以以后再看。` : ""}</p>
                       {keptWithoutEvidenceCount > 0 ? (
                         <p className={styles.inlineError}>有 {keptWithoutEvidenceCount} 条手写内容没有原话，只能随本次复盘保存。</p>
                       ) : null}
@@ -1898,20 +1963,13 @@ export function DailyReflectionShellContent({
                     </div>
                     <div className={styles.finalizeActions}>
                       <button
-                        className={styles.secondaryButton}
-                        disabled={busy}
-                        onClick={() => finalizeReview("recap_only")}
-                        type="button"
-                      >{session.operation === "finalizing" ? "正在保存…" : "只保存这次复盘"}</button>
-                      <button
                         className={styles.primaryButton}
-                        disabled={busy
-                          || retainedCandidateCount === 0
-                          || keptWithoutEvidenceCount > 0
-                          || keptUnclaimedActionCount > 0}
-                        onClick={() => finalizeReview("retain_selected")}
+                        disabled={busy}
+                        onClick={() => finalizeReview(!recapOnlyRequired && retainedCandidateCount > 0
+                          ? "retain_selected"
+                          : "recap_only")}
                         type="button"
-                      >{session.operation === "finalizing" ? "正在保存…" : "保存复盘并长期保留所选"}</button>
+                      >{session.operation === "finalizing" ? "正在保存…" : "完成这次复盘"}</button>
                     </div>
                   </div>
                 </section>
@@ -1945,7 +2003,7 @@ export function DailyReflectionShellContent({
                     && detail.confirmation
                     && "contractVersion" in detail.confirmation
                     && detail.confirmation.saveIntent === "recap_only" ? (
-                    <p className={styles.outcomeCopy}>这次复盘已经保存。你选择了只保留本次记录，没有加入长期内容。</p>
+                    <p className={styles.outcomeCopy}>这次复盘已经保存。没有内容被自动加入长期记忆。</p>
                   ) : detail.reflection.status === "completed" && detail.admissionOperation ? (
                     <p className={styles.outcomeCopy}>
                       {completedAdmissionCopy(
@@ -1958,6 +2016,13 @@ export function DailyReflectionShellContent({
                   ) : (
                     <p className={styles.outcomeCopy}>正在安全保存你刚刚确认的内容。</p>
                   )}
+                  {detail.reflection.status === "completed" ? (
+                    <dl className={styles.outcomeStats}>
+                      <div><dt>你的卡片</dt><dd>{savedCardCount}</dd></div>
+                      <div><dt>长期记住</dt><dd>{detail.rememberedCount ?? 0}</dd></div>
+                      <div><dt>只留在本次复盘</dt><dd>{detail.cards.filter((card) => card.reviewStatus !== "kept").length}</dd></div>
+                    </dl>
+                  ) : null}
                   {detail.cards.length > 0 ? (
                     <ol className={styles.candidateList}>
                       {sortedCards(detail).map((card) => (
@@ -1967,7 +2032,7 @@ export function DailyReflectionShellContent({
                             <span className={`${styles.pendingBadge} ${card.reviewStatus === "kept"
                               ? styles.keptBadge
                               : styles.excludedBadge}`}>{card.reviewStatus === "kept"
-                                ? "已选择长期保留"
+                                ? "已长期记住"
                                 : "仅保留在本次复盘"}</span>
                           </div>
                           <p>{card.userText ?? card.proposedText}</p>
@@ -1975,15 +2040,15 @@ export function DailyReflectionShellContent({
                             className={styles.textButton}
                             onClick={() => requestTranscriptSegmentFocus(card.evidenceIds[0])}
                             type="button"
-                          >查看依据</button>
+                          >查看来源</button>
                           {session.workingCardStates[card.id]?.status === "saved" ? (
                             <div className={styles.candidateActions}>
-                              <button className={styles.secondaryButton} disabled={busy} onClick={() => void session.archiveWorkingCard(card.id)} type="button">从 My Cards 归档</button>
-                              <button className={styles.textButton} disabled={busy} onClick={() => void session.removeWorkingCard(card.id)} type="button">从 My Cards 移除</button>
+                              <Link className={styles.secondaryButton} href={`/reflection/cards/${encodeURIComponent(card.id)}`}>打开卡片</Link>
+                              <button className={styles.textButton} disabled={busy} onClick={() => void session.archiveWorkingCard(card.id)} type="button">归档卡片</button>
                             </div>
                           ) : session.workingCardStates[card.id]?.status === "archived"
                             || session.workingCardStates[card.id]?.status === "removed" ? (
-                              <button className={styles.secondaryButton} disabled={busy} onClick={() => void session.restoreWorkingCard(card.id)} type="button">恢复到 My Cards</button>
+                              <button className={styles.secondaryButton} disabled={busy} onClick={() => void session.restoreWorkingCard(card.id)} type="button">恢复卡片</button>
                             ) : card.reviewStatus !== "excluded" ? (
                               <button
                                 className={styles.secondaryButton}
@@ -1993,7 +2058,7 @@ export function DailyReflectionShellContent({
                                   userText: card.userText
                                 })}
                                 type="button"
-                              >保存到我的 Cards</button>
+                              >保存为卡片</button>
                             ) : null}
                         </li>
                       ))}
@@ -2026,8 +2091,8 @@ export function DailyReflectionShellContent({
               </div>
             ) : null}
           </div>
-        )}
-        {!showRecord ? <DailyReflectionHistory session={session} /> : null}
+        ) : surface === "session" ? <p className={styles.productEmpty} role="status">正在读取这次复盘…</p> : null}
+        {!showRecord && surface === "legacy" ? <DailyReflectionHistory session={session} /> : null}
       </main>
     </div>
   );

@@ -69,7 +69,7 @@ export function CompanionModules({
         </article>
 
         {dailyReflectionEnabled ? (
-          <Link className={`${styles.moduleCard} ${styles.chatModule} ${styles.enabledModule}`} href="/date-companion/reflection">
+          <Link className={`${styles.moduleCard} ${styles.chatModule} ${styles.enabledModule}`} href="/reflection">
             <div className={styles.moduleCardTop}>
               <span className={styles.moduleGlyph} aria-hidden="true">记</span>
               <span className={styles.availableBadge}>内部开放</span>
