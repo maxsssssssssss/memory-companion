@@ -111,17 +111,19 @@ describe("DailyReflectionCardLibrary", () => {
       }
       return jsonResponse({ error: "not_found" }, 404);
     });
-    render(<DailyReflectionCardLibrary
+    const view = render(<DailyReflectionCardLibrary
       api={createDailyReflectionApi(fetcher)}
       now={() => new Date("2026-08-24T00:00:00.000Z")}
     />);
 
     expect(await screen.findByText("散步后的洞察")).toBeVisible();
     fireEvent.change(screen.getByLabelText("搜索卡片"), { target: { value: "散步" } });
-    fireEvent.change(screen.getByLabelText("按类型筛选"), { target: { value: "insight" } });
+    fireEvent.click(screen.getByRole("tab", { name: "洞察" }));
+    fireEvent.click(screen.getByRole("button", { name: "筛选" }));
     fireEvent.change(screen.getByLabelText("按状态筛选"), { target: { value: "removed" } });
     fireEvent.change(screen.getByLabelText("按时间筛选"), { target: { value: "30d" } });
-    fireEvent.click(screen.getByRole("button", { name: "筛选" }));
+    fireEvent.click(screen.getByRole("button", { name: "应用筛选" }));
+    fireEvent.click(screen.getByRole("button", { name: "搜索" }));
     await waitFor(() => {
       const listCall = [...fetcher.mock.calls].reverse().find(([path]) => String(path).includes("cards?"));
       expect(String(listCall?.[0])).toContain("type=insight");
@@ -130,11 +132,18 @@ describe("DailyReflectionCardLibrary", () => {
       expect(String(listCall?.[0])).toContain("from=2026-07-25T00%3A00%3A00.000Z");
     });
 
-    fireEvent.click(screen.getByRole("button", { name: "快速查看" }));
+    view.rerender(<DailyReflectionCardLibrary
+      api={createDailyReflectionApi(fetcher)}
+      detailOnly
+      initialCardId="card_1"
+      now={() => new Date("2026-08-24T00:00:00.000Z")}
+    />);
+    expect(await screen.findByRole("heading", { name: "散步后的洞察" })).toBeVisible();
     fireEvent.click(await screen.findByText("查看来源 · 1 段"));
     expect(await screen.findByText("散步以后，我觉得思路更清楚了。")).toBeVisible();
     expect(screen.getByRole("link", { name: "查看来源复盘" }))
       .toHaveAttribute("href", "/reflection/sessions/reflection_1");
+    fireEvent.click(screen.getByRole("button", { name: "编辑卡片" }));
     fireEvent.change(screen.getByLabelText("编辑卡片标题"), {
       target: { value: "更新后的洞察" }
     });
@@ -146,7 +155,8 @@ describe("DailyReflectionCardLibrary", () => {
       "/api/daily-reflections/cards/card_1",
       expect.objectContaining({ method: "PATCH" })
     ));
-    expect(await screen.findByDisplayValue("更新后的洞察")).toBeVisible();
+    expect(await screen.findByRole("heading", { name: "更新后的洞察" })).toBeVisible();
+    expect(screen.queryByLabelText("编辑卡片标题")).not.toBeInTheDocument();
     expect(document.body.textContent).not.toContain("Provider");
     expect(document.body.textContent).not.toContain("Candidate");
     expect(document.body.textContent).not.toContain("confidence");
@@ -172,14 +182,15 @@ describe("DailyReflectionCardLibrary", () => {
       else if (path === "/api/daily-reflections/cards/card_1" && init?.method === "DELETE") status = "removed";
       return jsonResponse(detail(status, true));
     });
-    render(<DailyReflectionCardLibrary api={createDailyReflectionApi(fetcher)} />);
+    render(<DailyReflectionCardLibrary api={createDailyReflectionApi(fetcher)} detailOnly initialCardId="card_1" />);
 
-    fireEvent.click(await screen.findByRole("button", { name: "快速查看" }));
+    expect(await screen.findByRole("heading", { name: "散步后的洞察" })).toBeVisible();
     fireEvent.click(await screen.findByText("查看来源 · 0 段"));
     expect(await screen.findByText(/原始来源已不可用/u)).toBeVisible();
     expect(screen.queryByRole("link", { name: /查看来源复盘/u })).not.toBeInTheDocument();
     expect(screen.queryByText("散步以后，我觉得思路更清楚了。")).not.toBeInTheDocument();
 
+    fireEvent.click(screen.getByText("管理这张卡片"));
     fireEvent.click(screen.getByRole("button", { name: "归档" }));
     expect(await screen.findByRole("button", { name: "恢复" })).toBeVisible();
     fireEvent.click(screen.getByRole("button", { name: "恢复" }));
@@ -249,9 +260,10 @@ describe("DailyReflectionCardLibrary", () => {
       }
       return jsonResponse({ error: "not_found" }, 404);
     });
-    render(<DailyReflectionCardLibrary api={createDailyReflectionApi(fetcher)} />);
+    render(<DailyReflectionCardLibrary api={createDailyReflectionApi(fetcher)} detailOnly initialCardId="card_1" />);
 
-    fireEvent.click(await screen.findByRole("button", { name: "快速查看" }));
+    expect(await screen.findByRole("heading", { name: "散步后的洞察" })).toBeVisible();
+    fireEvent.click(screen.getByText("管理这张卡片"));
     fireEvent.click(await screen.findByRole("button", { name: "撤销这条记忆" }));
     expect(screen.getByRole("dialog", { name: "撤销这条长期记忆？" })).toBeVisible();
     fireEvent.click(screen.getByRole("button", { name: "确认撤销" }));

@@ -105,6 +105,8 @@ describe("DailyReflectionReturn", () => {
     expect(await screen.findByRole("heading", { name: "一个未解决问题" })).toBeVisible();
     expect(screen.getByRole("heading", { name: "一个相关旧想法" })).toBeVisible();
     expect(screen.getByRole("heading", { name: "一个值得核对的变化" })).toBeVisible();
+    expect(screen.queryByRole("heading", { name: "反复出现了什么" })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("tab", { name: "本周" }));
     expect(screen.getByRole("heading", { name: "反复出现了什么" })).toBeVisible();
     expect(screen.getByRole("heading", { name: "什么发生变化" })).toBeVisible();
     expect(screen.getByRole("heading", { name: "什么仍未解决" })).toBeVisible();
@@ -155,14 +157,10 @@ describe("DailyReflectionReturn", () => {
       }))
     )} />);
 
-    expect(await screen.findByText("目前没有仍待确认的事项。")).toBeVisible();
-    expect(screen.getByText("今天没有适合重新回看的记录。")).toBeVisible();
-    expect(screen.getByText("目前没有有依据的核对问题。")).toBeVisible();
-    expect(screen.getByText("本周没有足够的重复来源。")).toBeVisible();
-    expect(screen.getByText("本周没有发现有先后依据支持的变化。")).toBeVisible();
-    expect(screen.getByText("本周没有仍未完成的确认事项。")).toBeVisible();
-    expect(screen.getByText("本周没有新的、可核对的想法。")).toBeVisible();
+    expect(await screen.findByText("今天暂时没有需要回看的内容。")).toBeVisible();
     expect(screen.queryByText("不应展示")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("tab", { name: "本周" }));
+    expect(await screen.findByText("过去七天暂无足够、有来源的回顾内容。")).toBeVisible();
   });
 
   it("keeps Daily and Weekly loading failures independent", async () => {
@@ -172,6 +170,7 @@ describe("DailyReflectionReturn", () => {
     )} />);
 
     expect(await screen.findByRole("alert")).toHaveTextContent("今天的回看暂时无法加载。");
+    fireEvent.click(screen.getByRole("tab", { name: "本周" }));
     const weekly = screen.getByRole("heading", { name: "本周回顾" }).closest("section");
     expect(weekly).not.toBeNull();
     expect(within(weekly as HTMLElement).getByText("重复提到留出专注时间")).toBeVisible();

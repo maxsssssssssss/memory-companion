@@ -91,9 +91,8 @@ describe("ReflectionHome", () => {
     expect(screen.getByRole("heading", { name: "给今天留下一点真实的东西。" })).toBeVisible();
     expect(screen.getByRole("link", { name: "开始表达" })).toHaveAttribute("href", "/reflection/capture?new=1");
     expect(screen.getByText(/原始表达会保留为可核对的来源/u)).toBeVisible();
-    expect(screen.getByRole("heading", { name: "上传录音" }).closest("a")).toBeVisible();
-    expect(screen.queryByRole("heading", { name: "开始说" })).not.toBeInTheDocument();
-    expect(screen.queryByRole("heading", { name: "从玩偶导入" })).not.toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "上传录音" })).toBeVisible();
+    expect(screen.queryByRole("link", { name: "从玩偶导入" })).not.toBeInTheDocument();
     expect(screen.getByRole("link", { name: "我最近反复在想什么？" }))
       .toHaveAttribute("href", "/reflection/ask?q=%E6%88%91%E6%9C%80%E8%BF%91%E5%8F%8D%E5%A4%8D%E5%9C%A8%E6%83%B3%E4%BB%80%E4%B9%88%EF%BC%9F");
     expect(await screen.findByRole("heading", { name: "值得继续" })).toBeVisible();
@@ -126,10 +125,10 @@ describe("ReflectionHome", () => {
     render(<ReflectionHome />);
 
     expect(screen.queryByText("给今天留下一点真实的东西。")).not.toBeInTheDocument();
-    expect(screen.getByRole("heading", { name: "开始说" }).closest("a")).toBeVisible();
-    expect(screen.getByRole("heading", { name: "上传录音" }).closest("a")).toBeVisible();
-    expect(screen.getByRole("heading", { name: "从玩偶导入" }).closest("a")).toBeVisible();
-    expect(screen.getByRole("heading", { name: "今天的复盘" })).toBeVisible();
+    expect(screen.getByRole("link", { name: "开始表达" })).toBeVisible();
+    expect(screen.getByRole("link", { name: "上传录音" })).toBeVisible();
+    expect(screen.getByRole("link", { name: "从玩偶导入" })).toBeVisible();
+    expect(screen.getByRole("heading", { name: "今天的内容" })).toBeVisible();
     expect(screen.getAllByText("已完成").length).toBeGreaterThan(0);
     expect(screen.getAllByText("长期记住 1 条").length).toBeGreaterThan(0);
     await waitFor(() => expect(screen.getByRole("heading", { name: "值得继续" })).toBeVisible());

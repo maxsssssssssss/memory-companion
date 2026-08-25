@@ -452,11 +452,12 @@ describe("DailyReflectionShellContent", () => {
     );
 
     const recordingButton = screen.getByRole("button", { name: "开始说" });
-    const uploadForm = screen.getByRole("form", { name: "上传日常复盘录音" });
     expect(recordingButton).toBeVisible();
-    expect(uploadForm).toBeVisible();
-    expect(recordingButton.closest("section")?.parentElement).toBe(uploadForm.parentElement);
     expect(screen.getByText("提交前请不要刷新或离开", { exact: false })).toBeVisible();
+    expect(screen.queryByRole("form", { name: "上传日常复盘录音" })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("tab", { name: "上传录音" }));
+    expect(screen.getByRole("form", { name: "上传日常复盘录音" })).toBeVisible();
+    expect(screen.queryByRole("button", { name: "开始说" })).not.toBeInTheDocument();
   });
 
   it("keeps toy sync off by default and preserves manual upload when it is enabled", () => {
@@ -464,8 +465,10 @@ describe("DailyReflectionShellContent", () => {
     expect(screen.queryByRole("heading", { name: "连接玩偶录音" })).not.toBeInTheDocument();
 
     rerender(<DailyReflectionShellContent session={session()} toySyncEnabled />);
+    expect(screen.queryByRole("heading", { name: "连接玩偶录音" })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("tab", { name: "从玩偶导入" }));
     expect(screen.getByRole("heading", { name: "连接玩偶录音" })).toBeVisible();
-    expect(screen.getByRole("form", { name: "上传日常复盘录音" })).toBeVisible();
+    expect(screen.queryByRole("form", { name: "上传日常复盘录音" })).not.toBeInTheDocument();
   });
 
   it.each([
@@ -484,7 +487,9 @@ describe("DailyReflectionShellContent", () => {
     chooseBrowserRecordingSource();
     fireEvent.click(screen.getByRole("button", { name: "开始说" }));
     await waitFor(() => expect(screen.getByRole("alert")).toHaveTextContent(message));
+    fireEvent.click(screen.getByRole("tab", { name: "上传录音" }));
     expect(screen.getByRole("form", { name: "上传日常复盘录音" })).toBeVisible();
+    fireEvent.click(screen.getByRole("tab", { name: "开始说" }));
     expect(screen.getByRole("button", { name: "开始说" })).toBeEnabled();
     expect(screen.queryByText("private detail")).not.toBeInTheDocument();
   });
@@ -1096,6 +1101,8 @@ describe("DailyReflectionShellContent", () => {
     expect(screen.getByLabelText("整理进度 37%")).toBeInTheDocument();
     expect(screen.getByText("37%")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "取消整理" })).toBeVisible();
+    expect(screen.getByRole("button", { name: "删除原始记录" })).not.toBeVisible();
+    fireEvent.click(screen.getByText("更多"));
     expect(screen.getByRole("button", { name: "删除原始记录" })).toBeVisible();
     expect(screen.queryByRole("button", { name: "重试整理" })).not.toBeInTheDocument();
   });
@@ -1195,11 +1202,10 @@ describe("DailyReflectionShellContent", () => {
     );
 
     expect(screen.getByText("这次表达里有什么值得带走")).toBeVisible();
-    expect(screen.getByDisplayValue("确认明天的安排")).toBeVisible();
-    expect(screen.getByDisplayValue("散步让我更放松")).toBeVisible();
-    expect(screen.queryByDisplayValue("还要想清楚的事")).not.toBeInTheDocument();
-    expect(screen.getByText("含 AI 推断，请核对")).toBeVisible();
-    expect(screen.getByText("可核对依据较少")).toBeVisible();
+    expect(screen.getByRole("heading", { name: "确认明天的安排" })).toBeVisible();
+    expect(screen.getByRole("heading", { name: "散步让我更放松" })).toBeVisible();
+    expect(screen.queryByRole("heading", { name: "还要想清楚的事" })).not.toBeInTheDocument();
+    expect(screen.getByText("含 AI 推断，请核对 · 可核对依据较少")).not.toBeVisible();
     expect(screen.queryByText("0.9")).not.toBeInTheDocument();
     expect(container.textContent).not.toContain("Provider");
     expect(container.textContent).not.toContain("Candidate #");
@@ -1211,13 +1217,14 @@ describe("DailyReflectionShellContent", () => {
     }));
 
     fireEvent.click(screen.getByRole("button", { name: /还有 1 条可能有用的内容/u }));
-    expect(screen.getByDisplayValue("还要想清楚的事")).toBeVisible();
+    expect(screen.getByRole("heading", { name: "还要想清楚的事" })).toBeVisible();
     expect(onLocalReviewMetric).toHaveBeenCalledWith({
       name: "more_expanded",
       value: 1,
       reflectionId: "reflection-1",
       tier: "more"
     });
+    fireEvent.click(screen.getAllByLabelText("更多选择").at(-1)!);
     fireEvent.click(screen.getByRole("button", { name: "设为重点" }));
     expect(updateCard).toHaveBeenCalledWith(expect.objectContaining({
       cardId: more.id,
@@ -1244,6 +1251,9 @@ describe("DailyReflectionShellContent", () => {
       cardId: primaryAction.id,
       actionClaimed: true
     }));
+    fireEvent.click(screen.getAllByLabelText("更多选择")[0]);
+    expect(screen.getByText("含 AI 推断，请核对 · 可核对依据较少")).toBeVisible();
+    fireEvent.click(screen.getAllByRole("button", { name: "编辑" })[0]);
     fireEvent.change(screen.getByRole("textbox", { name: "编辑标题：确认明天的安排" }), {
       target: { value: "我编辑后的安排" }
     });
@@ -1410,6 +1420,7 @@ describe("DailyReflectionShellContent", () => {
     />);
 
     expect(screen.getByRole("button", { name: "开始说" })).toBeVisible();
+    fireEvent.click(screen.getByRole("tab", { name: "上传录音" }));
     expect(screen.getByRole("form", { name: "上传日常复盘录音" })).toBeVisible();
     expect(screen.getByRole("navigation", { name: "产品空间" })).toHaveTextContent("约会陪伴日常复盘");
     expect(screen.getByText("你在 2026-08-12 的复盘中提到……")).toBeVisible();
@@ -1478,7 +1489,7 @@ describe("DailyReflectionShellContent", () => {
     expect(screen.getByRole("alertdialog", { name: "只撤销这一条保存？" })).toHaveTextContent(
       "不会修改原始复盘文字，也不会删除整次复盘"
     );
-    expect(screen.getByRole("button", { name: "删除原始记录" })).toBeVisible();
+    expect(screen.getByRole("button", { name: "删除原始记录" })).not.toBeVisible();
     expect(revokeCandidate).not.toHaveBeenCalled();
     fireEvent.click(screen.getByRole("button", { name: "确认撤销" }));
     expect(revokeCandidate).toHaveBeenCalledWith(remembered.id);

@@ -47,6 +47,25 @@ type ReflectionAppShellProps = Readonly<{
   toySyncEnabled: boolean;
 }>;
 
+function focusedRoute(pathname: string) {
+  if (pathname === REFLECTION_ROUTES.capture) {
+    return { backHref: REFLECTION_ROUTES.home, label: "开始表达" };
+  }
+  if (pathname.startsWith("/reflection/sessions/")) {
+    return { backHref: REFLECTION_ROUTES.home, label: "本次复盘" };
+  }
+  if (pathname !== REFLECTION_ROUTES.cards && pathname.startsWith(`${REFLECTION_ROUTES.cards}/`)) {
+    return { backHref: REFLECTION_ROUTES.cards, label: "卡片" };
+  }
+  if (pathname === REFLECTION_ROUTES.memory) {
+    return { backHref: REFLECTION_ROUTES.home, label: "记忆" };
+  }
+  if (pathname.startsWith(`${REFLECTION_ROUTES.memory}/`)) {
+    return { backHref: REFLECTION_ROUTES.memory, label: "记忆详情" };
+  }
+  return null;
+}
+
 export function ReflectionAppShell({
   browserRecordingEnabled,
   children,
@@ -105,10 +124,11 @@ export function ReflectionAppShell({
   }
 
   const userLabel = session.auth.user.name?.trim() || session.auth.user.email;
+  const focused = focusedRoute(pathname);
 
   return (
     <ReflectionAppContext.Provider value={context}>
-      <div className={styles.reflectionApp}>
+      <div className={`${styles.reflectionApp} ${focused ? styles.reflectionFocusedFlow : styles.reflectionRootFlow}`}>
         <header className={styles.reflectionHeader}>
           <Link className={styles.reflectionBrand} href={REFLECTION_ROUTES.home} aria-label="回到日常复盘首页">
             <span aria-hidden="true">DB</span>
@@ -141,9 +161,20 @@ export function ReflectionAppShell({
           </div>
         </header>
 
+        {focused ? (
+          <div aria-label="当前页面导航" className={styles.reflectionFocusedHeader} role="navigation">
+            <Link href={focused.backHref} aria-label={`返回${focused.label === "开始表达" ? "今天" : focused.label}`}>
+              <span aria-hidden="true">←</span>
+              <span>返回</span>
+            </Link>
+            <b>{focused.label}</b>
+            <span aria-hidden="true" />
+          </div>
+        ) : null}
+
         <div className={styles.reflectionShellContent}>{children}</div>
 
-        <nav className={styles.reflectionMobileNav} aria-label="日常复盘移动导航">
+        {!focused ? <nav className={styles.reflectionMobileNav} aria-label="日常复盘移动导航">
           {REFLECTION_MOBILE_NAV.map((item) => {
             const active = reflectionRouteIsActive(pathname, item);
             const primary = "primary" in item && item.primary;
@@ -160,7 +191,7 @@ export function ReflectionAppShell({
               </Link>
             );
           })}
-        </nav>
+        </nav> : null}
       </div>
     </ReflectionAppContext.Provider>
   );

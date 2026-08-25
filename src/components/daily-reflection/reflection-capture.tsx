@@ -31,17 +31,6 @@ export function ReflectionCapture({ forceNew = false, method = null, prompt = nu
     }
   }, [forceNew, router, session]);
 
-  useEffect(() => {
-    if (!method) return;
-    const timer = window.setTimeout(() => {
-      document.getElementById(`reflection-capture-${method}`)?.scrollIntoView({
-        behavior: "smooth",
-        block: "start"
-      });
-    }, 50);
-    return () => window.clearTimeout(timer);
-  }, [method]);
-
   return (
     <>
       {prompt ? (
@@ -53,6 +42,7 @@ export function ReflectionCapture({ forceNew = false, method = null, prompt = nu
       <DailyReflectionShellContent
         browserRecordingEnabled={browserRecordingEnabled}
         embedded
+        initialCaptureMethod={method}
         session={session}
         surface="capture"
         toySyncEnabled={toySyncEnabled}

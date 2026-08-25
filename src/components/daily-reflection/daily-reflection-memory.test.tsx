@@ -68,10 +68,10 @@ describe("DailyReflectionMemory", () => {
   it("shows only durable user-controlled memories without invented actions", async () => {
     render(<DailyReflectionMemory api={api()} />);
 
-    expect(await screen.findByRole("heading", { name: memory.title })).toBeVisible();
-    expect(screen.getByText(/你明确表达过/u)).toBeVisible();
-    expect(screen.getByText(/1 段来源/u)).toBeVisible();
-    expect(screen.getByRole("heading", { name: memory.title }).closest("a")).toHaveAttribute(
+    expect((await screen.findAllByRole("heading", { name: memory.title })).length).toBe(2);
+    expect(screen.getAllByText(/你明确表达过/u).length).toBeGreaterThan(0);
+    expect(screen.getAllByText(/1 段来源/u).length).toBeGreaterThan(0);
+    expect(screen.getAllByRole("heading", { name: memory.title }).at(-1)?.closest("a")).toHaveAttribute(
       "href",
       "/reflection/memory/memory_1"
     );

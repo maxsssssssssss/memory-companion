@@ -164,51 +164,20 @@ export function DailyReflectionQuery({ api: providedApi, embedded = false, initi
           <p className={styles.introText}>每次只回答当前这一问，不保存聊天记录。依据不足时会明确告诉你。</p>
         </section>
 
-        <form className={styles.candidateSection} onSubmit={(event) => void submit(event)}>
-          <div className={styles.sectionHeading}>
-            <div>
-               <p>一次只问一个问题</p>
-              <h2>你想找什么？</h2>
-            </div>
+        <form className={styles.askComposer} onSubmit={(event) => void submit(event)}>
+          <label className={styles.visuallyHidden} htmlFor="daily-reflection-question">你想问什么</label>
+          <div className={styles.askInputRow}>
+            <input id="daily-reflection-question" aria-label="你想问什么" disabled={busy} maxLength={512} onChange={(event) => setQuery(event.target.value)} placeholder="我之前为什么决定换一个方向？" value={query} />
+            <button aria-label={busy ? "正在查找" : "查找"} className={styles.primaryButton} disabled={busy || Array.from(query.normalize("NFKC").trim()).length < 2} type="submit">{busy ? "…" : "↵"}</button>
           </div>
-           <label className={styles.candidateEditor}>
-            <span>问题</span>
-            <textarea
-              aria-label="你想问什么"
-              disabled={busy}
-              maxLength={512}
-              onChange={(event) => setQuery(event.target.value)}
-              placeholder="例如：我之前为什么决定换一个方向？"
-              rows={4}
-              value={query}
-            />
-           </label>
-           <div className={styles.questionChips} aria-label="问题示例">
-             {REFLECTION_ASK_EXAMPLES.map((example) => (
-               <button disabled={busy} key={example} onClick={() => setQuery(example)} type="button">{example}</button>
-             ))}
-           </div>
-          <label className={styles.candidateEditor}>
-            <span>查找范围</span>
-            <select
-              aria-label="查找范围"
-              disabled={busy}
-              onChange={(event) => setScope(DailyReflectionQueryScopeSchema.parse(event.target.value))}
-              value={scope}
-            >
-              <option value="all">全部已确认内容</option>
-              <option value="last_7_days">最近 7 天</option>
-              <option value="last_30_days">最近 30 天</option>
-            </select>
-          </label>
-          <div className={styles.candidateActions}>
-            <button
-              className={styles.primaryButton}
-              disabled={busy || Array.from(query.normalize("NFKC").trim()).length < 2}
-              type="submit"
-            >
-              {busy ? "正在查找…" : "查找"}
-            </button>
+          <div className={styles.askComposerMeta}>
+            <div className={styles.questionChips} aria-label="问题示例">
+              {REFLECTION_ASK_EXAMPLES.map((example) => <button disabled={busy} key={example} onClick={() => setQuery(example)} type="button">{example}</button>)}
+            </div>
+            <details className={styles.askScope}>
+              <summary>{scope === "all" ? "全部时间 · 全部内容" : scope === "last_7_days" ? "最近 7 天" : "最近 30 天"}</summary>
+              <label><span>查找范围</span><select aria-label="查找范围" disabled={busy} onChange={(event) => setScope(DailyReflectionQueryScopeSchema.parse(event.target.value))} value={scope}><option value="all">全部已确认内容</option><option value="last_7_days">最近 7 天</option><option value="last_30_days">最近 30 天</option></select></label>
+            </details>
           </div>
         </form>
 
@@ -218,7 +187,7 @@ export function DailyReflectionQuery({ api: providedApi, embedded = false, initi
           <section
             aria-labelledby="daily-reflection-query-answer"
             aria-live="polite"
-            className={styles.candidateSection}
+            className={styles.askAnswer}
           >
             <div className={styles.sectionHeading}>
               <div>
@@ -226,7 +195,7 @@ export function DailyReflectionQuery({ api: providedApi, embedded = false, initi
                 <h2 id="daily-reflection-query-answer">回答</h2>
               </div>
             </div>
-             <p className={styles.candidateText}>{result.answer}</p>
+             <p className={styles.askAnswerText}>{result.answer}</p>
              {sourceCounts ? (
                <p className={styles.answerSourceSummary}>
                  这次回答参考了 {sourceCounts.cards} 张卡片、{sourceCounts.reflections} 次复盘
@@ -237,10 +206,10 @@ export function DailyReflectionQuery({ api: providedApi, embedded = false, initi
               <p className={styles.evidenceUnavailable}>现有记录还不足以支持确定结论。</p>
             ) : null}
             {result.claims.length > 0 ? (
-              <ol className={styles.candidateList} aria-label="回答依据">
+              <ol className={styles.askEvidenceTimeline} aria-label="回答依据">
                 {result.claims.map((claim, index) => (
-                  <li className={styles.candidateCard} key={`${result.createdAt}:${index}`}>
-                    <p className={styles.candidateText}>{claim.text}</p>
+                  <li className={styles.askClaim} key={`${result.createdAt}:${index}`}>
+                    <p>{claim.text}</p>
                     <EvidenceDisclosure
                       controlId={`daily-reflection-query-claim-${index}-sources`}
                       evidence={claim.evidence}
@@ -256,7 +225,7 @@ export function DailyReflectionQuery({ api: providedApi, embedded = false, initi
         ) : null}
 
         {result?.resurfacing && resurfacingVisible ? (
-          <section className={styles.candidateSection} aria-label="回看提示">
+          <section className={styles.askResurfacing} aria-label="回看提示">
             <div className={styles.candidateCardTop}>
               <div>
                 <p className={styles.eyebrow}>也许还值得回看</p>

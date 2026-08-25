@@ -41,7 +41,7 @@ beforeEach(() => {
 
 describe("ReflectionAppShell", () => {
   it("provides one canonical desktop/mobile shell and global capture action", () => {
-    state.pathname = "/reflection/cards/card_1";
+    state.pathname = "/reflection/cards";
     render(
       <ReflectionAppShell browserRecordingEnabled toySyncEnabled={false}>
         <p>页面内容</p>
@@ -57,6 +57,19 @@ describe("ReflectionAppShell", () => {
     const mobile = screen.getByRole("navigation", { name: "日常复盘移动导航" });
     expect(within(mobile).getByText("开始表达").closest("a")).toHaveAttribute("href", "/reflection/capture?new=1");
     expect(within(mobile).queryByText("记忆")).not.toBeInTheDocument();
+  });
+
+  it("uses a local return header and removes the mobile bottom navigation in focused flows", () => {
+    state.pathname = "/reflection/cards/card_1";
+    render(
+      <ReflectionAppShell browserRecordingEnabled toySyncEnabled={false}>
+        <p>卡片详情</p>
+      </ReflectionAppShell>
+    );
+
+    expect(screen.getByRole("navigation", { name: "当前页面导航" })).toHaveTextContent("返回卡片");
+    expect(screen.queryByRole("navigation", { name: "日常复盘移动导航" })).not.toBeInTheDocument();
+    expect(screen.getByRole("navigation", { name: "日常复盘主导航" })).toBeInTheDocument();
   });
 
   it("keeps authentication fail closed and redirects anonymous users", async () => {

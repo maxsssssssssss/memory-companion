@@ -81,7 +81,7 @@ function EvidenceList({ evidence }: { evidence: DailyReflectionReturnEvidence[] 
 function ReturnItem({ item }: { item: DisplayItem }) {
   const [evidenceExpanded, setEvidenceExpanded] = useState(false);
   return (
-    <li className={styles.candidateCard}>
+    <li className={styles.returnItem}>
       <div className={styles.candidateCardTop}>
         <b>{item.title}</b>
         {"sourceCount" in item ? (
@@ -112,17 +112,20 @@ function ReturnGroup({
   emptyText,
   id,
   items,
+  hideWhenEmpty = false,
   title
 }: Readonly<{
   eyebrow: string;
   emptyText: string;
   id: string;
   items: DisplayItem[];
+  hideWhenEmpty?: boolean;
   title: string;
 }>) {
   const displayable = items.filter(isDisplayable);
+  if (hideWhenEmpty && displayable.length === 0) return null;
   return (
-    <section aria-labelledby={id} className={styles.candidateSection}>
+    <section aria-labelledby={id} className={styles.returnGroup}>
       <div className={styles.sectionHeading}>
         <div>
           <p>{eyebrow}</p>
@@ -131,7 +134,7 @@ function ReturnGroup({
         <span>{displayable.length} 条</span>
       </div>
       {displayable.length > 0 ? (
-        <ol className={styles.candidateList}>
+        <ol className={styles.returnList}>
           {displayable.map((item) => <ReturnItem item={item} key={item.id} />)}
         </ol>
       ) : (
@@ -152,6 +155,7 @@ export function DailyReflectionReturn({ api: providedApi, embedded = false }: Da
   const [weeklyLoading, setWeeklyLoading] = useState(true);
   const [dailyError, setDailyError] = useState<string | null>(null);
   const [weeklyError, setWeeklyError] = useState<string | null>(null);
+  const [activeTab, setActiveTab] = useState<"daily" | "weekly">("daily");
 
   useEffect(() => {
     const controller = new AbortController();
@@ -172,6 +176,20 @@ export function DailyReflectionReturn({ api: providedApi, embedded = false }: Da
     return () => controller.abort();
   }, [api]);
 
+  const dailyHasContent = Boolean(daily && [
+    ...daily.openLoops.slice(0, 1),
+    ...daily.reflectionPrompts.slice(0, 1),
+    ...daily.resurfacedMemories.slice(0, 1)
+  ].some(isDisplayable));
+  const weeklyGroups = weekly ? [
+    weekly.repeatedThemes,
+    weekly.changedDecisions,
+    weekly.openCommitments,
+    weekly.emergingIdeas
+  ] : [];
+  const weeklyItemCount = weeklyGroups.flat().filter(isDisplayable).length;
+  const weeklyCategoryCount = weeklyGroups.filter((items) => items.some(isDisplayable)).length;
+
   return (
     <div className={embedded ? styles.embeddedRoot : styles.root}>
       {!embedded ? <header className={styles.header}>
@@ -191,12 +209,17 @@ export function DailyReflectionReturn({ api: providedApi, embedded = false }: Da
         <section className={embedded ? styles.productIntro : styles.intro}>
           <div>
             <p className={styles.eyebrow}>有来源的回顾</p>
-            <h1>今天，回看一点重要的事</h1>
+            <h1>回看</h1>
           </div>
-          <p className={styles.introText}>这里只呈现已经确认且仍可核对的内容。没有充分来源时，会保持空白。</p>
+          <p className={styles.introText}>让过去重新帮助现在。这里只有已经确认且仍可核对的内容。</p>
         </section>
 
-        <section className={styles.historySection} aria-labelledby="daily-return-today-title">
+        <div className={styles.returnTabs} role="tablist" aria-label="回看时间范围">
+          <button aria-controls="daily-return-panel" aria-selected={activeTab === "daily"} onClick={() => setActiveTab("daily")} role="tab" type="button">今天</button>
+          <button aria-controls="weekly-return-panel" aria-selected={activeTab === "weekly"} onClick={() => setActiveTab("weekly")} role="tab" type="button">本周</button>
+        </div>
+
+        {activeTab === "daily" ? <section className={styles.returnPanel} id="daily-return-panel" aria-labelledby="daily-return-today-title" role="tabpanel">
           <div className={styles.historyHeading}>
             <div>
               <p className={styles.eyebrow}>今天值得再想一想</p>
@@ -207,17 +230,17 @@ export function DailyReflectionReturn({ api: providedApi, embedded = false }: Da
           {dailyLoading ? <p role="status">正在准备今天的回看…</p> : dailyError ? (
             <p className={styles.inlineError} role="alert">{dailyError}</p>
           ) : daily ? (
-            <div className={styles.cardLibraryPage}>
-              <ReturnGroup eyebrow="仍未解决" emptyText="目前没有仍待确认的事项。" id="daily-return-open-loops" items={daily.openLoops.slice(0, 1)} title="一个未解决问题" />
-              <ReturnGroup eyebrow="过去回来" emptyText="今天没有适合重新回看的记录。" id="daily-return-resurfaced" items={daily.resurfacedMemories.slice(0, 1)} title="一个相关旧想法" />
-              <ReturnGroup eyebrow="今天的变化" emptyText="目前没有有依据的核对问题。" id="daily-return-prompts" items={daily.reflectionPrompts.slice(0, 1)} title="一个值得核对的变化" />
-            </div>
+            dailyHasContent ? <div className={styles.returnGrid}>
+              <ReturnGroup eyebrow="仍未解决" emptyText="" hideWhenEmpty id="daily-return-open-loops" items={daily.openLoops.slice(0, 1)} title="一个未解决问题" />
+              <ReturnGroup eyebrow="可能发生了变化" emptyText="" hideWhenEmpty id="daily-return-prompts" items={daily.reflectionPrompts.slice(0, 1)} title="一个值得核对的变化" />
+              <ReturnGroup eyebrow="过去回来" emptyText="" hideWhenEmpty id="daily-return-resurfaced" items={daily.resurfacedMemories.slice(0, 1)} title="一个相关旧想法" />
+            </div> : <p className={styles.historyEmpty}>今天暂时没有需要回看的内容。</p>
           ) : (
             <p className={styles.historyEmpty}>今天暂时没有需要回看的内容。</p>
           )}
-        </section>
+        </section> : null}
 
-        <section className={styles.historySection} aria-labelledby="weekly-reflection-title">
+        {activeTab === "weekly" ? <section className={styles.returnPanel} id="weekly-return-panel" aria-labelledby="weekly-reflection-title" role="tabpanel">
           <div className={styles.historyHeading}>
             <div>
               <p className={styles.eyebrow}>这一周在变化</p>
@@ -228,16 +251,19 @@ export function DailyReflectionReturn({ api: providedApi, embedded = false }: Da
           {weeklyLoading ? <p role="status">正在整理本周回顾…</p> : weeklyError ? (
             <p className={styles.inlineError} role="alert">{weeklyError}</p>
           ) : weekly ? (
-            <div className={styles.cardLibraryPage}>
-              <ReturnGroup eyebrow="反复出现" emptyText="本周没有足够的重复来源。" id="weekly-repeated-themes" items={weekly.repeatedThemes} title="反复出现了什么" />
-              <ReturnGroup eyebrow="前后变化" emptyText="本周没有发现有先后依据支持的变化。" id="weekly-changed-decisions" items={weekly.changedDecisions} title="什么发生变化" />
-              <ReturnGroup eyebrow="仍待继续" emptyText="本周没有仍未完成的确认事项。" id="weekly-open-commitments" items={weekly.openCommitments} title="什么仍未解决" />
-              <ReturnGroup eyebrow="可能形成方向" emptyText="本周没有新的、可核对的想法。" id="weekly-emerging-ideas" items={weekly.emergingIdeas} title="什么可能形成方向" />
-            </div>
+            weeklyItemCount > 0 ? <>
+              <p className={styles.returnOverview}>这一周有 {weeklyCategoryCount} 类内容值得回看，共 {weeklyItemCount} 条有来源的线索。</p>
+              <div className={styles.returnGrid}>
+                <ReturnGroup eyebrow="反复出现" emptyText="" hideWhenEmpty id="weekly-repeated-themes" items={weekly.repeatedThemes} title="反复出现了什么" />
+                <ReturnGroup eyebrow="前后变化" emptyText="" hideWhenEmpty id="weekly-changed-decisions" items={weekly.changedDecisions} title="什么发生变化" />
+                <ReturnGroup eyebrow="仍待继续" emptyText="" hideWhenEmpty id="weekly-open-commitments" items={weekly.openCommitments} title="什么仍未解决" />
+                <ReturnGroup eyebrow="可能形成方向" emptyText="" hideWhenEmpty id="weekly-emerging-ideas" items={weekly.emergingIdeas} title="什么可能形成方向" />
+              </div>
+            </> : <p className={styles.historyEmpty}>过去七天暂无足够、有来源的回顾内容。</p>
           ) : (
             <p className={styles.historyEmpty}>过去七天暂无足够、有来源的回顾内容。</p>
           )}
-        </section>
+        </section> : null}
       </main>
     </div>
   );

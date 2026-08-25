@@ -32,6 +32,21 @@ export const REFLECTION_ASK_EXAMPLES = [
   "有哪些事情我说过要继续做？"
 ] as const;
 
+export const REFLECTION_CARD_KIND_LABELS = {
+  idea: "洞察",
+  insight: "洞察",
+  question: "问题",
+  decision: "决定",
+  event: "经历",
+  action: "行动"
+} as const;
+
+export function reflectionCardKindLabel(kind: string) {
+  return REFLECTION_CARD_KIND_LABELS[
+    kind as keyof typeof REFLECTION_CARD_KIND_LABELS
+  ] ?? "卡片";
+}
+
 export function reflectionSessionPath(reflectionId: string) {
   return `/reflection/sessions/${encodeURIComponent(reflectionId)}`;
 }

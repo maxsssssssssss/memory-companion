@@ -16,6 +16,7 @@ import {
   REFLECTION_ASK_EXAMPLES,
   REFLECTION_ROUTES,
   REFLECTION_TRUST_COPY,
+  reflectionCardKindLabel,
   reflectionCardPath,
   reflectionSessionPath
 } from "./reflection-product";
@@ -27,13 +28,11 @@ type SessionPreview = Readonly<{
   summary: string | null;
 }>;
 
-const CARD_KIND_LABELS: Record<string, string> = {
+const REVIEW_CARD_KIND_LABELS: Record<string, string> = {
   insight: "洞察",
   open_question: "问题",
-  question: "问题",
   decision: "决定",
-  user_action: "行动",
-  action: "行动"
+  user_action: "行动"
 };
 
 function localDateValue(date = new Date()) {
@@ -94,7 +93,7 @@ function previewFromDetail(detail: DailyReflectionDetailResponse): SessionPrevie
           ? firstCandidate.userText
           : firstCandidate.proposedText)
         : null,
-    cardKinds: [...new Set(cards.map((card) => CARD_KIND_LABELS[card.cardKind]).filter(Boolean))]
+    cardKinds: [...new Set(cards.map((card) => REVIEW_CARD_KIND_LABELS[card.cardKind]).filter(Boolean))]
   };
 }
 
@@ -149,102 +148,80 @@ export function ReflectionHome() {
   const recentSessions = session.history.filter((item) => item.recordingDate !== today).slice(0, 5);
 
   return (
-    <main className={styles.productPage}>
-      <section className={styles.productHero}>
-        <p className={styles.productEyebrow}>{displayDate()}</p>
-        <h1>{firstUse ? "给今天留下一点真实的东西。" : `${greeting()}，有什么值得留下？`}</h1>
-        <p>{firstUse
-          ? `${browserRecordingEnabled ? "说一段或" : ""}上传一段${toySyncEnabled ? "，也可以从玩偶录音中选择一段" : ""}。Daily Reflection 会先整理成可核对的卡片，再由你决定什么值得长期记住。`
-          : "先从一段真实表达开始。今天的想法可以成为卡片，也可能在未来合适的时候重新回来。"}</p>
-        <div className={styles.productActions}>
-          <Link className={styles.productPrimary} href={`${REFLECTION_ROUTES.capture}?new=1`}>开始表达</Link>
-          {session.reflectionId ? (
-            <Link className={styles.productSecondary} href={reflectionSessionPath(session.reflectionId)}>继续正在进行的复盘</Link>
-          ) : null}
-        </div>
-        <p className={styles.trustNote}>{REFLECTION_TRUST_COPY}</p>
-      </section>
-
-      {firstUse ? (
-        <section className={styles.productSection} aria-labelledby="reflection-first-use-title">
-          <div className={styles.productSectionHeader}>
-            <div><p className={styles.productEyebrow}>以后可以这样找回来</p><h2 id="reflection-first-use-title">从一个问题开始想象它的价值</h2></div>
+    <main className={`${styles.productPage} ${styles.homePage}`}>
+      <section className={styles.homeHeroGrid}>
+        <div className={styles.homeHero}>
+          <p className={styles.productEyebrow}>{displayDate()}</p>
+          <h1>{firstUse ? "给今天留下一点真实的东西。" : <>{greeting()}。<br />今天想留下什么？</>}</h1>
+          <p>{firstUse
+            ? "从一段真实表达开始。系统会把值得继续的部分整理出来，再由你决定留下什么。"
+            : "说下当下真正关心的事。它会先成为可核对的卡片，再在未来合适的时候重新回来。"}</p>
+          <div className={styles.productActions}>
+            <Link className={styles.productPrimary} href={`${REFLECTION_ROUTES.capture}?new=1`}>开始表达</Link>
+            {session.reflectionId ? <Link className={styles.productSecondary} href={reflectionSessionPath(session.reflectionId)}>继续上次复盘</Link> : null}
           </div>
-          <div className={styles.questionChips}>
-            {REFLECTION_ASK_EXAMPLES.map((question) => (
-              <Link href={`${REFLECTION_ROUTES.ask}?q=${encodeURIComponent(question)}`} key={question}>{question}</Link>
-            ))}
+          <div className={styles.homeQuickLinks} aria-label="其他输入方式">
+            <Link href={`${REFLECTION_ROUTES.capture}?new=1&method=upload`}>上传录音</Link>
+            {toySyncEnabled ? <Link href={`${REFLECTION_ROUTES.capture}?new=1&method=toy`}>从玩偶导入</Link> : null}
+            {!browserRecordingEnabled ? <span>当前浏览器仅支持上传</span> : null}
           </div>
-        </section>
-      ) : null}
-
-      <section className={styles.productSection} aria-labelledby="reflection-start-title">
-        <div className={styles.productSectionHeader}>
-          <div><p className={styles.productEyebrow}>最轻松的开始</p><h2 id="reflection-start-title">选择你已经习惯的表达方式</h2></div>
+          <p className={styles.trustNote}>{REFLECTION_TRUST_COPY}</p>
         </div>
-        <div className={styles.productGrid}>
-          {browserRecordingEnabled ? <Link className={styles.productCard} href={`${REFLECTION_ROUTES.capture}?new=1&method=record`}>
-            <span className={styles.productPill}>直接表达</span><h3>开始说</h3><p>说完由你结束。提交前录音只留在这台设备上。</p>
-          </Link> : null}
-          <Link className={styles.productCard} href={`${REFLECTION_ROUTES.capture}?new=1&method=upload`}>
-            <span className={styles.productPill}>已有内容</span><h3>上传录音</h3><p>选择一段已经录好的声音，并明确它来自自己的复盘还是一段真实交流。</p>
-          </Link>
-          {toySyncEnabled ? <Link className={styles.productCard} href={`${REFLECTION_ROUTES.capture}?new=1&method=toy`}>
-            <span className={styles.productPill}>设备录音</span><h3>从玩偶导入</h3><p>从你明确选择的录音位置中，挑一段交给 Daily Reflection。</p>
-          </Link> : null}
-        </div>
-      </section>
 
-      {returns.length > 0 ? (
-        <section className={styles.productSection} aria-labelledby="reflection-continue-title">
-          <div className={styles.productSectionHeader}>
+        <aside className={styles.homeContinuity} aria-labelledby="reflection-continue-title">
+          <div className={styles.homeSectionHeading}>
             <div><p className={styles.productEyebrow}>过去仍有回声</p><h2 id="reflection-continue-title">值得继续</h2></div>
-            <Link className={styles.productSecondary} href={REFLECTION_ROUTES.reflect}>查看完整回看</Link>
+            <Link href={REFLECTION_ROUTES.reflect}>查看回看</Link>
           </div>
-          <div className={styles.productGrid}>
-            {returns.map((item) => (
-              <article className={styles.productCard} key={item.id}>
-                <span className={styles.productPill}>{item.type === "open_loop" ? "还没结束" : item.type === "reflection_prompt" ? "再想一想" : "过去的一条线索"}</span>
-                <h3>{item.title}</h3><p>{item.body}</p>
-                <div className={styles.productActions}>
-                  <Link className={styles.productSecondary} href={`${REFLECTION_ROUTES.capture}?new=1&prompt=${encodeURIComponent(item.title)}`}>继续想</Link>
-                  <Link className={styles.productSecondary} href={`${reflectionSessionPath(item.evidence[0].reflectionId)}?segment=${encodeURIComponent(item.evidence[0].sourceSegmentId)}`}>查看来源</Link>
-                </div>
-              </article>
-            ))}
-          </div>
-        </section>
-      ) : null}
+          {returns.length > 0 ? (
+            <ol className={styles.homeContinuityList}>
+              {returns.slice(0, 2).map((item) => (
+                <li key={item.id}>
+                  <span>{item.type === "open_loop" ? "还没有解决" : item.type === "reflection_prompt" ? "可能发生了变化" : "一个相关旧想法"}</span>
+                  <h3>{item.title}</h3>
+                  <p>{item.body}</p>
+                  <div>
+                    <Link href={`${REFLECTION_ROUTES.capture}?new=1&prompt=${encodeURIComponent(item.title)}`}>继续想</Link>
+                    <Link href={`${reflectionSessionPath(item.evidence[0].reflectionId)}?segment=${encodeURIComponent(item.evidence[0].sourceSegmentId)}`}>查看来源</Link>
+                  </div>
+                </li>
+              ))}
+            </ol>
+          ) : firstUse ? (
+            <div className={styles.homeFirstUseQuestions}>
+              <p>以后，你可以这样找回过去：</p>
+              {REFLECTION_ASK_EXAMPLES.slice(0, 2).map((question) => (
+                <Link href={`${REFLECTION_ROUTES.ask}?q=${encodeURIComponent(question)}`} key={question}>{question}</Link>
+              ))}
+            </div>
+          ) : <p className={styles.homeEmpty}>暂时没有需要追问的旧线索。新的表达会慢慢在这里形成连接。</p>}
+        </aside>
+      </section>
 
-      <section className={styles.productSection} aria-labelledby="reflection-today-title">
-        <div className={styles.productSectionHeader}>
-          <div><p className={styles.productEyebrow}>今天留下的内容</p><h2 id="reflection-today-title">{todaySessions.length > 0 ? "今天的复盘" : "今天还没有记录"}</h2></div>
-          {cardCount !== null ? <p>卡片库中有 {cardCount} 张卡片</p> : null}
+      <section className={styles.homeCollection} aria-labelledby="reflection-today-title">
+        <div className={styles.homeSectionHeading}>
+          <div><p className={styles.productEyebrow}>今天留下的</p><h2 id="reflection-today-title">{todaySessions.length > 0 || todayCards.length > 0 ? "今天的内容" : "今天还没有记录"}</h2></div>
+          {cardCount !== null ? <Link href={REFLECTION_ROUTES.cards}>{cardCount} 张卡片</Link> : null}
         </div>
-        {todaySessions.length > 0 ? (
-          <div className={styles.productGrid}>{todaySessions.map((item) => <SessionPreviewCard item={item} key={item.id} preview={previews[item.id]} />)}</div>
-        ) : <p className={styles.productEmpty}>不需要每天完成一份报告。只在有一句话值得留下时回来就好。</p>}
+        {todaySessions.length > 0 ? <div className={styles.homeSessionList}>{todaySessions.map((item) => <SessionPreviewCard item={item} key={item.id} preview={previews[item.id]} />)}</div> : null}
         {todayCards.length > 0 ? (
-          <div className={styles.productGrid} aria-label="今天保存的卡片">
+          <div className={styles.homeCardStrip} aria-label="今天保存的卡片">
             {todayCards.map((card) => (
-              <Link className={styles.productCard} href={reflectionCardPath(card.id)} key={card.id}>
-                <span className={styles.productPill}>{CARD_KIND_LABELS[card.cardKind] ?? "暂未归类"}</span>
-                <h3>{card.title}</h3><p>{card.content}</p>
-                <div className={styles.productCardMeta}><span>{card.evidenceIds.length} 段来源</span><span>你的卡片</span></div>
+              <Link href={reflectionCardPath(card.id)} key={card.id}>
+                <span>{reflectionCardKindLabel(card.cardKind)}</span><h3>{card.title}</h3><p>{card.content}</p>
+                <small>{card.evidenceIds.length} 段来源 · 你的卡片</small>
               </Link>
             ))}
           </div>
-        ) : null}
+        ) : todaySessions.length === 0 ? <p className={styles.homeEmpty}>不需要每天完成一份报告。只在有一句话值得留下时回来就好。</p> : null}
       </section>
 
       {recentSessions.length > 0 ? (
-        <section className={styles.productSection} aria-labelledby="reflection-recent-title">
-          <div className={styles.productSectionHeader}>
-            <div><p className={styles.productEyebrow}>最近</p><h2 id="reflection-recent-title">过去的表达</h2></div>
-          </div>
-          <div className={styles.productGrid}>{recentSessions.map((item) => <SessionPreviewCard item={item} key={item.id} preview={previews[item.id]} />)}</div>
+        <section className={styles.homeCollection} aria-labelledby="reflection-recent-title">
+          <div className={styles.homeSectionHeading}><div><p className={styles.productEyebrow}>最近复盘</p><h2 id="reflection-recent-title">过去的表达</h2></div></div>
+          <div className={styles.homeSessionList}>{recentSessions.map((item) => <SessionPreviewCard item={item} key={item.id} preview={previews[item.id]} />)}</div>
         </section>
-      ) : session.historyState === "loading" ? <p className={styles.productEmpty} role="status">正在读取过去的复盘…</p> : null}
+      ) : session.historyState === "loading" ? <p className={styles.homeEmpty} role="status">正在读取过去的复盘…</p> : null}
     </main>
   );
 }
@@ -256,13 +233,14 @@ function SessionPreviewCard({ item, preview }: Readonly<{
   const duration = formatDuration(preview?.durationSeconds ?? null);
   const source = item.sourceOrigin === "user_reflection" ? "自己的复盘" : "真实交流";
   return (
-    <Link className={styles.productCard} href={reflectionSessionPath(item.id)}>
-      <div className={styles.productCardMeta}><span>{item.recordingDate ?? "日期待确认"}</span><span>{source}</span>{duration ? <span>{duration}</span> : null}</div>
-      <h3>{preview?.summary ?? item.sourceStatement}</h3>
-      <p>{preview?.cardKinds.length
+    <Link className={styles.homeSessionRow} href={reflectionSessionPath(item.id)}>
+      <div>
+        <h3>{preview?.summary ?? item.sourceStatement}</h3>
+        <p>{preview?.cardKinds.length
         ? `${preview.cardKinds.join("、")} · ${item.candidateCount} 条整理内容`
         : item.candidateCount > 0 ? `${item.candidateCount} 条整理内容` : "原始表达已保留"}</p>
-      <div className={styles.productCardMeta}><span className={styles.productPill}>{statusLabel(item)}</span>{item.rememberedCount > 0 ? <span>长期记住 {item.rememberedCount} 条</span> : null}</div>
+      </div>
+      <div className={styles.homeSessionMeta}><span>{item.recordingDate ?? "日期待确认"}</span><span>{source}</span>{duration ? <span>{duration}</span> : null}<b>{statusLabel(item)}</b>{item.rememberedCount > 0 ? <span>长期记住 {item.rememberedCount} 条</span> : null}</div>
     </Link>
   );
 }

@@ -99,6 +99,7 @@ type DailyReflectionShellProps = {
   embedded?: boolean;
   initialReflectionId?: string | null;
   initialSegmentId?: string | null;
+  initialCaptureMethod?: "record" | "upload" | "toy" | null;
   browserRecordingEnabled?: boolean;
   toySyncEnabled?: boolean;
   onLocalReviewMetric?: (metric: DailyReflectionLocalReviewMetric) => void;
@@ -147,6 +148,12 @@ function formatDurationSeconds(durationSeconds: number | null | undefined) {
   const seconds = Math.round(durationSeconds % 60);
   if (minutes === 0) return `${seconds} 秒`;
   return seconds > 0 ? `${minutes} 分 ${seconds} 秒` : `${minutes} 分钟`;
+}
+
+function formatEvidenceTime(seconds: number | null | undefined) {
+  if (seconds === null || seconds === undefined || !Number.isFinite(seconds)) return null;
+  const rounded = Math.max(0, Math.floor(seconds));
+  return `${Math.floor(rounded / 60)}:${String(rounded % 60).padStart(2, "0")}`;
 }
 
 export function recordingDurationCopy(durationMs: number | null) {
@@ -522,6 +529,8 @@ function activeWorkingCardStatus(status: string | undefined) {
 type ReflectionCardReviewProps = Readonly<{
   card: DailyReflectionCardView;
   busy: boolean;
+  editing: boolean;
+  onCancelEdit(): void;
   onDecision(decision: DailyReflectionCardDecision): void;
   onArchiveFromCards(cardId: string): void;
   onRestoreToCards(cardId: string): void;
@@ -530,17 +539,21 @@ type ReflectionCardReviewProps = Readonly<{
     draft: Pick<DailyReflectionCardDecision, "userTitle" | "userText">
   ): void;
   onSource(segmentId: string): void;
+  onStartEdit(): void;
   workingCardStatus?: "saved" | "archived" | "removed";
 }>;
 
 function ReflectionCardReview({
   card,
   busy,
+  editing,
+  onCancelEdit,
   onDecision,
   onArchiveFromCards,
   onRestoreToCards,
   onSaveToCards,
   onSource,
+  onStartEdit,
   workingCardStatus
 }: ReflectionCardReviewProps) {
   const [draftTitle, setDraftTitle] = useState(card.userTitle ?? card.proposedTitle);
@@ -570,8 +583,21 @@ function ReflectionCardReview({
     ...(promoteToPrimary ? { promoteToPrimary } : {})
   });
 
+  const cancelEdit = () => {
+    setDraftTitle(card.userTitle ?? card.proposedTitle);
+    setDraftText(card.userText ?? card.proposedText);
+    onCancelEdit();
+  };
+
+  const saveEdit = () => {
+    decide(card.reviewStatus);
+    onCancelEdit();
+  };
+
+  const firstEvidenceTime = formatEvidenceTime(card.evidence[0]?.startSeconds);
+
   return (
-    <li className={styles.candidateCard}>
+    <li className={`${styles.candidateCard} ${styles.reviewCard} ${card.displayTier === "more" ? styles.reviewCardCompact : ""}`}>
       <div className={styles.candidateCardTop}>
         <span className={styles.candidateType}>{CANDIDATE_KIND_LABELS[card.cardKind]}</span>
         <span className={`${styles.pendingBadge} ${card.reviewStatus === "kept"
@@ -582,32 +608,27 @@ function ReflectionCardReview({
           ? "已选择长期记住"
           : card.reviewStatus === "excluded" ? "不保存" : "稍后再看"}</span>
       </div>
-      <label className={styles.candidateEditor}>
-        <span>短标题</span>
-        <input
-          aria-label={`编辑标题：${card.proposedTitle}`}
-          disabled={busy}
-          maxLength={240}
-          onChange={(event) => setDraftTitle(event.target.value)}
-          value={draftTitle}
-        />
-      </label>
-      <label className={styles.candidateEditor}>
-        <span>内容</span>
-        <textarea
-          aria-label={`编辑内容：${card.proposedTitle}`}
-          disabled={busy}
-          maxLength={4_000}
-          onChange={(event) => setDraftText(event.target.value)}
-          rows={4}
-          value={draftText}
-        />
-      </label>
-      {displayedRiskFlags.length > 0 ? (
-        <ul className={styles.evidenceList} aria-label="需要留意">
-          {displayedRiskFlags.map((flag) => <li key={flag}>{CARD_RISK_LABELS[flag]}</li>)}
-        </ul>
-      ) : null}
+      {editing ? (
+        <div className={styles.reviewCardEditor}>
+          <label className={styles.candidateEditor}>
+            <span>标题</span>
+            <input aria-label={`编辑标题：${card.proposedTitle}`} disabled={busy} maxLength={240} onChange={(event) => setDraftTitle(event.target.value)} value={draftTitle} />
+          </label>
+          <label className={styles.candidateEditor}>
+            <span>正文</span>
+            <textarea aria-label={`编辑内容：${card.proposedTitle}`} disabled={busy} maxLength={4_000} onChange={(event) => setDraftText(event.target.value)} rows={5} value={draftText} />
+          </label>
+          <div className={styles.reviewEditActions}>
+            <button className={styles.textButton} disabled={busy} onClick={cancelEdit} type="button">取消</button>
+            <button className={styles.primaryButton} disabled={busy || !draftTitle.trim() || !draftText.trim()} onClick={saveEdit} type="button">保存编辑</button>
+          </div>
+        </div>
+      ) : (
+        <div className={styles.reviewCardReading}>
+          <h3>{card.userTitle ?? card.proposedTitle}</h3>
+          <p>{card.userText ?? card.proposedText}</p>
+        </div>
+      )}
       {card.cardKind === "user_action" ? (
         <label className={styles.actionClaim}>
           <input
@@ -619,15 +640,7 @@ function ReflectionCardReview({
           <span><b>这是我要做的</b><small>只有你主动勾选后，才会作为行动保留。</small></span>
         </label>
       ) : null}
-      <div className={styles.candidateSource}>
-        <span>{card.evidence.length} 段来源</span>
-        <button
-          aria-expanded={evidenceExpanded}
-          className={styles.sourceButton}
-          onClick={() => setEvidenceExpanded((current) => !current)}
-          type="button"
-        >{evidenceExpanded ? "收起来源" : "查看来源"}</button>
-      </div>
+      <div className={styles.reviewCardMeta}><span>{firstEvidenceTime ? `${firstEvidenceTime} · ` : ""}{card.evidence.length} 段来源</span></div>
       {evidenceExpanded ? (
         <ol className={styles.evidenceList}>
           {card.evidence.map((evidence) => (
@@ -642,7 +655,7 @@ function ReflectionCardReview({
           ))}
         </ol>
       ) : null}
-      <div className={styles.candidateActions}>
+      <div className={`${styles.candidateActions} ${styles.reviewCardActions}`}>
         {!workingCardStatus && card.reviewStatus !== "excluded" ? (
           <button
             className={styles.secondaryButton}
@@ -654,24 +667,27 @@ function ReflectionCardReview({
             type="button"
           >保存为卡片</button>
         ) : workingCardStatus === "saved" ? (
-          <>
-            <Link className={styles.secondaryButton} href={`/reflection/cards/${encodeURIComponent(card.id)}`}>打开卡片</Link>
-            <button className={styles.textButton} disabled={busy} onClick={() => onArchiveFromCards(card.id)} type="button">归档</button>
-          </>
+          <Link className={styles.secondaryButton} href={`/reflection/cards/${encodeURIComponent(card.id)}`}>打开卡片</Link>
         ) : workingCardStatus ? (
           <button className={styles.secondaryButton} disabled={busy} onClick={() => onRestoreToCards(card.id)} type="button">恢复卡片</button>
         ) : null}
-        {card.displayTier === "more" ? (
+        <button aria-expanded={evidenceExpanded} className={styles.secondaryButton} onClick={() => setEvidenceExpanded((current) => !current)} type="button">{evidenceExpanded ? "收起来源" : "查看来源"}</button>
+        <details className={styles.cardAdvancedActions}>
+          <summary aria-label="更多选择">⋯</summary>
+          <div>
+            <button className={styles.textButton} disabled={busy || editing} onClick={onStartEdit} type="button">编辑</button>
+            {workingCardStatus === "saved" ? (
+              <button className={styles.textButton} disabled={busy} onClick={() => onArchiveFromCards(card.id)} type="button">归档</button>
+            ) : null}
+            {displayedRiskFlags.length > 0 ? <p className={styles.reviewRiskCopy}>{displayedRiskFlags.map((flag) => CARD_RISK_LABELS[flag]).join(" · ")}</p> : null}
+            {card.displayTier === "more" ? (
           <button
             className={styles.textButton}
             disabled={busy}
             onClick={() => decide("pending", undefined, true)}
             type="button"
           >设为重点</button>
-        ) : null}
-        <details className={styles.cardAdvancedActions}>
-          <summary>更多选择</summary>
-          <div>
+            ) : null}
             <button
               aria-pressed={card.reviewStatus === "pending"}
               className={styles.secondaryButton}
@@ -998,6 +1014,7 @@ export function DailyReflectionShell({
   embedded = false,
   initialReflectionId = null,
   initialSegmentId = null,
+  initialCaptureMethod = null,
   browserRecordingEnabled = false,
   onLocalReviewMetric,
   toySyncEnabled = false,
@@ -1010,6 +1027,7 @@ export function DailyReflectionShell({
       embedded={embedded}
       initialReflectionId={initialReflectionId}
       initialSegmentId={initialSegmentId}
+      initialCaptureMethod={initialCaptureMethod}
       onLocalReviewMetric={onLocalReviewMetric}
       session={session}
       surface={surface}
@@ -1025,6 +1043,7 @@ export function DailyReflectionShellContent({
   embedded = false,
   initialReflectionId = null,
   initialSegmentId = null,
+  initialCaptureMethod = null,
   onLocalReviewMetric,
   session,
   surface = "legacy",
@@ -1042,6 +1061,13 @@ export function DailyReflectionShellContent({
   const [focusRequest, setFocusRequest] = useState<TranscriptFocusRequest | null>(null);
   const [deleteConfirmation, setDeleteConfirmation] = useState(false);
   const [moreCardsExpanded, setMoreCardsExpanded] = useState(false);
+  const [captureMode, setCaptureMode] = useState<"voice" | "upload" | "toy">(() => {
+    if (initialCaptureMethod === "upload") return "upload";
+    if (initialCaptureMethod === "toy") return "toy";
+    return browserRecordingEnabled ? "voice" : "upload";
+  });
+  const [toyPanelVisited, setToyPanelVisited] = useState(initialCaptureMethod === "toy");
+  const [editingCardId, setEditingCardId] = useState<string | null>(null);
   const recorderRef = useRef<DailyReflectionBrowserRecorder | null>(null);
   const browserSubmitLatch = useRef(false);
   const browserReadyOperationKey = useRef<string | null>(null);
@@ -1081,7 +1107,20 @@ export function DailyReflectionShellContent({
   useEffect(() => {
     setDeleteConfirmation(false);
     setMoreCardsExpanded(false);
+    setEditingCardId(null);
   }, [session.reflectionId]);
+
+  useEffect(() => {
+    const nextMode = initialCaptureMethod === "upload"
+      ? "upload"
+      : initialCaptureMethod === "toy"
+        ? "toy"
+        : browserRecordingEnabled
+          ? "voice"
+          : "upload";
+    setCaptureMode(nextMode);
+    if (nextMode === "toy") setToyPanelVisited(true);
+  }, [browserRecordingEnabled, initialCaptureMethod]);
 
   useEffect(() => {
     if (!session.reflectionId) return;
@@ -1543,22 +1582,36 @@ export function DailyReflectionShellContent({
         </section> : null}
 
         {!showRecord && surface !== "session" ? (
-          <div className={styles.workspace}>
-            {toySyncEnabled ? (
-              <DailyReflectionToySync
-                accountId={session.auth.user.id}
-                busy={busy}
-                key={session.auth.user.id}
-                onUpload={(toyFile, toyRecordingDate, operationKey, toySourceOrigin) => session.upload(
-                  toyFile,
-                  toySourceOrigin,
-                  toyRecordingDate,
-                  { operationKey, inputAdapter: "toy_sync" }
-                )}
-              />
+          <div className={styles.captureWorkspace}>
+            <div className={styles.captureModeTabs} role="tablist" aria-label="选择表达方式">
+              {browserRecordingEnabled ? (
+                <button aria-controls="reflection-capture-record" aria-selected={captureMode === "voice"} onClick={() => setCaptureMode("voice")} role="tab" type="button">开始说</button>
+              ) : null}
+              <button aria-controls="reflection-capture-upload" aria-selected={captureMode === "upload"} onClick={() => setCaptureMode("upload")} role="tab" type="button">上传录音</button>
+              {toySyncEnabled ? (
+                <button aria-controls="reflection-capture-toy" aria-selected={captureMode === "toy"} onClick={() => {
+                  setToyPanelVisited(true);
+                  setCaptureMode("toy");
+                }} role="tab" type="button">从玩偶导入</button>
+              ) : null}
+            </div>
+            {toySyncEnabled && (toyPanelVisited || captureMode === "toy") ? (
+              <div className={styles.capturePanel} hidden={captureMode !== "toy"} id="reflection-capture-toy" role="tabpanel">
+                <DailyReflectionToySync
+                  accountId={session.auth.user.id}
+                  busy={busy}
+                  key={session.auth.user.id}
+                  onUpload={(toyFile, toyRecordingDate, operationKey, toySourceOrigin) => session.upload(
+                    toyFile,
+                    toySourceOrigin,
+                    toyRecordingDate,
+                    { operationKey, inputAdapter: "toy_sync" }
+                  )}
+                />
+              </div>
             ) : null}
             {browserRecordingEnabled ? (
-              <section id="reflection-capture-record" className={`${styles.uploadCard} ${styles.recordingCard}`} aria-labelledby="daily-reflection-recording-title">
+              <section hidden={captureMode !== "voice"} id="reflection-capture-record" className={`${styles.uploadCard} ${styles.recordingCard} ${styles.capturePanel}`} aria-labelledby="daily-reflection-recording-title" role="tabpanel">
                 <div>
                   <p className={styles.eyebrow}>现在说一说</p>
                   <h2 id="daily-reflection-recording-title">开始说</h2>
@@ -1636,7 +1689,7 @@ export function DailyReflectionShellContent({
                 <p className={styles.localOnlyNote}>提交前请不要刷新或离开，本地录音不会自动恢复。提交成功后可以稍后从“最近复盘”回来。</p>
               </section>
             ) : null}
-            <form id="reflection-capture-upload" className={styles.uploadCard} aria-label="上传日常复盘录音" onSubmit={submit}>
+            <form hidden={captureMode !== "upload"} id="reflection-capture-upload" className={`${styles.uploadCard} ${styles.capturePanel}`} aria-label="上传日常复盘录音" onSubmit={submit}>
               <div>
                   <p className={styles.eyebrow}>已有一段声音</p>
                   <h2>上传录音</h2>
@@ -1709,7 +1762,7 @@ export function DailyReflectionShellContent({
         ) : showRecord ? (
           <div className={styles.statusColumn}>
             <div className={styles.detailToolbar}>
-              <button className={styles.secondaryButton} disabled={busy} onClick={() => {
+              <button className={`${styles.secondaryButton} ${styles.sessionBackButton}`} disabled={busy} onClick={() => {
                 session.startNew();
                 if (embedded) router.push(REFLECTION_ROUTES.home);
               }} type="button">
@@ -1793,9 +1846,12 @@ export function DailyReflectionShellContent({
                   </button>
                 ) : null}
                 {session.reflectionId ? (
-                  <button className={styles.dangerButton} disabled={busy} onClick={() => setDeleteConfirmation(true)} type="button">
-                    删除原始记录
-                  </button>
+                  <details className={styles.recordAdvancedActions}>
+                    <summary>更多</summary>
+                    <div>
+                      <button className={styles.dangerButton} disabled={busy} onClick={() => setDeleteConfirmation(true)} type="button">删除原始记录</button>
+                    </div>
+                  </details>
                 ) : null}
               </div>
               <ReflectionConfirmDialog
@@ -1841,7 +1897,7 @@ export function DailyReflectionShellContent({
 
             {detail?.reflection.status === "review_pending" ? (
               <div>
-                <section className={styles.candidateSection} aria-labelledby="daily-reflection-candidates-title">
+                <section className={`${styles.candidateSection} ${styles.reviewSection}`} aria-labelledby="daily-reflection-candidates-title">
                   <div className={styles.sectionHeading}>
                     <div>
                       <p>先查看，不会自动进入长期记忆</p>
@@ -1850,8 +1906,12 @@ export function DailyReflectionShellContent({
                     <span>{cards.length > 0 ? cards.length : candidates.length} 条</span>
                   </div>
                   {cards.length > 0 ? (
-                    <div className={styles.reviewToolbar}>
-                      <p>{[...new Set(cards.map((card) => card.clusterTitle))].join(" · ")}</p>
+                    <div className={styles.reviewOverview}>
+                      <div>
+                        <span>你主要在思考</span>
+                        <strong>{[...new Set(cards.map((card) => card.clusterTitle))].join(" · ")}</strong>
+                        <small>{[...new Set(cards.map((card) => card.clusterTitle))].length} 个主题 · {cards.length} 张卡片</small>
+                      </div>
                       <button
                         className={styles.secondaryButton}
                         disabled={busy || unsavedPrimaryCards.length === 0}
@@ -1873,17 +1933,20 @@ export function DailyReflectionShellContent({
                   {cards.length > 0 ? (
                     <>
                       <h3>值得带走</h3>
-                      <ol className={styles.candidateList}>
+                      <ol className={`${styles.candidateList} ${styles.primaryCardGrid}`}>
                         {primaryCards.map((card) => (
                           <ReflectionCardReview
                             busy={busy}
                             card={card}
+                            editing={editingCardId === card.id}
                             key={card.id}
+                            onCancelEdit={() => setEditingCardId(null)}
                             onDecision={(decision) => decideCard(card, decision)}
                             onArchiveFromCards={(cardId) => void session.archiveWorkingCard(cardId)}
                             onRestoreToCards={(cardId) => void session.restoreWorkingCard(cardId)}
                             onSaveToCards={(cardId, draft) => void session.saveWorkingCard(cardId, draft)}
                             onSource={requestTranscriptSegmentFocus}
+                            onStartEdit={() => setEditingCardId(card.id)}
                             workingCardStatus={activeWorkingCardStatus(
                               session.workingCardStates[card.id]?.status
                             )}
@@ -1901,17 +1964,20 @@ export function DailyReflectionShellContent({
                             ? "收起更多整理结果"
                             : `还有 ${moreCards.length} 条可能有用的内容`}</button>
                           {moreCardsExpanded ? (
-                            <ol className={styles.candidateList}>
+                            <ol className={`${styles.candidateList} ${styles.moreCardList}`}>
                               {moreCards.map((card) => (
                                 <ReflectionCardReview
                                   busy={busy}
                                   card={card}
+                                  editing={editingCardId === card.id}
                                   key={card.id}
+                                  onCancelEdit={() => setEditingCardId(null)}
                                   onDecision={(decision) => decideCard(card, decision)}
                                   onArchiveFromCards={(cardId) => void session.archiveWorkingCard(cardId)}
                                   onRestoreToCards={(cardId) => void session.restoreWorkingCard(cardId)}
                                   onSaveToCards={(cardId, draft) => void session.saveWorkingCard(cardId, draft)}
                                   onSource={requestTranscriptSegmentFocus}
+                                  onStartEdit={() => setEditingCardId(card.id)}
                                   workingCardStatus={activeWorkingCardStatus(
                                     session.workingCardStates[card.id]?.status
                                   )}
@@ -1949,7 +2015,7 @@ export function DailyReflectionShellContent({
                   ) : null}
                   <div className={styles.finalizePanel}>
                     <div>
-                      <b>完成这次复盘</b>
+                      <b>已选择 {savedCardCount} 张卡片 · 长期记住 {retainedCandidateCount} 条</b>
                       <p>已保存 {savedCardCount} 张卡片；{retainedCandidateCount > 0
                         ? `将长期记住 ${retainedCandidateCount} 条你明确选择的内容。`
                         : "其余整理内容只会留在这次复盘里。"}
