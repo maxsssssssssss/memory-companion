@@ -8,5 +8,5 @@ export default async function ReflectionCardDetailPage({
   params
 }: Readonly<{ params: Promise<{ cardId: string }> }>) {
   const { cardId } = await params;
-  return <DailyReflectionCardLibrary detailOnly embedded initialCardId={cardId} />;
+  return <DailyReflectionCardLibrary embedded initialCardId={cardId} />;
 }

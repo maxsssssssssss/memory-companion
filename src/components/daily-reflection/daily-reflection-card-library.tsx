@@ -1,7 +1,17 @@
 "use client";
 
 import Link from "next/link";
-import { type FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  type CSSProperties,
+  type FormEvent,
+  type MouseEvent as ReactMouseEvent,
+  useCallback,
+  useEffect,
+  useId,
+  useMemo,
+  useRef,
+  useState
+} from "react";
 
 import {
   createDailyReflectionApi,
@@ -19,11 +29,7 @@ import type {
 
 import styles from "./daily-reflection.module.css";
 import { ReflectionConfirmDialog } from "./reflection-confirm-dialog";
-import {
-  reflectionCardKindLabel,
-  reflectionCardPath,
-  reflectionSessionPath
-} from "./reflection-product";
+import { reflectionCardPath, reflectionSessionPath } from "./reflection-product";
 
 const FILTER_KIND_LABELS = {
   insight: "洞察",
@@ -33,6 +39,22 @@ const FILTER_KIND_LABELS = {
 } as const satisfies Partial<Record<DailyReflectionWorkingCardKind, string>>;
 
 type ProductCardKind = keyof typeof FILTER_KIND_LABELS;
+type ConfirmAction = "discard" | "remove" | "revoke";
+type ExpansionPhase = "opening" | "open" | "closing";
+type Rect = Readonly<{ height: number; left: number; top: number; width: number }>;
+type CardExpansion = Readonly<{
+  cardId: string;
+  origin: Rect | null;
+  phase: ExpansionPhase;
+  target: Rect;
+}>;
+
+type DailyReflectionCardLibraryProps = Readonly<{
+  api?: DailyReflectionApi;
+  embedded?: boolean;
+  initialCardId?: string | null;
+  now?: () => Date;
+}>;
 
 const STATUS_LABELS: Record<DailyReflectionWorkingCardStatus, string> = {
   generated: "等待保存",
@@ -41,15 +63,7 @@ const STATUS_LABELS: Record<DailyReflectionWorkingCardStatus, string> = {
   archived: "已归档",
   removed: "已从卡片库移除"
 };
-
-type DailyReflectionCardLibraryProps = Readonly<{
-  api?: DailyReflectionApi;
-  detailOnly?: boolean;
-  embedded?: boolean;
-  initialCardId?: string | null;
-  now?: () => Date;
-}>;
-
+const OVERLAY_HISTORY_KEY = "__dailyReflectionCardOverlay";
 const defaultNow = () => new Date();
 
 function formatTime(value: string) {
@@ -62,16 +76,82 @@ function formatTime(value: string) {
   }).format(new Date(value));
 }
 
+function presentationKind(kind: DailyReflectionWorkingCardKind): ProductCardKind {
+  if (kind === "question" || kind === "decision" || kind === "action") return kind;
+  return "insight";
+}
+
+function CardKindIcon({ kind }: Readonly<{ kind: ProductCardKind }>) {
+  if (kind === "question") {
+    return <svg aria-hidden="true" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5" /><path d="M9.8 9.5a2.4 2.4 0 0 1 4.6 1c0 1.8-2.4 2-2.4 3.6" /><path d="M12 17.2h.01" /></svg>;
+  }
+  if (kind === "decision") {
+    return <svg aria-hidden="true" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5" /><path d="m8.5 12 2.3 2.3 4.8-5" /></svg>;
+  }
+  if (kind === "action") {
+    return <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M7 5.5 17 12 7 18.5Z" /></svg>;
+  }
+  return <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M8.5 14.5c-1.2-1-2-2.5-2-4.1a5.5 5.5 0 0 1 11 0c0 1.7-.8 3.2-2.1 4.2-.8.6-1.1 1.2-1.2 2H9.8c-.1-.8-.5-1.5-1.3-2.1Z" /><path d="M9.8 19h4.4" /></svg>;
+}
+
+function rectFromElement(element: HTMLElement | null): Rect | null {
+  if (!element) return null;
+  const rect = element.getBoundingClientRect();
+  if (rect.width <= 0 || rect.height <= 0) return null;
+  return { height: rect.height, left: rect.left, top: rect.top, width: rect.width };
+}
+
+function targetRect(): Rect {
+  const viewportWidth = window.innerWidth;
+  const viewportHeight = window.innerHeight;
+  const mobile = viewportWidth <= 620;
+  const horizontalMargin = mobile ? 14 : 32;
+  const verticalMargin = mobile ? 14 : 54;
+  const width = Math.min(mobile ? viewportWidth - 28 : 820, viewportWidth - horizontalMargin * 2);
+  const maxHeight = Math.min(
+    mobile ? viewportHeight * 0.87 : viewportHeight * 0.76,
+    viewportHeight - verticalMargin * 2
+  );
+  const height = Math.max(Math.min(maxHeight, mobile ? 720 : 690), Math.min(420, maxHeight));
+  return {
+    height,
+    left: Math.max(horizontalMargin, (viewportWidth - width) / 2),
+    top: Math.max(verticalMargin, (viewportHeight - height) / 2),
+    width
+  };
+}
+
+function fallbackOrigin(target: Rect): Rect {
+  return {
+    height: target.height * 0.9,
+    left: target.left + target.width * 0.04,
+    top: target.top + target.height * 0.05,
+    width: target.width * 0.92
+  };
+}
+
+function cardIdFromPathname(pathname: string) {
+  const match = /^\/reflection\/cards\/([^/]+)\/?$/u.exec(pathname);
+  if (!match?.[1]) return null;
+  try {
+    return decodeURIComponent(match[1]);
+  } catch {
+    return null;
+  }
+}
+
 export function DailyReflectionCardLibrary({
   api: providedApi,
-  detailOnly = false,
   embedded = false,
   initialCardId = null,
   now = defaultNow
 }: DailyReflectionCardLibraryProps) {
   const api = useMemo(() => providedApi ?? createDailyReflectionApi(), [providedApi]);
+  const dialogId = useId();
+  const dialogTitleId = useId();
   const [cards, setCards] = useState<DailyReflectionWorkingCardView[]>([]);
   const [total, setTotal] = useState(0);
+  const [countsComplete, setCountsComplete] = useState(false);
   const [queryDraft, setQueryDraft] = useState("");
   const [query, setQuery] = useState("");
   const [cardKind, setCardKind] = useState<ProductCardKind | "">("");
@@ -82,23 +162,43 @@ export function DailyReflectionCardLibrary({
   const [titleDraft, setTitleDraft] = useState("");
   const [contentDraft, setContentDraft] = useState("");
   const [loading, setLoading] = useState(true);
+  const [detailLoading, setDetailLoading] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [confirmAction, setConfirmAction] = useState<"remove" | "revoke" | null>(null);
+  const [detailError, setDetailError] = useState<string | null>(null);
+  const [confirmAction, setConfirmAction] = useState<ConfirmAction | null>(null);
   const [editing, setEditing] = useState(false);
   const [filtersOpen, setFiltersOpen] = useState(false);
-  const openedInitialCardId = useRef<string | null>(null);
+  const [expansion, setExpansion] = useState<CardExpansion | null>(null);
+  const [listBusyCardId, setListBusyCardId] = useState<string | null>(null);
+  const expansionRef = useRef<CardExpansion | null>(null);
+  const dirtyRef = useRef(false);
+  const detailControllerRef = useRef<AbortController | null>(null);
+  const detailRequestVersionRef = useRef(0);
+  const deepLinkSeededRef = useRef(false);
+  const closeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const closeNavigationRef = useRef(false);
+  const dialogRef = useRef<HTMLDivElement | null>(null);
   const filterCloseRef = useRef<HTMLButtonElement | null>(null);
+  const filterTriggerRef = useRef<HTMLButtonElement | null>(null);
+  const titleRefs = useRef(new Map<string, HTMLButtonElement>());
 
-  useEffect(() => {
-    if (!filtersOpen) return;
-    filterCloseRef.current?.focus();
-    const closeOnEscape = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setFiltersOpen(false);
-    };
-    window.addEventListener("keydown", closeOnEscape);
-    return () => window.removeEventListener("keydown", closeOnEscape);
-  }, [filtersOpen]);
+  const dirty = Boolean(
+    editing
+    && selected
+    && (titleDraft !== selected.card.title || contentDraft !== selected.card.content)
+  );
+  const expansionOpen = expansion !== null;
+  dirtyRef.current = dirty;
+  expansionRef.current = expansion;
+
+  const visibleCards = useMemo(() => cardKind
+    ? cards.filter((card) => presentationKind(card.cardKind) === cardKind)
+    : cards, [cardKind, cards]);
+  const kindCounts = useMemo(() => cards.reduce<Record<ProductCardKind, number>>((counts, card) => {
+    counts[presentationKind(card.cardKind)] += 1;
+    return counts;
+  }, { action: 0, decision: 0, insight: 0, question: 0 }), [cards]);
 
   const loadCards = useCallback(async (signal?: AbortSignal) => {
     setLoading(true);
@@ -109,7 +209,6 @@ export function DailyReflectionCardLibrary({
         : undefined;
       const result = await api.listWorkingCards({
         ...(query ? { query } : {}),
-        ...(cardKind ? { cardKind } : {}),
         ...(status ? { status } : {}),
         ...(createdFrom ? { createdFrom } : {}),
         sort,
@@ -118,46 +217,239 @@ export function DailyReflectionCardLibrary({
       }, signal);
       setCards(result.cards);
       setTotal(result.total);
+      setCountsComplete(result.total <= result.cards.length);
     } catch (cause) {
       if (signal?.aborted) return;
       setError(cause instanceof Error ? cause.message : "卡片暂时无法加载。");
     } finally {
       if (!signal?.aborted) setLoading(false);
     }
-  }, [api, cardKind, now, query, sort, status, timeRange]);
+  }, [api, now, query, sort, status, timeRange]);
 
   useEffect(() => {
-    if (detailOnly) {
-      setLoading(false);
-      return;
-    }
     const controller = new AbortController();
     void loadCards(controller.signal);
     return () => controller.abort();
-  }, [detailOnly, loadCards]);
+  }, [loadCards]);
 
   const openCard = useCallback(async (cardId: string) => {
-    setBusy(true);
-    setError(null);
+    detailControllerRef.current?.abort();
+    const controller = new AbortController();
+    detailControllerRef.current = controller;
+    const requestVersion = detailRequestVersionRef.current + 1;
+    detailRequestVersionRef.current = requestVersion;
+    setDetailLoading(true);
+    setDetailError(null);
     setSelected(null);
     try {
-      const result = await api.getWorkingCard(cardId);
+      const result = await api.getWorkingCard(cardId, controller.signal);
+      if (controller.signal.aborted || requestVersion !== detailRequestVersionRef.current) return;
       setSelected(result);
       setTitleDraft(result.card.title);
       setContentDraft(result.card.content);
       setEditing(false);
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : "卡片详情暂时无法加载。");
+      if (controller.signal.aborted || requestVersion !== detailRequestVersionRef.current) return;
+      setDetailError(cause instanceof Error ? cause.message : "卡片详情暂时无法加载。");
     } finally {
-      setBusy(false);
+      if (!controller.signal.aborted && requestVersion === detailRequestVersionRef.current) setDetailLoading(false);
     }
   }, [api]);
 
+  const beginExpansion = useCallback((cardId: string, originElement: HTMLElement | null, updateHistory: boolean) => {
+    if (expansionRef.current?.cardId === cardId && expansionRef.current.phase !== "closing") {
+      if (detailControllerRef.current?.signal.aborted) void openCard(cardId);
+      return;
+    }
+    if (closeTimerRef.current) clearTimeout(closeTimerRef.current);
+    const target = targetRect();
+    const origin = rectFromElement(originElement);
+    const reducedMotion = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false;
+    setExpansion({ cardId, origin, phase: reducedMotion ? "open" : "opening", target });
+    void openCard(cardId);
+    if (updateHistory) {
+      window.history.pushState({ ...(window.history.state ?? {}), [OVERLAY_HISTORY_KEY]: cardId }, "", reflectionCardPath(cardId));
+    }
+    if (!reducedMotion) {
+      window.requestAnimationFrame(() => window.requestAnimationFrame(() => {
+        setExpansion((current) => current?.cardId === cardId ? { ...current, phase: "open" } : current);
+      }));
+    }
+  }, [openCard]);
+
+  const finishClosing = useCallback((navigateAfter: boolean) => {
+    if (closeTimerRef.current) {
+      clearTimeout(closeTimerRef.current);
+      closeTimerRef.current = null;
+    }
+    const closingCardId = expansionRef.current?.cardId ?? null;
+    detailControllerRef.current?.abort();
+    setExpansion(null);
+    setSelected(null);
+    setDetailError(null);
+    setDetailLoading(false);
+    setEditing(false);
+    setConfirmAction(null);
+    if (navigateAfter) {
+      if (window.history.state?.[OVERLAY_HISTORY_KEY]) window.history.back();
+      else window.history.replaceState(window.history.state ?? {}, "", "/reflection/cards");
+    }
+    window.requestAnimationFrame(() => {
+      if (closingCardId) titleRefs.current.get(closingCardId)?.focus();
+    });
+  }, []);
+
+  const beginClosing = useCallback((navigateAfter: boolean) => {
+    const current = expansionRef.current;
+    if (!current || current.phase === "closing") return;
+    closeNavigationRef.current = navigateAfter;
+    const origin = rectFromElement(titleRefs.current.get(current.cardId)?.closest<HTMLElement>("[data-card-id]") ?? null) ?? current.origin;
+    const reducedMotion = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false;
+    if (reducedMotion) {
+      finishClosing(navigateAfter);
+      return;
+    }
+    setExpansion({ ...current, origin, phase: "closing" });
+    closeTimerRef.current = setTimeout(() => finishClosing(navigateAfter), 340);
+  }, [finishClosing]);
+
+  const requestClose = useCallback((navigateAfter = true) => {
+    if (dirtyRef.current) {
+      setConfirmAction("discard");
+      return;
+    }
+    beginClosing(navigateAfter);
+  }, [beginClosing]);
+
   useEffect(() => {
-    if (!initialCardId || openedInitialCardId.current === initialCardId) return;
-    openedInitialCardId.current = initialCardId;
-    void openCard(initialCardId);
-  }, [initialCardId, openCard]);
+    if (!initialCardId || deepLinkSeededRef.current) return;
+    deepLinkSeededRef.current = true;
+    const currentState = window.history.state ?? {};
+    const alreadySeeded = currentState[OVERLAY_HISTORY_KEY] === initialCardId
+      && cardIdFromPathname(window.location.pathname) === initialCardId;
+    if (!alreadySeeded) {
+      window.history.replaceState({ ...currentState }, "", "/reflection/cards");
+      window.history.pushState({ ...currentState, [OVERLAY_HISTORY_KEY]: initialCardId }, "", reflectionCardPath(initialCardId));
+    }
+    beginExpansion(initialCardId, null, false);
+    return () => {
+      deepLinkSeededRef.current = false;
+    };
+  }, [beginExpansion, initialCardId]);
+
+  useEffect(() => {
+    const onPopState = () => {
+      const nextCardId = cardIdFromPathname(window.location.pathname);
+      const current = expansionRef.current;
+      if (nextCardId) {
+        if (current?.cardId !== nextCardId || current.phase === "closing") {
+          beginExpansion(nextCardId, titleRefs.current.get(nextCardId)?.closest<HTMLElement>("[data-card-id]") ?? null, false);
+        }
+        return;
+      }
+      if (!current) return;
+      if (dirtyRef.current) {
+        window.history.pushState({ ...(window.history.state ?? {}), [OVERLAY_HISTORY_KEY]: current.cardId }, "", reflectionCardPath(current.cardId));
+        setConfirmAction("discard");
+        return;
+      }
+      beginClosing(false);
+    };
+    window.addEventListener("popstate", onPopState);
+    return () => window.removeEventListener("popstate", onPopState);
+  }, [beginClosing, beginExpansion]);
+
+  useEffect(() => {
+    if (!expansionOpen) return;
+    const onResize = () => setExpansion((current) => current ? { ...current, target: targetRect() } : current);
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
+  }, [expansionOpen]);
+
+  useEffect(() => {
+    if (!expansionOpen) return;
+    const body = document.body;
+    const previousOverflow = body.style.overflow;
+    const previousPaddingRight = body.style.paddingRight;
+    const scrollbarWidth = window.innerWidth - document.documentElement.clientWidth;
+    body.style.overflow = "hidden";
+    if (scrollbarWidth > 0 && scrollbarWidth < 64) body.style.paddingRight = `${scrollbarWidth}px`;
+    const frame = window.requestAnimationFrame(() => dialogRef.current?.focus());
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        requestClose(true);
+        return;
+      }
+      if (event.key !== "Tab") return;
+      const focusable = dialogRef.current?.querySelectorAll<HTMLElement>(
+        "button:not([disabled]), a[href], input:not([disabled]), textarea:not([disabled]), select:not([disabled]), summary, [tabindex]:not([tabindex='-1'])"
+      );
+      if (!focusable?.length) return;
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    };
+    document.addEventListener("keydown", onKeyDown);
+    return () => {
+      window.cancelAnimationFrame(frame);
+      document.removeEventListener("keydown", onKeyDown);
+      body.style.overflow = previousOverflow;
+      body.style.paddingRight = previousPaddingRight;
+    };
+  }, [expansionOpen, requestClose]);
+
+  useEffect(() => {
+    if (!dirty) return;
+    const onBeforeUnload = (event: BeforeUnloadEvent) => event.preventDefault();
+    window.addEventListener("beforeunload", onBeforeUnload);
+    return () => window.removeEventListener("beforeunload", onBeforeUnload);
+  }, [dirty]);
+
+  useEffect(() => () => {
+    detailControllerRef.current?.abort();
+    if (closeTimerRef.current) clearTimeout(closeTimerRef.current);
+  }, []);
+
+  useEffect(() => {
+    if (!filtersOpen) return;
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    filterCloseRef.current?.focus();
+    const restoreFilterFocus = () => window.requestAnimationFrame(() => filterTriggerRef.current?.focus());
+    const closeOnKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        setFiltersOpen(false);
+        restoreFilterFocus();
+        return;
+      }
+      if (event.key !== "Tab") return;
+      const panel = filterCloseRef.current?.closest<HTMLElement>("[role='dialog']");
+      const focusable = panel?.querySelectorAll<HTMLElement>("button:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex='-1'])");
+      if (!focusable?.length) return;
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    };
+    window.addEventListener("keydown", closeOnKey);
+    return () => {
+      window.removeEventListener("keydown", closeOnKey);
+      document.body.style.overflow = previousOverflow;
+    };
+  }, [filtersOpen]);
 
   const saveEdits = async () => {
     const card = selected?.card;
@@ -165,25 +457,21 @@ export function DailyReflectionCardLibrary({
     const content = contentDraft.normalize("NFKC").trim();
     if (!card || !title || !content || busy) return;
     setBusy(true);
-    setError(null);
+    setDetailError(null);
     try {
-      const result = await api.updateWorkingCard(card.id, {
-        expectedVersion: card.version,
-        title,
-        content
-      });
+      const result = await api.updateWorkingCard(card.id, { expectedVersion: card.version, title, content });
       setSelected(result);
       setTitleDraft(result.card.title);
       setContentDraft(result.card.content);
       setEditing(false);
-      if (!detailOnly) await loadCards();
+      await loadCards();
     } catch (cause) {
       if (cause instanceof DailyReflectionApiError && cause.status === 409) {
         await openCard(card.id);
-        if (!detailOnly) await loadCards();
-        setError("这张卡片已经在其他页面更新，已重新加载最新内容。");
+        await loadCards();
+        setDetailError("这张卡片已经在其他页面更新，已重新加载最新内容。");
       } else {
-        setError(cause instanceof Error ? cause.message : "卡片修改没有保存成功。");
+        setDetailError(cause instanceof Error ? cause.message : "卡片修改没有保存成功。");
       }
     } finally {
       setBusy(false);
@@ -194,7 +482,7 @@ export function DailyReflectionCardLibrary({
     const card = selected?.card;
     if (!card || busy) return;
     setBusy(true);
-    setError(null);
+    setDetailError(null);
     try {
       const input = { expectedVersion: card.version };
       const result = operation === "archive"
@@ -203,40 +491,53 @@ export function DailyReflectionCardLibrary({
           ? await api.restoreWorkingCard(card.id, input)
           : await api.removeWorkingCard(card.id, input);
       setSelected(result);
-      if (!detailOnly) await loadCards();
+      await loadCards();
       if (operation === "remove") setConfirmAction(null);
     } catch (cause) {
       if (cause instanceof DailyReflectionApiError && cause.status === 409) {
         await openCard(card.id);
-        if (!detailOnly) await loadCards();
-        setError("这张卡片已经在其他页面更新，已重新加载最新内容。");
+        await loadCards();
+        setDetailError("这张卡片已经在其他页面更新，已重新加载最新内容。");
       } else {
-        setError(cause instanceof Error ? cause.message : "卡片状态没有更新成功。");
+        setDetailError(cause instanceof Error ? cause.message : "卡片状态没有更新成功。");
       }
     } finally {
       setBusy(false);
     }
   };
 
+  const applyListLifecycle = async (card: DailyReflectionWorkingCardView, operation: "archive" | "restore") => {
+    if (listBusyCardId) return;
+    setListBusyCardId(card.id);
+    setError(null);
+    try {
+      const input = { expectedVersion: card.version };
+      if (operation === "archive") await api.archiveWorkingCard(card.id, input);
+      else await api.restoreWorkingCard(card.id, input);
+      await loadCards();
+    } catch (cause) {
+      if (cause instanceof DailyReflectionApiError && cause.status === 409) {
+        await loadCards();
+        setError("这张卡片已经在其他页面更新，已重新加载最新内容。");
+      } else {
+        setError(cause instanceof Error ? cause.message : "卡片状态没有更新成功。");
+      }
+    } finally {
+      setListBusyCardId(null);
+    }
+  };
+
   const revokeMemorySource = async () => {
     const card = selected?.card;
-    if (
-      !card
-      || busy
-      || (card.memoryLifecycleStatus !== "active"
-        && card.memoryLifecycleStatus !== "revocation_requested")
-    ) return;
+    if (!card || busy || (card.memoryLifecycleStatus !== "active" && card.memoryLifecycleStatus !== "revocation_requested")) return;
     setBusy(true);
-    setError(null);
+    setDetailError(null);
     try {
       let expectedMemoryLifecycleVersion = card.memoryLifecycleVersion;
       if (card.memoryLifecycleStatus === "revocation_requested") {
         const recovery = await api.getWorkingCardMemoryRevocation(card.id);
-        if (!recovery.found) {
-          throw new Error("撤销进度无法恢复，请重新加载后再试。");
-        }
-        expectedMemoryLifecycleVersion =
-          recovery.result.operation.requestedMemoryLifecycleVersion;
+        if (!recovery.found) throw new Error("撤销进度无法恢复，请重新加载后再试。");
+        expectedMemoryLifecycleVersion = recovery.result.operation.requestedMemoryLifecycleVersion;
       }
       await api.revokeWorkingCardMemory(card.id, {
         expectedMemoryLifecycleVersion,
@@ -244,17 +545,15 @@ export function DailyReflectionCardLibrary({
       });
       const refreshed = await api.getWorkingCard(card.id);
       setSelected(refreshed);
-      if (!detailOnly) await loadCards();
+      await loadCards();
       setConfirmAction(null);
     } catch (cause) {
       if (cause instanceof DailyReflectionApiError && cause.status === 409) {
         await openCard(card.id);
-        if (!detailOnly) await loadCards();
-        setError("这张卡片已经在其他页面更新，已重新加载最新内容。");
+        await loadCards();
+        setDetailError("这张卡片已经在其他页面更新，已重新加载最新内容。");
       } else {
-        setError(cause instanceof Error
-          ? cause.message
-          : "这条长期记忆暂时没有撤销成功。");
+        setDetailError(cause instanceof Error ? cause.message : "这条长期记忆暂时没有撤销成功。");
       }
     } finally {
       setBusy(false);
@@ -265,169 +564,156 @@ export function DailyReflectionCardLibrary({
     event.preventDefault();
     setQuery(queryDraft.normalize("NFKC").trim());
   };
+  const openFromTitle = (event: ReactMouseEvent<HTMLButtonElement>, cardId: string) => {
+    beginExpansion(cardId, event.currentTarget.closest<HTMLElement>("[data-card-id]"), true);
+  };
 
-  const selectedDetail = !selected && (loading || busy) ? (
-    <p className={styles.productEmpty} role="status">正在读取这张卡片…</p>
-  ) : !selected ? (
-    <div className={styles.productEmpty}>
-      <h2>{detailOnly ? "这张卡片暂时无法打开" : "选择一张卡片"}</h2>
-      <p>{detailOnly ? "它可能已被移除，或当前无法读取。" : "在这里查看、编辑并核对卡片的原始来源。"}</p>
-    </div>
-  ) : (
-    <article className={styles.cardDetailArticle}>
-      <div className={styles.cardDetailHeading}>
+  const selectedCard = selected?.card;
+  const selectedSummary = cards.find((card) => card.id === expansion?.cardId);
+  const expandedTitle = selectedCard?.title ?? selectedSummary?.title ?? "正在打开卡片";
+  const expandedKind = presentationKind(selectedCard?.cardKind ?? selectedSummary?.cardKind ?? "insight");
+  const expandedBox = expansion
+    ? expansion.phase === "open" ? expansion.target : expansion.origin ?? fallbackOrigin(expansion.target)
+    : null;
+  const expandedStyle = expandedBox ? {
+    height: `${expandedBox.height}px`, left: `${expandedBox.left}px`, top: `${expandedBox.top}px`, width: `${expandedBox.width}px`
+  } satisfies CSSProperties : undefined;
+
+  const expandedDetail = (
+    <>
+      <header className={styles.cardExpansionHeader}>
         <div>
-          <p className={styles.eyebrow}>{reflectionCardKindLabel(selected.card.cardKind)}</p>
-          <h1>{selected.card.title}</h1>
+          <span className={styles.cardKindMark} data-kind={expandedKind}><CardKindIcon kind={expandedKind} />{FILTER_KIND_LABELS[expandedKind]}</span>
+          <h2 className={styles.cardExpansionTitle} id={dialogTitleId}>
+            <button aria-label={`收起卡片：${expandedTitle}`} onClick={() => requestClose(true)} type="button">{expandedTitle}</button>
+          </h2>
         </div>
-        <span className={styles.pendingBadge}>{STATUS_LABELS[selected.card.status]}</span>
-      </div>
-      {editing ? (
-        <div className={styles.cardDetailEditor}>
-          <label className={styles.candidateEditor}>
-            <span>标题</span>
-            <input aria-label="编辑卡片标题" disabled={busy || selected.card.status === "removed"} maxLength={240} onChange={(event) => setTitleDraft(event.target.value)} value={titleDraft} />
-          </label>
-          <label className={styles.candidateEditor}>
-            <span>正文</span>
-            <textarea aria-label="编辑卡片正文" disabled={busy || selected.card.status === "removed"} maxLength={20_000} onChange={(event) => setContentDraft(event.target.value)} rows={10} value={contentDraft} />
-          </label>
-          <div className={styles.reviewEditActions}>
-            <button className={styles.textButton} disabled={busy} onClick={() => {
-              setTitleDraft(selected.card.title);
-              setContentDraft(selected.card.content);
-              setEditing(false);
-            }} type="button">取消</button>
-            <button className={styles.primaryButton} disabled={busy || !titleDraft.trim() || !contentDraft.trim()} onClick={() => void saveEdits()} type="button">保存修改</button>
-          </div>
+        <button aria-label="关闭卡片详情" className={styles.cardExpansionClose} onClick={() => requestClose(true)} type="button">×</button>
+      </header>
+      {detailLoading ? (
+        <div className={styles.cardExpansionSkeleton} role="status"><span /><span /><span /><p>正在读取完整内容…</p></div>
+      ) : !selectedCard ? (
+        <div className={styles.productEmpty}>
+          <h3>这张卡片暂时无法打开</h3><p>{detailError ?? "它可能已被移除，或当前无法读取。"}</p>
+          {expansion ? <button className={styles.secondaryButton} onClick={() => void openCard(expansion.cardId)} type="button">重新尝试</button> : null}
         </div>
       ) : (
-        <>
-          <p className={styles.readingText}>{selected.card.content}</p>
-          {selected.card.status !== "removed" ? <button className={styles.secondaryButton} onClick={() => setEditing(true)} type="button">编辑卡片</button> : null}
-        </>
-      )}
-      <dl className={styles.cardLibraryDefinitionList}>
-        <div><dt>类型</dt><dd>{reflectionCardKindLabel(selected.card.cardKind)}</dd></div>
-        <div><dt>创建时间</dt><dd>{formatTime(selected.card.createdAt)}</dd></div>
-        <div><dt>最近更新</dt><dd>{formatTime(selected.card.updatedAt)}</dd></div>
-        <div><dt>长期记忆</dt><dd>{selected.card.memoryLifecycleStatus === "active"
-          ? "已长期记住"
-          : selected.card.memoryLifecycleStatus === "revocation_requested"
-            ? "正在撤销"
-            : selected.card.memoryLifecycleStatus === "revoked"
-              ? "已撤销"
-              : "暂未长期保存"}</dd></div>
-        <div><dt>来源</dt><dd>{selected.card.sourceUnavailable
-          ? "原始复盘已不可用"
-          : selected.card.sourceReflectionIds.map((reflectionId, index) => (
-            <Link href={reflectionSessionPath(reflectionId)} key={reflectionId}>
-              {selected.card.sourceReflectionIds.length === 1 ? "查看来源复盘" : `查看来源复盘 ${index + 1}`}
-            </Link>
-          ))}</dd></div>
-      </dl>
-      <details className={styles.progressivePanel}>
-        <summary>查看来源 · {selected.card.evidence.length} 段</summary>
-        {selected.card.sourceUnavailable ? (
-          <p className={styles.evidenceUnavailable}>原始来源已不可用；卡片仍然保留，但不会伪装成仍可核对。</p>
-        ) : (
-          <ol className={styles.evidenceList}>
-            {selected.card.evidence.map((evidence) => (
-              <li key={evidence.sourceSegmentId}>
-                <p>{evidence.text}</p>
-                <small>{evidence.effectiveOrigin === "user_reflection" ? "自己的复盘原话" : "真实交流原话"} · {Math.floor(evidence.startSeconds / 60)}:{String(Math.floor(evidence.startSeconds % 60)).padStart(2, "0")}</small>
-                {selected.card.sourceReflectionIds.length === 1 ? (
-                  <Link className={styles.textButton} href={`${reflectionSessionPath(selected.card.sourceReflectionIds[0]!)}?segment=${encodeURIComponent(evidence.sourceSegmentId)}`}>
-                    在完整文字记录中查看
-                  </Link>
-                ) : null}
-              </li>
-            ))}
-          </ol>
-        )}
-      </details>
-      <details className={`${styles.progressivePanel} ${styles.assetManagement}`}>
-        <summary>管理这张卡片</summary>
-        <div className={styles.candidateActions}>
-          {selected.card.memoryLifecycleStatus === "active" || selected.card.memoryLifecycleStatus === "revocation_requested" ? <button className={styles.dangerButton} disabled={busy} onClick={() => setConfirmAction("revoke")} type="button">撤销这条记忆</button> : null}
-          {selected.card.status === "saved" ? <button className={styles.secondaryButton} disabled={busy} onClick={() => void applyLifecycle("archive")} type="button">归档</button> : null}
-          {selected.card.status === "archived" || selected.card.status === "removed" ? <button className={styles.primaryButton} disabled={busy} onClick={() => void applyLifecycle("restore")} type="button">恢复</button> : null}
-          {selected.card.status === "saved" || selected.card.status === "archived" ? <button className={styles.dangerButton} disabled={busy} onClick={() => setConfirmAction("remove")} type="button">从卡片库移除</button> : null}
+        <div className={styles.cardExpansionContent}>
+          <div className={styles.cardExpansionStatusLine}><span>{STATUS_LABELS[selectedCard.status]}</span><span>{selectedCard.evidence.length} 段来源</span><span>更新于 {formatTime(selectedCard.updatedAt)}</span></div>
+          {detailError ? <p className={styles.inlineError} role="alert">{detailError}</p> : null}
+          {editing ? (
+            <div className={styles.cardDetailEditor}>
+              <label className={styles.candidateEditor}><span>标题</span><input aria-label="编辑卡片标题" disabled={busy || selectedCard.status === "removed"} maxLength={240} onChange={(event) => setTitleDraft(event.target.value)} value={titleDraft} /></label>
+              <label className={styles.candidateEditor}><span>正文</span><textarea aria-label="编辑卡片正文" disabled={busy || selectedCard.status === "removed"} maxLength={20_000} onChange={(event) => setContentDraft(event.target.value)} rows={9} value={contentDraft} /></label>
+              <div className={styles.reviewEditActions}>
+                <button className={styles.textButton} disabled={busy} onClick={() => { setTitleDraft(selectedCard.title); setContentDraft(selectedCard.content); setEditing(false); }} type="button">取消</button>
+                <button className={styles.primaryButton} disabled={busy || !titleDraft.trim() || !contentDraft.trim()} onClick={() => void saveEdits()} type="button">保存修改</button>
+              </div>
+            </div>
+          ) : (
+            <section className={styles.cardExpansionReading}>
+              <p>{selectedCard.content}</p>
+              {selectedCard.status !== "removed" ? <button className={styles.secondaryButton} onClick={() => setEditing(true)} type="button">编辑卡片</button> : null}
+            </section>
+          )}
+          <dl className={styles.cardLibraryDefinitionList}>
+            <div><dt>创建时间</dt><dd>{formatTime(selectedCard.createdAt)}</dd></div>
+            <div><dt>长期记忆</dt><dd>{selectedCard.memoryLifecycleStatus === "active" ? "已长期记住" : selectedCard.memoryLifecycleStatus === "revocation_requested" ? "正在撤销" : selectedCard.memoryLifecycleStatus === "revoked" ? "已撤销" : "暂未长期保存"}</dd></div>
+            <div><dt>来源</dt><dd>{selectedCard.sourceUnavailable ? "原始复盘已不可用" : selectedCard.sourceReflectionIds.map((reflectionId, index) => <Link href={reflectionSessionPath(reflectionId)} key={reflectionId}>{selectedCard.sourceReflectionIds.length === 1 ? "查看来源复盘" : `查看来源复盘 ${index + 1}`}</Link>)}</dd></div>
+          </dl>
+          <details className={styles.progressivePanel}>
+            <summary>查看来源 · {selectedCard.evidence.length} 段</summary>
+            {selectedCard.sourceUnavailable ? <p className={styles.evidenceUnavailable}>原始来源已不可用；卡片仍然保留，但不会伪装成仍可核对。</p> : (
+              <ol className={styles.evidenceList}>{selectedCard.evidence.map((evidence) => <li key={evidence.sourceSegmentId}><p>{evidence.text}</p><small>{evidence.effectiveOrigin === "user_reflection" ? "自己的复盘原话" : "真实交流原话"} · {Math.floor(evidence.startSeconds / 60)}:{String(Math.floor(evidence.startSeconds % 60)).padStart(2, "0")}</small>{selectedCard.sourceReflectionIds.length === 1 ? <Link className={styles.textButton} href={`${reflectionSessionPath(selectedCard.sourceReflectionIds[0]!)}?segment=${encodeURIComponent(evidence.sourceSegmentId)}`}>在完整文字记录中查看</Link> : null}</li>)}</ol>
+            )}
+          </details>
+          <details className={`${styles.progressivePanel} ${styles.assetManagement}`}>
+            <summary>管理这张卡片</summary>
+            <div className={styles.candidateActions}>
+              {selectedCard.memoryLifecycleStatus === "active" || selectedCard.memoryLifecycleStatus === "revocation_requested" ? <button className={styles.dangerButton} disabled={busy} onClick={() => setConfirmAction("revoke")} type="button">撤销这条记忆</button> : null}
+              {selectedCard.status === "saved" ? <button className={styles.secondaryButton} disabled={busy} onClick={() => void applyLifecycle("archive")} type="button">归档</button> : null}
+              {selectedCard.status === "archived" || selectedCard.status === "removed" ? <button className={styles.primaryButton} disabled={busy} onClick={() => void applyLifecycle("restore")} type="button">恢复</button> : null}
+              {selectedCard.status === "saved" || selectedCard.status === "archived" ? <button className={styles.dangerButton} disabled={busy} onClick={() => setConfirmAction("remove")} type="button">从卡片库移除</button> : null}
+            </div>
+          </details>
         </div>
-      </details>
-    </article>
+      )}
+    </>
   );
 
   return (
     <div className={embedded ? styles.embeddedRoot : styles.root}>
-      <main className={`${embedded ? styles.productPage : styles.page} ${styles.cardLibraryPage}`}>
-        {!detailOnly ? (
-          <>
-            <section className={styles.productIntro}>
-              <div><p className={styles.eyebrow}>思想资产</p><h1>卡片</h1><p>把值得继续使用的洞察、问题、决定和行动，留成属于你的卡片。</p></div>
-              <Link className={styles.secondaryButton} href="/reflection/memory">查看长期记忆</Link>
-            </section>
-            <div className={styles.cardLibraryTools}>
-              <div className={styles.cardTypeTabs} role="tablist" aria-label="卡片类型">
-                <button aria-selected={cardKind === ""} onClick={() => setCardKind("")} role="tab" type="button">全部</button>
-                {Object.entries(FILTER_KIND_LABELS).map(([value, label]) => <button aria-selected={cardKind === value} key={value} onClick={() => setCardKind(value as ProductCardKind)} role="tab" type="button">{label}</button>)}
-              </div>
-              <form className={styles.cardSearchBar} onSubmit={submitSearch}>
-                <label><span className={styles.visuallyHidden}>搜索卡片</span><input aria-label="搜索卡片" maxLength={200} onChange={(event) => setQueryDraft(event.target.value)} placeholder="搜索你的卡片" value={queryDraft} /></label>
-                <button className={styles.secondaryButton} type="submit">搜索</button>
-                <button aria-expanded={filtersOpen} className={styles.secondaryButton} onClick={() => setFiltersOpen(true)} type="button">筛选</button>
-              </form>
-            </div>
-            {filtersOpen ? (
-              <div className={styles.filterBackdrop} onMouseDown={(event) => {
-                if (event.currentTarget === event.target) setFiltersOpen(false);
-              }}>
-                <section aria-labelledby="card-filter-title" aria-modal="true" className={styles.filterPanel} role="dialog">
-                  <div className={styles.filterPanelHeading}><div><p className={styles.eyebrow}>缩小范围</p><h2 id="card-filter-title">筛选卡片</h2></div><button aria-label="关闭筛选" className={styles.textButton} onClick={() => setFiltersOpen(false)} ref={filterCloseRef} type="button">关闭</button></div>
-                  <label><span>状态</span><select aria-label="按状态筛选" onChange={(event) => setStatus(event.target.value as typeof status)} value={status}><option value="saved">使用中</option><option value="archived">已归档</option><option value="removed">已移除</option></select></label>
-                  <label><span>时间</span><select aria-label="按时间筛选" onChange={(event) => setTimeRange(event.target.value as typeof timeRange)} value={timeRange}><option value="all">全部时间</option><option value="30d">最近 30 天</option></select></label>
-                  <label><span>排序</span><select aria-label="卡片排序" onChange={(event) => setSort(event.target.value as typeof sort)} value={sort}><option value="updated_desc">最近更新</option><option value="created_desc">最新创建</option><option value="created_asc">最早创建</option><option value="title_asc">按标题</option></select></label>
-                  <button className={styles.primaryButton} onClick={() => setFiltersOpen(false)} type="button">应用筛选</button>
-                </section>
-              </div>
-            ) : null}
-          </>
-        ) : <Link className={styles.backLink} href="/reflection/cards">← 返回卡片库</Link>}
+      <main aria-hidden={expansionOpen ? "true" : undefined} className={`${embedded ? styles.productPage : styles.page} ${styles.cardLibraryPage}`}>
+        <section className={`${styles.productIntro} ${styles.cardLibraryIntro}`}>
+          <div><p className={styles.eyebrow}>思想资产</p><h1>你的卡片</h1><p>记录灵感、决定与问题，让过去的思考能够继续使用。</p></div>
+          <div className={styles.cardLibraryIntroAside}><span aria-live="polite">{loading ? "正在读取" : `${total} 张`}</span><Link href="/reflection/memory">查看长期记忆</Link></div>
+        </section>
 
-        {error && !confirmAction ? <p className={styles.inlineError} role="alert">{error}</p> : null}
-        {detailOnly ? selectedDetail : (
-          <section aria-labelledby="reflection-cards-title" className={styles.cardLibraryList}>
-              <div className={styles.sectionHeading}><h2 id="reflection-cards-title">你的卡片</h2><span>{total > cards.length ? `最近 ${cards.length} 张` : `${total} 张`}</span></div>
-              {loading ? <p role="status">正在读取卡片…</p> : cards.length === 0 ? (
-                <div className={styles.productEmpty}><h3>这里还没有卡片</h3><p>完成一次复盘后，把真正想留下的重点保存到这里。</p><Link className={styles.primaryButton} href="/reflection/capture?new=1">开始表达</Link></div>
-              ) : (
-                <ol className={styles.cardAssetGrid}>
-                  {cards.map((card) => (
-                    <li key={card.id}><Link
-                      className={styles.cardAsset}
-                      data-card-kind={card.cardKind}
-                      data-density={card.content.length > 140 ? "compact" : "standard"}
-                      data-status={card.status}
-                      href={reflectionCardPath(card.id)}
-                    >
-                      <div className={styles.cardAssetTop}><span>{reflectionCardKindLabel(card.cardKind)}</span><small>{STATUS_LABELS[card.status]}</small></div>
-                      <h3>{card.title}</h3><p className={styles.cardExcerpt}>{card.content}</p>
-                      <div className={styles.cardLibraryMeta}><span>{card.evidenceIds.length} 段来源</span><span>更新于 {formatTime(card.updatedAt)}</span></div>
-                    </Link></li>
-                  ))}
-                </ol>
-              )}
-          </section>
-        )}
+        <div className={styles.cardLibraryTools}>
+          <div className={styles.cardTypeTabs} role="tablist" aria-label="卡片类型">
+            <button aria-selected={cardKind === ""} onClick={() => setCardKind("")} role="tab" type="button">全部 <small>{total}</small></button>
+            {Object.entries(FILTER_KIND_LABELS).map(([value, label]) => <button aria-selected={cardKind === value} key={value} onClick={() => setCardKind(value as ProductCardKind)} role="tab" type="button">{label}{countsComplete ? <small>{kindCounts[value as ProductCardKind]}</small> : null}</button>)}
+          </div>
+          <form className={styles.cardSearchBar} onSubmit={submitSearch}>
+            <label><span className={styles.visuallyHidden}>搜索卡片</span><input aria-label="搜索卡片" maxLength={200} onChange={(event) => setQueryDraft(event.target.value)} placeholder="搜索卡片标题或内容…" value={queryDraft} /></label>
+            <button className={styles.secondaryButton} type="submit">搜索</button>
+            <label className={styles.cardSortControl}><span className={styles.visuallyHidden}>卡片排序</span><select aria-label="卡片排序" onChange={(event) => setSort(event.target.value as typeof sort)} value={sort}><option value="updated_desc">最近更新</option><option value="created_desc">最新创建</option><option value="created_asc">最早创建</option><option value="title_asc">按标题</option></select></label>
+            <button aria-expanded={filtersOpen} className={styles.secondaryButton} onClick={() => setFiltersOpen(true)} ref={filterTriggerRef} type="button">筛选</button>
+          </form>
+        </div>
+
+        {filtersOpen ? (
+          <div className={styles.filterBackdrop} onMouseDown={(event) => {
+            if (event.currentTarget === event.target) { setFiltersOpen(false); window.requestAnimationFrame(() => filterTriggerRef.current?.focus()); }
+          }}>
+            <section aria-labelledby="card-filter-title" aria-modal="true" className={styles.filterPanel} role="dialog">
+              <div className={styles.filterPanelHeading}><div><p className={styles.eyebrow}>缩小范围</p><h2 id="card-filter-title">筛选卡片</h2></div><button aria-label="关闭筛选" className={styles.textButton} onClick={() => { setFiltersOpen(false); window.requestAnimationFrame(() => filterTriggerRef.current?.focus()); }} ref={filterCloseRef} type="button">关闭</button></div>
+              <label><span>状态</span><select aria-label="按状态筛选" onChange={(event) => setStatus(event.target.value as typeof status)} value={status}><option value="saved">使用中</option><option value="archived">已归档</option><option value="removed">已移除</option></select></label>
+              <label><span>时间</span><select aria-label="按时间筛选" onChange={(event) => setTimeRange(event.target.value as typeof timeRange)} value={timeRange}><option value="all">全部时间</option><option value="30d">最近 30 天</option></select></label>
+              <label><span>排序</span><select aria-label="筛选面板卡片排序" onChange={(event) => setSort(event.target.value as typeof sort)} value={sort}><option value="updated_desc">最近更新</option><option value="created_desc">最新创建</option><option value="created_asc">最早创建</option><option value="title_asc">按标题</option></select></label>
+              <button className={styles.primaryButton} onClick={() => { setFiltersOpen(false); window.requestAnimationFrame(() => filterTriggerRef.current?.focus()); }} type="button">应用筛选</button>
+            </section>
+          </div>
+        ) : null}
+
+        {error ? <p className={styles.inlineError} role="alert">{error}</p> : null}
+        <section aria-labelledby="reflection-cards-title" className={styles.cardLibraryList}>
+          <h2 className={styles.visuallyHidden} id="reflection-cards-title">卡片列表</h2>
+          {loading ? <p role="status">正在读取卡片…</p> : visibleCards.length === 0 ? (
+            <div className={styles.productEmpty}><h3>这里还没有卡片</h3><p>完成一次复盘后，把真正想留下的重点保存到这里。</p><Link className={styles.primaryButton} href="/reflection/capture?new=1">开始表达</Link></div>
+          ) : (
+            <ol className={styles.cardAssetGrid}>{visibleCards.map((card) => {
+              const kind = presentationKind(card.cardKind);
+              const expanded = expansion?.cardId === card.id;
+              return <li key={card.id}><article className={styles.cardAsset} data-card-id={card.id} data-card-kind={kind} data-density={card.content.length > 140 ? "compact" : "standard"} data-expanded={expanded ? "true" : undefined} data-status={card.status}>
+                <div className={styles.cardAssetTop}>
+                  <span className={styles.cardKindMark} data-kind={kind}><CardKindIcon kind={kind} />{FILTER_KIND_LABELS[kind]}</span>
+                  <details className={styles.cardAssetMenu}><summary aria-label={`更多操作：${card.title}`}>···</summary><div>{card.sourceReflectionIds[0] ? <Link href={reflectionSessionPath(card.sourceReflectionIds[0])}>查看来源复盘</Link> : null}{card.status === "saved" ? <button disabled={listBusyCardId === card.id} onClick={() => void applyListLifecycle(card, "archive")} type="button">归档</button> : null}{card.status === "archived" || card.status === "removed" ? <button disabled={listBusyCardId === card.id} onClick={() => void applyListLifecycle(card, "restore")} type="button">恢复</button> : null}</div></details>
+                </div>
+                <h3><button aria-controls={dialogId} aria-expanded={expanded} aria-label={`打开卡片：${card.title}`} onClick={(event) => openFromTitle(event, card.id)} ref={(node) => { if (node) titleRefs.current.set(card.id, node); else titleRefs.current.delete(card.id); }} type="button">{card.title}</button></h3>
+                <p className={styles.cardExcerpt}>{card.content}</p>
+                <div className={styles.cardLibraryMeta}><span>{STATUS_LABELS[card.status]}</span><span>{card.evidenceIds.length} 段来源</span><span>更新于 {formatTime(card.updatedAt)}</span></div>
+              </article></li>;
+            })}</ol>
+          )}
+          {total > cards.length ? <p className={styles.cardLibraryLimit}>当前显示最近 {cards.length} 张卡片。</p> : null}
+        </section>
       </main>
-      <ReflectionConfirmDialog busy={busy} confirmLabel={confirmAction === "revoke" ? "确认撤销" : "确认移除"} onCancel={() => setConfirmAction(null)} onConfirm={() => {
+
+      {expansion && expandedBox ? <div className={styles.cardExpansionBackdrop} data-phase={expansion.phase} onMouseDown={(event) => { if (event.currentTarget === event.target) requestClose(true); }}>
+        <div aria-labelledby={dialogTitleId} aria-modal="true" className={styles.cardExpansionCard} data-card-expansion={expansion.cardId} data-phase={expansion.phase} id={dialogId} onTransitionEnd={(event) => { if (event.currentTarget === event.target && expansionRef.current?.phase === "closing") finishClosing(closeNavigationRef.current); }} ref={dialogRef} role="dialog" style={expandedStyle} tabIndex={-1}>{expandedDetail}</div>
+      </div> : null}
+
+      <ReflectionConfirmDialog busy={busy} confirmLabel={confirmAction === "revoke" ? "确认撤销" : confirmAction === "remove" ? "确认移除" : "放弃并关闭"} onCancel={() => setConfirmAction(null)} onConfirm={() => {
         if (confirmAction === "revoke") void revokeMemorySource();
         if (confirmAction === "remove") void applyLifecycle("remove");
-      }} open={confirmAction !== null} title={confirmAction === "revoke" ? "撤销这条长期记忆？" : "从卡片库移除？"}>
-        <p>{confirmAction === "revoke"
-          ? "只撤销这张卡片对应的长期记忆。原始复盘和卡片仍会保留，你仍可查看来源。"
-          : "卡片会从卡片库移除，但原始复盘不会删除。之后仍可恢复这张卡片。"}</p>
-        {error ? <p className={styles.inlineError} role="alert">{error}</p> : null}
+        if (confirmAction === "discard") {
+          if (selectedCard) { setTitleDraft(selectedCard.title); setContentDraft(selectedCard.content); }
+          setEditing(false); setConfirmAction(null); beginClosing(true);
+        }
+      }} open={confirmAction !== null} role="alertdialog" title={confirmAction === "revoke" ? "撤销这条长期记忆？" : confirmAction === "remove" ? "从卡片库移除？" : "放弃未保存的修改？"}>
+        <p>{confirmAction === "revoke" ? "只撤销这张卡片对应的长期记忆。原始复盘和卡片仍会保留，你仍可查看来源。" : confirmAction === "remove" ? "卡片会从卡片库移除，但原始复盘不会删除。之后仍可恢复这张卡片。" : "你对标题或正文的修改还没有保存。放弃后，这些修改不会保留。"}</p>
+        {detailError && confirmAction !== "discard" ? <p className={styles.inlineError} role="alert">{detailError}</p> : null}
       </ReflectionConfirmDialog>
     </div>
   );

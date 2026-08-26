@@ -30,4 +30,30 @@ describe("Daily Reflection responsive product shell", () => {
     expect(css).toContain("@media (prefers-reduced-motion: reduce)");
     expect(css).toContain(".reflectionMobileNav .reflectionMobilePrimary { transform: none; }");
   });
+
+  it("keeps the Card Library two-column on desktop and one-column on mobile", () => {
+    const cardGrid = css.indexOf(".cardAssetGrid {");
+    const phoneMedia = css.indexOf("@media (max-width: 620px)", cardGrid);
+    const reducedMotion = css.lastIndexOf("@media (prefers-reduced-motion: reduce)");
+
+    expect(css.slice(cardGrid, phoneMedia)).toMatch(
+      /\.cardAssetGrid\s*\{[^}]*grid-template-columns:\s*repeat\(2,\s*minmax\(0,\s*1fr\)\)/u
+    );
+    expect(css.slice(phoneMedia, reducedMotion)).toMatch(
+      /\.cardAssetGrid\s*\{[^}]*grid-template-columns:\s*1fr/u
+    );
+    expect(css).toMatch(/\.cardExpansionCard\s*\{[^}]*position:\s*fixed/u);
+    expect(css).toMatch(/\.cardExpansionContent\s*\{[^}]*overflow-y:\s*auto/u);
+    expect(css).toContain(".reflectionApp:has(.cardExpansionBackdrop) .reflectionMobileNav { display: none; }");
+  });
+
+  it("places the Card expansion reduced-motion override after its transition rules", () => {
+    const cardTransition = css.lastIndexOf(".cardExpansionCard {");
+    const reducedMotion = css.lastIndexOf("@media (prefers-reduced-motion: reduce)");
+
+    expect(cardTransition).toBeGreaterThan(-1);
+    expect(reducedMotion).toBeGreaterThan(cardTransition);
+    expect(css.slice(reducedMotion)).toContain(".cardExpansionCard,");
+    expect(css.slice(reducedMotion)).toContain("transition: none !important;");
+  });
 });
