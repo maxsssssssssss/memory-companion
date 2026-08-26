@@ -71,6 +71,9 @@ describe("DailyReflectionMemory", () => {
     expect((await screen.findAllByRole("heading", { name: memory.title })).length).toBe(2);
     expect(screen.getAllByText(/你明确表达过/u).length).toBeGreaterThan(0);
     expect(screen.getAllByText(/1 段来源/u).length).toBeGreaterThan(0);
+    const stateLine = screen.getAllByText("决定").at(-1)?.parentElement;
+    expect(stateLine).toHaveTextContent("决定当前有效");
+    expect(stateLine?.querySelector("i[aria-hidden=\"true\"]")).not.toBeNull();
     expect(screen.getAllByRole("heading", { name: memory.title }).at(-1)?.closest("a")).toHaveAttribute(
       "href",
       "/reflection/memory/memory_1"

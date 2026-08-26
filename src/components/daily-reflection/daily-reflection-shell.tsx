@@ -1245,6 +1245,7 @@ export function DailyReflectionShellContent({
   const recapOnlyRequired = keptWithoutEvidenceCount > 0 || keptUnclaimedActionCount > 0;
   const savedCardCount = Object.values(session.workingCardStates)
     .filter((item) => item.status === "saved").length;
+  const hasCompletionSelection = savedCardCount > 0 || retainedCandidateCount > 0;
   const unsavedPrimaryCards = primaryCards.filter(
     (card) => session.workingCardStates[card.id]?.status !== "saved"
       && card.reviewStatus !== "excluded"
@@ -2013,13 +2014,22 @@ export function DailyReflectionShellContent({
                       segments={detail.segments}
                     />
                   ) : null}
-                  <div className={styles.finalizePanel}>
+                  <div className={`${styles.finalizePanel} ${hasCompletionSelection
+                    ? styles.finalizePanelActive
+                    : styles.finalizePanelIdle}`}>
                     <div>
-                      <b>已选择 {savedCardCount} 张卡片 · 长期记住 {retainedCandidateCount} 条</b>
-                      <p>已保存 {savedCardCount} 张卡片；{retainedCandidateCount > 0
-                        ? `将长期记住 ${retainedCandidateCount} 条你明确选择的内容。`
-                        : "其余整理内容只会留在这次复盘里。"}
-                        {pendingCandidateCount > 0 ? ` 还有 ${pendingCandidateCount} 条可以以后再看。` : ""}</p>
+                      {hasCompletionSelection ? <>
+                        <b>{savedCardCount} 张卡片 · {retainedCandidateCount} 条长期记忆</b>
+                        <p>已保存 {savedCardCount} 张卡片；{retainedCandidateCount > 0
+                          ? `会评估并尝试长期记住 ${retainedCandidateCount} 条你明确选择的内容。`
+                          : "其余整理内容只会留在这次复盘里。"}
+                          {pendingCandidateCount > 0 ? ` 还有 ${pendingCandidateCount} 条可以以后再看。` : ""}</p>
+                      </> : <>
+                        <b>看完后，完成这次复盘</b>
+                        <p>{pendingCandidateCount > 0
+                          ? `还有 ${pendingCandidateCount} 条可以以后再看；没有要保存的内容，也可以直接完成。`
+                          : "没有要保存的内容，也可以直接完成。"}</p>
+                      </>}
                       {keptWithoutEvidenceCount > 0 ? (
                         <p className={styles.inlineError}>有 {keptWithoutEvidenceCount} 条手写内容没有原话，只能随本次复盘保存。</p>
                       ) : null}

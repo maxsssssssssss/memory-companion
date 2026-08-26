@@ -129,9 +129,14 @@ export function DailyReflectionMemory({ api: providedApi, memoryId = null }: Dai
           <div className={styles.productEmpty}><h1>暂时无法打开</h1><p className={styles.inlineError} role="alert">{loadError}</p><Link className={styles.secondaryButton} href="/reflection/memory">查看其他记忆</Link></div>
         ) : detail ? (
           <article className={styles.memoryDetailArticle}>
-            <div className={styles.cardDetailHeading}>
-              <div><p className={styles.eyebrow}>{MEMORY_TYPE_LABELS[detail.memory.memoryType]}</p><h1>{detail.memory.title}</h1></div>
-              <span className={styles.keptBadge}>已长期记住</span>
+            <div className={`${styles.cardDetailHeading} ${styles.memoryDetailHeading}`}>
+              <div>
+                <p className={styles.memoryStateLine}>
+                  <span>{MEMORY_TYPE_LABELS[detail.memory.memoryType]}</span>
+                  <span><i aria-hidden="true" />当前有效</span>
+                </p>
+                <h1>{detail.memory.title}</h1>
+              </div>
             </div>
             <p className={styles.readingText}>{detail.memory.content}</p>
             {detail.memory.epistemicCaution ? <p className={styles.cautionCopy}>这是系统根据你的表达整理出的理解，查看原话可以帮助你判断它是否准确。</p> : null}
@@ -200,7 +205,10 @@ export function DailyReflectionMemory({ api: providedApi, memoryId = null }: Dai
               {memories.map((memory) => (
                 <li key={memory.id}>
                   <Link href={reflectionMemoryPath(memory.id)}>
-                    <div><span className={styles.pendingBadge}>{MEMORY_TYPE_LABELS[memory.memoryType]}</span><span className={styles.keptBadge}>当前有效</span></div>
+                    <div className={styles.memoryStateLine}>
+                      <span>{MEMORY_TYPE_LABELS[memory.memoryType]}</span>
+                      <span><i aria-hidden="true" />当前有效</span>
+                    </div>
                     <h2>{memory.title}</h2><p>{memory.content}</p>
                     <small>{epistemicCopy(memory)} · {memory.sourceCount} 段来源 · {formatDate(memory.recordingDate)}</small>
                   </Link>

@@ -23,6 +23,9 @@ describe("Daily Reflection responsive product shell", () => {
 
   it("keeps safe-area navigation, reachable touch controls, and reduced motion", () => {
     expect(css).toContain("env(safe-area-inset-bottom)");
+    expect(css).toMatch(/\.reflectionMobileNav\s*\{[^}]*background:\s*var\(--dr-surface\);/u);
+    expect(css).toMatch(/\.finalizePanelIdle\s*\{[^}]*box-shadow:\s*none;/u);
+    expect(css).toMatch(/\.reviewSection\s*\{[^}]*scroll-padding-bottom:\s*96px;/u);
     expect(css).toMatch(/\.candidateActions button[^}]*min-height:\s*46px/u);
     expect(css).toContain("@media (prefers-reduced-motion: reduce)");
     expect(css).toContain(".reflectionMobileNav .reflectionMobilePrimary { transform: none; }");

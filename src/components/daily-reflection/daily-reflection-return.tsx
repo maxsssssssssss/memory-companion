@@ -113,6 +113,8 @@ function ReturnGroup({
   id,
   items,
   hideWhenEmpty = false,
+  presentation,
+  showCount = true,
   title
 }: Readonly<{
   eyebrow: string;
@@ -120,18 +122,20 @@ function ReturnGroup({
   id: string;
   items: DisplayItem[];
   hideWhenEmpty?: boolean;
+  presentation: "open" | "change" | "past" | "weekly";
+  showCount?: boolean;
   title: string;
 }>) {
   const displayable = items.filter(isDisplayable);
   if (hideWhenEmpty && displayable.length === 0) return null;
   return (
-    <section aria-labelledby={id} className={styles.returnGroup}>
+    <section aria-labelledby={id} className={styles.returnGroup} data-return-kind={presentation}>
       <div className={styles.sectionHeading}>
         <div>
           <p>{eyebrow}</p>
           <h2 id={id}>{title}</h2>
         </div>
-        <span>{displayable.length} 条</span>
+        {showCount ? <span>{displayable.length} 条</span> : null}
       </div>
       {displayable.length > 0 ? (
         <ol className={styles.returnList}>
@@ -231,9 +235,9 @@ export function DailyReflectionReturn({ api: providedApi, embedded = false }: Da
             <p className={styles.inlineError} role="alert">{dailyError}</p>
           ) : daily ? (
             dailyHasContent ? <div className={styles.returnGrid}>
-              <ReturnGroup eyebrow="仍未解决" emptyText="" hideWhenEmpty id="daily-return-open-loops" items={daily.openLoops.slice(0, 1)} title="一个未解决问题" />
-              <ReturnGroup eyebrow="可能发生了变化" emptyText="" hideWhenEmpty id="daily-return-prompts" items={daily.reflectionPrompts.slice(0, 1)} title="一个值得核对的变化" />
-              <ReturnGroup eyebrow="过去回来" emptyText="" hideWhenEmpty id="daily-return-resurfaced" items={daily.resurfacedMemories.slice(0, 1)} title="一个相关旧想法" />
+              <ReturnGroup eyebrow="仍未解决" emptyText="" hideWhenEmpty id="daily-return-open-loops" items={daily.openLoops.slice(0, 1)} presentation="open" showCount={false} title="还没有解决" />
+              <ReturnGroup eyebrow="需要再核对" emptyText="" hideWhenEmpty id="daily-return-prompts" items={daily.reflectionPrompts.slice(0, 1)} presentation="change" showCount={false} title="可能发生了变化" />
+              <ReturnGroup eyebrow="过去回来" emptyText="" hideWhenEmpty id="daily-return-resurfaced" items={daily.resurfacedMemories.slice(0, 1)} presentation="past" showCount={false} title="与过去有关" />
             </div> : <p className={styles.historyEmpty}>今天暂时没有需要回看的内容。</p>
           ) : (
             <p className={styles.historyEmpty}>今天暂时没有需要回看的内容。</p>
@@ -254,10 +258,10 @@ export function DailyReflectionReturn({ api: providedApi, embedded = false }: Da
             weeklyItemCount > 0 ? <>
               <p className={styles.returnOverview}>这一周有 {weeklyCategoryCount} 类内容值得回看，共 {weeklyItemCount} 条有来源的线索。</p>
               <div className={styles.returnGrid}>
-                <ReturnGroup eyebrow="反复出现" emptyText="" hideWhenEmpty id="weekly-repeated-themes" items={weekly.repeatedThemes} title="反复出现了什么" />
-                <ReturnGroup eyebrow="前后变化" emptyText="" hideWhenEmpty id="weekly-changed-decisions" items={weekly.changedDecisions} title="什么发生变化" />
-                <ReturnGroup eyebrow="仍待继续" emptyText="" hideWhenEmpty id="weekly-open-commitments" items={weekly.openCommitments} title="什么仍未解决" />
-                <ReturnGroup eyebrow="可能形成方向" emptyText="" hideWhenEmpty id="weekly-emerging-ideas" items={weekly.emergingIdeas} title="什么可能形成方向" />
+                <ReturnGroup eyebrow="反复出现" emptyText="" hideWhenEmpty id="weekly-repeated-themes" items={weekly.repeatedThemes} presentation="weekly" title="反复出现了什么" />
+                <ReturnGroup eyebrow="前后变化" emptyText="" hideWhenEmpty id="weekly-changed-decisions" items={weekly.changedDecisions} presentation="weekly" title="什么发生变化" />
+                <ReturnGroup eyebrow="仍待继续" emptyText="" hideWhenEmpty id="weekly-open-commitments" items={weekly.openCommitments} presentation="weekly" title="什么仍未解决" />
+                <ReturnGroup eyebrow="可能形成方向" emptyText="" hideWhenEmpty id="weekly-emerging-ideas" items={weekly.emergingIdeas} presentation="weekly" title="什么可能形成方向" />
               </div>
             </> : <p className={styles.historyEmpty}>过去七天暂无足够、有来源的回顾内容。</p>
           ) : (

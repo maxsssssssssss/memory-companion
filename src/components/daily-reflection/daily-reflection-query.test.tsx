@@ -78,21 +78,13 @@ describe("DailyReflectionQuery", () => {
         })
       })
     );
-    expect(screen.queryByText("我最开始考虑继续原来的方向，后来决定换一个方向。")).not.toBeInTheDocument();
-    const sourceButton = screen.getByRole("button", {
-      name: "查看第 1 条回答来源"
-    });
-    expect(sourceButton).toHaveAttribute(
-      "aria-controls",
-      "daily-reflection-query-claim-0-sources"
-    );
-    fireEvent.click(sourceButton);
     expect(screen.getByText("我最开始考虑继续原来的方向，后来决定换一个方向。")).toBeVisible();
     expect(screen.getByText("你在 2026-08-20 的复盘中提到 · 录音 1:05")).toBeVisible();
-    expect(screen.getByRole("link", { name: "在原复盘中查看" })).toHaveAttribute(
+    expect(screen.getByRole("link", { name: "查看完整来源" })).toHaveAttribute(
       "href",
       "/reflection/sessions/reflection_1?segment=segment_1"
     );
+    expect(screen.queryByRole("button", { name: "查看第 1 条回答来源" })).not.toBeInTheDocument();
     expect(screen.getByText("这次回答参考了 1 张卡片、1 次复盘和 1 条长期记忆。")).toBeVisible();
 
     expect(screen.getByRole("heading", { name: "也可以回看最初的考虑" })).toBeVisible();
@@ -115,6 +107,50 @@ describe("DailyReflectionQuery", () => {
     ]) {
       expect(container.textContent).not.toContain(forbidden);
     }
+  });
+
+  it("uses the full evidence timeline only when an answer has multiple sources", async () => {
+    const first = response();
+    const secondEvidence = {
+      ...evidence(),
+      reflectionId: "reflection_2",
+      cardId: "card_2",
+      recordingDate: "2026-08-22",
+      sourceSegmentId: "segment_2",
+      startSeconds: 18,
+      endSeconds: 25,
+      snippet: "后来我确认先做桌面端，验证完整记录的阅读体验。"
+    };
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(jsonResponse({
+      ...first,
+      claims: [
+        first.claims[0],
+        {
+          text: "之后你再次确认了这个选择。",
+          sourceMemoryIds: ["memory_2"],
+          sourceCardIds: ["card_2"],
+          evidenceIds: ["segment_2"],
+          evidence: [secondEvidence],
+          epistemicStatuses: ["explicit_user_statement"]
+        }
+      ]
+    }));
+    render(<DailyReflectionQuery api={createDailyReflectionApi(fetcher)} />);
+
+    fireEvent.change(screen.getByLabelText("你想问什么"), {
+      target: { value: "这个选择是怎样确定下来的？" }
+    });
+    fireEvent.click(screen.getByRole("button", { name: "查找" }));
+
+    expect(await screen.findByRole("button", { name: "查看第 1 条回答来源" })).toBeVisible();
+    expect(screen.getByRole("button", { name: "查看第 2 条回答来源" })).toBeVisible();
+    expect(screen.queryByRole("link", { name: "查看完整来源" })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "查看第 2 条回答来源" }));
+    expect(screen.getByText(secondEvidence.snippet)).toBeVisible();
+    expect(screen.getByRole("link", { name: "在原复盘中查看" })).toHaveAttribute(
+      "href",
+      "/reflection/sessions/reflection_2?segment=segment_2"
+    );
   });
 
   it("replaces the previous answer instead of building chat history", async () => {

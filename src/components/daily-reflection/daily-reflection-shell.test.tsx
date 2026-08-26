@@ -784,6 +784,8 @@ describe("DailyReflectionShellContent", () => {
 
     expect(screen.getByRole("button", { name: "完成这次复盘" })).toBeEnabled();
     expect(screen.getByText(/还有 1 条可以以后再看/u)).toBeVisible();
+    expect(screen.getByText("看完后，完成这次复盘")).toBeVisible();
+    expect(screen.queryByText(/0 张卡片/u)).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "长期记住" })).toHaveAttribute("aria-pressed", "false");
     expect(screen.getByRole("button", { name: "不保存" })).toHaveAttribute("aria-pressed", "false");
     expect(screen.queryByRole("combobox")).not.toBeInTheDocument();
@@ -843,6 +845,22 @@ describe("DailyReflectionShellContent", () => {
       userText: null,
       subjectPersonId: null
     });
+  });
+
+  it("shows the full completion summary only after the user has selected content", () => {
+    render(<DailyReflectionShellContent session={session({
+      state: "review_pending",
+      reflectionId: "reflection-1",
+      detail: detail({
+        candidates: [{
+          ...candidate(0, "event", "segment-early"),
+          status: "kept"
+        }]
+      })
+    })} />);
+
+    expect(screen.getByText("0 张卡片 · 1 条长期记忆")).toBeVisible();
+    expect(screen.queryByText("看完后，完成这次复盘")).not.toBeInTheDocument();
   });
 
   it("expands every Evidence item, explicitly claims an action, deletes one card, and creates a manual card", () => {

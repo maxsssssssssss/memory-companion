@@ -403,7 +403,13 @@ export function DailyReflectionCardLibrary({
               ) : (
                 <ol className={styles.cardAssetGrid}>
                   {cards.map((card) => (
-                    <li key={card.id}><Link className={styles.cardAsset} href={reflectionCardPath(card.id)}>
+                    <li key={card.id}><Link
+                      className={styles.cardAsset}
+                      data-card-kind={card.cardKind}
+                      data-density={card.content.length > 140 ? "compact" : "standard"}
+                      data-status={card.status}
+                      href={reflectionCardPath(card.id)}
+                    >
                       <div className={styles.cardAssetTop}><span>{reflectionCardKindLabel(card.cardKind)}</span><small>{STATUS_LABELS[card.status]}</small></div>
                       <h3>{card.title}</h3><p className={styles.cardExcerpt}>{card.content}</p>
                       <div className={styles.cardLibraryMeta}><span>{card.evidenceIds.length} 段来源</span><span>更新于 {formatTime(card.updatedAt)}</span></div>

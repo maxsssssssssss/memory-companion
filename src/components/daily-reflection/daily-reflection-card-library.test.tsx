@@ -116,7 +116,11 @@ describe("DailyReflectionCardLibrary", () => {
       now={() => new Date("2026-08-24T00:00:00.000Z")}
     />);
 
-    expect(await screen.findByText("散步后的洞察")).toBeVisible();
+    const cardTitle = await screen.findByText("散步后的洞察");
+    expect(cardTitle).toBeVisible();
+    expect(cardTitle.closest("a")).toHaveAttribute("data-card-kind", "insight");
+    expect(cardTitle.closest("a")).toHaveAttribute("data-density", "standard");
+    expect(cardTitle.closest("a")).toHaveAttribute("data-status", "saved");
     fireEvent.change(screen.getByLabelText("搜索卡片"), { target: { value: "散步" } });
     fireEvent.click(screen.getByRole("tab", { name: "洞察" }));
     fireEvent.click(screen.getByRole("button", { name: "筛选" }));

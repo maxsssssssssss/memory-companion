@@ -54,6 +54,11 @@ function sourceContext(evidence: DailyReflectionReturnEvidence) {
     : `在 ${evidence.recordingDate} 的交流中提到`;
 }
 
+function displayRecordingDate(value: string) {
+  const [, month, day] = value.split("-");
+  return `${Number(month)}月${Number(day)}日`;
+}
+
 function EvidenceDisclosure({
   controlId,
   evidence,
@@ -139,6 +144,13 @@ export function DailyReflectionQuery({ api: providedApi, embedded = false, initi
     reflections: new Set(result.claims.flatMap((claim) => claim.evidence.map((item) => item.reflectionId))).size,
     memories: new Set(result.claims.flatMap((claim) => claim.sourceMemoryIds)).size
   } : null;
+  const uniqueEvidence = result ? Array.from(new Map(
+    result.claims.flatMap((claim) => claim.evidence)
+      .map((item) => [`${item.reflectionId}:${item.sourceSegmentId}`, item] as const)
+  ).values()) : [];
+  const singleSource = result && result.claims.length === 1 && uniqueEvidence.length === 1
+    ? { claim: result.claims[0]!, evidence: uniqueEvidence[0]! }
+    : null;
 
   return (
     <div className={embedded ? styles.embeddedRoot : styles.root}>
@@ -205,7 +217,20 @@ export function DailyReflectionQuery({ api: providedApi, embedded = false, initi
             {result.insufficientEvidence ? (
               <p className={styles.evidenceUnavailable}>现有记录还不足以支持确定结论。</p>
             ) : null}
-            {result.claims.length > 0 ? (
+            {singleSource ? (
+              <article className={styles.askSingleSource} aria-label="回答依据">
+                <div className={styles.askSingleSourceMeta}>
+                  <time dateTime={singleSource.evidence.recordingDate}>{displayRecordingDate(singleSource.evidence.recordingDate)}</time>
+                  <span>{singleSource.evidence.sourceOrigin === "user_reflection" ? "你的复盘" : "真实交流"}</span>
+                </div>
+                <h3>{singleSource.claim.text}</h3>
+                <blockquote>
+                  <p>{singleSource.evidence.snippet}</p>
+                  <footer>{sourceContext(singleSource.evidence)} · 录音 {formatTimestamp(singleSource.evidence.startSeconds)}</footer>
+                </blockquote>
+                <Link className={styles.secondaryButton} href={safeSourceLink(singleSource.evidence)}>查看完整来源</Link>
+              </article>
+            ) : result.claims.length > 0 ? (
               <ol className={styles.askEvidenceTimeline} aria-label="回答依据">
                 {result.claims.map((claim, index) => (
                   <li className={styles.askClaim} key={`${result.createdAt}:${index}`}>

@@ -102,9 +102,15 @@ describe("DailyReflectionReturn", () => {
     const returnApi = api();
     const { container } = render(<DailyReflectionReturn api={returnApi} />);
 
-    expect(await screen.findByRole("heading", { name: "一个未解决问题" })).toBeVisible();
-    expect(screen.getByRole("heading", { name: "一个相关旧想法" })).toBeVisible();
-    expect(screen.getByRole("heading", { name: "一个值得核对的变化" })).toBeVisible();
+    expect(await screen.findByRole("heading", { name: "还没有解决" })).toBeVisible();
+    expect(screen.getByRole("heading", { name: "与过去有关" })).toBeVisible();
+    expect(screen.getByRole("heading", { name: "可能发生了变化" })).toBeVisible();
+    expect(screen.getByRole("heading", { name: "还没有解决" }).closest("section"))
+      .toHaveAttribute("data-return-kind", "open");
+    expect(screen.getByRole("heading", { name: "可能发生了变化" }).closest("section"))
+      .toHaveAttribute("data-return-kind", "change");
+    expect(screen.getByRole("heading", { name: "与过去有关" }).closest("section"))
+      .toHaveAttribute("data-return-kind", "past");
     expect(screen.queryByRole("heading", { name: "反复出现了什么" })).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole("tab", { name: "本周" }));
     expect(screen.getByRole("heading", { name: "反复出现了什么" })).toBeVisible();
