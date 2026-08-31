@@ -9,6 +9,7 @@
   "scripts": {
     "dev": "next dev",
     "build": "next build",
+    "postbuild": "node scripts/sanitize-next-traces.mjs",
     "start": "next start",
     "test": "vitest run",
     "test:watch": "vitest",

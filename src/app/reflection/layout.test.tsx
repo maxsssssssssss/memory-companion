@@ -38,7 +38,7 @@ vi.mock("@/components/daily-reflection/reflection-app-shell", () => ({
   )
 }));
 
-import ReflectionLayout from "./layout";
+import ReflectionLayout, { dynamic } from "./layout";
 
 beforeEach(() => {
   state.enabled = true;
@@ -47,6 +47,10 @@ beforeEach(() => {
 });
 
 describe("ReflectionLayout", () => {
+  it("evaluates the release gate at runtime instead of baking build-time state into the artifact", () => {
+    expect(dynamic).toBe("force-dynamic");
+  });
+
   it("cannot bypass the main Daily Reflection feature flag", () => {
     state.enabled = false;
     expect(() => ReflectionLayout({ children: <p>私密内容</p> })).toThrow("NEXT_NOT_FOUND");
