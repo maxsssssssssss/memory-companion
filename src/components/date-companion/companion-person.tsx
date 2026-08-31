@@ -1,49 +1,40 @@
 "use client";
 
 import Link from "next/link";
-import { type FormEvent, type ReactNode, useLayoutEffect, useRef, useState } from "react";
+import { type FormEvent, useState } from "react";
 
+import { ProductDialog, ProductEvidence, ProductState } from "@/components/product-system/product-primitives";
 import type {
+  DateCompanionConfirmedPerson,
   DateCompanionMutationState,
   DateCompanionSearchState,
   InteractionVM,
   PersonVM,
   PromiseVM,
   RecapItemVM,
-  RelationshipVM,
   SourceRefVM
 } from "@/lib/domain/date-companion";
+import type {
+  DateCompanionPersonArchiveEntry,
+  DateCompanionPersonArchiveState
+} from "@/lib/client/date-companion-people";
 
 import styles from "./date-companion.module.css";
 
-type ProfileSection = {
-  id: "remembered" | "recent" | "relationship" | "promises";
-  eyebrow: string;
-  title: string;
-  empty: string;
-  side: "left" | "right";
-};
-
 type CompanionPersonProps = {
+  archiveState?: DateCompanionPersonArchiveState;
+  confirmedPerson?: DateCompanionConfirmedPerson | null;
   currentInteraction: InteractionVM | null;
-  relationship: RelationshipVM | null;
+  isCurrentRelationship?: boolean;
   person?: PersonVM;
   searchState?: DateCompanionSearchState;
   mutationState?: DateCompanionMutationState;
-  proactiveObservation?: ReactNode;
   onDeleteInteraction?: (interaction: InteractionVM) => Promise<void> | void;
   onOpenInteraction?: (interaction: InteractionVM) => Promise<void> | void;
   onOpenSource?: (source: SourceRefVM, segmentId: string) => Promise<void> | void;
   onSearch?: (query: string) => Promise<void> | void;
   onUpdatePromise?: (promise: PromiseVM, status: PromiseVM["status"]) => Promise<void> | void;
 };
-
-const PROFILE_SECTIONS: ProfileSection[] = [
-  { id: "remembered", eyebrow: "记得的片段", title: "你记得的 Ta", empty: "还没有留下这一类片段", side: "left" },
-  { id: "recent", eyebrow: "最近提到", title: "Ta 最近", empty: "还没有留下这一类片段", side: "right" },
-  { id: "relationship", eyebrow: "相处片段", title: "你们之间", empty: "还没有经过你确认、且有原话来源的内容", side: "left" },
-  { id: "promises", eyebrow: "明确约定", title: "你答应了", empty: "还没有确认由“我”说出的约定", side: "right" }
-];
 
 const EMPTY_PERSON: PersonVM = {
   remembered: [],
@@ -55,9 +46,35 @@ const EMPTY_PERSON: PersonVM = {
   limitedToCurrentInteraction: true
 };
 
-function formatDate(recordingDate: string) {
-  const match = /^(\d{4})-(\d{2})-(\d{2})$/u.exec(recordingDate);
-  return match ? `${Number(match[2])} 月 ${Number(match[3])} 日` : recordingDate;
+const MEMORY_TYPE_COPY: Record<DateCompanionPersonArchiveEntry["type"], string> = {
+  event: "记录",
+  commitment: "约定",
+  question: "问题",
+  relationship_signal: "相处片段",
+  preference: "偏好",
+  summary: "摘要"
+};
+
+const MEMORY_STATUS_COPY: Record<DateCompanionPersonArchiveEntry["status"], string> = {
+  active: "当前有效",
+  resolved: "已解决",
+  expired: "已过期",
+  superseded: "已更新"
+};
+
+const PERSON_DATE_FORMATTER = new Intl.DateTimeFormat("zh-CN", {
+  day: "numeric",
+  month: "numeric",
+  timeZone: "Asia/Shanghai",
+  year: "numeric"
+});
+
+function formatDate(value: string) {
+  const dateOnly = /^(\d{4})-(\d{2})-(\d{2})$/u.exec(value);
+  const date = new Date(dateOnly ? `${value}T12:00:00+08:00` : value);
+  if (Number.isNaN(date.getTime())) return value.slice(0, 10);
+  const parts = Object.fromEntries(PERSON_DATE_FORMATTER.formatToParts(date).map((part) => [part.type, part.value]));
+  return `${parts.year} 年 ${parts.month} 月 ${parts.day} 日`;
 }
 
 function sourceTime(source: SourceRefVM) {
@@ -65,13 +82,25 @@ function sourceTime(source: SourceRefVM) {
   return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}`;
 }
 
-function visibleRecapItems(items: RecapItemVM[]) {
-  return items.filter((item) => item.disposition === "kept" && item.sources.length > 0);
+function evidenceSources(sources: SourceRefVM[]) {
+  return sources.filter((source) => (
+    source.segmentIds.length > 0
+    && source.quote.trim().length > 0
+  ));
 }
 
-function shortenSummary(value: string, maxLength = 84) {
-  const normalized = value.trim();
-  return normalized.length <= maxLength ? normalized : `${normalized.slice(0, maxLength).trimEnd()}…`;
+function sourcePresentationLabel(source: SourceRefVM) {
+  if (source.presentation === "direct_quote") return "原话";
+  if (source.presentation === "suggestion") return "支持这条建议的原话";
+  return "支持这条整理的原话";
+}
+
+function visibleRecapItems(items: RecapItemVM[]) {
+  return items.filter((item) => item.disposition === "kept" && evidenceSources(item.sources).length > 0);
+}
+
+function personInitials(name: string) {
+  return [...name].slice(0, 2).join("");
 }
 
 function EvidenceList({
@@ -81,26 +110,25 @@ function EvidenceList({
   onOpenSource?: (source: SourceRefVM, segmentId: string) => Promise<void> | void;
   sources: SourceRefVM[];
 }) {
+  const evidence = evidenceSources(sources);
+  if (evidence.length === 0) return null;
   return (
-    <details className={styles.longTermSources}>
-      <summary>核对原话 · {sources.length}</summary>
-      <ul>
-        {sources.map((source) => {
+    <details className={styles.personEvidenceDisclosure}>
+      <summary>查看来源 · {evidence.length}</summary>
+      <div className={styles.personEvidenceList}>
+        {evidence.map((source) => {
           const segmentId = source.segmentIds[0];
           const canOpen = Boolean(source.canOpenTranscript && segmentId && onOpenSource);
           return (
-            <li key={source.id}>
-              <blockquote>“{source.quote}”</blockquote>
-              <div>
-                <span>{formatDate(source.recordingDate)} · {sourceTime(source)}</span>
-                {canOpen ? (
-                  <button onClick={() => onOpenSource?.(source, segmentId)} type="button">在完整文字稿中查看</button>
-                ) : <small>已保留可核对原话</small>}
-              </div>
-            </li>
+            <div key={source.id}>
+              <ProductEvidence label={sourcePresentationLabel(source)} meta={`${formatDate(source.recordingDate)} · ${sourceTime(source)}`}>
+                <p>{source.presentation === "direct_quote" ? `“${source.quote}”` : source.quote}</p>
+              </ProductEvidence>
+              {canOpen ? <button onClick={() => onOpenSource?.(source, segmentId)} type="button">在完整文字记录中查看</button> : <small>这台设备上暂时无法打开完整文字记录</small>}
+            </div>
           );
         })}
-      </ul>
+      </div>
     </details>
   );
 }
@@ -115,13 +143,13 @@ function RecapItems({
   onOpenSource?: (source: SourceRefVM, segmentId: string) => Promise<void> | void;
 }) {
   const kept = visibleRecapItems(items);
-  if (kept.length === 0) return <p className={styles.profileEmpty}>{empty}</p>;
+  if (kept.length === 0) return <p className={styles.personSectionEmpty}>{empty}</p>;
   return (
-    <ul className={styles.profileFactList}>
+    <ul className={styles.personFactList}>
       {kept.map((item) => (
         <li key={item.id}>
           <p>{item.displayedText || item.proposedText}</p>
-          <EvidenceList onOpenSource={onOpenSource} sources={item.sources} />
+          <EvidenceList onOpenSource={onOpenSource} sources={evidenceSources(item.sources)} />
         </li>
       ))}
     </ul>
@@ -129,34 +157,33 @@ function RecapItems({
 }
 
 function PromiseList({
-  empty,
   onOpenSource,
   onUpdatePromise,
   promises
 }: {
-  empty: string;
   onOpenSource?: (source: SourceRefVM, segmentId: string) => Promise<void> | void;
   onUpdatePromise?: (promise: PromiseVM, status: PromiseVM["status"]) => Promise<void> | void;
   promises: PromiseVM[];
 }) {
   const [changingId, setChangingId] = useState<string | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const visiblePromises = promises.filter((promise) => evidenceSources(promise.sources).length > 0);
 
-  if (promises.length === 0) return <p className={styles.profileEmpty}>{empty}</p>;
+  if (visiblePromises.length === 0) return <p className={styles.personSectionEmpty}>还没有带有可核对来源的明确约定。</p>;
   return (
     <div>
       {errorMessage ? <p className={styles.inlineError} role="alert">{errorMessage}</p> : null}
-      <ul className={styles.promiseList}>
-        {promises.map((promise) => (
+      <ul className={styles.personPromiseList}>
+        {visiblePromises.map((promise) => (
           <li key={promise.id}>
-            <div className={styles.promiseHeading}>
+            <div className={styles.personPromiseHeading}>
               <p>{promise.text}</p>
-              <span data-status={promise.status}>{promise.status === "open" ? "待完成" : "已完成"}</span>
+              <span data-status={promise.status}>{promise.status === "open" ? "仍在继续" : "已完成"}</span>
             </div>
-            <EvidenceList onOpenSource={onOpenSource} sources={promise.sources} />
+            <EvidenceList onOpenSource={onOpenSource} sources={evidenceSources(promise.sources)} />
             {onUpdatePromise ? (
               <button
-                className={styles.promiseAction}
+                className={styles.personTertiaryAction}
                 disabled={changingId !== null}
                 onClick={async () => {
                   setChangingId(promise.id);
@@ -170,7 +197,7 @@ function PromiseList({
                   }
                 }}
                 type="button"
-              >{changingId === promise.id ? "正在保存…" : promise.status === "open" ? "标为已完成" : "恢复为待完成"}</button>
+              >{changingId === promise.id ? "正在保存…" : promise.status === "open" ? "标为已完成" : "恢复为仍在继续"}</button>
             ) : null}
           </li>
         ))}
@@ -179,72 +206,82 @@ function PromiseList({
   );
 }
 
+function ArchiveTimeline({ entries }: { entries: DateCompanionPersonArchiveEntry[] }) {
+  const visibleEntries = entries.filter((entry) => entry.sources.length > 0);
+  const hiddenCount = entries.length - visibleEntries.length;
+  if (visibleEntries.length === 0) {
+    return <ProductState description="没有可靠来源的内容不会作为人物信息展示。" title="还没有可核对的长期内容" tone="empty" />;
+  }
+  return (
+    <>
+      {hiddenCount > 0 ? <p className={styles.personSourceNotice}>{hiddenCount} 条内容因为来源暂不可核对，没有显示在这里。</p> : null}
+      <ol className={styles.personArchiveTimeline}>
+        {visibleEntries.map((entry) => (
+          <li key={entry.id}>
+            <div className={styles.personTimelineMarker} aria-hidden="true" />
+            <article>
+              <header>
+                <span>{MEMORY_TYPE_COPY[entry.type]} · {MEMORY_STATUS_COPY[entry.status]}</span>
+                <time dateTime={entry.date}>{formatDate(entry.date)}</time>
+              </header>
+              <h3>{entry.title}</h3>
+              <p>{entry.summary}</p>
+              <div className={styles.personArchiveMeta}>
+                <span>{entry.sourceStatement}</span>
+                <span>{entry.sources.length} 条来源{entry.shared ? " · 涉及多人" : ""}</span>
+              </div>
+              <details className={styles.personEvidenceDisclosure}>
+                <summary>查看来源 · {entry.sources.length}</summary>
+                <div className={styles.personEvidenceList}>
+                  {entry.sources.map((source) => (
+                    <div key={source.id}>
+                      <ProductEvidence label="原话" meta={formatDate(source.date)}>
+                        <p>“{source.quote}”</p>
+                      </ProductEvidence>
+                      <small>完整原话已保留；这条档案当前不提供失效的跳转链接。</small>
+                    </div>
+                  ))}
+                </div>
+              </details>
+            </article>
+          </li>
+        ))}
+      </ol>
+    </>
+  );
+}
+
 export function CompanionPerson({
+  archiveState = { status: "idle" },
+  confirmedPerson = null,
   currentInteraction,
+  isCurrentRelationship = false,
   onDeleteInteraction,
   onOpenInteraction,
   onOpenSource,
   onSearch,
   onUpdatePromise,
   person = EMPTY_PERSON,
-  relationship,
   mutationState = { status: "idle" },
-  proactiveObservation,
   searchState = { status: "idle" }
 }: CompanionPersonProps) {
-  const [expandedSection, setExpandedSection] = useState<ProfileSection["id"] | null>(null);
   const [query, setQuery] = useState("");
   const [deleteCandidateId, setDeleteCandidateId] = useState<string | null>(null);
   const [deletingId, setDeletingId] = useState<string | null>(null);
   const [deleteError, setDeleteError] = useState<string | null>(null);
-  const cardRefs = useRef<Record<ProfileSection["id"], HTMLElement | null>>({
-    remembered: null,
-    recent: null,
-    relationship: null,
-    promises: null
-  });
-  const previousCardRects = useRef<Map<ProfileSection["id"], DOMRect> | null>(null);
-  const displayName = relationship?.displayName?.trim() || "Ta";
+  const archive = archiveState.status === "ready" ? archiveState.archive : null;
+  const displayName = confirmedPerson?.displayName?.trim() || archive?.person.displayName?.trim() || "人物";
+  const confirmedAt = confirmedPerson?.confirmedAt || archive?.person.confirmedAt || null;
   const confirmedInteractions = person.interactions.filter((interaction) => interaction.persistenceStatus === "confirmed");
+  const selectedDeleteInteraction = confirmedInteractions.find((interaction) => interaction.id === deleteCandidateId) ?? null;
+  const recentItems = visibleRecapItems(person.recent);
+  const validSearchResults = searchState.status === "ready"
+    ? searchState.results.filter((result) => evidenceSources(result.sources).length > 0)
+    : [];
   const relationshipMutationError = mutationState.status === "error"
     && (mutationState.operation === "promise" || mutationState.operation === "delete")
     ? mutationState.message
     : null;
-  const expandedProfileSection = PROFILE_SECTIONS.find((section) => section.id === expandedSection);
-  const squeezeSide = expandedProfileSection
-    ? expandedProfileSection.side === "left" ? "right" : "left"
-    : "none";
-  const compactSections = expandedSection
-    ? PROFILE_SECTIONS.filter((section) => section.id !== expandedSection)
-    : [];
-  const continuationItem = [...person.recent, ...person.relationship]
-    .filter((item) => item.disposition === "kept" && item.sources.length > 0)
-    .at(-1);
-
-  useLayoutEffect(() => {
-    const firstRects = previousCardRects.current;
-    previousCardRects.current = null;
-    if (!firstRects || window.matchMedia?.("(prefers-reduced-motion: reduce)").matches) return;
-
-    for (const section of PROFILE_SECTIONS) {
-      const card = cardRefs.current[section.id];
-      const first = firstRects.get(section.id);
-      if (!card || !first || typeof card.animate !== "function") continue;
-
-      const last = card.getBoundingClientRect();
-      if (!first.width || !first.height || !last.width || !last.height) continue;
-      card.animate(
-        [
-          {
-            transform: `translate(${first.left - last.left}px, ${first.top - last.top}px) scale(${first.width / last.width}, ${first.height / last.height})`,
-            transformOrigin: "top left"
-          },
-          { transform: "none", transformOrigin: "top left" }
-        ],
-        { duration: 440, easing: "cubic-bezier(0.22, 1, 0.36, 1)" }
-      );
-    }
-  }, [expandedSection]);
 
   const submitSearch = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -252,236 +289,196 @@ export function CompanionPerson({
     if (normalized && onSearch) void onSearch(normalized);
   };
 
-  const toggleSection = (sectionId: ProfileSection["id"]) => {
-    previousCardRects.current = new Map(
-      PROFILE_SECTIONS.flatMap((section) => {
-        const card = cardRefs.current[section.id];
-        return card ? [[section.id, card.getBoundingClientRect()] as const] : [];
-      })
-    );
-    setExpandedSection((current) => current === sectionId ? null : sectionId);
-  };
-
-  const sectionSummary = (section: ProfileSection) => {
-    if (section.id === "promises") {
-      if (person.promises.length === 0) return section.empty;
-      const openCount = person.promises.filter((promise) => promise.status === "open").length;
-      const doneCount = person.promises.length - openCount;
-      return [openCount > 0 ? `${openCount} 件待完成` : null, doneCount > 0 ? `${doneCount} 件已完成` : null]
-        .filter(Boolean)
-        .join(" · ");
-    }
-
-    const kept = visibleRecapItems(person[section.id]);
-    if (kept.length === 0) return section.empty;
-    const first = shortenSummary(kept[0].displayedText || kept[0].proposedText);
-    return kept.length > 1 ? `${first} · 另有 ${kept.length - 1} 条` : first;
-  };
-
-  const sectionContent = (section: ProfileSection) => {
-    if (section.id === "promises") {
-      return (
-        <PromiseList
-          empty={section.empty}
-          onOpenSource={onOpenSource}
-          onUpdatePromise={onUpdatePromise}
-          promises={person.promises}
+  if (archiveState.status === "not_found") {
+    return (
+      <div className={styles.personBoundaryState}>
+        <ProductState
+          action={<Link className={styles.secondaryButton} href="/date-companion/a/people">返回人物</Link>}
+          description="这位人物不存在、尚未确认，或不属于当前账号。"
+          title="没有找到这位人物"
+          tone="error"
         />
-      );
-    }
-    return <RecapItems empty={section.empty} items={person[section.id]} onOpenSource={onOpenSource} />;
-  };
+      </div>
+    );
+  }
 
   return (
-    <div className={`${styles.twoColumnPage} ${styles.personPage}`}>
-      <header className={`${styles.stickyHero} ${styles.personHero}`}>
-        <span className={styles.heroMark} aria-hidden="true">Ta</span>
-        <p>当前这段关系</p>
-        <h1>{displayName}</h1>
-        <span>这里只留下你亲自确认、并且能核对原话的内容。说话人编号和昵称不会替你判断谁是 Ta。</span>
+    <div className={styles.personArchivePage}>
+      <header className={styles.personArchiveHeader}>
+        <Link className={styles.personBackLink} href="/date-companion/a/people">← 返回人物</Link>
+        <div className={styles.personIdentity}>
+          <span aria-hidden="true" className={styles.personIdentityMark}>{personInitials(displayName)}</span>
+          <div>
+            <p className={styles.eyebrow}>由你确认的人物</p>
+            <h1>{displayName}</h1>
+            <p>{confirmedAt ? `${formatDate(confirmedAt)}确认` : "只展示有可靠来源、经过确认的内容"}</p>
+          </div>
+        </div>
       </header>
 
-      <div className={`${styles.contentColumn} ${styles.personContent}`}>
-        <section className={`${styles.contentPanel} ${styles.personSearchPanel}`} aria-labelledby="relationship-search-title">
-          <h2 id="relationship-search-title">在这段关系里找一找</h2>
-          <p className={styles.contentIntro}>只搜索当前 Ta 已确认留下的内容。</p>
-          <div className={styles.boundaryNote} role="note">
-            被排除、尚未决定或说话人仍不确定的内容，不会出现在这里，也不会进入见面前准备和关键词搜索。
+      {archiveState.status === "loading" ? (
+        <ProductState description="正在核对人物与来源。" title="正在读取人物内容" tone="loading" />
+      ) : archiveState.status === "error" ? (
+        <ProductState
+          action={<Link className={styles.secondaryButton} href="/date-companion/a/people">返回人物</Link>}
+          description={archiveState.message}
+          title="人物内容暂时不可用"
+          tone="error"
+        />
+      ) : null}
+
+      {isCurrentRelationship ? (
+        <section aria-labelledby="person-recent-title" className={styles.personPrimarySection}>
+          <header className={styles.personSectionHeader}>
+            <div><p className={styles.eyebrow}>最近相关内容</p><h2 id="person-recent-title">最近留下的片段</h2></div>
+            <span>{recentItems.length > 0 ? `${recentItems.length} 条` : "暂无"}</span>
+          </header>
+          <RecapItems empty="还没有经过确认、且有原话来源的最近片段。" items={person.recent} onOpenSource={onOpenSource} />
+        </section>
+      ) : null}
+
+      {isCurrentRelationship ? (
+        <section aria-labelledby="person-confirmed-title" className={styles.personPrimarySection}>
+          <header className={styles.personSectionHeader}>
+            <div><p className={styles.eyebrow}>已确认信息</p><h2 id="person-confirmed-title">你亲自留下的内容</h2></div>
+          </header>
+          <div className={styles.personKnowledgeSections}>
+            <details open>
+              <summary><span>记得的片段</span><small>{visibleRecapItems(person.remembered).length} 条</small></summary>
+              <RecapItems empty="还没有留下这一类片段。" items={person.remembered} onOpenSource={onOpenSource} />
+            </details>
+            <details>
+              <summary><span>你们之间</span><small>{visibleRecapItems(person.relationship).length} 条</small></summary>
+              <RecapItems empty="还没有经过确认、且有可核对来源的相处片段。" items={person.relationship} onOpenSource={onOpenSource} />
+            </details>
+            <details>
+              <summary><span>明确约定</span><small>{person.promises.filter((promise) => evidenceSources(promise.sources).length > 0).length} 条</small></summary>
+              <PromiseList onOpenSource={onOpenSource} onUpdatePromise={onUpdatePromise} promises={person.promises} />
+            </details>
           </div>
-          {relationshipMutationError ? <p className={styles.inlineError} role="alert">{relationshipMutationError}</p> : null}
+        </section>
+      ) : null}
+
+      {archive ? (
+        <section aria-labelledby="person-archive-title" className={styles.personPrimarySection}>
+          <header className={styles.personSectionHeader}>
+            <div><p className={styles.eyebrow}>长期相关内容</p><h2 id="person-archive-title">可追溯的内容档案</h2></div>
+            <span>{archive.entries.length} 条</span>
+          </header>
+          <ArchiveTimeline entries={archive.entries} />
+        </section>
+      ) : null}
+
+      {isCurrentRelationship && onSearch ? (
+        <section aria-labelledby="relationship-search-title" className={styles.personSecondarySection}>
+          <header className={styles.personSectionHeader}>
+            <div><p className={styles.eyebrow}>在已确认内容中</p><h2 id="relationship-search-title">找一段过去的记录</h2></div>
+          </header>
+          <p className={styles.contentIntro}>只搜索当前人物已确认、且能够核对来源的内容。</p>
           <form className={styles.relationshipSearch} onSubmit={submitSearch}>
             <label>
               <span className={styles.visuallyHidden}>关键词</span>
-              <input
-                aria-label="关系内关键词"
-                disabled={!onSearch || searchState.status === "loading"}
-                onChange={(event) => setQuery(event.target.value)}
-                placeholder="例如：旅行、考试、想去的地方"
-                type="search"
-                value={query}
-              />
+              <input aria-label="人物内容关键词" autoComplete="off" disabled={searchState.status === "loading"} name="person-content-search" onChange={(event) => setQuery(event.currentTarget.value)} placeholder="例如：旅行、考试、想去的地方" type="search" value={query} />
             </label>
-            <button className={styles.secondaryButton} disabled={!onSearch || !query.trim() || searchState.status === "loading"} type="submit">
-              {searchState.status === "loading" ? "正在找…" : "找一找"}
-            </button>
+            <button className={styles.secondaryButton} disabled={!query.trim() || searchState.status === "loading"} type="submit">{searchState.status === "loading" ? "正在找…" : "找一找"}</button>
           </form>
           {searchState.status === "error" ? <p className={styles.inlineError} role="alert">{searchState.message}</p> : null}
           {searchState.status === "ready" ? (
-            searchState.results.length === 0 ? (
-              <div className={styles.emptyState}><div><b>没有找到已确认内容</b><span>被排除或尚未确认的片段不会出现在结果里。</span></div></div>
-            ) : (
-              <ul className={styles.searchResults}>
-                {searchState.results.map((result) => (
+            validSearchResults.length === 0 ? <ProductState description="被排除、尚未确认或无法核对来源的片段不会出现在结果里。" title="没有找到已确认内容" tone="empty" /> : (
+              <ul className={styles.personSearchResults}>
+                {validSearchResults.map((result) => (
                   <li key={result.id}>
                     <time dateTime={result.recordingDate}>{formatDate(result.recordingDate)}</time>
                     <p>{result.text}</p>
-                    <EvidenceList onOpenSource={onOpenSource} sources={result.sources} />
+                    <EvidenceList onOpenSource={onOpenSource} sources={evidenceSources(result.sources)} />
                   </li>
                 ))}
               </ul>
             )
           ) : null}
         </section>
+      ) : null}
 
-        <section
-          aria-label="关于 Ta 的四类内容"
-          className={[
-            styles.profileGrid,
-            expandedSection ? styles.profileGridExpanded : "",
-            squeezeSide === "left" ? styles.profileGridSqueezeLeft : "",
-            squeezeSide === "right" ? styles.profileGridSqueezeRight : ""
-          ].filter(Boolean).join(" ")}
-          data-expanded={expandedSection ?? undefined}
-          data-expanded-card={expandedSection ?? "none"}
-          data-squeeze-side={squeezeSide}
-        >
-          {PROFILE_SECTIONS.map((section) => {
-            const expanded = expandedSection === section.id;
-            const compact = expandedSection !== null && !expanded;
-            const state = expanded ? "expanded" : compact ? "compact" : "idle";
-            const railOrder = compact ? compactSections.findIndex((candidate) => candidate.id === section.id) + 1 : 0;
-            const contentId = `profile-section-${section.id}`;
-            return (
-              <article
-                className={`${styles.profileCard} ${expanded ? styles.profileCardExpanded : ""} ${compact ? styles.profileCardCompact : ""}`}
-                data-card-id={section.id}
-                data-card-state={state}
-                data-rail-order={railOrder || undefined}
-                id={`profile-card-${section.id}`}
-                key={section.id}
-                ref={(node) => {
-                  cardRefs.current[section.id] = node;
-                }}
-              >
-                <div className={styles.profileCardHeading}>
-                  <div>
-                    <small hidden={compact}>{section.eyebrow}</small>
-                    <h2>
-                      <button
-                        aria-controls={contentId}
-                        aria-expanded={expanded}
-                        onClick={(event) => {
-                          event.currentTarget.focus();
-                          toggleSection(section.id);
-                        }}
-                        title={expanded ? "再次点击恢复四张卡片" : "点击放大这张卡片"}
-                        type="button"
-                      >{section.title}</button>
-                    </h2>
-                  </div>
-                </div>
-                <div data-profile-card-content hidden={compact} id={contentId}>
-                  {expanded ? sectionContent(section) : <p className={styles.profileEmpty}>{sectionSummary(section)}</p>}
-                </div>
-              </article>
-            );
-          })}
-        </section>
-
-        <section className={`${styles.contentPanel} ${styles.personHistoryPanel}`}>
-          <h2>一起走过的几次</h2>
-          <p className={styles.contentIntro}>只有最终确认过的相处会留在这里。</p>
-          {deleteError ? <p className={styles.inlineError} role="alert">{deleteError}</p> : null}
+      {isCurrentRelationship ? (
+        <section aria-labelledby="person-history-title" className={styles.personSecondarySection}>
+          <header className={styles.personSectionHeader}>
+            <div><p className={styles.eyebrow}>相处记录</p><h2 id="person-history-title">一起走过的几次</h2></div>
+          </header>
           {confirmedInteractions.length === 0 ? (
-            <div className={styles.emptyState}>
-              <div><b>还没有确认过的相处</b><span>{currentInteraction?.status === "ready" ? "当前这次可以先在复盘页核对和确认。" : "上传一段重要对话，整理后由你决定是否留下。"}</span></div>
-            </div>
+            <ProductState description={currentInteraction?.status === "ready" ? "当前这次可以先在复盘页核对和确认。" : "只有最终确认过的相处会留在这里。"} title="还没有确认过的相处" tone="empty" />
           ) : (
-            <ol className={styles.interactionHistory}>
-              {confirmedInteractions.map((interaction) => {
-                const canOpen = Boolean(onOpenInteraction && interaction.relationshipInteractionId);
-                return (
-                  <li key={interaction.id}>
-                    <time dateTime={interaction.recordingDate}>{formatDate(interaction.recordingDate)}</time>
-                    <div><b>{interaction.title || interaction.fileName}</b><span>{interaction.fileName}</span></div>
-                    <div className={styles.interactionActions}>
-                      {canOpen ? (
-                        <button onClick={() => onOpenInteraction?.(interaction)} type="button">
-                          {interaction.transcript.length > 0 ? "查看完整复盘" : "查看保留的复盘"}
-                        </button>
-                      ) : <small>可核对原话已保留</small>}
-                      {onDeleteInteraction ? (
-                        <button
-                          className={styles.removeInteractionAction}
-                          disabled={deletingId !== null}
-                          onClick={() => {
-                            setDeleteError(null);
-                            setDeleteCandidateId(interaction.id);
-                          }}
-                          type="button"
-                        >移除这次记录</button>
-                      ) : null}
-                    </div>
-                    {deleteCandidateId === interaction.id ? (
-                      <div className={styles.removeInteractionConfirm} role="alertdialog" aria-label={`移除${formatDate(interaction.recordingDate)}的记录`}>
-                        <p>移除后，这次相处留下的片段和由它产生的约定会一并重新整理。此操作不能在这里撤销。</p>
-                        <div>
-                          <button disabled={deletingId !== null} onClick={() => setDeleteCandidateId(null)} type="button">先不移除</button>
-                          <button
-                            disabled={deletingId !== null}
-                            onClick={async () => {
-                              setDeletingId(interaction.id);
-                              setDeleteError(null);
-                              try {
-                                await onDeleteInteraction?.(interaction);
-                                setDeleteCandidateId(null);
-                              } catch (error) {
-                                setDeleteError(error instanceof Error && error.message.trim() ? error.message : "这次记录暂时没有移除成功。");
-                              } finally {
-                                setDeletingId(null);
-                              }
-                            }}
-                            type="button"
-                          >{deletingId === interaction.id ? "正在移除…" : "确认移除"}</button>
-                        </div>
-                      </div>
-                    ) : null}
-                  </li>
-                );
-              })}
+            <ol className={styles.personInteractionList}>
+              {confirmedInteractions.map((interaction) => (
+                <li key={interaction.id}>
+                  <time dateTime={interaction.recordingDate}>{formatDate(interaction.recordingDate)}</time>
+                  <div><b>{interaction.title || interaction.fileName}</b><span>{interaction.fileName}</span></div>
+                  {onOpenInteraction && interaction.relationshipInteractionId ? <button onClick={() => onOpenInteraction(interaction)} type="button">查看复盘</button> : <small>可核对原话已保留</small>}
+                </li>
+              ))}
             </ol>
           )}
         </section>
+      ) : null}
 
-        <section className={`${styles.contentPanel} ${styles.personObservationPanel}`}>
-          <h2>关于你们的一点观察</h2>
-          <p className={styles.contentIntro}>这只是根据已确认片段整理的观察，可能并不完整。</p>
-          {proactiveObservation ?? (
-            <div className={styles.emptyState}><div><b>还没有足够片段形成观察</b><span>确认更多相处后，这里只会根据有原话来源的内容整理。</span></div></div>
-          )}
-        </section>
+      <section aria-labelledby="person-trust-title" className={styles.personTrustSection} id="person-trust-controls">
+        <header className={styles.personSectionHeader}>
+          <div><p className={styles.eyebrow}>数据与隐私</p><h2 id="person-trust-title">来源与控制</h2></div>
+        </header>
+        <p>人物内容与数据控制分开管理。撤销长期使用、删除一段记录和删除原始来源有不同影响，不会合并成一个含糊的“删除”。</p>
+        {isCurrentRelationship ? <Link className={styles.personTrustLink} href="/date-companion/a/people#trust-controls">查看人物与长期使用设置 →</Link> : null}
+        {isCurrentRelationship && confirmedInteractions.length > 0 && onDeleteInteraction ? (
+          <details className={styles.personRecordControls}>
+            <summary>管理相关记录</summary>
+            <ul>
+              {confirmedInteractions.map((interaction) => (
+                <li key={interaction.id}>
+                  <span><b>{interaction.title || interaction.fileName}</b><small>{formatDate(interaction.recordingDate)}</small></span>
+                  <button disabled={deletingId !== null} onClick={() => { setDeleteError(null); setDeleteCandidateId(interaction.id); }} type="button">移除这次记录</button>
+                </li>
+              ))}
+            </ul>
+          </details>
+        ) : null}
+        {deleteError || relationshipMutationError ? <p className={styles.inlineError} role="alert">{deleteError || relationshipMutationError}</p> : null}
+      </section>
 
-        <section className={`${styles.contentPanel} ${styles.personContinue}`}>
-          <small>下次可以从这里继续</small>
-          <p className={styles.observationCopy}>{continuationItem
-            ? `“${continuationItem.displayedText || continuationItem.proposedText}”`
-            : "见面前，再看一眼你确认留下的片段和仍未完成的约定。"}</p>
-          <Link className={`${styles.primaryButton} ${styles.personContinueAction}`} href="/date-companion/a/prepare">
-            <span><b>见 {displayName} 前看一眼</b><small>只会阅读，不会修改任何记录</small></span>
-            <span aria-hidden="true">→</span>
-          </Link>
-        </section>
-      </div>
+      {isCurrentRelationship ? (
+        <aside className={styles.personContinue}>
+          <div><small>下次见面前</small><p>回看你确认留下的片段和仍在继续的约定。</p></div>
+          <Link className={styles.primaryButton} href="/date-companion/a/prepare"><span>见 {displayName} 前看一眼</span><span aria-hidden="true">→</span></Link>
+        </aside>
+      ) : null}
+
+      <ProductDialog
+        footer={(
+          <>
+            <button disabled={deletingId !== null} onClick={() => setDeleteCandidateId(null)} type="button">取消</button>
+            <button
+              className={styles.dangerButton}
+              disabled={deletingId !== null}
+              onClick={async () => {
+                if (!selectedDeleteInteraction || !onDeleteInteraction) return;
+                setDeletingId(selectedDeleteInteraction.id);
+                setDeleteError(null);
+                try {
+                  await onDeleteInteraction(selectedDeleteInteraction);
+                  setDeleteCandidateId(null);
+                } catch (error) {
+                  setDeleteError(error instanceof Error && error.message.trim() ? error.message : "这次记录暂时没有移除成功。");
+                } finally {
+                  setDeletingId(null);
+                }
+              }}
+              type="button"
+            >{deletingId ? "正在移除…" : "确认移除记录"}</button>
+          </>
+        )}
+        onClose={() => deletingId === null && setDeleteCandidateId(null)}
+        open={Boolean(selectedDeleteInteraction)}
+        title="移除这次相处记录？"
+      >
+        <p>将移除“{selectedDeleteInteraction?.title || selectedDeleteInteraction?.fileName || "这次相处"}”（{selectedDeleteInteraction ? formatDate(selectedDeleteInteraction.recordingDate) : "日期未知"}）。这会删除整次相处记录，并让由它产生的片段和约定重新整理；人物本身不会因此被删除。</p>
+      </ProductDialog>
     </div>
   );
 }

@@ -433,6 +433,20 @@ function fakeApi(overrides: Partial<DailyReflectionApi> = {}): DailyReflectionAp
     removeWorkingCard: async () => {
       throw new Error("working card remove is not configured for this test");
     },
+    createWorkingCardMemoryProposal: async () => {
+      throw new Error("working card Memory proposal is not configured for this test");
+    },
+    admitMemoryProposal: async () => {
+      throw new Error("working card Memory admission is not configured for this test");
+    },
+    getMemoryRecommendations: async (reflectionId) => ({
+      reflectionId,
+      policyVersion: "daily_reflection_memory_recommendation_v1",
+      recommendationFingerprint: "0".repeat(64),
+      maxRecommendations: 5,
+      eligibleCount: 0,
+      recommendations: []
+    }),
     getWorkingCardMemoryRevocation: async () => ({ found: false }),
     revokeWorkingCardMemory: async () => {
       throw new Error("working card Memory revocation is not configured for this test");
@@ -1076,7 +1090,7 @@ describe("DailyReflectionSessionController", () => {
     });
     await controller.initialize("reflection_1");
 
-    await controller.saveWorkingCard(card.id);
+    expect(await controller.saveWorkingCard(card.id)).toBe(true);
 
     expect(saveWorkingCard).toHaveBeenCalledWith(
       "reflection_1",
@@ -1181,10 +1195,10 @@ describe("DailyReflectionSessionController", () => {
     });
     await controller.initialize("reflection_1");
 
-    await controller.saveWorkingCard(card.id, {
+    expect(await controller.saveWorkingCard(card.id, {
       userTitle: editedCard.userTitle,
       userText: editedCard.userText
-    });
+    })).toBe(true);
 
     expect(updateCards).toHaveBeenCalledWith("reflection_1", {
       expectedVersion: 3,
@@ -1233,10 +1247,10 @@ describe("DailyReflectionSessionController", () => {
     });
     await controller.initialize("reflection_1");
 
-    await controller.saveWorkingCard(card.id, {
+    expect(await controller.saveWorkingCard(card.id, {
       userTitle: null,
       userText: "本页尚未保存的内容"
-    });
+    })).toBe(false);
 
     expect(saveWorkingCard).not.toHaveBeenCalled();
     expect(get).toHaveBeenCalledTimes(2);

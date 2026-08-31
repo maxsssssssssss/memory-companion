@@ -4,6 +4,10 @@ import type { DailyReflectionMemoryProposal } from
   "@/lib/domain/daily-reflection-memory-proposal";
 import type { TranscriptSegment } from "@/lib/domain/types";
 
+import { DAILY_REFLECTION_MEMORY_PROPOSAL_POLICY_VERSION } from
+  "./memory-proposal-policy";
+import type { DailyReflectionMemoryProposalSource } from
+  "./memory-proposal-repository";
 import { createDailyReflectionMemoryProposalService } from
   "./memory-proposal-service";
 
@@ -80,7 +84,7 @@ function proposal(overrides: Partial<DailyReflectionMemoryProposal> = {}) {
 
 function harness(initial = proposal()) {
   let current = initial;
-  const source = {
+  const source: DailyReflectionMemoryProposalSource = {
     proposal: current,
     evidenceSegments: [{ ...segment(), effectiveOrigin: "user_reflection" as const }],
     sourceSegments: [segment()],
@@ -101,14 +105,14 @@ function harness(initial = proposal()) {
     list: vi.fn(),
     getAdmissionSource: vi.fn(() => ({ ...source, proposal: current })),
     evaluate: vi.fn((input: {
-      decision: "approved" | "rejected";
+      decision: "approved" | "needs_confirmation" | "rejected";
       policyVersion: string;
       score: number;
       reasons: string[];
     }) => {
       current = {
         ...current,
-        status: input.decision,
+        status: input.decision === "needs_confirmation" ? "pending" : input.decision,
         policyVersion: input.policyVersion,
         score: input.score,
         reasons: input.reasons,
@@ -198,6 +202,7 @@ function harness(initial = proposal()) {
     admissionRepository,
     personRepository,
     onPublicationVisible,
+    source,
     current: () => current
   };
 }
@@ -231,12 +236,7 @@ describe("Daily Reflection Memory Proposal service", () => {
       actionClaimed: false,
       content: "我会在明天完成并提交材料。"
     }),
-    proposal({ epistemicStatus: "ai_inference" }),
-    proposal({
-      memoryType: "preference",
-      content: "我今天先喝咖啡。",
-      durability: 0.2
-    })
+    proposal({ epistemicStatus: "ai_inference" })
   ])("rejects an unsafe or transient proposal with zero Durable Memory writes", async (unsafe) => {
     const fixture = harness(unsafe);
     const result = await fixture.service.admit({
@@ -248,6 +248,140 @@ describe("Daily Reflection Memory Proposal service", () => {
     expect(result.status).toBe("rejected");
     expect(fixture.admissionRepository.applyProposal).not.toHaveBeenCalled();
     expect(fixture.admissionRepository.markPublished).not.toHaveBeenCalled();
+  });
+
+  it("does not let a low durability score veto an explicitly selected owned preference", async () => {
+    const fixture = harness(proposal({
+      memoryType: "preference",
+      content: "我今天先喝咖啡。",
+      durability: 0.2
+    }));
+    await expect(fixture.service.admit({
+      accountId: "account_1",
+      proposalId: "proposal_1",
+      expectedVersion: 0
+    })).resolves.toMatchObject({ status: "admitted" });
+    expect(fixture.admissionRepository.applyProposal).toHaveBeenCalledOnce();
+  });
+
+  it("re-evaluates a stable V1 generic question rejection and admits exactly once", async () => {
+    const fixture = harness(proposal({
+      cardKind: "question",
+      memoryType: "question",
+      content: "长内容首屏呈现规则仍待确定",
+      status: "rejected",
+      policyVersion: "daily_reflection_memory_proposal_policy_v1",
+      reasons: ["resolved_or_generic_question"],
+      score: 0.32,
+      version: 1
+    }));
+
+    const result = await fixture.service.admit({
+      accountId: "account_1",
+      proposalId: "proposal_1",
+      expectedVersion: 1
+    });
+    expect(result.status).toBe("admitted");
+    expect(fixture.proposalRepository.evaluate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        decision: "approved",
+        policyVersion: "daily_reflection_memory_proposal_policy_v2"
+      })
+    );
+    expect(fixture.admissionRepository.applyProposal).toHaveBeenCalledOnce();
+  });
+
+  it("admits a user-selected direct-conversation summary with derived source framing", async () => {
+    const direct = proposal({
+      memoryType: "summary",
+      content: "重点卡片数量应动态调整",
+      sourceOrigin: "direct_conversation",
+      evidenceSnapshots: [{
+        sourceSegmentId: "segment_1",
+        uploadId: "upload_1",
+        startSeconds: 0,
+        endSeconds: 8,
+        effectiveOrigin: "direct_conversation"
+      }]
+    });
+    const fixture = harness(direct);
+    fixture.source.evidenceSegments = [{
+      ...segment("重点卡片数量应动态调整"),
+      identity: undefined,
+      effectiveOrigin: "direct_conversation"
+    }];
+    fixture.source.sourceSegments = fixture.source.evidenceSegments.map(
+      ({ effectiveOrigin: _effectiveOrigin, ...item }) => item
+    );
+
+    await expect(fixture.service.admit({
+      accountId: "account_1",
+      proposalId: "proposal_1",
+      expectedVersion: 0
+    })).resolves.toMatchObject({ status: "admitted" });
+    expect(fixture.admissionRepository.applyProposal).toHaveBeenCalledWith(
+      expect.objectContaining({
+        memory: expect.objectContaining({
+          summary: "基于 2026-08-24 的交流记录整理：重点卡片数量应动态调整"
+        }),
+        sourceOrigin: "direct_conversation"
+      })
+    );
+  });
+
+  it("requires and audits an explicit acknowledgement before a sensitive ordinary Card", async () => {
+    const fixture = harness(proposal({ sensitivity: 0.9 }));
+    const pending = await fixture.service.admit({
+      accountId: "account_1",
+      proposalId: "proposal_1",
+      expectedVersion: 0
+    });
+    expect(pending).toMatchObject({
+      status: "needs_confirmation",
+      confirmationRequirements: [{
+        code: "acknowledge_sensitive_content",
+        resolution: "acknowledgement"
+      }]
+    });
+    expect(fixture.admissionRepository.applyProposal).not.toHaveBeenCalled();
+
+    const admitted = await fixture.service.admit({
+      accountId: "account_1",
+      proposalId: "proposal_1",
+      expectedVersion: fixture.current().version,
+      acknowledgements: ["acknowledge_sensitive_content"]
+    });
+    expect(admitted.status).toBe("admitted");
+    expect(fixture.current().reasons).toContain(
+      "user_confirmation:acknowledge_sensitive_content"
+    );
+    expect(fixture.admissionRepository.applyProposal).toHaveBeenCalledOnce();
+  });
+
+  it("does not let an acknowledgement bypass verified owner requirements for facts", async () => {
+    const fixture = harness(proposal({ memoryType: "preference" }));
+    fixture.source.evidenceSegments = [{
+      ...segment(),
+      identity: undefined,
+      effectiveOrigin: "user_reflection"
+    }];
+    fixture.source.sourceSegments = fixture.source.evidenceSegments.map(
+      ({ effectiveOrigin: _effectiveOrigin, ...item }) => item
+    );
+    const result = await fixture.service.admit({
+      accountId: "account_1",
+      proposalId: "proposal_1",
+      expectedVersion: 0,
+      acknowledgements: ["acknowledge_attribution_uncertainty"]
+    });
+    expect(result).toMatchObject({
+      status: "needs_confirmation",
+      confirmationRequirements: [{
+        code: "verify_fact_owner",
+        resolution: "verified_owner"
+      }]
+    });
+    expect(fixture.admissionRepository.applyProposal).not.toHaveBeenCalled();
   });
 
   it("keeps person_fact fail-closed when the existing Person admission path is unavailable", async () => {
@@ -290,7 +424,7 @@ describe("Daily Reflection Memory Proposal service", () => {
       expect.objectContaining({
         memory: expect.objectContaining({
           type: "event",
-          summary: "用户报告：项目负责人报告验收已经完成。",
+          summary: "用户在 2026-08-24 的复盘中提到：项目负责人报告验收已经完成。",
           importanceReasons: expect.arrayContaining([
             "daily_reflection: epistemic status reported_event"
           ])
@@ -300,7 +434,11 @@ describe("Daily Reflection Memory Proposal service", () => {
   });
 
   it("recovers a lost response from the authoritative operation without a duplicate write", async () => {
-    const fixture = harness(proposal({ status: "approved", version: 3 }));
+    const fixture = harness(proposal({
+      status: "approved",
+      version: 3,
+      policyVersion: DAILY_REFLECTION_MEMORY_PROPOSAL_POLICY_VERSION
+    }));
     const prepared = (fixture.admissionRepository.applyProposal as ReturnType<typeof vi.fn>);
     const probe = harness();
     await probe.service.admit({
@@ -348,7 +486,11 @@ describe("Daily Reflection Memory Proposal service", () => {
   });
 
   it("claims the lease before revalidating Card and Evidence", async () => {
-    const fixture = harness(proposal({ status: "approved", version: 1 }));
+    const fixture = harness(proposal({
+      status: "approved",
+      version: 1,
+      policyVersion: DAILY_REFLECTION_MEMORY_PROPOSAL_POLICY_VERSION
+    }));
     await fixture.service.admit({
       accountId: "account_1",
       proposalId: "proposal_1",
@@ -361,7 +503,11 @@ describe("Daily Reflection Memory Proposal service", () => {
   });
 
   it("rejects a source changed under the lease with zero Durable Memory writes", async () => {
-    const fixture = harness(proposal({ status: "approved", version: 1 }));
+    const fixture = harness(proposal({
+      status: "approved",
+      version: 1,
+      policyVersion: DAILY_REFLECTION_MEMORY_PROPOSAL_POLICY_VERSION
+    }));
     fixture.proposalRepository.getAdmissionSource.mockReturnValueOnce({
       proposal: fixture.current(),
       evidenceSegments: [],

@@ -9,6 +9,7 @@ import {
   type DateCompanionSessionValue
 } from "@/lib/client/date-companion-session";
 import { usePersistentDateCompanionSession } from "@/lib/client/date-companion-session-provider";
+import { useDateCompanionPersonArchive } from "@/lib/client/date-companion-people";
 import {
   dateCompanionProactiveSourceRevision,
   presentDateCompanionProactiveValue,
@@ -17,6 +18,9 @@ import {
   type DateCompanionProactiveValueTarget
 } from "@/lib/client/date-companion-proactive-value";
 import type { AuthState, QaState, SourceRefVM, UploadState } from "@/lib/domain/date-companion";
+import { ProductAccountMenu } from "@/components/product-system/product-account-menu";
+import { ProductState } from "@/components/product-system/product-primitives";
+import { ProductSwitcher } from "@/components/product-system/product-switcher";
 
 import { CompanionHome, type CompanionUploadPresentation } from "./companion-home";
 import { CompanionLogin, type CompanionAuthMode } from "./companion-login";
@@ -33,9 +37,7 @@ import styles from "./date-companion.module.css";
 
 export const dateCompanionScreens = ["home", "person", "recap", "prepare", "people"] as const;
 export type DateCompanionScreen = (typeof dateCompanionScreens)[number];
-const primaryDateCompanionScreens = dateCompanionScreens.filter(
-  (screen): screen is Exclude<DateCompanionScreen, "people"> => screen !== "people"
-);
+const primaryDateCompanionScreens = ["home", "prepare", "recap", "people"] as const;
 
 type DateCompanionShellProps =
   | { entry: "login" }
@@ -43,17 +45,19 @@ type DateCompanionShellProps =
   | {
       entry: "companion";
       screen: DateCompanionScreen;
+      dailyReflectionEnabled?: boolean;
       toySyncEnabled?: boolean;
+      initialPersonId?: string | null;
       initialSegmentId?: string | null;
       initialInteractionId?: string | null;
     };
 
 const SCREEN_LABELS: Record<DateCompanionScreen, string> = {
-  home: "此刻",
-  person: "关于 Ta",
-  recap: "这次相处",
-  prepare: "见面前",
-  people: "人物设置"
+  home: "首页",
+  person: "人物详情",
+  recap: "复盘",
+  prepare: "准备",
+  people: "人物"
 };
 
 function screenPath(screen: DateCompanionScreen) {
@@ -94,10 +98,8 @@ function translatedAuthError(message: string, mode: CompanionAuthMode) {
 function LoadingScreen({ label = "正在确认你的私人空间…" }: { label?: string }) {
   return (
     <main className={styles.loadingScreen}>
-      <div className={styles.loadingCard} role="status">
-        <span className={styles.loadingMark}>DB</span>
-        <span className={styles.loadingDot} aria-hidden="true" />
-        <p>{label}</p>
+      <div className={styles.authBoundaryState}>
+        <ProductState title={label} tone="loading" />
       </div>
     </main>
   );
@@ -106,11 +108,13 @@ function LoadingScreen({ label = "正在确认你的私人空间…" }: { label?
 function AuthProblem({ auth }: { auth: Extract<AuthState, { status: "error" }> }) {
   return (
     <main className={styles.loadingScreen}>
-      <div className={styles.loginCard}>
-        <p className={styles.eyebrow}>无法进入</p>
-        <h2>登录状态没有确认</h2>
-        <p className={styles.inlineError} role="alert">{translatedAuthError(auth.message, "login")}</p>
-        <Link className={styles.primaryButton} href="/date-companion"><span>返回登录</span><span aria-hidden="true">→</span></Link>
+      <div className={styles.authBoundaryState}>
+        <ProductState
+          action={<Link className={styles.authBoundaryAction} href="/date-companion">返回登录</Link>}
+          description={translatedAuthError(auth.message, "login")}
+          title="登录状态没有确认"
+          tone="error"
+        />
       </div>
     </main>
   );
@@ -181,7 +185,7 @@ function DateCompanionShellContent({
     : null;
 
   useEffect(() => {
-    if (props.entry === "login" && auth.status === "authenticated") router.replace("/date-companion/modules");
+    if (props.entry === "login" && auth.status === "authenticated") router.replace("/");
     if (props.entry !== "login" && auth.status === "anonymous") router.replace("/date-companion");
   }, [auth.status, props.entry, router]);
 
@@ -319,6 +323,26 @@ function DateCompanionShellContent({
       : null,
     [personQaSources, relationshipProactiveState]
   );
+  const requestedPersonId = props.entry === "companion" && props.screen === "person"
+    ? props.initialPersonId?.trim() || null
+    : null;
+  const readyMemoryBridge = session.memoryBridgeState.status === "ready"
+    ? session.memoryBridgeState
+    : null;
+  const mappedCompanionPersonId = readyMemoryBridge?.mapping?.status === "confirmed"
+    ? readyMemoryBridge.mapping.companionPersonId
+    : null;
+  const selectedPersonId = props.entry === "companion" && props.screen === "person"
+    ? requestedPersonId ?? mappedCompanionPersonId
+    : null;
+  const selfPersonId = readyMemoryBridge?.mapping?.selfPersonId ?? readyMemoryBridge?.selfBinding?.personId ?? null;
+  const selectedConfirmedPerson = selectedPersonId
+    ? readyMemoryBridge?.people.find((person) => person.id === selectedPersonId) ?? null
+    : null;
+  const personArchiveTarget = selectedConfirmedPerson && selectedConfirmedPerson.id !== selfPersonId
+    ? selectedConfirmedPerson.id
+    : null;
+  const personArchiveState = useDateCompanionPersonArchive(personArchiveTarget);
 
   if (auth.status === "checking") return <LoadingScreen />;
 
@@ -345,6 +369,7 @@ function DateCompanionShellContent({
     const userLabel = auth.user.name?.trim() || auth.user.email;
     return (
       <CompanionModules
+        accountId={auth.user.id}
         dailyReflectionEnabled={props.dailyReflectionEnabled ?? false}
         onLogout={async () => {
           await session.logout();
@@ -407,20 +432,43 @@ function DateCompanionShellContent({
     if (!source.canOpenTranscript || !session.selectCachedInteraction(source.uploadId)) return;
     router.push(`/date-companion/a/recap?segment=${encodeURIComponent(segmentId)}#full-transcript`);
   };
+  const selectedIsCurrentRelationship = Boolean(
+    selectedPersonId && selectedPersonId === mappedCompanionPersonId
+  );
+  const resolvedPersonArchiveState = props.entry === "companion"
+    && props.screen === "person"
+    && !readyMemoryBridge
+    ? { status: "loading" as const }
+    : requestedPersonId && readyMemoryBridge && (!selectedConfirmedPerson || requestedPersonId === selfPersonId)
+      ? { status: "not_found" as const }
+      : personArchiveState;
 
   return (
     <main className={styles.companionPage} data-screen={screen}>
       <div className={styles.companionChrome}>
         <div className={styles.topBar}>
-          <Link className={styles.backLink} href="/date-companion/modules"><span aria-hidden="true">←</span>返回空间选择</Link>
-          <span className={styles.topBarNote}>约会陪伴 · {relationshipName}</span>
+          <ProductSwitcher
+            accountId={auth.user.id}
+            currentProduct="date_companion"
+            dailyReflectionEnabled={props.dailyReflectionEnabled ?? false}
+          />
+          <div className={styles.topBarTools}>
+            <span className={styles.topBarNote}>约会陪伴 · {relationshipName}</span>
+            <ProductAccountMenu
+              onLogout={async () => {
+                await session.logout();
+                router.replace("/date-companion");
+              }}
+              userLabel={auth.user.name?.trim() || auth.user.email}
+            />
+          </div>
         </div>
         <nav className={styles.nav} aria-label="约会陪伴页面">
           <div className={styles.navLinks}>
             {primaryDateCompanionScreens.map((candidate) => (
               <Link
-                aria-current={screen === candidate ? "page" : undefined}
-                className={`${styles.navLink} ${screen === candidate ? styles.navLinkActive : ""}`}
+                aria-current={screen === candidate || candidate === "people" && screen === "person" ? "page" : undefined}
+                className={`${styles.navLink} ${screen === candidate || candidate === "people" && screen === "person" ? styles.navLinkActive : ""}`}
                 href={candidate === "recap" && !interaction && latestConfirmedInteractionId
                   ? `${screenPath(candidate)}?interaction=${encodeURIComponent(latestConfirmedInteractionId)}`
                   : screenPath(candidate)}
@@ -431,11 +479,6 @@ function DateCompanionShellContent({
             ))}
           </div>
           <div className={styles.navActions}>
-            <Link
-              aria-current={screen === "people" ? "page" : undefined}
-              className={`${styles.peopleLink} ${screen === "people" ? styles.peopleLinkActive : ""}`}
-              href="/date-companion/a/people"
-            >人物与长期保留</Link>
             <CompanionQuestionDrawer
               answers={session.qaHistory}
               disabledMessage={personQaAvailability.enabled ? undefined : personQaAvailability.message}
@@ -480,8 +523,11 @@ function DateCompanionShellContent({
           ) : null}
           {screen === "person" ? (
             <CompanionPerson
+              archiveState={resolvedPersonArchiveState}
+              confirmedPerson={selectedConfirmedPerson}
               currentInteraction={interaction}
-              onOpenInteraction={async (candidate) => {
+              isCurrentRelationship={selectedIsCurrentRelationship}
+              onOpenInteraction={selectedIsCurrentRelationship ? async (candidate) => {
                 const uploadId = candidate.sourceUploadId ?? candidate.uploadIds[0];
                 if (uploadId && session.selectCachedInteraction(uploadId)) {
                   router.push("/date-companion/a/recap");
@@ -495,24 +541,17 @@ function DateCompanionShellContent({
                     `/date-companion/a/recap?interaction=${encodeURIComponent(candidate.relationshipInteractionId)}`
                   );
                 }
-              }}
-              onDeleteInteraction={async (candidate) => {
+              } : undefined}
+              onDeleteInteraction={selectedIsCurrentRelationship ? async (candidate) => {
                 if (!candidate.relationshipInteractionId) return;
                 await session.deleteInteraction(candidate.relationshipInteractionId);
-              }}
-              onOpenSource={openSource}
-              onSearch={session.searchRelationship}
-              onUpdatePromise={async (promise, status) => {
+              } : undefined}
+              onOpenSource={selectedIsCurrentRelationship ? openSource : undefined}
+              onSearch={selectedIsCurrentRelationship ? session.searchRelationship : undefined}
+              onUpdatePromise={selectedIsCurrentRelationship ? async (promise, status) => {
                 await session.updatePromise(promise.id, promise.version, status);
-              }}
-              person={viewModel.person}
-              proactiveObservation={relationshipProactivePresentation ? (
-                <CompanionProactiveObservation
-                  onOpenSource={openSource}
-                  presentation={relationshipProactivePresentation}
-                />
-              ) : undefined}
-              relationship={viewModel.relationship}
+              } : undefined}
+              person={selectedIsCurrentRelationship ? viewModel.person : undefined}
               mutationState={session.mutationState}
               searchState={session.searchState}
             />
@@ -554,6 +593,7 @@ function DateCompanionShellContent({
                   presentation={currentProactivePresentation}
                 />
               ) : undefined}
+              proactiveObservationStatus={currentProactivePresentation?.status}
               memoryBridgeState={session.memoryBridgeState}
               memoryMutationState={session.memoryMutationState}
               onMemorySync={recapInteraction?.relationshipInteractionId ? async (selections, confirmation, relationshipReconfirmation) => {

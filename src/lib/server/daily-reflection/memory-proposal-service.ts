@@ -1,6 +1,11 @@
 import { createHash, randomUUID } from "node:crypto";
 
-import type { DailyReflectionMemoryProposal } from "@/lib/domain/daily-reflection-memory-proposal";
+import {
+  memoryProposalConfirmationRequirements,
+  type DailyReflectionMemoryProposal,
+  type DailyReflectionMemoryProposalAcknowledgement,
+  type DailyReflectionMemoryProposalConfirmationRequirement
+} from "@/lib/domain/daily-reflection-memory-proposal";
 import type { TranscriptSegment } from "@/lib/domain/types";
 import { evaluateMemoryAdmission } from "@/lib/server/memory/admission";
 import {
@@ -20,7 +25,10 @@ import { enqueueEmbeddingIndexJob } from "@/lib/server/queue/producer";
 import { resolveQaHybridRetrievalMode } from "@/lib/server/retrieval/hybrid/runtime-config";
 
 import { getDailyReflectionDatabase } from "./db";
-import { evaluateDailyReflectionMemoryProposalPolicy } from "./memory-proposal-policy";
+import {
+  DAILY_REFLECTION_MEMORY_PROPOSAL_POLICY_VERSION,
+  evaluateDailyReflectionMemoryProposalPolicy
+} from "./memory-proposal-policy";
 import {
   createDailyReflectionMemoryProposalRepository,
   DailyReflectionMemoryProposalLeaseLostError,
@@ -50,6 +58,7 @@ type ProposalRepository = Pick<
   DailyReflectionMemoryProposalRepository,
   | "create"
   | "get"
+  | "getByCard"
   | "list"
   | "evaluate"
   | "startAdmission"
@@ -84,10 +93,11 @@ export type DailyReflectionMemoryProposalServiceDependencies = {
 };
 
 export type DailyReflectionMemoryProposalAdmissionResult = {
-  status: "approved" | "rejected" | "admitted" | "already_exists";
+  status: "approved" | "needs_confirmation" | "rejected" | "admitted" | "already_exists";
   proposal: DailyReflectionMemoryProposal;
   memoryId: string | null;
   reasons: string[];
+  confirmationRequirements: DailyReflectionMemoryProposalConfirmationRequirement[];
 };
 
 function digest(value: unknown) {
@@ -102,6 +112,10 @@ function memoryTypeForProposal(
   type: DailyReflectionMemoryProposal["memoryType"]
 ): MemoryWriteInput["type"] {
   switch (type) {
+    case "summary":
+      return "summary";
+    case "question":
+      return "question";
     case "commitment":
       return "commitment";
     case "preference":
@@ -150,6 +164,9 @@ function memoryForProposal(input: {
   );
   const importanceReasons = [
     "daily_reflection: user saved Working Card",
+    ...(input.proposal.policyVersion === DAILY_REFLECTION_MEMORY_PROPOSAL_POLICY_VERSION
+      ? ["daily_reflection: user explicitly selected long-term retention"]
+      : []),
     `daily_reflection: proposal type ${input.proposal.memoryType}`,
     `daily_reflection: epistemic status ${input.proposal.epistemicStatus}`,
     ...(input.proposal.epistemicCaution
@@ -159,12 +176,24 @@ function memoryForProposal(input: {
       ? ["extraction: contains a dated or completed activity"]
       : [])
   ];
+  const explicitUncertainty = input.proposal.reasons.some(
+    (reason) => reason === "user_confirmation:acknowledge_inference"
+      || reason === "user_confirmation:acknowledge_attribution_uncertainty"
+  );
+  const v2Summary = input.proposal.sourceOrigin === "direct_conversation"
+    ? `基于 ${input.source.upload.recordingDate} 的交流记录整理${
+      explicitUncertainty ? "（用户确认作为待核实想法保留）" : ""
+    }：${input.proposal.content}`
+    : `用户在 ${input.source.upload.recordingDate} 的复盘中提到${
+      explicitUncertainty ? "（作为待核实想法保留）" : ""
+    }：${input.proposal.content}`;
   return {
     id: memoryId,
     type: memoryType,
     title: input.proposal.title.slice(0, 500),
-    summary: (
-      input.proposal.epistemicStatus === "reported_event"
+    summary: (input.proposal.policyVersion === DAILY_REFLECTION_MEMORY_PROPOSAL_POLICY_VERSION
+      ? v2Summary
+      : input.proposal.epistemicStatus === "reported_event"
         ? `用户报告：${input.proposal.content}`
         : input.proposal.content
     ).slice(0, 4_000),
@@ -275,6 +304,7 @@ function policyFor(input: {
   personExists: boolean;
   memory: MemoryWriteInput | null;
   ownerAttribution: MemoryOwnerResolution | null;
+  acknowledgements: DailyReflectionMemoryProposalAcknowledgement[];
 }) {
   let existingAdmissionEligible = false;
   let existingAdmissionReasons: string[] = [];
@@ -302,17 +332,21 @@ function policyFor(input: {
     actionClaimed: input.proposal.actionClaimed,
     epistemicStatus: input.proposal.epistemicStatus,
     epistemicCaution: input.proposal.epistemicCaution,
+    riskFlags: input.proposal.riskFlags,
     sourceAvailable: input.source.sourceValid,
     evidenceValid: input.source.sourceValid
       && input.source.evidenceSegments.length === input.proposal.evidenceIds.length,
     subjectPersonConfirmed: input.proposal.subjectPersonId !== null && input.personExists,
     existingPersonPathEligible: false,
+    verifiedOwnerAvailable: input.ownerAttribution?.scope === "individual"
+      && input.ownerAttribution.owner.type === "known_identity",
     importance: input.proposal.importance,
     durability: input.proposal.durability,
     novelty: input.proposal.novelty,
     sensitivity: input.proposal.sensitivity,
     existingAdmissionEligible,
-    existingAdmissionReasons
+    existingAdmissionReasons,
+    acknowledgements: input.acknowledgements
   });
 }
 
@@ -325,7 +359,8 @@ function result(
     status,
     proposal,
     memoryId: proposal.memoryId,
-    reasons
+    reasons,
+    confirmationRequirements: memoryProposalConfirmationRequirements(reasons)
   };
 }
 
@@ -361,6 +396,10 @@ export function createDailyReflectionMemoryProposalService(
     return dependencies.proposalRepository.get(accountId, proposalId);
   }
 
+  function getByCard(accountId: string, cardId: string) {
+    return dependencies.proposalRepository.getByCard(accountId, cardId);
+  }
+
   function list(input: {
     accountId: string;
     status?: DailyReflectionMemoryProposal["status"];
@@ -374,9 +413,10 @@ export function createDailyReflectionMemoryProposalService(
     accountId: string;
     proposalId: string;
     expectedVersion: number;
+    acknowledgements?: DailyReflectionMemoryProposalAcknowledgement[];
   }) {
     const proposal = get(input.accountId, input.proposalId);
-    if (proposal.version !== input.expectedVersion && proposal.status === "pending") {
+    if (proposal.version !== input.expectedVersion) {
       throw new DailyReflectionVersionConflictError(proposal.version);
     }
     const { source, prepared } = getPrepared(proposal);
@@ -390,7 +430,8 @@ export function createDailyReflectionMemoryProposalService(
       source,
       personExists,
       memory: prepared?.memory ?? null,
-      ownerAttribution: prepared?.ownerAttribution ?? null
+      ownerAttribution: prepared?.ownerAttribution ?? null,
+      acknowledgements: input.acknowledgements ?? []
     });
     const evaluated = dependencies.proposalRepository.evaluate({
       accountId: input.accountId,
@@ -430,6 +471,8 @@ export function createDailyReflectionMemoryProposalService(
     accountId: string;
     proposalId: string;
     expectedVersion: number;
+    acknowledgements?: DailyReflectionMemoryProposalAcknowledgement[];
+    deferPublication?: boolean;
   }): Promise<DailyReflectionMemoryProposalAdmissionResult> {
     let proposal = get(input.accountId, input.proposalId);
     const revoked = dependencies.proposalRepository
@@ -464,11 +507,13 @@ export function createDailyReflectionMemoryProposalService(
         ...prepared.admissionInput,
         now: now()
       });
-      await publishVisible({
-        accountId: input.accountId,
-        reflectionId: proposal.reflectionId,
-        uploadId: source.upload.id
-      });
+      if (!input.deferPublication) {
+        await publishVisible({
+          accountId: input.accountId,
+          reflectionId: proposal.reflectionId,
+          uploadId: source.upload.id
+        });
+      }
       return result("already_exists", proposal);
     }
     const discoveredOperation = dependencies.admissionRepository.findByOperationKey({
@@ -481,12 +526,23 @@ export function createDailyReflectionMemoryProposalService(
     if (proposal.version !== input.expectedVersion && !recoverableOperation) {
       throw new DailyReflectionVersionConflictError(proposal.version);
     }
-    if (proposal.status === "pending") {
-      proposal = evaluate({
+    if (
+      proposal.status === "pending"
+      || (
+        proposal.policyVersion !== DAILY_REFLECTION_MEMORY_PROPOSAL_POLICY_VERSION
+        && !recoverableOperation
+      )
+    ) {
+      const evaluated = evaluate({
         accountId: input.accountId,
         proposalId: input.proposalId,
-        expectedVersion: input.expectedVersion
-      }).proposal;
+        expectedVersion: proposal.version,
+        acknowledgements: input.acknowledgements
+      });
+      proposal = evaluated.proposal;
+      if (evaluated.decision.status === "needs_confirmation") {
+        return result("needs_confirmation", proposal, evaluated.decision.reasons);
+      }
     }
     if (proposal.status === "rejected") return result("rejected", proposal);
     if (proposal.status !== "approved") {
@@ -508,7 +564,9 @@ export function createDailyReflectionMemoryProposalService(
         return admit({
           accountId: input.accountId,
           proposalId: input.proposalId,
-          expectedVersion: claim.proposal.version
+          expectedVersion: claim.proposal.version,
+          acknowledgements: input.acknowledgements,
+          deferPublication: input.deferPublication
         });
       }
       return result("rejected", claim.proposal);
@@ -551,11 +609,13 @@ export function createDailyReflectionMemoryProposalService(
         recovered: applied.status === "already_exists",
         now: now()
       }).proposal;
-      await publishVisible({
-        accountId: input.accountId,
-        reflectionId: proposal.reflectionId,
-        uploadId: source.upload.id
-      });
+      if (!input.deferPublication) {
+        await publishVisible({
+          accountId: input.accountId,
+          reflectionId: proposal.reflectionId,
+          uploadId: source.upload.id
+        });
+      }
       return result(
         applied.status === "already_exists" ? "already_exists" : "admitted",
         completed
@@ -631,7 +691,21 @@ export function createDailyReflectionMemoryProposalService(
     };
   }
 
-  return { create, get, list, evaluate, admit, provenance };
+  async function publish(accountId: string, proposalId: string) {
+    const proposal = get(accountId, proposalId);
+    if (proposal.status !== "admitted") {
+      throw new DailyReflectionConflictError(
+        "daily_reflection_memory_proposal_not_admitted"
+      );
+    }
+    return admit({
+      accountId,
+      proposalId,
+      expectedVersion: proposal.version
+    });
+  }
+
+  return { create, get, getByCard, list, evaluate, admit, publish, provenance };
 }
 
 export function getDailyReflectionMemoryProposalService() {

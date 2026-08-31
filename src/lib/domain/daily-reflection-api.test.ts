@@ -232,5 +232,26 @@ describe("DailyReflectionDetailResponseSchema", () => {
       ...completed,
       revokedCandidateIds: [candidate.id, candidate.id]
     }).success).toBe(false);
+
+    const revokedWorkingCard = {
+      ...completed,
+      rememberedCount: 0,
+      revokedCandidateIds: [],
+      workingCards: [{
+        id: candidate.id,
+        status: "saved" as const,
+        memoryLifecycleStatus: "revoked" as const,
+        version: 1
+      }]
+    };
+    expect(DailyReflectionDetailResponseSchema.safeParse(revokedWorkingCard).success)
+      .toBe(true);
+    expect(DailyReflectionDetailResponseSchema.safeParse({
+      ...revokedWorkingCard,
+      workingCards: [{
+        ...revokedWorkingCard.workingCards[0],
+        memoryLifecycleStatus: "active"
+      }]
+    }).success).toBe(false);
   });
 });

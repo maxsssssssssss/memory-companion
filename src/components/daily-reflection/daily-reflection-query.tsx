@@ -155,7 +155,7 @@ export function DailyReflectionQuery({ api: providedApi, embedded = false, initi
   return (
     <div className={embedded ? styles.embeddedRoot : styles.root}>
       {!embedded ? <header className={styles.header}>
-        <Link className={styles.wordmark} href="/date-companion/modules" aria-label="返回空间选择">
+        <Link className={styles.wordmark} href="/" aria-label="返回产品选择">
           <span className={styles.wordmarkMark}>DB</span>
           <b>问问复盘</b>
         </Link>

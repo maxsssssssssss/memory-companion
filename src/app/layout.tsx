@@ -1,11 +1,12 @@
+import "./design-system.css";
 import "./globals.css";
 import type { Metadata } from "next";
 import type { Viewport } from "next";
 import type { ReactNode } from "react";
 
 export const metadata: Metadata = {
-  title: "Founder Daily Brief",
-  description: "Evidence-backed daily brief for founder recordings",
+  title: "Daily Brief",
+  description: "把重要的表达留给未来",
   icons: {
     icon: "/icon.svg",
     apple: "/icon.svg"

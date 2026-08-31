@@ -1,54 +1,14 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+
+const redirect = vi.hoisted(() => vi.fn());
+
+vi.mock("next/navigation", () => ({ redirect }));
 
 import DateCompanionModulesPage from "./page";
 
-vi.mock("@/components/date-companion/date-companion-shell", () => ({
-  DateCompanionShell: (props: { dailyReflectionEnabled?: boolean; entry: string }) => ({
-    type: "date-companion-shell",
-    props,
-    key: null
-  })
-}));
-
-const originalFlag = process.env.DAILY_REFLECTION_UPLOAD_ENABLED;
-const originalBrowserRecordingFlag =
-  process.env.DAILY_REFLECTION_BROWSER_RECORDING_ENABLED;
-
-describe("Date Companion modules page", () => {
-  afterEach(() => {
-    if (originalFlag === undefined) delete process.env.DAILY_REFLECTION_UPLOAD_ENABLED;
-    else process.env.DAILY_REFLECTION_UPLOAD_ENABLED = originalFlag;
-    if (originalBrowserRecordingFlag === undefined) {
-      delete process.env.DAILY_REFLECTION_BROWSER_RECORDING_ENABLED;
-    } else {
-      process.env.DAILY_REFLECTION_BROWSER_RECORDING_ENABLED =
-        originalBrowserRecordingFlag;
-    }
+describe("legacy Date Companion modules route", () => {
+  it("redirects to the one canonical global product entry", () => {
+    DateCompanionModulesPage();
+    expect(redirect).toHaveBeenCalledWith("/");
   });
-
-  it.each([
-    [undefined, undefined, false],
-    ["false", "true", false],
-    ["true", undefined, true],
-    ["true", "false", true],
-    ["true", "true", true]
-  ] as const)(
-    "passes upload flag %s with browser flag %s through the server shell as %s",
-    (uploadFlag, browserRecordingFlag, expected) => {
-      if (uploadFlag === undefined) delete process.env.DAILY_REFLECTION_UPLOAD_ENABLED;
-      else process.env.DAILY_REFLECTION_UPLOAD_ENABLED = uploadFlag;
-      if (browserRecordingFlag === undefined) {
-        delete process.env.DAILY_REFLECTION_BROWSER_RECORDING_ENABLED;
-      } else {
-        process.env.DAILY_REFLECTION_BROWSER_RECORDING_ENABLED = browserRecordingFlag;
-      }
-
-      const page = DateCompanionModulesPage();
-      const shell = page.props.children;
-      expect(shell.props).toMatchObject({
-        entry: "modules",
-        dailyReflectionEnabled: expected
-      });
-    }
-  );
 });

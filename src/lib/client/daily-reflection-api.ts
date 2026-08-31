@@ -50,10 +50,13 @@ import {
 import {
   DailyReflectionIdSchema,
   DailyReflectionStatusSchema,
+  DailyReflectionVersionSchema,
   DailyReflectionV2CapturePurposeSchema,
   DailyReflectionV2InputAdapterSchema,
   DailyReflectionV2InputSchema,
   DailyReflectionV2SourceOriginSchema,
+  ReflectionCardEpistemicStatusSchema,
+  ReflectionCardRiskFlagSchema,
   type DailyReflectionV2Input
 } from "@/lib/domain/daily-reflection";
 import {
@@ -70,6 +73,20 @@ import {
   type DailyReflectionMemoryDetailResponse,
   type DailyReflectionMemoryListResponse
 } from "@/lib/domain/daily-reflection-memory-view";
+import {
+  DailyReflectionMemoryProposalAdmitRequestSchema,
+  DailyReflectionMemoryProposalConfirmationRequirementSchema,
+  DailyReflectionMemoryProposalCreateRequestSchema,
+  DailyReflectionMemoryProposalEpistemicCautionSchema,
+  DailyReflectionMemoryProposalEvidenceSnapshotSchema,
+  DailyReflectionMemoryProposalReasonSchema,
+  DailyReflectionMemoryProposalStatusSchema,
+  DailyReflectionMemoryProposalTypeSchema,
+  DailyReflectionMemoryRecommendationResponseSchema,
+  type DailyReflectionMemoryRecommendationResponse
+} from "@/lib/domain/daily-reflection-memory-proposal";
+import { DailyReflectionWorkingCardKindSchema } from
+  "@/lib/domain/daily-reflection-working-card";
 import {
   DailyReflectionDailyReturnResponseSchema,
   DailyReflectionWeeklyReflectionResponseSchema,
@@ -98,6 +115,161 @@ export type DailyReflectionBrowserRecordingInput = Readonly<{
   file: File;
   clientReportedDurationMs?: number;
 }> & DailyReflectionV2Input;
+
+const DailyReflectionMemoryProposalClientViewSchema = z.object({
+  id: DailyReflectionIdSchema,
+  cardId: DailyReflectionIdSchema,
+  reflectionId: DailyReflectionIdSchema,
+  title: z.string().trim().min(1).max(240),
+  cardKind: DailyReflectionWorkingCardKindSchema,
+  actionClaimed: z.boolean(),
+  memoryType: DailyReflectionMemoryProposalTypeSchema,
+  content: z.string().trim().min(1).max(20_000),
+  evidenceIds: z.array(DailyReflectionIdSchema).min(1).max(64),
+  evidenceSnapshots: z.array(
+    DailyReflectionMemoryProposalEvidenceSnapshotSchema
+  ).min(1).max(64),
+  riskFlags: z.array(ReflectionCardRiskFlagSchema).max(8),
+  subjectPersonId: DailyReflectionIdSchema.nullable(),
+  importance: z.number().min(0).max(1),
+  durability: z.number().min(0).max(1),
+  novelty: z.number().min(0).max(1),
+  sensitivity: z.number().min(0).max(1),
+  epistemicStatus: ReflectionCardEpistemicStatusSchema,
+  epistemicCaution: DailyReflectionMemoryProposalEpistemicCautionSchema,
+  status: DailyReflectionMemoryProposalStatusSchema,
+  policyVersion: z.string().trim().min(1).max(128),
+  score: z.number().min(0).max(1),
+  reasons: z.array(DailyReflectionMemoryProposalReasonSchema).max(32),
+  confirmationRequirements: z.array(
+    DailyReflectionMemoryProposalConfirmationRequirementSchema
+  ).max(4),
+  memoryId: DailyReflectionIdSchema.nullable(),
+  sourceOrigin: DailyReflectionV2SourceOriginSchema,
+  recordingDate: z.string().date(),
+  version: DailyReflectionVersionSchema,
+  createdAt: z.string().datetime(),
+  updatedAt: z.string().datetime(),
+  admittedAt: z.string().datetime().nullable()
+}).strict().superRefine((proposal, context) => {
+  if (
+    proposal.evidenceSnapshots.length !== proposal.evidenceIds.length
+    || proposal.evidenceSnapshots.some(
+      (evidence, index) => evidence.sourceSegmentId !== proposal.evidenceIds[index]
+        || evidence.effectiveOrigin !== proposal.sourceOrigin
+    )
+  ) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["evidenceSnapshots"],
+      message: "proposal Evidence must exactly match the public allowlist"
+    });
+  }
+  if (proposal.cardKind !== "action" && proposal.actionClaimed) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["actionClaimed"],
+      message: "only action Cards may be explicitly claimed"
+    });
+  }
+  const admitted = proposal.status === "admitted";
+  if (admitted !== (proposal.memoryId !== null && proposal.admittedAt !== null)) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["memoryId"],
+      message: "admitted proposals require matching durable state"
+    });
+  }
+});
+
+const DailyReflectionMemoryProposalCreateResponseSchema = z.object({
+  proposal: DailyReflectionMemoryProposalClientViewSchema,
+  reused: z.boolean()
+}).strict();
+
+const DailyReflectionMemoryProposalAdmissionResponseSchema = z.object({
+  status: z.enum(["needs_confirmation", "rejected", "admitted", "already_exists"]),
+  proposal: DailyReflectionMemoryProposalClientViewSchema,
+  memoryId: DailyReflectionIdSchema.nullable(),
+  reasons: z.array(DailyReflectionMemoryProposalReasonSchema).max(64),
+  confirmationRequirements: z.array(
+    DailyReflectionMemoryProposalConfirmationRequirementSchema
+  ).max(4)
+}).strict().superRefine((result, context) => {
+  const admitted = result.status === "admitted" || result.status === "already_exists";
+  if (
+    admitted !== (result.proposal.status === "admitted")
+    || admitted !== (result.memoryId !== null)
+    || (admitted && result.memoryId !== result.proposal.memoryId)
+  ) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["status"],
+      message: "admission result does not match proposal state"
+    });
+  }
+  if (result.status === "rejected" && result.proposal.status !== "rejected") {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["proposal", "status"],
+      message: "rejected result requires a rejected proposal"
+    });
+  }
+  if (result.status === "rejected" && result.memoryId !== null) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["memoryId"],
+      message: "rejected result cannot expose a Memory id"
+    });
+  }
+  if (
+    result.status === "needs_confirmation"
+    && (
+      result.proposal.status !== "pending"
+      || result.memoryId !== null
+      || result.confirmationRequirements.length === 0
+    )
+  ) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["confirmationRequirements"],
+      message: "confirmation result requires a pending proposal and explicit requirements"
+    });
+  }
+  if (
+    result.status !== "needs_confirmation"
+    && result.confirmationRequirements.length > 0
+  ) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["confirmationRequirements"],
+      message: "only confirmation results may expose requirements"
+    });
+  }
+  if (
+    JSON.stringify(result.confirmationRequirements)
+    !== JSON.stringify(result.proposal.confirmationRequirements)
+  ) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["confirmationRequirements"],
+      message: "admission requirements must match the proposal"
+    });
+  }
+});
+
+export type DailyReflectionMemoryProposalCreateRequest = z.infer<
+  typeof DailyReflectionMemoryProposalCreateRequestSchema
+>;
+export type DailyReflectionMemoryProposalCreateResponse = z.infer<
+  typeof DailyReflectionMemoryProposalCreateResponseSchema
+>;
+export type DailyReflectionMemoryProposalAdmitRequest = z.infer<
+  typeof DailyReflectionMemoryProposalAdmitRequestSchema
+>;
+export type DailyReflectionMemoryProposalAdmissionResponse = z.infer<
+  typeof DailyReflectionMemoryProposalAdmissionResponseSchema
+>;
 
 const DailyReflectionUploadInputSchema = z.object({
   file: z.custom<File>(
@@ -252,6 +424,20 @@ export interface DailyReflectionApi {
     input: DailyReflectionWorkingCardLifecycleRequest,
     signal?: AbortSignal
   ): Promise<DailyReflectionWorkingCardDetailResponse>;
+  createWorkingCardMemoryProposal(
+    cardId: string,
+    input: DailyReflectionMemoryProposalCreateRequest,
+    signal?: AbortSignal
+  ): Promise<DailyReflectionMemoryProposalCreateResponse>;
+  admitMemoryProposal(
+    proposalId: string,
+    input: DailyReflectionMemoryProposalAdmitRequest,
+    signal?: AbortSignal
+  ): Promise<DailyReflectionMemoryProposalAdmissionResponse>;
+  getMemoryRecommendations(
+    reflectionId: string,
+    signal?: AbortSignal
+  ): Promise<DailyReflectionMemoryRecommendationResponse>;
   getWorkingCardMemoryRevocation(
     cardId: string,
     signal?: AbortSignal
@@ -366,6 +552,12 @@ const ERROR_MESSAGES: Readonly<Record<string, string>> = {
   daily_reflection_working_card_not_editable: "这张卡片当前不能编辑。",
   daily_reflection_working_card_relation_invalid: "关联的卡片不存在或已移除。",
   daily_reflection_working_card_transition_invalid: "这张卡片当前不能执行该操作。",
+  invalid_daily_reflection_memory_proposal: "这张卡片暂时无法申请长期记住，请重新加载后再试。",
+  invalid_memory_proposal_admission: "这张卡片暂时无法进入长期记忆，请重新加载后再试。",
+  daily_reflection_memory_proposal_source_invalid: "这张卡片的原始依据已不可用，无法长期记住。",
+  daily_reflection_memory_proposal_revoked: "这张卡片对应的长期记忆已经撤销。",
+  daily_reflection_memory_proposal_publication_failed: "长期记忆还没有完成保存，请稍后重试。",
+  daily_reflection_memory_proposal_admission_failed: "长期记忆还没有完成保存，请稍后重试。",
   invalid_working_card_memory_revocation: "撤销长期记忆来源的请求无效，请重新加载后再试。",
   daily_reflection_card_memory_revocation_failed: "这张卡片的长期记忆来源暂时没有撤销成功，请稍后重试。",
   daily_reflection_card_memory_revocation_index_refresh_failed: "撤销已完成，检索刷新仍在重试中。",
@@ -748,6 +940,58 @@ export function createDailyReflectionApi(
         signal
       });
       return parseJsonResponse(response, DailyReflectionWorkingCardDetailResponseSchema);
+    },
+
+    async createWorkingCardMemoryProposal(cardId, input, signal) {
+      const parsedInput = DailyReflectionMemoryProposalCreateRequestSchema.safeParse(input);
+      if (!parsedInput.success) {
+        throw new DailyReflectionApiError(
+          400,
+          "invalid_daily_reflection_memory_proposal"
+        );
+      }
+      const response = await sameOrigin(`${workingCardPath(cardId)}/memory-proposals`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(parsedInput.data),
+        signal
+      });
+      return parseJsonResponse(
+        response,
+        DailyReflectionMemoryProposalCreateResponseSchema
+      );
+    },
+
+    async admitMemoryProposal(proposalId, input, signal) {
+      const proposal = DailyReflectionIdSchema.safeParse(proposalId);
+      const parsedInput = DailyReflectionMemoryProposalAdmitRequestSchema.safeParse(input);
+      if (!proposal.success || !parsedInput.success) {
+        throw new DailyReflectionApiError(400, "invalid_memory_proposal_admission");
+      }
+      const response = await sameOrigin(
+        `/api/daily-reflections/memory-proposals/${encodeURIComponent(proposal.data)}/admit`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(parsedInput.data),
+          signal
+        }
+      );
+      return parseJsonResponse(
+        response,
+        DailyReflectionMemoryProposalAdmissionResponseSchema
+      );
+    },
+
+    async getMemoryRecommendations(reflectionId, signal) {
+      const response = await sameOrigin(
+        `${reflectionPath(reflectionId)}/memory-recommendations`,
+        { method: "GET", signal }
+      );
+      return parseJsonResponse(
+        response,
+        DailyReflectionMemoryRecommendationResponseSchema
+      );
     },
 
     async getWorkingCardMemoryRevocation(cardId, signal) {

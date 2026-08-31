@@ -2,7 +2,15 @@
 
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { type FormEvent, useEffect, useMemo, useRef, useState } from "react";
+import {
+  type FormEvent,
+  type KeyboardEvent as ReactKeyboardEvent,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState
+} from "react";
 
 import { isSupportedAudioUpload } from "@/lib/audio/compat";
 import {
@@ -10,6 +18,12 @@ import {
   type BrowserAudioRecorderSnapshot,
   type BrowserAudioRecording
 } from "@/lib/client/browser-audio-recorder";
+import {
+  createDailyReflectionApi,
+  DailyReflectionApiError,
+  type DailyReflectionApi,
+  type DailyReflectionMemoryProposalCreateRequest
+} from "@/lib/client/daily-reflection-api";
 import {
   useDailyReflectionSession,
   type DailyReflectionManualCandidateDraft,
@@ -24,6 +38,15 @@ import type {
   DailyReflectionHistoryItem
 } from "@/lib/domain/daily-reflection-api";
 import type { SourceOrigin } from "@/lib/domain/daily-reflection";
+import type {
+  DailyReflectionMemoryProposalAcknowledgement,
+  DailyReflectionMemoryProposalConfirmationRequirement,
+  DailyReflectionMemoryRecommendationResponse
+} from "@/lib/domain/daily-reflection-memory-proposal";
+import {
+  ProductEvidence,
+  ProductReviewCompletion
+} from "@/components/product-system/product-primitives";
 
 import {
   DailyReflectionTranscript,
@@ -96,6 +119,8 @@ export type DailyReflectionLocalReviewMetric = Readonly<{
 }>;
 
 type DailyReflectionShellProps = {
+  api?: DailyReflectionApi;
+  autoStartVoice?: boolean;
   embedded?: boolean;
   initialReflectionId?: string | null;
   initialSegmentId?: string | null;
@@ -302,7 +327,7 @@ function processingCopy(detail: DailyReflectionDetailResponse | null, state: Dai
     || state === "admitting"
   ) return "正在保存你选择的内容";
   if (status === "completed" || state === "completed") return "已完成";
-  if (status === "admission_failed" || state === "admission_failed") return "有些内容还没有整理好";
+  if (status === "admission_failed" || state === "admission_failed") return "长期记忆待重试";
   if (status === "failed" || state === "failed") return "这次整理没有完成";
   if (status === "cancelled" || state === "cancelled") return "这次记录已取消";
   if (state === "loading") return "正在读取这次记录";
@@ -365,7 +390,7 @@ function normalizedCandidateText(
 type CandidateReviewCardProps = Readonly<{
   candidate: DailyReflectionCandidateView;
   busy: boolean;
-  onDecision(decision: DailyReflectionCandidateDecision): void;
+  onDecision(decision: DailyReflectionCandidateDecision): Promise<void>;
   onDelete(candidateId: string): void;
   onSource(segmentId: string): void;
 }>;
@@ -378,15 +403,17 @@ function CandidateReviewCard({
   onSource
 }: CandidateReviewCardProps) {
   const [draftText, setDraftText] = useState(candidate.userText ?? candidate.proposedText);
+  const [editing, setEditing] = useState(false);
   const [evidenceExpanded, setEvidenceExpanded] = useState(false);
   const label = candidateLabel(candidate);
 
   useEffect(() => {
     setDraftText(candidate.userText ?? candidate.proposedText);
+    setEditing(false);
     setEvidenceExpanded(false);
   }, [candidate.id, candidate.proposedText, candidate.userText, candidate.version]);
 
-  const decide = (status: DailyReflectionCandidateDecision["status"]) => {
+  const decide = (status: DailyReflectionCandidateDecision["status"]) =>
     onDecision({
       candidateId: candidate.id,
       status,
@@ -394,7 +421,6 @@ function CandidateReviewCard({
       subjectPersonId: null,
       ...("contractVersion" in candidate ? { actionClaimed: candidate.actionClaimed } : {})
     });
-  };
 
   return (
     <li className={styles.candidateCard}>
@@ -407,33 +433,59 @@ function CandidateReviewCard({
             : ""}`}>{candidateStatusLabel(candidate.status)}</span>
       </div>
 
-      <label className={styles.candidateEditor}>
-        <span>你想留下的文字</span>
-        <textarea
-          aria-label={`编辑${label}`}
-          disabled={busy}
-          maxLength={4_000}
-          onChange={(event) => setDraftText(event.target.value)}
-          rows={4}
-          value={draftText}
-        />
-      </label>
-      <div className={styles.editorMeta}>
-        <span>{draftText.trim().length}/4000</span>
-        <button
-          className={styles.textButton}
-          disabled={busy || draftText === candidate.proposedText}
-          onClick={() => setDraftText(candidate.proposedText)}
-          type="button"
-        >恢复最初整理</button>
-      </div>
+      {editing ? (
+        <div className={styles.reviewCardEditor}>
+          <label className={styles.candidateEditor}>
+            <span>你想留下的文字</span>
+            <textarea
+              aria-label={`编辑${label}`}
+              disabled={busy}
+              maxLength={4_000}
+              onChange={(event) => setDraftText(event.target.value)}
+              rows={4}
+              value={draftText}
+            />
+          </label>
+          <div className={styles.editorMeta}>
+            <span>{draftText.trim().length}/4000</span>
+            <button
+              className={styles.textButton}
+              disabled={busy || draftText === candidate.proposedText}
+              onClick={() => setDraftText(candidate.proposedText)}
+              type="button"
+            >恢复最初整理</button>
+          </div>
+          <div className={styles.reviewEditActions}>
+            <button
+              className={styles.textButton}
+              disabled={busy}
+              onClick={() => {
+                setDraftText(candidate.userText ?? candidate.proposedText);
+                setEditing(false);
+              }}
+              type="button"
+            >取消</button>
+            <button
+              className={styles.primaryButton}
+              disabled={busy || !draftText.trim()}
+              onClick={() => void decide(candidate.status)}
+              type="button"
+            >保存编辑</button>
+          </div>
+        </div>
+      ) : (
+        <div className={styles.reviewCardReading}>
+          <h3>{label}</h3>
+          <p>{candidate.userText ?? candidate.proposedText}</p>
+        </div>
+      )}
 
       {"contractVersion" in candidate && candidate.candidateKind === "user_action" ? (
         <label className={styles.actionClaim}>
           <input
             checked={candidate.actionClaimed}
             disabled={busy || candidate.evidence.length === 0}
-            onChange={(event) => onDecision({
+            onChange={(event) => void onDecision({
               candidateId: candidate.id,
               status: candidate.status,
               userText: normalizedCandidateText(draftText, candidate.proposedText),
@@ -462,10 +514,13 @@ function CandidateReviewCard({
       </div>
       {evidenceExpanded ? (
         candidate.evidence.length > 0 ? (
-          <ol className={styles.evidenceList}>
+          <ol className={`${styles.evidenceList} ${styles.canonicalEvidenceList}`}>
             {candidate.evidence.map((evidence) => (
               <li key={evidence.sourceSegmentId}>
-                <p>{evidence.text}</p>
+                <ProductEvidence
+                  label="原话"
+                  meta={formatEvidenceTime(evidence.startSeconds)}
+                >{evidence.text}</ProductEvidence>
                 <button
                   className={styles.textButton}
                   onClick={() => onSource(evidence.sourceSegmentId)}
@@ -479,25 +534,33 @@ function CandidateReviewCard({
         )
       ) : null}
       <div className={styles.candidateActions}>
+        {!editing ? (
+          <button
+            className={styles.secondaryButton}
+            disabled={busy}
+            onClick={() => setEditing(true)}
+            type="button"
+          >编辑</button>
+        ) : null}
         <button
           aria-pressed={candidate.status === "pending"}
           className={styles.secondaryButton}
           disabled={busy}
-          onClick={() => decide("pending")}
+          onClick={() => void decide("pending")}
           type="button"
         >稍后再看</button>
         <button
           aria-pressed={candidate.status === "excluded"}
           className={styles.secondaryButton}
           disabled={busy}
-          onClick={() => decide("excluded")}
+          onClick={() => void decide("excluded")}
           type="button"
         >不保存</button>
         <button
           aria-pressed={candidate.status === "kept"}
-          className={styles.primaryButton}
+          className={styles.secondaryButton}
           disabled={busy}
-          onClick={() => decide("kept")}
+          onClick={() => void decide("kept")}
           type="button"
         >{candidate.status === "kept" ? "保存修改" : "长期记住"}</button>
         {"contractVersion" in candidate ? (
@@ -520,10 +583,178 @@ const CARD_RISK_LABELS: Record<DailyReflectionCardView["riskFlags"][number], str
   sensitive: "可能包含敏感内容"
 };
 
+type ReflectionMemoryFeedback = Readonly<{
+  message: string;
+  tone: "error" | "notice" | "success";
+}>;
+type ReflectionMemoryConfirmation = Readonly<{
+  requirements: DailyReflectionMemoryProposalConfirmationRequirement[];
+  selected: DailyReflectionMemoryProposalAcknowledgement[];
+}>;
+type ReflectionPendingAdmission = Readonly<{
+  expectedVersion: number;
+  proposalId: string;
+}>;
+
+function memoryTypeForReflectionCard(
+  card: DailyReflectionCardView
+): DailyReflectionMemoryProposalCreateRequest["memoryType"] | null {
+  switch (card.cardKind) {
+    case "insight": return "summary";
+    case "open_question": return "question";
+    case "decision": return "decision";
+    case "user_action": return card.actionClaimed ? "commitment" : null;
+  }
+}
+
+function reflectionMemoryConfirmationCopy(
+  requirement: DailyReflectionMemoryProposalConfirmationRequirement
+) {
+  switch (requirement.code) {
+    case "acknowledge_sensitive_content":
+      return "这可能包含较敏感的个人内容；确认后才会长期记住。";
+    case "acknowledge_inference":
+      return "这部分包含系统整理出的推测；请确认它符合你的意思。";
+    case "acknowledge_attribution_uncertainty":
+      return "这段表达的归属不够明确；请确认它可以作为你的长期内容。";
+    case "verify_fact_owner":
+      return "这条内容的归属还需要先确认；确认前不会加入长期记忆。";
+  }
+}
+
+function isReflectionAcknowledgement(
+  requirement: DailyReflectionMemoryProposalConfirmationRequirement
+): requirement is DailyReflectionMemoryProposalConfirmationRequirement & {
+  code: DailyReflectionMemoryProposalAcknowledgement;
+  resolution: "acknowledgement";
+} {
+  return requirement.resolution === "acknowledgement"
+    && requirement.code !== "verify_fact_owner";
+}
+
 function activeWorkingCardStatus(status: string | undefined) {
   return status === "saved" || status === "archived" || status === "removed"
     ? status
     : undefined;
+}
+
+type ReflectionMemoryActionProps = Readonly<{
+  busy: boolean;
+  confirmation?: ReflectionMemoryConfirmation;
+  feedback?: ReflectionMemoryFeedback;
+  onConfirm(acknowledgements: DailyReflectionMemoryProposalAcknowledgement[]): void;
+  onRemember(): void;
+  onToggleConfirmation(
+    acknowledgement: DailyReflectionMemoryProposalAcknowledgement,
+    checked: boolean
+  ): void;
+  selected?: boolean;
+}>;
+
+function ReflectionMemoryAction({
+  busy,
+  confirmation,
+  feedback,
+  onConfirm,
+  onRemember,
+  onToggleConfirmation,
+  selected = false
+}: ReflectionMemoryActionProps) {
+  const acknowledgementRequirements = confirmation?.requirements
+    .filter(isReflectionAcknowledgement) ?? [];
+  const hasOwnerVerification = confirmation?.requirements.some(
+    (requirement) => requirement.code === "verify_fact_owner"
+  ) ?? false;
+  const allAcknowledged = acknowledgementRequirements.every(
+    (requirement) => confirmation?.selected.includes(requirement.code)
+  );
+
+  return (
+    <div className={styles.cardMemoryAction}>
+      {confirmation ? (
+        <fieldset className={styles.cardMemoryConfirmation}>
+          <legend>确认后再长期记住</legend>
+          {confirmation.requirements.map((requirement) => (
+            isReflectionAcknowledgement(requirement) ? (
+              <label key={requirement.code}>
+                <input
+                  checked={confirmation.selected.includes(requirement.code)}
+                  disabled={busy}
+                  onChange={(event) => onToggleConfirmation(
+                    requirement.code,
+                    event.target.checked
+                  )}
+                  type="checkbox"
+                />
+                <span>{reflectionMemoryConfirmationCopy(requirement)}</span>
+              </label>
+            ) : (
+              <p key={requirement.code}>{reflectionMemoryConfirmationCopy(requirement)}</p>
+            )
+          ))}
+          {!hasOwnerVerification ? (
+            <button
+              className={styles.secondaryButton}
+              disabled={busy || !allAcknowledged}
+              onClick={() => onConfirm(confirmation.selected)}
+              type="button"
+            >{busy ? "正在确认…" : "确认并长期记住"}</button>
+          ) : null}
+        </fieldset>
+      ) : (
+        <button
+          aria-pressed={selected}
+          className={styles.secondaryButton}
+          disabled={busy || selected}
+          onClick={onRemember}
+          type="button"
+        >{selected ? "已选择长期记住" : busy ? "正在处理…" : "长期记住"}</button>
+      )}
+      {feedback ? (
+        <p
+          className={feedback.tone === "error" ? styles.inlineError : styles.memoryActionFeedback}
+          role={feedback.tone === "error" ? "alert" : "status"}
+        >{feedback.message}</p>
+      ) : null}
+    </div>
+  );
+}
+
+function ReflectionRecommendationEvidence({
+  card,
+  onSource
+}: Readonly<{
+  card: DailyReflectionCardView;
+  onSource(segmentId: string): void;
+}>) {
+  const [expanded, setExpanded] = useState(false);
+  return (
+    <>
+      <button
+        aria-expanded={expanded}
+        className={styles.secondaryButton}
+        onClick={() => setExpanded((current) => !current)}
+        type="button"
+      >{expanded ? "收起来源" : "查看来源"}</button>
+      {expanded ? (
+        <ol className={`${styles.evidenceList} ${styles.canonicalEvidenceList}`}>
+          {card.evidence.map((evidence) => (
+            <li key={evidence.sourceSegmentId}>
+              <ProductEvidence
+                label="原话"
+                meta={formatEvidenceTime(evidence.startSeconds)}
+              >{evidence.text}</ProductEvidence>
+              <button
+                className={styles.textButton}
+                onClick={() => onSource(evidence.sourceSegmentId)}
+                type="button"
+              >在完整文字记录中查看</button>
+            </li>
+          ))}
+        </ol>
+      ) : null}
+    </>
+  );
 }
 
 type ReflectionCardReviewProps = Readonly<{
@@ -531,13 +762,13 @@ type ReflectionCardReviewProps = Readonly<{
   busy: boolean;
   editing: boolean;
   onCancelEdit(): void;
-  onDecision(decision: DailyReflectionCardDecision): void;
+  onDecision(decision: DailyReflectionCardDecision): Promise<void>;
   onArchiveFromCards(cardId: string): void;
   onRestoreToCards(cardId: string): void;
   onSaveToCards(
     cardId: string,
     draft: Pick<DailyReflectionCardDecision, "userTitle" | "userText">
-  ): void;
+  ): Promise<boolean>;
   onSource(segmentId: string): void;
   onStartEdit(): void;
   workingCardStatus?: "saved" | "archived" | "removed";
@@ -559,11 +790,18 @@ function ReflectionCardReview({
   const [draftTitle, setDraftTitle] = useState(card.userTitle ?? card.proposedTitle);
   const [draftText, setDraftText] = useState(card.userText ?? card.proposedText);
   const [evidenceExpanded, setEvidenceExpanded] = useState(false);
+  const pendingEditVersion = useRef<number | null>(null);
 
   useEffect(() => {
     setDraftTitle(card.userTitle ?? card.proposedTitle);
     setDraftText(card.userText ?? card.proposedText);
   }, [card.id, card.proposedTitle, card.proposedText, card.userTitle, card.userText, card.version]);
+
+  useEffect(() => {
+    if (pendingEditVersion.current === null || card.version === pendingEditVersion.current) return;
+    pendingEditVersion.current = null;
+    onCancelEdit();
+  }, [card.version, onCancelEdit]);
 
   const displayedRiskFlags = Array.from(new Set([
     ...(card.epistemicStatus === "ai_inference" ? ["ai_inference" as const] : []),
@@ -584,29 +822,47 @@ function ReflectionCardReview({
   });
 
   const cancelEdit = () => {
+    pendingEditVersion.current = null;
     setDraftTitle(card.userTitle ?? card.proposedTitle);
     setDraftText(card.userText ?? card.proposedText);
     onCancelEdit();
   };
 
   const saveEdit = () => {
-    decide(card.reviewStatus);
-    onCancelEdit();
+    pendingEditVersion.current = card.version;
+    void decide(card.reviewStatus);
+  };
+
+  const selectForLongTermMemory = async () => {
+    if (!workingCardStatus) {
+      const saved = await onSaveToCards(card.id, {
+        userTitle: normalizedCandidateText(draftTitle, card.proposedTitle),
+        userText: normalizedCandidateText(draftText, card.proposedText)
+      });
+      if (!saved) return;
+    }
+    await decide("kept");
   };
 
   const firstEvidenceTime = formatEvidenceTime(card.evidence[0]?.startSeconds);
+  const unclaimedAction = card.cardKind === "user_action" && !card.actionClaimed;
+  const eligibleKept = card.reviewStatus === "kept" && !unclaimedAction;
 
   return (
     <li className={`${styles.candidateCard} ${styles.reviewCard} ${card.displayTier === "more" ? styles.reviewCardCompact : ""}`}>
       <div className={styles.candidateCardTop}>
         <span className={styles.candidateType}>{CANDIDATE_KIND_LABELS[card.cardKind]}</span>
-        <span className={`${styles.pendingBadge} ${card.reviewStatus === "kept"
+        <span className={`${styles.pendingBadge} ${eligibleKept
           ? styles.keptBadge
           : card.reviewStatus === "excluded"
             ? styles.excludedBadge
-            : ""}`}>{card.reviewStatus === "kept"
+            : ""}`}>{eligibleKept
           ? "已选择长期记住"
-          : card.reviewStatus === "excluded" ? "不保存" : "稍后再看"}</span>
+          : card.reviewStatus === "excluded"
+            ? "不保存"
+            : card.reviewStatus === "kept" && unclaimedAction
+              ? "尚未选择长期记住"
+              : "稍后再看"}</span>
       </div>
       {editing ? (
         <div className={styles.reviewCardEditor}>
@@ -634,7 +890,7 @@ function ReflectionCardReview({
           <input
             checked={card.actionClaimed}
             disabled={busy}
-            onChange={(event) => decide(card.reviewStatus, event.target.checked)}
+            onChange={(event) => void decide(card.reviewStatus, event.target.checked)}
             type="checkbox"
           />
           <span><b>这是我要做的</b><small>只有你主动勾选后，才会作为行动保留。</small></span>
@@ -642,10 +898,13 @@ function ReflectionCardReview({
       ) : null}
       <div className={styles.reviewCardMeta}><span>{firstEvidenceTime ? `${firstEvidenceTime} · ` : ""}{card.evidence.length} 段来源</span></div>
       {evidenceExpanded ? (
-        <ol className={styles.evidenceList}>
+        <ol className={`${styles.evidenceList} ${styles.canonicalEvidenceList}`}>
           {card.evidence.map((evidence) => (
             <li key={evidence.sourceSegmentId}>
-              <p>{evidence.text}</p>
+              <ProductEvidence
+                label="原话"
+                meta={formatEvidenceTime(evidence.startSeconds)}
+              >{evidence.text}</ProductEvidence>
               <button
                 className={styles.textButton}
                 onClick={() => onSource(evidence.sourceSegmentId)}
@@ -660,7 +919,7 @@ function ReflectionCardReview({
           <button
             className={styles.secondaryButton}
             disabled={busy}
-            onClick={() => onSaveToCards(card.id, {
+            onClick={() => void onSaveToCards(card.id, {
               userTitle: normalizedCandidateText(draftTitle, card.proposedTitle),
               userText: normalizedCandidateText(draftText, card.proposedText)
             })}
@@ -670,6 +929,17 @@ function ReflectionCardReview({
           <Link className={styles.secondaryButton} href={`/reflection/cards/${encodeURIComponent(card.id)}`}>打开卡片</Link>
         ) : workingCardStatus ? (
           <button className={styles.secondaryButton} disabled={busy} onClick={() => onRestoreToCards(card.id)} type="button">恢复卡片</button>
+        ) : null}
+        {!editing ? (
+          <button
+            aria-pressed={eligibleKept}
+            className={styles.secondaryButton}
+            disabled={busy || unclaimedAction}
+            onClick={() => void selectForLongTermMemory()}
+            type="button"
+          >{unclaimedAction
+            ? "先确认“这是我要做的”"
+            : card.reviewStatus === "kept" ? "已选择长期记住" : "长期记住"}</button>
         ) : null}
         <button aria-expanded={evidenceExpanded} className={styles.secondaryButton} onClick={() => setEvidenceExpanded((current) => !current)} type="button">{evidenceExpanded ? "收起来源" : "查看来源"}</button>
         <details className={styles.cardAdvancedActions}>
@@ -692,23 +962,16 @@ function ReflectionCardReview({
               aria-pressed={card.reviewStatus === "pending"}
               className={styles.secondaryButton}
               disabled={busy}
-              onClick={() => decide("pending")}
+            onClick={() => void decide("pending")}
               type="button"
             >稍后再看</button>
             <button
               aria-pressed={card.reviewStatus === "excluded"}
               className={styles.secondaryButton}
               disabled={busy}
-              onClick={() => decide("excluded")}
+              onClick={() => void decide("excluded")}
               type="button"
             >不保存</button>
-            <button
-              aria-pressed={card.reviewStatus === "kept"}
-              className={styles.primaryButton}
-              disabled={busy}
-              onClick={() => decide("kept")}
-              type="button"
-            >{card.reviewStatus === "kept" ? "保存长期记忆修改" : "长期记住"}</button>
           </div>
         </details>
       </div>
@@ -1011,6 +1274,8 @@ function ReflectionResultList({
 }
 
 export function DailyReflectionShell({
+  api: providedApi,
+  autoStartVoice = false,
   embedded = false,
   initialReflectionId = null,
   initialSegmentId = null,
@@ -1020,9 +1285,12 @@ export function DailyReflectionShell({
   toySyncEnabled = false,
   surface = "legacy"
 }: DailyReflectionShellProps) {
-  const session = useDailyReflectionSession({ initialReflectionId });
+  const api = useMemo(() => providedApi ?? createDailyReflectionApi(), [providedApi]);
+  const session = useDailyReflectionSession({ api, initialReflectionId });
   return (
     <DailyReflectionShellContent
+      api={api}
+      autoStartVoice={autoStartVoice}
       browserRecordingEnabled={browserRecordingEnabled}
       embedded={embedded}
       initialReflectionId={initialReflectionId}
@@ -1037,6 +1305,8 @@ export function DailyReflectionShell({
 }
 
 export function DailyReflectionShellContent({
+  api,
+  autoStartVoice = false,
   browserRecordingEnabled = false,
   createBrowserRecorder = defaultBrowserRecorderFactory,
   createOperationKey = defaultOperationKey,
@@ -1050,6 +1320,10 @@ export function DailyReflectionShellContent({
   toySyncEnabled = false
 }: DailyReflectionShellContentProps) {
   const router = useRouter();
+  const memoryApi = useMemo(
+    () => api ?? (embedded ? createDailyReflectionApi() : null),
+    [api, embedded]
+  );
   const [file, setFile] = useState<File | null>(null);
   const [sourceOrigin, setSourceOrigin] = useState<DailyReflectionUploadSource | null>(null);
   const [browserSourceOrigin, setBrowserSourceOrigin] = useState<DailyReflectionUploadSource | null>(null);
@@ -1067,7 +1341,22 @@ export function DailyReflectionShellContent({
     return browserRecordingEnabled ? "voice" : "upload";
   });
   const [toyPanelVisited, setToyPanelVisited] = useState(initialCaptureMethod === "toy");
+  const captureModeLocked = recorderSnapshot.state === "starting"
+    || recorderSnapshot.state === "recording"
+    || recorderSnapshot.state === "stopping";
   const [editingCardId, setEditingCardId] = useState<string | null>(null);
+  const [memoryRecommendations, setMemoryRecommendations] = useState<
+    DailyReflectionMemoryRecommendationResponse | null
+  >(null);
+  const [memoryRecommendationState, setMemoryRecommendationState] = useState<
+    "idle" | "loading" | "ready" | "error"
+  >("idle");
+  const [memoryRecommendationRefresh, setMemoryRecommendationRefresh] = useState(0);
+  const [memoryBusyCardId, setMemoryBusyCardId] = useState<string | null>(null);
+  const [memoryFeedback, setMemoryFeedback] = useState<Record<string, ReflectionMemoryFeedback>>({});
+  const [memoryConfirmations, setMemoryConfirmations] = useState<
+    Record<string, ReflectionMemoryConfirmation>
+  >({});
   const recorderRef = useRef<DailyReflectionBrowserRecorder | null>(null);
   const browserSubmitLatch = useRef(false);
   const browserReadyOperationKey = useRef<string | null>(null);
@@ -1077,6 +1366,10 @@ export function DailyReflectionShellContent({
   const lastCardExposureKey = useRef<string | null>(null);
   const appliedInitialSegmentKey = useRef<string | null>(null);
   const reviewStartedAt = useRef<number | null>(null);
+  const voiceAutostartAttempted = useRef(false);
+  const memoryRecommendationController = useRef<AbortController | null>(null);
+  const memoryBusyCardIdRef = useRef<string | null>(null);
+  const pendingMemoryAdmissions = useRef(new Map<string, ReflectionPendingAdmission>());
 
   useEffect(() => {
     if (!browserRecordingEnabled) return;
@@ -1108,7 +1401,33 @@ export function DailyReflectionShellContent({
     setDeleteConfirmation(false);
     setMoreCardsExpanded(false);
     setEditingCardId(null);
+    memoryRecommendationController.current?.abort();
+    memoryRecommendationController.current = null;
+    pendingMemoryAdmissions.current.clear();
+    memoryBusyCardIdRef.current = null;
+    setMemoryBusyCardId(null);
+    setMemoryFeedback({});
+    setMemoryConfirmations({});
+    setMemoryRecommendations(null);
+    setMemoryRecommendationState("idle");
   }, [session.reflectionId]);
+
+  useEffect(() => {
+    if (session.auth.status === "authenticated") return;
+    memoryRecommendationController.current?.abort();
+    memoryRecommendationController.current = null;
+    pendingMemoryAdmissions.current.clear();
+    memoryBusyCardIdRef.current = null;
+    setMemoryBusyCardId(null);
+    setMemoryFeedback({});
+    setMemoryConfirmations({});
+    setMemoryRecommendations(null);
+    setMemoryRecommendationState("idle");
+  }, [session.auth.status]);
+
+  useEffect(() => () => {
+    memoryRecommendationController.current?.abort();
+  }, []);
 
   useEffect(() => {
     const nextMode = initialCaptureMethod === "upload"
@@ -1242,7 +1561,7 @@ export function DailyReflectionShellContent({
   const retainedCandidateCount = keptCandidateCount
     - keptWithoutEvidenceCount
     - keptUnclaimedActionCount;
-  const recapOnlyRequired = keptWithoutEvidenceCount > 0 || keptUnclaimedActionCount > 0;
+  const recapOnlyRequired = keptWithoutEvidenceCount > 0;
   const savedCardCount = Object.values(session.workingCardStates)
     .filter((item) => item.status === "saved").length;
   const hasCompletionSelection = savedCardCount > 0 || retainedCandidateCount > 0;
@@ -1250,8 +1569,241 @@ export function DailyReflectionShellContent({
     (card) => session.workingCardStates[card.id]?.status !== "saved"
       && card.reviewStatus !== "excluded"
   );
+  const workingCardRecommendationKey = Object.entries(session.workingCardStates)
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([cardId, state]) => (
+      `${cardId}:${state.status}:${state.memoryLifecycleStatus ?? "not_admitted"}:${state.version}`
+    ))
+    .join("|");
+  const reflectionCardRecommendationKey = detail?.cards
+    .map((card) => (
+      `${card.id}:${card.reviewStatus}:${card.actionClaimed}:${card.version}:${card.evidenceIds.join(",")}`
+    ))
+    .join("|") ?? "";
 
-  const decideCard = (
+  useEffect(() => {
+    const reflectionId = session.reflectionId;
+    const canLoad = Boolean(
+      memoryApi
+      && reflectionId
+      && session.auth.status === "authenticated"
+      && (
+        detail?.reflection.status === "review_pending"
+        || detail?.reflection.status === "completed"
+      )
+    );
+    if (!canLoad || !memoryApi || !reflectionId) {
+      memoryRecommendationController.current?.abort();
+      memoryRecommendationController.current = null;
+      setMemoryRecommendations(null);
+      setMemoryRecommendationState("idle");
+      return;
+    }
+
+    memoryRecommendationController.current?.abort();
+    const controller = new AbortController();
+    memoryRecommendationController.current = controller;
+    setMemoryRecommendationState("loading");
+    void memoryApi.getMemoryRecommendations(reflectionId, controller.signal)
+      .then((response) => {
+        if (controller.signal.aborted) return;
+        setMemoryRecommendations(response);
+        setMemoryRecommendationState("ready");
+      })
+      .catch((error: unknown) => {
+        if (controller.signal.aborted) return;
+        if (error instanceof DailyReflectionApiError && error.status === 404) {
+          setMemoryRecommendations(null);
+          setMemoryRecommendationState("ready");
+          return;
+        }
+        setMemoryRecommendations(null);
+        setMemoryRecommendationState("error");
+      });
+    return () => controller.abort();
+  }, [
+    memoryApi,
+    detail?.reflection.status,
+    memoryRecommendationRefresh,
+    reflectionCardRecommendationKey,
+    session.auth.status,
+    session.reflectionId,
+    workingCardRecommendationKey
+  ]);
+
+  const recommendedCards = useMemo(() => {
+    if (!detail || !memoryRecommendations || memoryRecommendations.recommendations.length === 0) {
+      return [];
+    }
+    const cardsById = new Map(detail.cards.map((card) => [card.id, card]));
+    const resolved = memoryRecommendations.recommendations.map((recommendation) => {
+      const card = cardsById.get(recommendation.cardId);
+      return card ? { card, recommendation } : null;
+    });
+    return resolved.some((item) => item === null)
+      ? []
+      : resolved.filter((item): item is NonNullable<typeof item> => item !== null);
+  }, [detail, memoryRecommendations]);
+  const reviewPrimaryCards = primaryCards;
+  const reviewMoreCards = moreCards;
+  const outcomeCards = useMemo(
+    () => detail ? sortedCards(detail) : [],
+    [detail]
+  );
+
+  const toggleMemoryConfirmation = (
+    cardId: string,
+    acknowledgement: DailyReflectionMemoryProposalAcknowledgement,
+    checked: boolean
+  ) => {
+    setMemoryConfirmations((current) => {
+      const confirmation = current[cardId];
+      if (!confirmation) return current;
+      const selected = checked
+        ? Array.from(new Set([...confirmation.selected, acknowledgement]))
+        : confirmation.selected.filter((item) => item !== acknowledgement);
+      return { ...current, [cardId]: { ...confirmation, selected } };
+    });
+  };
+
+  const rememberWorkingCard = async (
+    card: DailyReflectionCardView,
+    memoryType: DailyReflectionMemoryProposalCreateRequest["memoryType"],
+    acknowledgements: DailyReflectionMemoryProposalAcknowledgement[] = []
+  ) => {
+    if (!memoryApi || memoryBusyCardIdRef.current) return;
+    const workingCard = session.workingCardStates[card.id];
+    if (
+      !workingCard
+      || workingCard.status !== "saved"
+      || (workingCard.memoryLifecycleStatus ?? "not_admitted") !== "not_admitted"
+      || card.evidenceIds.length === 0
+    ) {
+      setMemoryFeedback((current) => ({
+        ...current,
+        [card.id]: {
+          message: "这张卡片目前不能加入长期记忆；卡片本身仍会保留。",
+          tone: "notice"
+        }
+      }));
+      return;
+    }
+
+    memoryBusyCardIdRef.current = card.id;
+    setMemoryBusyCardId(card.id);
+    setMemoryFeedback((current) => {
+      const next = { ...current };
+      delete next[card.id];
+      return next;
+    });
+    try {
+      let pending = pendingMemoryAdmissions.current.get(card.id);
+      if (!pending) {
+        const created = await memoryApi.createWorkingCardMemoryProposal(card.id, {
+          expectedCardVersion: workingCard.version,
+          memoryType
+        });
+        pending = {
+          proposalId: created.proposal.id,
+          expectedVersion: created.proposal.version
+        };
+        pendingMemoryAdmissions.current.set(card.id, pending);
+      }
+      const admitted = await memoryApi.admitMemoryProposal(pending.proposalId, {
+        expectedVersion: pending.expectedVersion,
+        acknowledgements
+      });
+      if (admitted.status === "admitted" || admitted.status === "already_exists") {
+        pendingMemoryAdmissions.current.delete(card.id);
+        setMemoryConfirmations((current) => {
+          const next = { ...current };
+          delete next[card.id];
+          return next;
+        });
+        setMemoryFeedback((current) => ({
+          ...current,
+          [card.id]: {
+            message: admitted.status === "already_exists"
+              ? "这条内容已经在长期记忆里了。"
+              : "已长期记住",
+            tone: "success"
+          }
+        }));
+        await session.reload();
+        setMemoryRecommendationRefresh((current) => current + 1);
+        return;
+      }
+      if (admitted.status === "needs_confirmation") {
+        pendingMemoryAdmissions.current.set(card.id, {
+          proposalId: admitted.proposal.id,
+          expectedVersion: admitted.proposal.version
+        });
+        setMemoryConfirmations((current) => ({
+          ...current,
+          [card.id]: {
+            requirements: admitted.confirmationRequirements,
+            selected: acknowledgements.filter((acknowledgement) => (
+              admitted.confirmationRequirements.some(
+                (requirement) => requirement.code === acknowledgement
+              )
+            ))
+          }
+        }));
+        setMemoryFeedback((current) => ({
+          ...current,
+          [card.id]: {
+            message: "还需要你明确确认，确认前不会加入长期记忆。",
+            tone: "notice"
+          }
+        }));
+        return;
+      }
+      pendingMemoryAdmissions.current.delete(card.id);
+      setMemoryConfirmations((current) => {
+        const next = { ...current };
+        delete next[card.id];
+        return next;
+      });
+      setMemoryFeedback((current) => ({
+        ...current,
+        [card.id]: {
+          message: "这张卡片不符合长期保存的安全条件；卡片本身仍会保留。",
+          tone: "notice"
+        }
+      }));
+    } catch (error) {
+      const conflict = error instanceof DailyReflectionApiError && error.status === 409;
+      const retryable = error instanceof DailyReflectionApiError && error.status === 503;
+      if (conflict) {
+        pendingMemoryAdmissions.current.delete(card.id);
+        setMemoryConfirmations((current) => {
+          const next = { ...current };
+          delete next[card.id];
+          return next;
+        });
+        await session.reload();
+        setMemoryRecommendationRefresh((current) => current + 1);
+      } else if (!retryable) {
+        pendingMemoryAdmissions.current.delete(card.id);
+      }
+      setMemoryFeedback((current) => ({
+        ...current,
+        [card.id]: {
+          message: conflict
+            ? "这份内容已在其他页面更新，请重新加载最新内容。"
+            : retryable
+              ? "这次保存还没有确认完成，请重试；重试会继续同一次操作。"
+              : "暂时无法长期记住，请稍后重试。",
+          tone: "error"
+        }
+      }));
+    } finally {
+      memoryBusyCardIdRef.current = null;
+      setMemoryBusyCardId(null);
+    }
+  };
+
+  const decideCard = async (
     card: DailyReflectionCardView,
     decision: DailyReflectionCardDecision
   ) => {
@@ -1282,7 +1834,61 @@ export function DailyReflectionShellContent({
         tier: "more"
       });
     }
-    void session.updateCard(decision);
+    await session.updateCard(decision);
+  };
+
+  const selectRecommendedCardForLongTermMemory = async (
+    card: DailyReflectionCardView
+  ) => {
+    if (
+      memoryBusyCardIdRef.current
+      || card.evidenceIds.length === 0
+      || (card.cardKind === "user_action" && !card.actionClaimed)
+    ) return;
+    memoryBusyCardIdRef.current = card.id;
+    setMemoryBusyCardId(card.id);
+    setMemoryFeedback((current) => {
+      const next = { ...current };
+      delete next[card.id];
+      return next;
+    });
+    try {
+      if (session.workingCardStates[card.id]?.status !== "saved") {
+        const saved = await session.saveWorkingCard(card.id, {
+          userTitle: card.userTitle,
+          userText: card.userText
+        });
+        if (!saved) {
+          setMemoryFeedback((current) => ({
+            ...current,
+            [card.id]: {
+              message: "卡片还没有保存成功，请重试。",
+              tone: "error"
+            }
+          }));
+          return;
+        }
+      }
+      await decideCard(card, {
+        cardId: card.id,
+        reviewStatus: "kept",
+        userTitle: card.userTitle,
+        userText: card.userText,
+        ...(card.cardKind === "user_action"
+          ? { actionClaimed: card.actionClaimed }
+          : {})
+      });
+      setMemoryFeedback((current) => ({
+        ...current,
+        [card.id]: {
+          message: "已选择长期记住，完成复盘后处理。",
+          tone: "success"
+        }
+      }));
+    } finally {
+      memoryBusyCardIdRef.current = null;
+      setMemoryBusyCardId(null);
+    }
   };
 
   const toggleMoreCards = () => {
@@ -1368,8 +1974,8 @@ export function DailyReflectionShellContent({
     });
   };
 
-  const startBrowserRecording = async () => {
-    if (!browserSourceOrigin) {
+  const startBrowserRecording = useCallback(async (allowWithoutSource = false) => {
+    if (!browserSourceOrigin && !allowWithoutSource) {
       setRecorderError("先确认这段声音来自自己的复盘，还是一段真实交流。");
       return;
     }
@@ -1386,7 +1992,49 @@ export function DailyReflectionShellContent({
       const message = browserRecordingError(error);
       if (message) setRecorderError(message);
     }
+  }, [browserSourceOrigin]);
+
+  const selectCaptureMode = (mode: "voice" | "upload" | "toy") => {
+    if (captureModeLocked && mode !== "voice") return;
+    if (mode === "toy") setToyPanelVisited(true);
+    setCaptureMode(mode);
   };
+
+  const moveCaptureTabFocus = (event: ReactKeyboardEvent<HTMLDivElement>) => {
+    if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+    const tabs = [...event.currentTarget.querySelectorAll<HTMLButtonElement>('[role="tab"]:not(:disabled)')];
+    if (tabs.length === 0) return;
+    const currentIndex = Math.max(0, tabs.indexOf(document.activeElement as HTMLButtonElement));
+    const nextIndex = event.key === "Home"
+      ? 0
+      : event.key === "End"
+        ? tabs.length - 1
+        : (currentIndex + (event.key === "ArrowRight" ? 1 : -1) + tabs.length) % tabs.length;
+    event.preventDefault();
+    tabs[nextIndex]?.focus();
+    tabs[nextIndex]?.click();
+  };
+
+  useEffect(() => {
+    if (
+      !autoStartVoice
+      || voiceAutostartAttempted.current
+      || !browserRecordingEnabled
+      || captureMode !== "voice"
+      || session.auth.status !== "authenticated"
+      || recorderSnapshot.state !== "idle"
+      || !recorderRef.current
+    ) return;
+    voiceAutostartAttempted.current = true;
+    void startBrowserRecording(true);
+  }, [
+    autoStartVoice,
+    browserRecordingEnabled,
+    captureMode,
+    recorderSnapshot.state,
+    session.auth.status,
+    startBrowserRecording
+  ]);
 
   const stopBrowserRecording = async () => {
     const recorder = recorderRef.current;
@@ -1543,7 +2191,7 @@ export function DailyReflectionShellContent({
   return (
     <div className={embedded ? styles.embeddedRoot : styles.root}>
       {!embedded ? <header className={styles.header}>
-        <Link className={styles.wordmark} href="/date-companion/modules" aria-label="返回空间选择">
+        <Link className={styles.wordmark} href="/" aria-label="返回产品选择">
           <span className={styles.wordmarkMark}>DB</span>
           <b>日常复盘</b>
         </Link>
@@ -1553,7 +2201,7 @@ export function DailyReflectionShellContent({
           <Link href="/reflection/cards">卡片</Link>
           <Link href="/reflection/memory">记忆</Link>
           <Link href="/reflection/reflect">回看</Link>
-          <Link href="/reflection/ask">问问过去</Link>
+          <Link href="/reflection/think?mode=past_clues">一起想</Link>
         </nav>
         <div className={styles.headerTools}>
           <span title={userLabel}>{userLabel}</span>
@@ -1584,20 +2232,54 @@ export function DailyReflectionShellContent({
 
         {!showRecord && surface !== "session" ? (
           <div className={styles.captureWorkspace}>
-            <div className={styles.captureModeTabs} role="tablist" aria-label="选择表达方式">
+            <div
+              className={styles.captureModeTabs}
+              role="tablist"
+              aria-label="选择表达方式"
+              onKeyDown={moveCaptureTabFocus}
+            >
               {browserRecordingEnabled ? (
-                <button aria-controls="reflection-capture-record" aria-selected={captureMode === "voice"} onClick={() => setCaptureMode("voice")} role="tab" type="button">开始说</button>
+                <button
+                  aria-controls="reflection-capture-record"
+                  aria-selected={captureMode === "voice"}
+                  id="reflection-capture-tab-voice"
+                  onClick={() => selectCaptureMode("voice")}
+                  role="tab"
+                  tabIndex={captureMode === "voice" ? 0 : -1}
+                  type="button"
+                >开始说</button>
               ) : null}
-              <button aria-controls="reflection-capture-upload" aria-selected={captureMode === "upload"} onClick={() => setCaptureMode("upload")} role="tab" type="button">上传录音</button>
+              <button
+                aria-controls="reflection-capture-upload"
+                aria-selected={captureMode === "upload"}
+                disabled={captureModeLocked}
+                id="reflection-capture-tab-upload"
+                onClick={() => selectCaptureMode("upload")}
+                role="tab"
+                tabIndex={captureMode === "upload" ? 0 : -1}
+                type="button"
+              >上传录音</button>
               {toySyncEnabled ? (
-                <button aria-controls="reflection-capture-toy" aria-selected={captureMode === "toy"} onClick={() => {
-                  setToyPanelVisited(true);
-                  setCaptureMode("toy");
-                }} role="tab" type="button">从玩偶导入</button>
+                <button
+                  aria-controls="reflection-capture-toy-panel"
+                  aria-selected={captureMode === "toy"}
+                  disabled={captureModeLocked}
+                  id="reflection-capture-tab-toy"
+                  onClick={() => selectCaptureMode("toy")}
+                  role="tab"
+                  tabIndex={captureMode === "toy" ? 0 : -1}
+                  type="button"
+                >从玩偶导入</button>
               ) : null}
             </div>
             {toySyncEnabled && (toyPanelVisited || captureMode === "toy") ? (
-              <div className={styles.capturePanel} hidden={captureMode !== "toy"} id="reflection-capture-toy" role="tabpanel">
+              <div
+                aria-labelledby="reflection-capture-tab-toy"
+                className={styles.capturePanel}
+                hidden={captureMode !== "toy"}
+                id="reflection-capture-toy-panel"
+                role="tabpanel"
+              >
                 <DailyReflectionToySync
                   accountId={session.auth.user.id}
                   busy={busy}
@@ -1612,7 +2294,7 @@ export function DailyReflectionShellContent({
               </div>
             ) : null}
             {browserRecordingEnabled ? (
-              <section hidden={captureMode !== "voice"} id="reflection-capture-record" className={`${styles.uploadCard} ${styles.recordingCard} ${styles.capturePanel}`} aria-labelledby="daily-reflection-recording-title" role="tabpanel">
+              <section hidden={captureMode !== "voice"} id="reflection-capture-record" className={`${styles.uploadCard} ${styles.recordingCard} ${styles.capturePanel}`} aria-labelledby="reflection-capture-tab-voice" role="tabpanel">
                 <div>
                   <p className={styles.eyebrow}>现在说一说</p>
                   <h2 id="daily-reflection-recording-title">开始说</h2>
@@ -1682,7 +2364,12 @@ export function DailyReflectionShellContent({
                 ) : (
                   <div className={styles.recorderState}>
                     <p>准备好后开始，说完由你自己停止；录到三分钟也不会被中断。</p>
-                    <button className={styles.primaryButton} disabled={!browserSourceOrigin} onClick={() => void startBrowserRecording()} type="button">开始说</button>
+                    <button
+                      className={styles.primaryButton}
+                      disabled={!browserSourceOrigin && !autoStartVoice}
+                      onClick={() => void startBrowserRecording(autoStartVoice)}
+                      type="button"
+                    >{recorderError ? "重新尝试" : "开始说"}</button>
                   </div>
                 )}
 
@@ -1690,7 +2377,18 @@ export function DailyReflectionShellContent({
                 <p className={styles.localOnlyNote}>提交前请不要刷新或离开，本地录音不会自动恢复。提交成功后可以稍后从“最近复盘”回来。</p>
               </section>
             ) : null}
-            <form hidden={captureMode !== "upload"} id="reflection-capture-upload" className={`${styles.uploadCard} ${styles.capturePanel}`} aria-label="上传日常复盘录音" onSubmit={submit}>
+            <div
+              aria-labelledby="reflection-capture-tab-upload"
+              className={styles.capturePanel}
+              hidden={captureMode !== "upload"}
+              id="reflection-capture-upload"
+              role="tabpanel"
+            >
+              <form
+                aria-label="上传日常复盘录音"
+                className={styles.uploadCard}
+                onSubmit={submit}
+              >
               <div>
                   <p className={styles.eyebrow}>已有一段声音</p>
                   <h2>上传录音</h2>
@@ -1758,7 +2456,8 @@ export function DailyReflectionShellContent({
                   type="submit"
                 >开始整理</button>
               </div>
-            </form>
+              </form>
+            </div>
           </div>
         ) : showRecord ? (
           <div className={styles.statusColumn}>
@@ -1771,11 +2470,19 @@ export function DailyReflectionShellContent({
               </button>
               <span>这条记录会一直保留在最近复盘中，直到你明确删除。</span>
             </div>
-            <section className={styles.statusCard} aria-live="polite">
+            <section
+              aria-live="polite"
+              className={styles.statusCard}
+              data-status={status ?? session.state}
+            >
               <div className={styles.statusTop}>
                 <div>
                   <p className={styles.eyebrow}>这次记录</p>
-                  <h2>{browserSubmitting ? "正在整理这次复盘……" : processingCopy(detail, session.state)}</h2>
+                  <h2>{browserSubmitting
+                    ? "正在整理这次复盘……"
+                    : status === "review_pending"
+                      ? "这次复盘"
+                      : processingCopy(detail, session.state)}</h2>
                 </div>
                 <span className={styles.statusBadge}>{status === "review_pending"
                   ? "等你看看"
@@ -1848,7 +2555,7 @@ export function DailyReflectionShellContent({
                 ) : null}
                 {session.reflectionId ? (
                   <details className={styles.recordAdvancedActions}>
-                    <summary>更多</summary>
+                    <summary aria-label="更多">⋯</summary>
                     <div>
                       <button className={styles.dangerButton} disabled={busy} onClick={() => setDeleteConfirmation(true)} type="button">删除原始记录</button>
                     </div>
@@ -1931,30 +2638,82 @@ export function DailyReflectionShellContent({
                       >长期记住这些重点</button>
                     </div>
                   ) : null}
-                  {cards.length > 0 ? (
-                    <>
-                      <h3>值得带走</h3>
-                      <ol className={`${styles.candidateList} ${styles.primaryCardGrid}`}>
-                        {primaryCards.map((card) => (
-                          <ReflectionCardReview
-                            busy={busy}
-                            card={card}
-                            editing={editingCardId === card.id}
-                            key={card.id}
-                            onCancelEdit={() => setEditingCardId(null)}
-                            onDecision={(decision) => decideCard(card, decision)}
-                            onArchiveFromCards={(cardId) => void session.archiveWorkingCard(cardId)}
-                            onRestoreToCards={(cardId) => void session.restoreWorkingCard(cardId)}
-                            onSaveToCards={(cardId, draft) => void session.saveWorkingCard(cardId, draft)}
-                            onSource={requestTranscriptSegmentFocus}
-                            onStartEdit={() => setEditingCardId(card.id)}
-                            workingCardStatus={activeWorkingCardStatus(
-                              session.workingCardStates[card.id]?.status
-                            )}
-                          />
+                  {recommendedCards.length > 0 ? (
+                    <section
+                      aria-labelledby="daily-reflection-review-memory-recommendations-title"
+                      className={styles.memoryRecommendationSection}
+                    >
+                      <div className={styles.memoryRecommendationHeading}>
+                        <div>
+                          <p>可选，不影响完成本次复盘</p>
+                          <h3 id="daily-reflection-review-memory-recommendations-title">建议长期记住</h3>
+                        </div>
+                        <span>{recommendedCards.length} 张</span>
+                      </div>
+                      <p className={styles.memoryRecommendationLead}>
+                        这些卡片以后可能继续有用。默认不会长期保存，只有你明确选择时才会处理。
+                      </p>
+                      <ol className={styles.memoryRecommendationGrid}>
+                        {recommendedCards.map(({ card }) => (
+                          <li className={styles.memoryRecommendationCard} key={card.id}>
+                            <span className={styles.candidateType}>{CANDIDATE_KIND_LABELS[card.cardKind]}</span>
+                            <h4>{card.userTitle ?? card.proposedTitle}</h4>
+                            <small>{card.evidenceIds.length} 条来源</small>
+                            <ReflectionRecommendationEvidence
+                              card={card}
+                              onSource={requestTranscriptSegmentFocus}
+                            />
+                            <ReflectionMemoryAction
+                              busy={memoryBusyCardId === card.id}
+                              feedback={memoryFeedback[card.id]}
+                              onConfirm={() => undefined}
+                              onRemember={() => void selectRecommendedCardForLongTermMemory(card)}
+                              onToggleConfirmation={() => undefined}
+                              selected={card.reviewStatus === "kept"}
+                            />
+                          </li>
                         ))}
                       </ol>
-                      {moreCards.length > 0 ? (
+                    </section>
+                  ) : null}
+                  {memoryRecommendationState === "error" ? (
+                    <div className={styles.memoryRecommendationError} role="status">
+                      <p>长期记住的建议暂时没有读取到；你的复盘和卡片不受影响。</p>
+                      <button
+                        className={styles.textButton}
+                        onClick={() => setMemoryRecommendationRefresh((current) => current + 1)}
+                        type="button"
+                      >重新读取建议</button>
+                    </div>
+                  ) : null}
+                  {cards.length > 0 ? (
+                    <>
+                      {reviewPrimaryCards.length > 0 ? (
+                        <>
+                          <h3>值得带走</h3>
+                          <ol className={`${styles.candidateList} ${styles.primaryCardGrid}`}>
+                            {reviewPrimaryCards.map((card) => (
+                              <ReflectionCardReview
+                                busy={busy}
+                                card={card}
+                                editing={editingCardId === card.id}
+                                key={card.id}
+                                onCancelEdit={() => setEditingCardId(null)}
+                                onDecision={(decision) => decideCard(card, decision)}
+                                onArchiveFromCards={(cardId) => void session.archiveWorkingCard(cardId)}
+                                onRestoreToCards={(cardId) => void session.restoreWorkingCard(cardId)}
+                                onSaveToCards={(cardId, draft) => session.saveWorkingCard(cardId, draft)}
+                                onSource={requestTranscriptSegmentFocus}
+                                onStartEdit={() => setEditingCardId(card.id)}
+                                workingCardStatus={activeWorkingCardStatus(
+                                  session.workingCardStates[card.id]?.status
+                                )}
+                              />
+                            ))}
+                          </ol>
+                        </>
+                      ) : null}
+                      {reviewMoreCards.length > 0 ? (
                         <section aria-label="更多整理结果">
                           <button
                             aria-expanded={moreCardsExpanded}
@@ -1963,10 +2722,10 @@ export function DailyReflectionShellContent({
                             type="button"
                           >{moreCardsExpanded
                             ? "收起更多整理结果"
-                            : `还有 ${moreCards.length} 条可能有用的内容`}</button>
+                            : `还有 ${reviewMoreCards.length} 条可能有用的内容`}</button>
                           {moreCardsExpanded ? (
                             <ol className={`${styles.candidateList} ${styles.moreCardList}`}>
-                              {moreCards.map((card) => (
+                              {reviewMoreCards.map((card) => (
                                 <ReflectionCardReview
                                   busy={busy}
                                   card={card}
@@ -1976,7 +2735,7 @@ export function DailyReflectionShellContent({
                                   onDecision={(decision) => decideCard(card, decision)}
                                   onArchiveFromCards={(cardId) => void session.archiveWorkingCard(cardId)}
                                   onRestoreToCards={(cardId) => void session.restoreWorkingCard(cardId)}
-                                  onSaveToCards={(cardId, draft) => void session.saveWorkingCard(cardId, draft)}
+                                  onSaveToCards={(cardId, draft) => session.saveWorkingCard(cardId, draft)}
                                   onSource={requestTranscriptSegmentFocus}
                                   onStartEdit={() => setEditingCardId(card.id)}
                                   workingCardStatus={activeWorkingCardStatus(
@@ -1997,7 +2756,7 @@ export function DailyReflectionShellContent({
                             busy={busy}
                             candidate={candidate}
                             key={candidate.id}
-                            onDecision={(decision) => void session.updateCandidate(decision)}
+                            onDecision={(decision) => session.updateCandidate(decision)}
                             onDelete={(candidateId) => void session.excludeCandidate(candidateId)}
                             onSource={requestTranscriptSegmentFocus}
                           />
@@ -2014,30 +2773,15 @@ export function DailyReflectionShellContent({
                       segments={detail.segments}
                     />
                   ) : null}
-                  <div className={`${styles.finalizePanel} ${hasCompletionSelection
-                    ? styles.finalizePanelActive
-                    : styles.finalizePanelIdle}`}>
-                    <div>
-                      {hasCompletionSelection ? <>
-                        <b>{savedCardCount} 张卡片 · {retainedCandidateCount} 条长期记忆</b>
-                        <p>已保存 {savedCardCount} 张卡片；{retainedCandidateCount > 0
-                          ? `会评估并尝试长期记住 ${retainedCandidateCount} 条你明确选择的内容。`
-                          : "其余整理内容只会留在这次复盘里。"}
-                          {pendingCandidateCount > 0 ? ` 还有 ${pendingCandidateCount} 条可以以后再看。` : ""}</p>
-                      </> : <>
-                        <b>看完后，完成这次复盘</b>
-                        <p>{pendingCandidateCount > 0
-                          ? `还有 ${pendingCandidateCount} 条可以以后再看；没有要保存的内容，也可以直接完成。`
-                          : "没有要保存的内容，也可以直接完成。"}</p>
-                      </>}
-                      {keptWithoutEvidenceCount > 0 ? (
-                        <p className={styles.inlineError}>有 {keptWithoutEvidenceCount} 条手写内容没有原话，只能随本次复盘保存。</p>
-                      ) : null}
-                      {keptUnclaimedActionCount > 0 ? (
-                        <p className={styles.inlineError}>有 {keptUnclaimedActionCount} 条行动还没有由你认领，只能随本次复盘保存。</p>
-                      ) : null}
-                    </div>
-                    <div className={styles.finalizeActions}>
+                </section>
+
+                <DailyReflectionTranscript
+                  focusRequest={focusRequest}
+                  segments={detail.segments}
+                />
+                <div className={styles.completionBlock}>
+                  <ProductReviewCompletion
+                    action={(
                       <button
                         className={styles.primaryButton}
                         disabled={busy}
@@ -2046,14 +2790,30 @@ export function DailyReflectionShellContent({
                           : "recap_only")}
                         type="button"
                       >{session.operation === "finalizing" ? "正在保存…" : "完成这次复盘"}</button>
-                    </div>
-                  </div>
-                </section>
-
-                <DailyReflectionTranscript
-                  focusRequest={focusRequest}
-                  segments={detail.segments}
-                />
+                    )}
+                    className={`${styles.finalizePanel} ${hasCompletionSelection
+                      ? styles.finalizePanelActive
+                      : styles.finalizePanelIdle}`}
+                    description={hasCompletionSelection
+                      ? `已保存的卡片会留在卡片库；${retainedCandidateCount > 0
+                        ? `只有你明确选择的 ${retainedCandidateCount} 条会进入长期记忆处理。`
+                        : "其余整理内容只留在本次复盘中。"}${pendingCandidateCount > 0
+                          ? ` 还有 ${pendingCandidateCount} 条可以以后再看。`
+                          : ""}`
+                      : pendingCandidateCount > 0
+                        ? `还有 ${pendingCandidateCount} 条可以以后再看；没有要保存的内容，也可以直接完成。`
+                        : "没有要保存的内容，也可以直接完成。"}
+                    title={hasCompletionSelection
+                      ? `已保存 ${savedCardCount} 张卡片 · 已选择长期记住 ${retainedCandidateCount} 条`
+                      : "看完后，完成这次复盘"}
+                  />
+                  {keptWithoutEvidenceCount > 0 ? (
+                    <p className={styles.completionNotice}>有 {keptWithoutEvidenceCount} 条手写内容没有原话，只能随本次复盘保存。</p>
+                  ) : null}
+                  {keptUnclaimedActionCount > 0 ? (
+                    <p className={styles.completionNotice}>有 {keptUnclaimedActionCount} 条行动还没有由你认领，只能随本次复盘保存。</p>
+                  ) : null}
+                </div>
               </div>
             ) : null}
 
@@ -2071,7 +2831,7 @@ export function DailyReflectionShellContent({
                       <h2 id="daily-reflection-outcome-title">{detail.reflection.status === "completed"
                         ? "这次复盘已经整理好"
                         : detail.reflection.status === "admission_failed"
-                          ? "有些内容还没有整理好"
+                          ? "长期记忆还没有保存完成"
                           : "正在整理你确认的内容"}</h2>
                     </div>
                   </div>
@@ -2088,7 +2848,7 @@ export function DailyReflectionShellContent({
                       )}
                     </p>
                   ) : detail.reflection.status === "admission_failed" ? (
-                    <p className={styles.outcomeCopy}>这次整理没有完整完成，你可以稍后重新读取结果。</p>
+                    <p className={styles.outcomeCopy}>卡片和原始记录已经保留，但长期记忆暂时没有保存完成。你可以重新保存。</p>
                   ) : (
                     <p className={styles.outcomeCopy}>正在安全保存你刚刚确认的内容。</p>
                   )}
@@ -2096,20 +2856,105 @@ export function DailyReflectionShellContent({
                     <dl className={styles.outcomeStats}>
                       <div><dt>你的卡片</dt><dd>{savedCardCount}</dd></div>
                       <div><dt>长期记住</dt><dd>{detail.rememberedCount ?? 0}</dd></div>
-                      <div><dt>只留在本次复盘</dt><dd>{detail.cards.filter((card) => card.reviewStatus !== "kept").length}</dd></div>
+                      <div><dt>只留在本次复盘</dt><dd>{Math.max(
+                        0,
+                        detail.cards.length - (detail.rememberedCount ?? 0)
+                      )}</dd></div>
                     </dl>
                   ) : null}
-                  {detail.cards.length > 0 ? (
+                  {detail.reflection.status === "completed" && recommendedCards.length > 0 ? (
+                    <section
+                      aria-labelledby="daily-reflection-memory-recommendations-title"
+                      className={styles.memoryRecommendationSection}
+                    >
+                      <div className={styles.memoryRecommendationHeading}>
+                        <div>
+                          <p>由你最后决定</p>
+                          <h3 id="daily-reflection-memory-recommendations-title">建议长期记住</h3>
+                        </div>
+                        <span>{recommendedCards.length} 张</span>
+                      </div>
+                      <p className={styles.memoryRecommendationLead}>
+                        这些卡片可能在以后继续有用。不会自动保存，只有你明确选择后才会处理。
+                      </p>
+                      <ol className={styles.memoryRecommendationGrid}>
+                        {recommendedCards.map(({ card, recommendation }) => (
+                          <li className={styles.memoryRecommendationCard} key={card.id}>
+                            <span className={styles.candidateType}>{CANDIDATE_KIND_LABELS[card.cardKind]}</span>
+                            <h4>{card.userTitle ?? card.proposedTitle}</h4>
+                            <p>{card.userText ?? card.proposedText}</p>
+                            <small>{card.evidenceIds.length} 条来源</small>
+                            <ReflectionRecommendationEvidence
+                              card={card}
+                              onSource={requestTranscriptSegmentFocus}
+                            />
+                            <ReflectionMemoryAction
+                              busy={memoryBusyCardId === card.id}
+                              confirmation={memoryConfirmations[card.id]}
+                              feedback={memoryFeedback[card.id]}
+                              onConfirm={(acknowledgements) => void rememberWorkingCard(
+                                card,
+                                recommendation.memoryType,
+                                acknowledgements
+                              )}
+                              onRemember={() => void rememberWorkingCard(card, recommendation.memoryType)}
+                              onToggleConfirmation={(acknowledgement, checked) => (
+                                toggleMemoryConfirmation(card.id, acknowledgement, checked)
+                              )}
+                            />
+                          </li>
+                        ))}
+                      </ol>
+                    </section>
+                  ) : null}
+                  {detail.reflection.status === "completed" && memoryRecommendationState === "error" ? (
+                    <div className={styles.memoryRecommendationError} role="status">
+                      <p>长期记住的建议暂时没有读取到；你的复盘和卡片不受影响。</p>
+                      <button
+                        className={styles.textButton}
+                        onClick={() => setMemoryRecommendationRefresh((current) => current + 1)}
+                        type="button"
+                      >重新读取建议</button>
+                    </div>
+                  ) : null}
+                  {detail.cards.length > 0 && outcomeCards.length > 0 ? (
                     <ol className={styles.candidateList}>
-                      {sortedCards(detail).map((card) => (
+                      {outcomeCards.map((card) => {
+                        const result = detail.admissionResults.find(
+                          (item) => item.candidateId === card.id
+                        );
+                        const memoryLifecycleStatus = session
+                          .workingCardStates[card.id]?.memoryLifecycleStatus;
+                        const revoked = memoryLifecycleStatus === "revoked";
+                        const revocationPending = memoryLifecycleStatus === "revocation_requested";
+                        const remembered = !revoked
+                          && !revocationPending
+                          && (result?.status === "admitted"
+                            || result?.status === "already_admitted");
+                        const statusCopy = revoked
+                          ? "已撤销长期记忆"
+                          : revocationPending
+                            ? "正在撤销长期记忆"
+                            : remembered
+                              ? "已长期记住"
+                              : result?.status === "rejected"
+                                ? "暂未长期保存"
+                                : card.reviewStatus === "excluded"
+                                  ? "仅保留在本次复盘"
+                                  : "你的卡片";
+                        const workingCard = session.workingCardStates[card.id];
+                        const explicitMemoryType = memoryTypeForReflectionCard(card);
+                        const canRemember = workingCard?.status === "saved"
+                          && (workingCard.memoryLifecycleStatus ?? "not_admitted") === "not_admitted"
+                          && card.evidenceIds.length > 0
+                          && explicitMemoryType !== null;
+                        return (
                         <li className={styles.candidateCard} key={card.id}>
                           <div className={styles.candidateCardTop}>
                             <b>{card.userTitle ?? card.proposedTitle}</b>
-                            <span className={`${styles.pendingBadge} ${card.reviewStatus === "kept"
+                            <span className={`${styles.pendingBadge} ${remembered
                               ? styles.keptBadge
-                              : styles.excludedBadge}`}>{card.reviewStatus === "kept"
-                                ? "已长期记住"
-                                : "仅保留在本次复盘"}</span>
+                              : styles.excludedBadge}`}>{statusCopy}</span>
                           </div>
                           <p>{card.userText ?? card.proposedText}</p>
                           <button
@@ -2120,6 +2965,24 @@ export function DailyReflectionShellContent({
                           {session.workingCardStates[card.id]?.status === "saved" ? (
                             <div className={styles.candidateActions}>
                               <Link className={styles.secondaryButton} href={`/reflection/cards/${encodeURIComponent(card.id)}`}>打开卡片</Link>
+                              {canRemember && explicitMemoryType ? (
+                                <ReflectionMemoryAction
+                                  busy={memoryBusyCardId === card.id}
+                                  confirmation={memoryConfirmations[card.id]}
+                                  feedback={memoryFeedback[card.id]}
+                                  onConfirm={(acknowledgements) => void rememberWorkingCard(
+                                    card,
+                                    explicitMemoryType,
+                                    acknowledgements
+                                  )}
+                                  onRemember={() => void rememberWorkingCard(card, explicitMemoryType)}
+                                  onToggleConfirmation={(acknowledgement, checked) => (
+                                    toggleMemoryConfirmation(card.id, acknowledgement, checked)
+                                  )}
+                                />
+                              ) : card.cardKind === "user_action" && !card.actionClaimed ? (
+                                <span className={styles.memoryActionHint}>先在复盘中明确认领这项行动后，才能长期记住。</span>
+                              ) : null}
                               <button className={styles.textButton} disabled={busy} onClick={() => void session.archiveWorkingCard(card.id)} type="button">归档卡片</button>
                             </div>
                           ) : session.workingCardStates[card.id]?.status === "archived"
@@ -2137,7 +3000,8 @@ export function DailyReflectionShellContent({
                               >保存为卡片</button>
                             ) : null}
                         </li>
-                      ))}
+                        );
+                      })}
                     </ol>
                   ) : (
                     <ReflectionResultList
@@ -2160,7 +3024,7 @@ export function DailyReflectionShellContent({
                           : "retain_selected"
                       )}
                       type="button"
-                    >重新保存</button>
+                    >重新保存长期记忆</button>
                   ) : null}
                 </section>
                 <DailyReflectionTranscript focusRequest={focusRequest} segments={detail.segments} />

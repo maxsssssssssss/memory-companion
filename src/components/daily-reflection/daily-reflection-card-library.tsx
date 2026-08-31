@@ -4,6 +4,7 @@ import Link from "next/link";
 import {
   type CSSProperties,
   type FormEvent,
+  type KeyboardEvent as ReactKeyboardEvent,
   type MouseEvent as ReactMouseEvent,
   useCallback,
   useEffect,
@@ -13,15 +14,21 @@ import {
   useState
 } from "react";
 
+import { ProductState } from "@/components/product-system/product-primitives";
 import {
   createDailyReflectionApi,
   DailyReflectionApiError,
-  type DailyReflectionApi
+  type DailyReflectionApi,
+  type DailyReflectionMemoryProposalCreateRequest
 } from "@/lib/client/daily-reflection-api";
 import type {
   DailyReflectionWorkingCardDetailResponse,
   DailyReflectionWorkingCardView
 } from "@/lib/domain/daily-reflection-api";
+import type {
+  DailyReflectionMemoryProposalAcknowledgement,
+  DailyReflectionMemoryProposalConfirmationRequirement
+} from "@/lib/domain/daily-reflection-memory-proposal";
 import type {
   DailyReflectionWorkingCardKind,
   DailyReflectionWorkingCardStatus
@@ -47,6 +54,21 @@ type CardExpansion = Readonly<{
   origin: Rect | null;
   phase: ExpansionPhase;
   target: Rect;
+}>;
+type CardExpansionStyle = CSSProperties & Readonly<{
+  "--card-expansion-origin-transform": string;
+}>;
+type CardMemoryFeedback = Readonly<{
+  message: string;
+  tone: "error" | "notice" | "success";
+}>;
+type PendingMemoryAdmission = Readonly<{
+  expectedVersion: number;
+  proposalId: string;
+}>;
+type CardMemoryConfirmation = Readonly<{
+  requirements: DailyReflectionMemoryProposalConfirmationRequirement[];
+  selected: DailyReflectionMemoryProposalAcknowledgement[];
 }>;
 
 type DailyReflectionCardLibraryProps = Readonly<{
@@ -81,6 +103,171 @@ function presentationKind(kind: DailyReflectionWorkingCardKind): ProductCardKind
   return "insight";
 }
 
+function memoryTypeForWorkingCard(
+  kind: DailyReflectionWorkingCardKind
+): DailyReflectionMemoryProposalCreateRequest["memoryType"] | null {
+  switch (kind) {
+    case "idea":
+    case "insight": return "summary";
+    case "question": return "question";
+    case "decision": return "decision";
+    // The public Working Card DTO does not expose actionClaimed. Action Cards
+    // therefore stay fail-closed instead of inferring a commitment from kind.
+    case "event": return "event";
+    case "action": return null;
+  }
+}
+
+function memoryConfirmationCopy(
+  requirement: DailyReflectionMemoryProposalConfirmationRequirement
+) {
+  switch (requirement.code) {
+    case "acknowledge_sensitive_content":
+      return "这可能包含较敏感的个人内容；确认后才会长期记住。";
+    case "acknowledge_inference":
+      return "这部分包含系统整理出的推测；请确认它符合你的意思。";
+    case "acknowledge_attribution_uncertainty":
+      return "这段表达的归属不够明确；请确认它可以作为你的长期内容。";
+    case "verify_fact_owner":
+      return "这条内容的归属还需要先在复盘中确认；确认前不会加入长期记忆。";
+  }
+}
+
+function isAcknowledgementRequirement(
+  requirement: DailyReflectionMemoryProposalConfirmationRequirement
+): requirement is DailyReflectionMemoryProposalConfirmationRequirement & {
+  code: DailyReflectionMemoryProposalAcknowledgement;
+  resolution: "acknowledgement";
+} {
+  return requirement.resolution === "acknowledgement"
+    && requirement.code !== "verify_fact_owner";
+}
+
+function CardMemoryAction({
+  busy,
+  card,
+  compact = false,
+  confirmation,
+  feedback,
+  onConfirm,
+  onOpenConfirmation,
+  onRemember,
+  onToggleConfirmation
+}: Readonly<{
+  busy: boolean;
+  card: DailyReflectionWorkingCardView;
+  compact?: boolean;
+  confirmation?: CardMemoryConfirmation;
+  feedback?: CardMemoryFeedback;
+  onConfirm: (acknowledgements: DailyReflectionMemoryProposalAcknowledgement[]) => void;
+  onOpenConfirmation?: () => void;
+  onRemember: (card: DailyReflectionWorkingCardView) => void;
+  onToggleConfirmation: (
+    acknowledgement: DailyReflectionMemoryProposalAcknowledgement,
+    selected: boolean
+  ) => void;
+}>) {
+  if (card.status !== "saved") return null;
+  if (card.memoryLifecycleStatus === "active") {
+    return <div className={styles.cardMemoryAction}><span role="status">已长期记住</span></div>;
+  }
+  if (card.memoryLifecycleStatus === "revocation_requested") {
+    return <div className={styles.cardMemoryAction}><span role="status">正在撤销长期记忆</span></div>;
+  }
+  if (card.memoryLifecycleStatus === "revoked") {
+    return <div className={styles.cardMemoryAction}><span role="status">已撤销长期记忆</span></div>;
+  }
+  if (card.sourceUnavailable || card.evidenceIds.length === 0) {
+    return <div className={styles.cardMemoryAction}><span>来源不可用，无法长期记住</span></div>;
+  }
+  if (card.cardKind === "action") {
+    return (
+      <div className={styles.cardMemoryAction} data-tone="notice">
+        <button className={styles.secondaryButton} disabled type="button">长期记住</button>
+        <span>先在复盘中明确认领这项行动后，才能长期记住</span>
+      </div>
+    );
+  }
+  if (memoryTypeForWorkingCard(card.cardKind) === null) return null;
+  const acknowledgementRequirements = confirmation?.requirements.filter(
+    isAcknowledgementRequirement
+  ) ?? [];
+  const ownerVerificationRequired = confirmation?.requirements.some(
+    (requirement) => requirement.resolution === "verified_owner"
+  ) ?? false;
+  const allAcknowledged = acknowledgementRequirements.every(
+    (requirement) => confirmation?.selected.includes(requirement.code)
+  );
+  if (confirmation && compact) {
+    return (
+      <div className={styles.cardMemoryAction} data-tone="notice">
+        <span>{ownerVerificationRequired ? "需要先确认内容归属" : "需要确认后才能长期记住"}</span>
+        {onOpenConfirmation ? (
+          <button
+            className={styles.textButton}
+            disabled={busy}
+            onClick={onOpenConfirmation}
+            type="button"
+          >打开卡片确认</button>
+        ) : null}
+        {feedback ? (
+          <span role={feedback.tone === "error" ? "alert" : "status"}>
+            {feedback.message}
+          </span>
+        ) : null}
+      </div>
+    );
+  }
+  return (
+    <div className={styles.cardMemoryAction} data-tone={feedback?.tone}>
+      {confirmation ? (
+        <fieldset className={styles.cardMemoryConfirmation}>
+          <legend>长期记住前再确认</legend>
+          {confirmation.requirements.map((requirement) => isAcknowledgementRequirement(requirement) ? (
+            <label key={requirement.code}>
+              <input
+                checked={confirmation.selected.includes(requirement.code)}
+                disabled={busy || ownerVerificationRequired}
+                onChange={(event) => onToggleConfirmation(
+                  requirement.code,
+                  event.currentTarget.checked
+                )}
+                type="checkbox"
+              />
+              <span>{memoryConfirmationCopy(requirement)}</span>
+            </label>
+          ) : (
+            <p key={requirement.code}>{memoryConfirmationCopy(requirement)}</p>
+          ))}
+          {!ownerVerificationRequired ? (
+            <button
+              className={styles.secondaryButton}
+              disabled={busy || !allAcknowledged}
+              onClick={() => onConfirm(confirmation.selected)}
+              type="button"
+            >{busy ? "正在长期记住…" : "确认并长期记住"}</button>
+          ) : null}
+        </fieldset>
+      ) : (
+        <button
+          aria-label={`长期记住：${card.title}`}
+          className={styles.secondaryButton}
+          disabled={busy}
+          onClick={() => onRemember(card)}
+          type="button"
+        >
+          {busy ? "正在长期记住…" : "长期记住"}
+        </button>
+      )}
+      {feedback ? (
+        <span role={feedback.tone === "error" ? "alert" : "status"}>
+          {feedback.message}
+        </span>
+      ) : null}
+    </div>
+  );
+}
+
 function CardKindIcon({ kind }: Readonly<{ kind: ProductCardKind }>) {
   if (kind === "question") {
     return <svg aria-hidden="true" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5" /><path d="M9.8 9.5a2.4 2.4 0 0 1 4.6 1c0 1.8-2.4 2-2.4 3.6" /><path d="M12 17.2h.01" /></svg>;
@@ -112,13 +299,19 @@ function targetRect(): Rect {
     mobile ? viewportHeight * 0.87 : viewportHeight * 0.76,
     viewportHeight - verticalMargin * 2
   );
-  const height = Math.max(Math.min(maxHeight, mobile ? 720 : 690), Math.min(420, maxHeight));
+  const height = Math.max(Math.min(maxHeight, mobile ? 720 : 640), Math.min(420, maxHeight));
   return {
     height,
     left: Math.max(horizontalMargin, (viewportWidth - width) / 2),
     top: Math.max(verticalMargin, (viewportHeight - height) / 2),
     width
   };
+}
+
+function originTransform(origin: Rect, target: Rect) {
+  const scaleX = origin.width / target.width;
+  const scaleY = origin.height / target.height;
+  return `translate3d(${origin.left - target.left}px, ${origin.top - target.top}px, 0) scale(${scaleX}, ${scaleY})`;
 }
 
 function fallbackOrigin(target: Rect): Rect {
@@ -149,6 +342,7 @@ export function DailyReflectionCardLibrary({
   const api = useMemo(() => providedApi ?? createDailyReflectionApi(), [providedApi]);
   const dialogId = useId();
   const dialogTitleId = useId();
+  const cardTabsId = useId();
   const [cards, setCards] = useState<DailyReflectionWorkingCardView[]>([]);
   const [total, setTotal] = useState(0);
   const [countsComplete, setCountsComplete] = useState(false);
@@ -171,6 +365,11 @@ export function DailyReflectionCardLibrary({
   const [filtersOpen, setFiltersOpen] = useState(false);
   const [expansion, setExpansion] = useState<CardExpansion | null>(null);
   const [listBusyCardId, setListBusyCardId] = useState<string | null>(null);
+  const [memoryBusyCardId, setMemoryBusyCardId] = useState<string | null>(null);
+  const [memoryFeedback, setMemoryFeedback] = useState<Record<string, CardMemoryFeedback>>({});
+  const [memoryConfirmations, setMemoryConfirmations] = useState<
+    Record<string, CardMemoryConfirmation>
+  >({});
   const expansionRef = useRef<CardExpansion | null>(null);
   const dirtyRef = useRef(false);
   const detailControllerRef = useRef<AbortController | null>(null);
@@ -179,9 +378,12 @@ export function DailyReflectionCardLibrary({
   const closeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const closeNavigationRef = useRef(false);
   const dialogRef = useRef<HTMLDivElement | null>(null);
+  const expansionCloseRef = useRef<HTMLButtonElement | null>(null);
   const filterCloseRef = useRef<HTMLButtonElement | null>(null);
   const filterTriggerRef = useRef<HTMLButtonElement | null>(null);
   const titleRefs = useRef(new Map<string, HTMLButtonElement>());
+  const memoryBusyCardIdRef = useRef<string | null>(null);
+  const pendingMemoryAdmissionsRef = useRef(new Map<string, PendingMemoryAdmission>());
 
   const dirty = Boolean(
     editing
@@ -256,7 +458,12 @@ export function DailyReflectionCardLibrary({
     }
   }, [api]);
 
-  const beginExpansion = useCallback((cardId: string, originElement: HTMLElement | null, updateHistory: boolean) => {
+  const beginExpansion = useCallback((
+    cardId: string,
+    originElement: HTMLElement | null,
+    updateHistory: boolean,
+    animate = true
+  ) => {
     if (expansionRef.current?.cardId === cardId && expansionRef.current.phase !== "closing") {
       if (detailControllerRef.current?.signal.aborted) void openCard(cardId);
       return;
@@ -265,12 +472,13 @@ export function DailyReflectionCardLibrary({
     const target = targetRect();
     const origin = rectFromElement(originElement);
     const reducedMotion = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false;
-    setExpansion({ cardId, origin, phase: reducedMotion ? "open" : "opening", target });
+    const shouldAnimate = animate && !reducedMotion;
+    setExpansion({ cardId, origin, phase: shouldAnimate ? "opening" : "open", target });
     void openCard(cardId);
     if (updateHistory) {
       window.history.pushState({ ...(window.history.state ?? {}), [OVERLAY_HISTORY_KEY]: cardId }, "", reflectionCardPath(cardId));
     }
-    if (!reducedMotion) {
+    if (shouldAnimate) {
       window.requestAnimationFrame(() => window.requestAnimationFrame(() => {
         setExpansion((current) => current?.cardId === cardId ? { ...current, phase: "open" } : current);
       }));
@@ -299,13 +507,13 @@ export function DailyReflectionCardLibrary({
     });
   }, []);
 
-  const beginClosing = useCallback((navigateAfter: boolean) => {
+  const beginClosing = useCallback((navigateAfter: boolean, animate = true) => {
     const current = expansionRef.current;
     if (!current || current.phase === "closing") return;
     closeNavigationRef.current = navigateAfter;
     const origin = rectFromElement(titleRefs.current.get(current.cardId)?.closest<HTMLElement>("[data-card-id]") ?? null) ?? current.origin;
     const reducedMotion = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false;
-    if (reducedMotion) {
+    if (reducedMotion || !animate) {
       finishClosing(navigateAfter);
       return;
     }
@@ -313,12 +521,12 @@ export function DailyReflectionCardLibrary({
     closeTimerRef.current = setTimeout(() => finishClosing(navigateAfter), 340);
   }, [finishClosing]);
 
-  const requestClose = useCallback((navigateAfter = true) => {
+  const requestClose = useCallback((navigateAfter = true, animate = true) => {
     if (dirtyRef.current) {
       setConfirmAction("discard");
       return;
     }
-    beginClosing(navigateAfter);
+    beginClosing(navigateAfter, animate);
   }, [beginClosing]);
 
   useEffect(() => {
@@ -374,11 +582,11 @@ export function DailyReflectionCardLibrary({
     const scrollbarWidth = window.innerWidth - document.documentElement.clientWidth;
     body.style.overflow = "hidden";
     if (scrollbarWidth > 0 && scrollbarWidth < 64) body.style.paddingRight = `${scrollbarWidth}px`;
-    const frame = window.requestAnimationFrame(() => dialogRef.current?.focus());
+    const frame = window.requestAnimationFrame(() => expansionCloseRef.current?.focus());
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
         event.preventDefault();
-        requestClose(true);
+        requestClose(true, false);
         return;
       }
       if (event.key !== "Tab") return;
@@ -527,6 +735,160 @@ export function DailyReflectionCardLibrary({
     }
   };
 
+  const rememberCard = async (
+    card: DailyReflectionWorkingCardView,
+    acknowledgements: DailyReflectionMemoryProposalAcknowledgement[] = []
+  ) => {
+    const memoryType = memoryTypeForWorkingCard(card.cardKind);
+    if (
+      memoryBusyCardIdRef.current
+      || card.status !== "saved"
+      || card.memoryLifecycleStatus !== "not_admitted"
+      || card.sourceUnavailable
+      || card.evidenceIds.length === 0
+      || memoryType === null
+    ) return;
+    memoryBusyCardIdRef.current = card.id;
+    setMemoryBusyCardId(card.id);
+    setMemoryFeedback((current) => {
+      const next = { ...current };
+      delete next[card.id];
+      return next;
+    });
+    try {
+      let pending = pendingMemoryAdmissionsRef.current.get(card.id);
+      if (!pending) {
+        const created = await api.createWorkingCardMemoryProposal(card.id, {
+          expectedCardVersion: card.version,
+          memoryType
+        });
+        pending = {
+          expectedVersion: created.proposal.version,
+          proposalId: created.proposal.id
+        };
+        pendingMemoryAdmissionsRef.current.set(card.id, pending);
+      }
+      const result = await api.admitMemoryProposal(pending.proposalId, {
+        expectedVersion: pending.expectedVersion,
+        acknowledgements
+      });
+      if (result.status === "admitted" || result.status === "already_exists") {
+        pendingMemoryAdmissionsRef.current.delete(card.id);
+        setMemoryConfirmations((current) => {
+          const next = { ...current };
+          delete next[card.id];
+          return next;
+        });
+        setMemoryFeedback((current) => ({
+          ...current,
+          [card.id]: { message: "已长期记住", tone: "success" }
+        }));
+      } else if (result.status === "needs_confirmation") {
+        pendingMemoryAdmissionsRef.current.set(card.id, {
+          expectedVersion: result.proposal.version,
+          proposalId: result.proposal.id
+        });
+        setMemoryConfirmations((current) => ({
+          ...current,
+          [card.id]: {
+            requirements: result.confirmationRequirements,
+            selected: current[card.id]?.selected.filter((item) =>
+              result.confirmationRequirements.some((requirement) => requirement.code === item)
+            ) ?? []
+          }
+        }));
+        setMemoryFeedback((current) => ({
+          ...current,
+          [card.id]: {
+            message: "还需要你明确确认，确认前不会加入长期记忆。",
+            tone: "notice"
+          }
+        }));
+      } else if (result.status === "rejected") {
+        pendingMemoryAdmissionsRef.current.delete(card.id);
+        setMemoryConfirmations((current) => {
+          const next = { ...current };
+          delete next[card.id];
+          return next;
+        });
+        setMemoryFeedback((current) => ({
+          ...current,
+          [card.id]: {
+            message: "这张卡片不符合长期记住的安全条件；卡片本身仍会保留。",
+            tone: "notice"
+          }
+        }));
+      } else {
+        setMemoryFeedback((current) => ({
+          ...current,
+          [card.id]: {
+            message: "长期记忆还没有完成保存，请重试",
+            tone: "error"
+          }
+        }));
+      }
+      const refreshDetail = expansionRef.current?.cardId === card.id;
+      await Promise.all([
+        loadCards(),
+        refreshDetail ? openCard(card.id) : Promise.resolve()
+      ]);
+    } catch (cause) {
+      if (cause instanceof DailyReflectionApiError && cause.status === 409) {
+        pendingMemoryAdmissionsRef.current.delete(card.id);
+        setMemoryConfirmations((current) => {
+          const next = { ...current };
+          delete next[card.id];
+          return next;
+        });
+        const refreshDetail = expansionRef.current?.cardId === card.id;
+        await Promise.all([
+          loadCards(),
+          refreshDetail ? openCard(card.id) : Promise.resolve()
+        ]);
+        setMemoryFeedback((current) => ({
+          ...current,
+          [card.id]: {
+            message: "这张卡片已经在其他页面更新，已重新加载最新内容。",
+            tone: "error"
+          }
+        }));
+      } else {
+        setMemoryFeedback((current) => ({
+          ...current,
+          [card.id]: {
+            message: cause instanceof Error
+              ? cause.message
+              : "长期记忆还没有完成保存，请重试。",
+            tone: "error"
+          }
+        }));
+      }
+    } finally {
+      if (memoryBusyCardIdRef.current === card.id) {
+        memoryBusyCardIdRef.current = null;
+        setMemoryBusyCardId(null);
+      }
+    }
+  };
+
+  const toggleMemoryConfirmation = (
+    cardId: string,
+    acknowledgement: DailyReflectionMemoryProposalAcknowledgement,
+    selected: boolean
+  ) => {
+    setMemoryConfirmations((current) => {
+      const confirmation = current[cardId];
+      if (!confirmation) return current;
+      const nextSelected = selected
+        ? [...new Set([...confirmation.selected, acknowledgement])]
+        : confirmation.selected.filter((item) => item !== acknowledgement);
+      return {
+        ...current,
+        [cardId]: { ...confirmation, selected: nextSelected }
+      };
+    });
+  };
+
   const revokeMemorySource = async () => {
     const card = selected?.card;
     if (!card || busy || (card.memoryLifecycleStatus !== "active" && card.memoryLifecycleStatus !== "revocation_requested")) return;
@@ -565,19 +927,39 @@ export function DailyReflectionCardLibrary({
     setQuery(queryDraft.normalize("NFKC").trim());
   };
   const openFromTitle = (event: ReactMouseEvent<HTMLButtonElement>, cardId: string) => {
-    beginExpansion(cardId, event.currentTarget.closest<HTMLElement>("[data-card-id]"), true);
+    beginExpansion(cardId, event.currentTarget.closest<HTMLElement>("[data-card-id]"), true, event.detail !== 0);
+  };
+  const moveCardKindFocus = (
+    event: ReactKeyboardEvent<HTMLButtonElement>,
+    index: number
+  ) => {
+    const tabs = Array.from(
+      event.currentTarget.parentElement?.querySelectorAll<HTMLButtonElement>("[role='tab']") ?? []
+    );
+    if (tabs.length === 0) return;
+    let nextIndex = index;
+    if (event.key === "ArrowRight") nextIndex = (index + 1) % tabs.length;
+    else if (event.key === "ArrowLeft") nextIndex = (index - 1 + tabs.length) % tabs.length;
+    else if (event.key === "Home") nextIndex = 0;
+    else if (event.key === "End") nextIndex = tabs.length - 1;
+    else return;
+    event.preventDefault();
+    tabs[nextIndex]?.focus();
+    tabs[nextIndex]?.click();
   };
 
   const selectedCard = selected?.card;
   const selectedSummary = cards.find((card) => card.id === expansion?.cardId);
   const expandedTitle = selectedCard?.title ?? selectedSummary?.title ?? "正在打开卡片";
   const expandedKind = presentationKind(selectedCard?.cardKind ?? selectedSummary?.cardKind ?? "insight");
-  const expandedBox = expansion
-    ? expansion.phase === "open" ? expansion.target : expansion.origin ?? fallbackOrigin(expansion.target)
-    : null;
-  const expandedStyle = expandedBox ? {
-    height: `${expandedBox.height}px`, left: `${expandedBox.left}px`, top: `${expandedBox.top}px`, width: `${expandedBox.width}px`
-  } satisfies CSSProperties : undefined;
+  const expansionOrigin = expansion ? expansion.origin ?? fallbackOrigin(expansion.target) : null;
+  const expandedStyle = expansion && expansionOrigin ? {
+    "--card-expansion-origin-transform": originTransform(expansionOrigin, expansion.target),
+    height: `${expansion.target.height}px`,
+    left: `${expansion.target.left}px`,
+    top: `${expansion.target.top}px`,
+    width: `${expansion.target.width}px`
+  } satisfies CardExpansionStyle : undefined;
 
   const expandedDetail = (
     <>
@@ -585,10 +967,10 @@ export function DailyReflectionCardLibrary({
         <div>
           <span className={styles.cardKindMark} data-kind={expandedKind}><CardKindIcon kind={expandedKind} />{FILTER_KIND_LABELS[expandedKind]}</span>
           <h2 className={styles.cardExpansionTitle} id={dialogTitleId}>
-            <button aria-label={`收起卡片：${expandedTitle}`} onClick={() => requestClose(true)} type="button">{expandedTitle}</button>
+            <button aria-label={`收起卡片：${expandedTitle}`} onClick={(event) => requestClose(true, event.detail !== 0)} type="button">{expandedTitle}</button>
           </h2>
         </div>
-        <button aria-label="关闭卡片详情" className={styles.cardExpansionClose} onClick={() => requestClose(true)} type="button">×</button>
+        <button aria-label="关闭卡片详情" className={styles.cardExpansionClose} onClick={(event) => requestClose(true, event.detail !== 0)} ref={expansionCloseRef} type="button">×</button>
       </header>
       {detailLoading ? (
         <div className={styles.cardExpansionSkeleton} role="status"><span /><span /><span /><p>正在读取完整内容…</p></div>
@@ -614,6 +996,19 @@ export function DailyReflectionCardLibrary({
             <section className={styles.cardExpansionReading}>
               <p>{selectedCard.content}</p>
               {selectedCard.status !== "removed" ? <button className={styles.secondaryButton} onClick={() => setEditing(true)} type="button">编辑卡片</button> : null}
+              <CardMemoryAction
+                busy={busy || memoryBusyCardId === selectedCard.id}
+                card={selectedCard}
+                confirmation={memoryConfirmations[selectedCard.id]}
+                feedback={memoryFeedback[selectedCard.id]}
+                onConfirm={(acknowledgements) => void rememberCard(
+                  selectedCard,
+                  acknowledgements
+                )}
+                onRemember={(card) => void rememberCard(card)}
+                onToggleConfirmation={(acknowledgement, checked) =>
+                  toggleMemoryConfirmation(selectedCard.id, acknowledgement, checked)}
+              />
             </section>
           )}
           <dl className={styles.cardLibraryDefinitionList}>
@@ -646,13 +1041,13 @@ export function DailyReflectionCardLibrary({
       <main aria-hidden={expansionOpen ? "true" : undefined} className={`${embedded ? styles.productPage : styles.page} ${styles.cardLibraryPage}`}>
         <section className={`${styles.productIntro} ${styles.cardLibraryIntro}`}>
           <div><p className={styles.eyebrow}>思想资产</p><h1>你的卡片</h1><p>记录灵感、决定与问题，让过去的思考能够继续使用。</p></div>
-          <div className={styles.cardLibraryIntroAside}><span aria-live="polite">{loading ? "正在读取" : `${total} 张`}</span><Link href="/reflection/memory">查看长期记忆</Link></div>
+          <div className={styles.cardLibraryIntroAside}><span aria-live="polite">{error ? "读取失败" : loading ? "正在读取" : `${total} 张`}</span><Link href="/reflection/memory">查看长期记忆</Link></div>
         </section>
 
         <div className={styles.cardLibraryTools}>
           <div className={styles.cardTypeTabs} role="tablist" aria-label="卡片类型">
-            <button aria-selected={cardKind === ""} onClick={() => setCardKind("")} role="tab" type="button">全部 <small>{total}</small></button>
-            {Object.entries(FILTER_KIND_LABELS).map(([value, label]) => <button aria-selected={cardKind === value} key={value} onClick={() => setCardKind(value as ProductCardKind)} role="tab" type="button">{label}{countsComplete ? <small>{kindCounts[value as ProductCardKind]}</small> : null}</button>)}
+            <button aria-controls={`${cardTabsId}-panel`} aria-selected={cardKind === ""} id={`${cardTabsId}-all`} onClick={() => setCardKind("")} onKeyDown={(event) => moveCardKindFocus(event, 0)} role="tab" tabIndex={cardKind === "" ? 0 : -1} type="button">全部 <small>{total}</small></button>
+            {Object.entries(FILTER_KIND_LABELS).map(([value, label], index) => <button aria-controls={`${cardTabsId}-panel`} aria-selected={cardKind === value} id={`${cardTabsId}-${value}`} key={value} onClick={() => setCardKind(value as ProductCardKind)} onKeyDown={(event) => moveCardKindFocus(event, index + 1)} role="tab" tabIndex={cardKind === value ? 0 : -1} type="button">{label}{countsComplete ? <small>{kindCounts[value as ProductCardKind]}</small> : null}</button>)}
           </div>
           <form className={styles.cardSearchBar} onSubmit={submitSearch}>
             <label><span className={styles.visuallyHidden}>搜索卡片</span><input aria-label="搜索卡片" maxLength={200} onChange={(event) => setQueryDraft(event.target.value)} placeholder="搜索卡片标题或内容…" value={queryDraft} /></label>
@@ -676,11 +1071,14 @@ export function DailyReflectionCardLibrary({
           </div>
         ) : null}
 
-        {error ? <p className={styles.inlineError} role="alert">{error}</p> : null}
-        <section aria-labelledby="reflection-cards-title" className={styles.cardLibraryList}>
+        <section aria-labelledby={cardKind === "" ? `${cardTabsId}-all` : `${cardTabsId}-${cardKind}`} aria-live="polite" className={styles.cardLibraryList} id={`${cardTabsId}-panel`} role="tabpanel">
           <h2 className={styles.visuallyHidden} id="reflection-cards-title">卡片列表</h2>
-          {loading ? <p role="status">正在读取卡片…</p> : visibleCards.length === 0 ? (
-            <div className={styles.productEmpty}><h3>这里还没有卡片</h3><p>完成一次复盘后，把真正想留下的重点保存到这里。</p><Link className={styles.primaryButton} href="/reflection/capture?new=1">开始表达</Link></div>
+          {loading ? (
+            <ProductState description="正在找回你保存的思想资产。" title="正在读取卡片" tone="loading" />
+          ) : error ? (
+            <ProductState action={<button className={styles.secondaryButton} onClick={() => void loadCards()} type="button">重新尝试</button>} description="请稍后再试；已经保存的卡片不会受影响。" title="卡片暂时没有加载完成" tone="error" />
+          ) : visibleCards.length === 0 ? (
+            <div className={styles.productEmpty}><h3>这里还没有卡片</h3><p>完成一次复盘后，把真正想留下的重点保存到这里。</p><Link className={styles.primaryButton} href="/reflection/capture?new=1">开始讲述</Link></div>
           ) : (
             <ol className={styles.cardAssetGrid}>{visibleCards.map((card) => {
               const kind = presentationKind(card.cardKind);
@@ -688,10 +1086,26 @@ export function DailyReflectionCardLibrary({
               return <li key={card.id}><article className={styles.cardAsset} data-card-id={card.id} data-card-kind={kind} data-density={card.content.length > 140 ? "compact" : "standard"} data-expanded={expanded ? "true" : undefined} data-status={card.status}>
                 <div className={styles.cardAssetTop}>
                   <span className={styles.cardKindMark} data-kind={kind}><CardKindIcon kind={kind} />{FILTER_KIND_LABELS[kind]}</span>
-                  <details className={styles.cardAssetMenu}><summary aria-label={`更多操作：${card.title}`}>···</summary><div>{card.sourceReflectionIds[0] ? <Link href={reflectionSessionPath(card.sourceReflectionIds[0])}>查看来源复盘</Link> : null}{card.status === "saved" ? <button disabled={listBusyCardId === card.id} onClick={() => void applyListLifecycle(card, "archive")} type="button">归档</button> : null}{card.status === "archived" || card.status === "removed" ? <button disabled={listBusyCardId === card.id} onClick={() => void applyListLifecycle(card, "restore")} type="button">恢复</button> : null}</div></details>
+                   <details className={styles.cardAssetMenu}><summary aria-label={`更多操作：${card.title}`}>⋯</summary><div>{card.sourceReflectionIds[0] ? <Link href={reflectionSessionPath(card.sourceReflectionIds[0])}>查看来源复盘</Link> : null}{card.status === "saved" ? <button disabled={listBusyCardId === card.id} onClick={() => void applyListLifecycle(card, "archive")} type="button">归档</button> : null}{card.status === "archived" || card.status === "removed" ? <button disabled={listBusyCardId === card.id} onClick={() => void applyListLifecycle(card, "restore")} type="button">恢复</button> : null}</div></details>
                 </div>
                 <h3><button aria-controls={dialogId} aria-expanded={expanded} aria-label={`打开卡片：${card.title}`} onClick={(event) => openFromTitle(event, card.id)} ref={(node) => { if (node) titleRefs.current.set(card.id, node); else titleRefs.current.delete(card.id); }} type="button">{card.title}</button></h3>
                 <p className={styles.cardExcerpt}>{card.content}</p>
+                <CardMemoryAction
+                  busy={listBusyCardId === card.id || memoryBusyCardId === card.id}
+                  card={card}
+                  compact
+                  confirmation={memoryConfirmations[card.id]}
+                  feedback={memoryFeedback[card.id]}
+                  onConfirm={(acknowledgements) => void rememberCard(card, acknowledgements)}
+                  onOpenConfirmation={() => beginExpansion(
+                    card.id,
+                    titleRefs.current.get(card.id)?.closest<HTMLElement>("[data-card-id]") ?? null,
+                    true
+                  )}
+                  onRemember={(target) => void rememberCard(target)}
+                  onToggleConfirmation={(acknowledgement, checked) =>
+                    toggleMemoryConfirmation(card.id, acknowledgement, checked)}
+                />
                 <div className={styles.cardLibraryMeta}><span>{STATUS_LABELS[card.status]}</span><span>{card.evidenceIds.length} 段来源</span><span>更新于 {formatTime(card.updatedAt)}</span></div>
               </article></li>;
             })}</ol>
@@ -700,8 +1114,8 @@ export function DailyReflectionCardLibrary({
         </section>
       </main>
 
-      {expansion && expandedBox ? <div className={styles.cardExpansionBackdrop} data-phase={expansion.phase} onMouseDown={(event) => { if (event.currentTarget === event.target) requestClose(true); }}>
-        <div aria-labelledby={dialogTitleId} aria-modal="true" className={styles.cardExpansionCard} data-card-expansion={expansion.cardId} data-phase={expansion.phase} id={dialogId} onTransitionEnd={(event) => { if (event.currentTarget === event.target && expansionRef.current?.phase === "closing") finishClosing(closeNavigationRef.current); }} ref={dialogRef} role="dialog" style={expandedStyle} tabIndex={-1}>{expandedDetail}</div>
+      {expansion && expandedStyle ? <div className={styles.cardExpansionBackdrop} data-phase={expansion.phase} onMouseDown={(event) => { if (event.currentTarget === event.target) requestClose(true); }}>
+        <div aria-labelledby={dialogTitleId} aria-modal="true" className={styles.cardExpansionCard} data-card-expansion={expansion.cardId} data-phase={expansion.phase} id={dialogId} onTransitionEnd={(event) => { if (event.currentTarget === event.target && event.propertyName === "transform" && expansionRef.current?.phase === "closing") finishClosing(closeNavigationRef.current); }} ref={dialogRef} role="dialog" style={expandedStyle} tabIndex={-1}>{expandedDetail}</div>
       </div> : null}
 
       <ReflectionConfirmDialog busy={busy} confirmLabel={confirmAction === "revoke" ? "确认撤销" : confirmAction === "remove" ? "确认移除" : "放弃并关闭"} onCancel={() => setConfirmAction(null)} onConfirm={() => {

@@ -13,12 +13,22 @@ import {
 } from "react";
 
 import { DailyReflectionApiError } from "@/lib/client/daily-reflection-api";
+import { ProductAccountMenu } from "@/components/product-system/product-account-menu";
+import { ProductState } from "@/components/product-system/product-primitives";
+import { ProductSwitcher } from "@/components/product-system/product-switcher";
+import { createDailyReflectionThinkingApi } from "@/lib/client/daily-reflection-thinking-api";
 import {
   useDailyReflectionSession,
   type DailyReflectionSessionValue
 } from "@/lib/client/daily-reflection-session";
 
 import styles from "./daily-reflection.module.css";
+import { armVoiceAutostartIntent } from "./reflection-capture-intent";
+import {
+  ReflectionThinkingProvider,
+  ReflectionThinkingQuickPanel,
+  useReflectionThinking
+} from "./reflection-thinking-panel";
 import {
   REFLECTION_DESKTOP_NAV,
   REFLECTION_MOBILE_NAV,
@@ -34,6 +44,7 @@ type ReflectionAppContextValue = Readonly<{
 }>;
 
 const ReflectionAppContext = createContext<ReflectionAppContextValue | null>(null);
+const THINKING_API = createDailyReflectionThinkingApi();
 
 export function useReflectionApp() {
   const value = useContext(ReflectionAppContext);
@@ -47,9 +58,22 @@ type ReflectionAppShellProps = Readonly<{
   toySyncEnabled: boolean;
 }>;
 
+function ReflectionThinkingShellActions() {
+  const { openPanel } = useReflectionThinking();
+  return (
+    <button
+      className={styles.reflectionBrainstormButton}
+      onClick={(event) => openPanel(event.currentTarget)}
+      type="button"
+    >
+      头脑风暴
+    </button>
+  );
+}
+
 function focusedRoute(pathname: string) {
   if (pathname === REFLECTION_ROUTES.capture) {
-    return { backHref: REFLECTION_ROUTES.home, label: "开始表达" };
+    return { backHref: REFLECTION_ROUTES.home, label: "开始讲述" };
   }
   if (pathname.startsWith("/reflection/sessions/")) {
     return { backHref: REFLECTION_ROUTES.home, label: "本次复盘" };
@@ -98,11 +122,13 @@ export function ReflectionAppShell({
   if (session.auth.status === "checking" || session.auth.status === "anonymous") {
     return (
       <main className={styles.reflectionBoundary}>
-        <div className={styles.loadingCard} role="status">
-          <span className={styles.loadingDot} aria-hidden="true" />
-          <p>{session.auth.status === "checking"
-            ? "正在打开你的日常复盘…"
-            : "正在返回登录页…"}</p>
+        <div className={styles.reflectionBoundaryState}>
+          <ProductState
+            title={session.auth.status === "checking"
+              ? "正在打开你的日常复盘…"
+              : "正在返回登录页…"}
+            tone="loading"
+          />
         </div>
       </main>
     );
@@ -111,13 +137,13 @@ export function ReflectionAppShell({
   if (session.auth.status === "error") {
     return (
       <main className={styles.reflectionBoundary}>
-        <div className={styles.loadingCard}>
-          <p className={styles.eyebrow}>日常复盘</p>
-          <h1>暂时无法进入</h1>
-          <p className={styles.inlineError} role="alert">{session.auth.message}</p>
-          <button className={styles.primaryButton} onClick={() => void session.initialize()} type="button">
-            重新尝试
-          </button>
+        <div className={styles.reflectionBoundaryState}>
+          <ProductState
+            action={<button onClick={() => void session.initialize()} type="button">重新尝试</button>}
+            description={session.auth.message}
+            title="暂时无法进入"
+            tone="error"
+          />
         </div>
       </main>
     );
@@ -128,7 +154,8 @@ export function ReflectionAppShell({
 
   return (
     <ReflectionAppContext.Provider value={context}>
-      <div className={`${styles.reflectionApp} ${focused ? styles.reflectionFocusedFlow : styles.reflectionRootFlow}`}>
+      <ReflectionThinkingProvider api={THINKING_API} key={session.auth.user.id}>
+        <div className={`${styles.reflectionApp} ${focused ? styles.reflectionFocusedFlow : styles.reflectionRootFlow}`}>
         <header className={styles.reflectionHeader}>
           <Link className={styles.reflectionBrand} href={REFLECTION_ROUTES.home} aria-label="回到日常复盘首页">
             <span aria-hidden="true">DB</span>
@@ -145,25 +172,29 @@ export function ReflectionAppShell({
             })}
           </nav>
           <div className={styles.reflectionAccount}>
-            <Link className={styles.reflectionCaptureButton} href={`${REFLECTION_ROUTES.capture}?new=1`}>
-              <span aria-hidden="true">＋</span>开始表达
+            <ProductSwitcher accountId={session.auth.user.id} currentProduct="daily_reflection" />
+            <ReflectionThinkingShellActions />
+            <Link
+              className={styles.reflectionCaptureButton}
+              href={`${REFLECTION_ROUTES.capture}?new=1&method=record`}
+              onClick={() => armVoiceAutostartIntent()}
+            >
+              <span aria-hidden="true">＋</span>开始讲述
             </Link>
-            <details>
-              <summary aria-label={`账号：${userLabel}`}>{userLabel.slice(0, 1).toUpperCase()}</summary>
-              <div>
-                <span title={userLabel}>{userLabel}</span>
-                <button onClick={async () => {
-                  await session.logout();
-                  router.replace("/date-companion");
-                }} type="button">退出登录</button>
-              </div>
-            </details>
+            <ProductAccountMenu
+              onLogout={async () => {
+                await session.logout();
+                router.replace("/date-companion");
+              }}
+              userLabel={userLabel}
+            />
           </div>
         </header>
+        <ReflectionThinkingQuickPanel />
 
         {focused ? (
           <div aria-label="当前页面导航" className={styles.reflectionFocusedHeader} role="navigation">
-            <Link href={focused.backHref} aria-label={`返回${focused.label === "开始表达" ? "今天" : focused.label}`}>
+            <Link href={focused.backHref} aria-label={`返回${focused.label === "开始讲述" ? "今天" : focused.label}`}>
               <span aria-hidden="true">←</span>
               <span>返回</span>
             </Link>
@@ -178,13 +209,15 @@ export function ReflectionAppShell({
           {REFLECTION_MOBILE_NAV.map((item) => {
             const active = reflectionRouteIsActive(pathname, item);
             const primary = "primary" in item && item.primary;
-            const href = primary ? `${item.href}?new=1` : item.href;
+            const href = primary ? `${item.href}?new=1&method=record` : item.href;
             return (
               <Link
+                aria-label={primary ? "开始讲述" : undefined}
                 aria-current={active ? "page" : undefined}
                 className={primary ? styles.reflectionMobilePrimary : active ? styles.reflectionNavActive : undefined}
                 href={href}
                 key={item.href}
+                onClick={primary ? () => armVoiceAutostartIntent() : undefined}
               >
                 <span aria-hidden="true">{item.icon}</span>
                 <small>{item.label}</small>
@@ -192,7 +225,8 @@ export function ReflectionAppShell({
             );
           })}
         </nav> : null}
-      </div>
+        </div>
+      </ReflectionThinkingProvider>
     </ReflectionAppContext.Provider>
   );
 }

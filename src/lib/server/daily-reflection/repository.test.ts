@@ -928,6 +928,46 @@ describe("DailyReflectionRepository", () => {
     ]);
   });
 
+  it("can fail closed on missing Working Card Evidence without mutating Card state", () => {
+    const review = createReviewPendingCards({
+      id: "reflection_working_readonly_evidence",
+      operationKey: "operation_working_readonly_evidence"
+    });
+    const cardId = "reflection_working_readonly_evidence_card_primary";
+    const saved = repository.saveWorkingCardFromReflection({
+      accountId: "account_1",
+      reflectionId: review.reflection.id,
+      cardId,
+      expectedVersion: 0
+    });
+    database.prepare(`
+      DELETE FROM dr_asset_publications
+      WHERE account_id = ? AND reflection_id = ? AND asset_kind = 'segments'
+    `).run("account_1", review.reflection.id);
+
+    expect(repository.readWorkingCardWithEvidence("account_1", cardId)).toMatchObject({
+      card: {
+        id: cardId,
+        sourceUnavailable: false,
+        version: saved.version
+      },
+      evidence: []
+    });
+    expect(repository.getWorkingCard("account_1", cardId)).toMatchObject({
+      sourceUnavailable: false,
+      version: saved.version
+    });
+    expect(database.prepare(`
+      SELECT event_type, count(*) AS count
+      FROM dr_working_card_events
+      WHERE account_id = ? AND card_id = ?
+      GROUP BY event_type
+      ORDER BY event_type
+    `).all("account_1", cardId)).toEqual([
+      { event_type: "saved", count: 1 }
+    ]);
+  });
+
   it("deletes unsaved Cards but preserves saved provenance as source-unavailable", () => {
     const review = createReviewPendingCards({
       id: "reflection_working_delete",
@@ -1010,6 +1050,7 @@ describe("DailyReflectionRepository", () => {
     )).toEqual([{
       id: savedId,
       status: "saved",
+      memoryLifecycleStatus: "not_admitted",
       version: saved.version + 1
     }]);
     expect(() => repository.saveWorkingCardFromReflection({
@@ -1063,6 +1104,13 @@ describe("DailyReflectionRepository", () => {
       reviewStatus: "kept",
       userTitle: "我确认的行动"
     });
+    expect(repository.getReflectionDetail("account_1", review.reflection.id).candidates)
+      .toContainEqual(expect.objectContaining({
+        id: "reflection_action_card_card_primary",
+        candidateKind: "user_action",
+        candidateType: "commitment",
+        actionClaimed: true
+      }));
     expect(() => repository.updateReflectionCards({
       accountId: "account_1",
       reflectionId: review.reflection.id,
@@ -1109,6 +1157,222 @@ describe("DailyReflectionRepository", () => {
     expect(finalized.confirmation.candidateSnapshots.some((snapshot) =>
       snapshot.candidateId.includes("hidden") || snapshot.candidateId.endsWith("card_more")
     )).toBe(false);
+    expect(repository.getAdmissionExecutionMethod(
+      "account_1",
+      review.reflection.id
+    )).toBe("memory_proposal_v1");
+    expect(repository.getWorkingCard(
+      "account_1",
+      "reflection_card_finalize_card_primary"
+    )).toMatchObject({
+      status: "saved",
+      content: "用户确认后的重点",
+      memoryLifecycleStatus: "not_admitted"
+    });
+    const savedEventCount = database.prepare(`
+      SELECT COUNT(*) AS count
+      FROM dr_working_card_events
+      WHERE account_id = 'account_1'
+        AND card_id = 'reflection_card_finalize_card_primary'
+        AND event_type = 'saved'
+    `).get();
+    expect(savedEventCount).toEqual({ count: 1 });
+    expect(repository.finalizeReviewV2({
+      accountId: "account_1",
+      reflectionId: review.reflection.id,
+      expectedVersion: updated.reflection.version,
+      operationKey: review.operationKey,
+      saveIntent: "retain_selected"
+    }).reused).toBe(true);
+    expect(database.prepare(`
+      SELECT COUNT(*) AS count
+      FROM dr_working_card_events
+      WHERE account_id = 'account_1'
+        AND card_id = 'reflection_card_finalize_card_primary'
+        AND event_type = 'saved'
+    `).get()).toEqual({ count: 1 });
+  });
+
+  it("counts Proposal-backed memory only while the Working Card lifecycle is active", () => {
+    const review = createReviewPendingCards({
+      id: "reflection_card_memory_count",
+      operationKey: "operation_card_memory_count"
+    });
+    const updated = repository.updateReflectionCards({
+      accountId: "account_1",
+      reflectionId: review.reflection.id,
+      expectedVersion: review.reflection.version,
+      cards: [{
+        cardId: "reflection_card_memory_count_card_primary",
+        reviewStatus: "kept",
+        userTitle: null,
+        userText: null
+      }]
+    });
+    repository.finalizeReviewV2({
+      accountId: "account_1",
+      reflectionId: review.reflection.id,
+      expectedVersion: updated.reflection.version,
+      operationKey: review.operationKey,
+      saveIntent: "retain_selected"
+    });
+    const claim = repository.startAdmissionOperation({
+      accountId: "account_1",
+      reflectionId: review.reflection.id,
+      leaseOwner: "proposal-memory-count-worker",
+      leaseDurationMs: 60_000,
+      now: timestamp
+    });
+    if (!claim.executionFence) throw new Error("expected admission fence");
+    database.prepare(`
+      UPDATE dr_working_cards
+      SET memory_lifecycle_status = 'active'
+      WHERE account_id = ? AND id = ?
+    `).run("account_1", "reflection_card_memory_count_card_primary");
+    repository.completeAdmissionOperation({
+      accountId: "account_1",
+      reflectionId: review.reflection.id,
+      leaseOwner: claim.executionFence.leaseOwner,
+      attemptVersion: claim.executionFence.attemptVersion,
+      results: [{
+        candidateId: "reflection_card_memory_count_card_primary",
+        status: "admitted",
+        memoryId: "memory-card-count",
+        reasonCode: null,
+        errorCode: null,
+        operationKey: "daily-reflection-card:reflection_card_memory_count_card_primary",
+        updatedAt: timestamp
+      }],
+      now: timestamp
+    });
+
+    expect(repository.getRememberedCandidateCount(
+      "account_1",
+      review.reflection.id
+    )).toBe(1);
+    database.prepare(`
+      UPDATE dr_working_cards
+      SET memory_lifecycle_status = 'revoked'
+      WHERE account_id = ? AND id = ?
+    `).run("account_1", "reflection_card_memory_count_card_primary");
+    expect(repository.getRememberedCandidateCount(
+      "account_1",
+      review.reflection.id
+    )).toBe(0);
+  });
+
+  it("stops counting a historical legacy-direct Card after Card lifecycle revocation", () => {
+    const review = createReviewPendingCards({
+      id: "reflection_legacy_card_memory_count",
+      operationKey: "operation_legacy_card_memory_count"
+    });
+    const cardId = "reflection_legacy_card_memory_count_card_primary";
+    const updated = repository.updateReflectionCards({
+      accountId: "account_1",
+      reflectionId: review.reflection.id,
+      expectedVersion: review.reflection.version,
+      cards: [{
+        cardId,
+        reviewStatus: "kept",
+        userTitle: null,
+        userText: null
+      }]
+    });
+    repository.finalizeReviewV2({
+      accountId: "account_1",
+      reflectionId: review.reflection.id,
+      expectedVersion: updated.reflection.version,
+      operationKey: review.operationKey,
+      saveIntent: "retain_selected"
+    });
+    database.prepare(`
+      UPDATE dr_admission_operations
+      SET execution_method = 'legacy_direct_v1'
+      WHERE account_id = ? AND reflection_id = ?
+    `).run("account_1", review.reflection.id);
+    const claim = repository.startAdmissionOperation({
+      accountId: "account_1",
+      reflectionId: review.reflection.id,
+      leaseOwner: "legacy-card-count-worker",
+      leaseDurationMs: 60_000,
+      now: timestamp
+    });
+    if (!claim.executionFence) throw new Error("expected admission fence");
+    database.prepare(`
+      UPDATE dr_working_cards
+      SET memory_lifecycle_status = 'active'
+      WHERE account_id = ? AND id = ?
+    `).run("account_1", cardId);
+    repository.completeAdmissionOperation({
+      accountId: "account_1",
+      reflectionId: review.reflection.id,
+      leaseOwner: claim.executionFence.leaseOwner,
+      attemptVersion: claim.executionFence.attemptVersion,
+      results: [{
+        candidateId: cardId,
+        status: "admitted",
+        memoryId: "legacy-card-memory",
+        reasonCode: null,
+        errorCode: null,
+        operationKey: `legacy-card:${cardId}`,
+        updatedAt: timestamp
+      }],
+      now: timestamp
+    });
+
+    expect(repository.getRememberedCandidateCount(
+      "account_1",
+      review.reflection.id
+    )).toBe(1);
+    database.prepare(`
+      UPDATE dr_working_cards
+      SET memory_lifecycle_status = 'revoked'
+      WHERE account_id = ? AND id = ?
+    `).run("account_1", cardId);
+    expect(repository.getRememberedCandidateCount(
+      "account_1",
+      review.reflection.id
+    )).toBe(0);
+  });
+
+  it("rejects Card edits after a V2 confirmation snapshot is frozen", () => {
+    const review = createReviewPendingCards({
+      id: "reflection_card_frozen_update",
+      operationKey: "operation_card_frozen_update"
+    });
+    const updated = repository.updateReflectionCards({
+      accountId: "account_1",
+      reflectionId: review.reflection.id,
+      expectedVersion: review.reflection.version,
+      cards: [{
+        cardId: "reflection_card_frozen_update_card_primary",
+        reviewStatus: "kept",
+        userTitle: null,
+        userText: null
+      }]
+    });
+    repository.finalizeReviewV2({
+      accountId: "account_1",
+      reflectionId: review.reflection.id,
+      expectedVersion: updated.reflection.version,
+      operationKey: review.operationKey,
+      saveIntent: "retain_selected"
+    });
+    const frozen = repository.getReflection("account_1", review.reflection.id);
+
+    expect(() => repository.updateReflectionCards({
+      accountId: "account_1",
+      reflectionId: review.reflection.id,
+      expectedVersion: frozen.version,
+      cards: [{
+        cardId: "reflection_card_frozen_update_card_primary",
+        reviewStatus: "kept",
+        userTitle: "确认后不允许改写",
+        userText: null
+      }]
+    })).toThrowError(expect.objectContaining({
+      code: "daily_reflection_card_update_conflict"
+    }));
   });
 
   it("recap_only completes with unreviewed Primary and More Cards and creates zero admission", () => {
@@ -1273,6 +1537,10 @@ describe("DailyReflectionRepository", () => {
       saveIntent: "retain_selected"
     });
     expect(finalized.operation).toMatchObject({ status: "confirmation_ready" });
+    expect(repository.getAdmissionExecutionMethod(
+      review.reflection.accountId,
+      review.reflection.id
+    )).toBe("legacy_direct_v1");
     expect(finalized.confirmation.candidateSnapshots.map((candidate) => ({
       kind: candidate.candidateKind,
       type: candidate.candidateType,

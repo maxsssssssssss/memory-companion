@@ -168,7 +168,8 @@ describe("Daily Reflection SQLite schema", () => {
           { version: 9, count: 1 },
           { version: 10, count: 1 },
           { version: 11, count: 1 },
-          { version: 12, count: 1 }
+          { version: 12, count: 1 },
+          { version: 13, count: 1 }
         ]);
       }
       expect((web.prepare("PRAGMA table_info(dr_reflections)").all() as Array<{
@@ -220,7 +221,8 @@ describe("Daily Reflection SQLite schema", () => {
         { version: 9 },
         { version: 10 },
         { version: 11 },
-        { version: 12 }
+        { version: 12 },
+        { version: 13 }
       ]);
       expect((first.prepare("PRAGMA table_info(dr_reflections)").all() as Array<{
         name: string;
@@ -268,14 +270,14 @@ describe("Daily Reflection SQLite schema", () => {
     try {
       expect(reopened.prepare(
         "SELECT COUNT(*) AS count FROM dr_schema_migrations"
-      ).get()).toEqual({ count: 12 });
+      ).get()).toEqual({ count: 13 });
       expect(reopened.prepare(
         "SELECT source_origin FROM dr_reflections WHERE id = 'reflection_reopen'"
       ).get()).toEqual({ source_origin: "unknown" });
       migrateDailyReflectionSchema(reopened);
       expect(reopened.prepare(
         "SELECT COUNT(*) AS count FROM dr_schema_migrations"
-      ).get()).toEqual({ count: 12 });
+      ).get()).toEqual({ count: 13 });
       expect(reopened.pragma("foreign_key_check")).toEqual([]);
       expect(reopened.pragma("integrity_check", { simple: true })).toBe("ok");
     } finally {
@@ -309,7 +311,8 @@ describe("Daily Reflection SQLite schema", () => {
         { version: 9 },
         { version: 10 },
         { version: 11 },
-        { version: 12 }
+        { version: 12 },
+        { version: 13 }
       ]);
       expect(database.prepare(`
         SELECT lease_owner, lease_until, attempt_version, upload_fingerprint
@@ -539,7 +542,7 @@ describe("Daily Reflection SQLite schema", () => {
 
       expect(database.prepare(
         "SELECT version FROM dr_schema_migrations ORDER BY version DESC LIMIT 2"
-      ).all()).toEqual([{ version: 12 }, { version: 11 }]);
+      ).all()).toEqual([{ version: 13 }, { version: 12 }]);
       expect(database.prepare(`
         SELECT id, title, content, status, version
         FROM dr_working_cards WHERE id = 'card_v10_proposal'
@@ -559,6 +562,12 @@ describe("Daily Reflection SQLite schema", () => {
         { name: "dr_memory_proposal_events" },
         { name: "dr_memory_proposals" }
       ]);
+      expect((database.pragma("table_info(dr_memory_proposals)") as Array<{
+        name: string;
+      }>).map((column) => column.name)).toContain("memory_type_v2");
+      expect((database.pragma("table_info(dr_admission_operations)") as Array<{
+        name: string;
+      }>).map((column) => column.name)).toContain("execution_method");
       expect(database.pragma("foreign_key_check")).toEqual([]);
     } finally {
       database.close();

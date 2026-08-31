@@ -36,7 +36,7 @@ export function CompanionProactiveObservation({
   if (hidden) {
     return (
       <div className={styles.proactiveHidden} role="status">
-        <p>这条观察已在本次浏览中收起，原话记录没有改变。</p>
+        <p>已收起这条{presentation.status === "ready" ? "观察" : "线索"}，原话和复盘内容没有改变。</p>
         <button onClick={() => setHiddenFingerprint(null)} type="button">重新显示</button>
       </div>
     );
@@ -44,10 +44,15 @@ export function CompanionProactiveObservation({
 
   return (
     <div className={styles.proactiveObservation} data-proactive-status={presentation.status}>
-      <p className={styles.observationCopy}>{presentation.observation}</p>
-      <p className={styles.proactiveCaution}>{presentation.caution}</p>
+      <p className={styles.proactiveObservationLead}>{presentation.observation}</p>
+      <div className={styles.proactiveCaution}>
+        <b>{presentation.status === "ready" ? "观察边界" : "线索边界"}</b>
+        <p>{presentation.caution}</p>
+      </div>
       <details className={styles.longTermSources}>
-        <summary>核对原话 · {presentation.sources.length}</summary>
+        <summary>
+          查看这条{presentation.status === "ready" ? "观察" : "线索"}的依据 · {presentation.sources.length} 条原话
+        </summary>
         <ul>
           {presentation.sources.map((source) => {
             const segmentId = source.segmentIds[0];
@@ -71,7 +76,7 @@ export function CompanionProactiveObservation({
         onClick={() => setHiddenFingerprint(presentation.fingerprint)}
         title="只在本次浏览中收起，不会改动原话或长期记录"
         type="button"
-      >这条不准确</button>
+      >觉得不太准确，先收起</button>
     </div>
   );
 }

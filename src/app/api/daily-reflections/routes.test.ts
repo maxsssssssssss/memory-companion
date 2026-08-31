@@ -30,6 +30,7 @@ const processDailyReflectionUploadMock = vi.hoisted(() => vi.fn());
 const resolveDailyReflectionAuthoritativeDurationMock = vi.hoisted(() => vi.fn());
 const deleteMemoryUploadAndRefreshIndexMock = vi.hoisted(() => vi.fn());
 const admitDailyReflectionUnderLeaseMock = vi.hoisted(() => vi.fn());
+const admitDailyReflectionMemoryProposalUnderLeaseMock = vi.hoisted(() => vi.fn());
 const uploadStorageState = vi.hoisted(() => ({
   failBeforePersist: false,
   failAfterPersist: false,
@@ -54,6 +55,9 @@ vi.mock("@/lib/server/daily-reflection", async (importOriginal) => ({
   getDailyReflectionRepository: () => moduleState.repository as DailyReflectionRepository,
   getDailyReflectionMemoryAdmissionService: () => ({
     admitUnderLease: admitDailyReflectionUnderLeaseMock
+  }),
+  getDailyReflectionMemoryProposalFinalizeService: () => ({
+    admitUnderLease: admitDailyReflectionMemoryProposalUnderLeaseMock
   }),
   getDailyReflectionCandidateRevocationService: () =>
     moduleState.candidateRevocationService as { revoke(input: unknown): Promise<unknown> },
@@ -356,6 +360,256 @@ function createReviewPendingDetail(input: {
   });
 }
 
+function createV2CardReviewPending(input: {
+  reflectionId: string;
+  operationKey: string;
+}) {
+  const sourceSegmentId = `segment_${input.reflectionId}`;
+  const hiddenCandidateId = `${input.reflectionId}_hidden`;
+  const cardId = `${input.reflectionId}_card`;
+  const createdResult = repository.createReflectionV2({
+    id: input.reflectionId,
+    accountId,
+    uploadId: null,
+    operationKey: input.operationKey,
+    inputAdapter: "file_picker",
+    sourceOrigin: "user_reflection",
+    capturePurpose: "inspiration_capture",
+    recordingDate: "2026-08-13",
+    contentHash: "d".repeat(64)
+  });
+  const created = createdResult.reflection;
+  const uploadId = createdResult.receipt?.uploadId
+    ?? `upload_${input.reflectionId}`;
+  const uploading = repository.transitionStatus({
+    accountId,
+    reflectionId: input.reflectionId,
+    expectedVersion: created.version,
+    status: "uploading"
+  });
+  const fence = repository.claimExecutionLease({
+    accountId,
+    reflectionId: input.reflectionId,
+    leaseOwner: `v2-card-route:${input.reflectionId}`,
+    leaseDurationMs: 60_000,
+    allowedStatuses: ["uploading"]
+  });
+  if (!fence) throw new Error("expected V2 Card route fence");
+  const bound = repository.bindUploadAndPlanV2({
+    accountId,
+    reflectionId: input.reflectionId,
+    expectedVersion: uploading.version,
+    uploadId,
+    inputAdapter: "file_picker",
+    processingProfile: "full_recording",
+    effectiveDurationMs: 300_000,
+    durationSource: "server_ffprobe",
+    candidateLimit: 5,
+    leaseOwner: fence.leaseOwner,
+    attemptVersion: fence.attemptVersion
+  });
+  const transcribing = repository.transitionStatus({
+    accountId,
+    reflectionId: input.reflectionId,
+    expectedVersion: bound.reflection.version,
+    status: "transcribing",
+    leaseOwner: fence.leaseOwner,
+    attemptVersion: fence.attemptVersion
+  });
+  const extracting = repository.transitionStatus({
+    accountId,
+    reflectionId: input.reflectionId,
+    expectedVersion: transcribing.version,
+    status: "extracting",
+    leaseOwner: fence.leaseOwner,
+    attemptVersion: fence.attemptVersion
+  });
+  repository.publishAssetUnderExecutionFence({
+    accountId,
+    reflectionId: input.reflectionId,
+    leaseOwner: fence.leaseOwner,
+    attemptVersion: fence.attemptVersion,
+    assetKind: "upload",
+    payload: uploadRecord({ reflectionId: input.reflectionId, uploadId })
+  });
+  repository.publishAssetUnderExecutionFence({
+    accountId,
+    reflectionId: input.reflectionId,
+    leaseOwner: fence.leaseOwner,
+    attemptVersion: fence.attemptVersion,
+    assetKind: "segments",
+    payload: [segment(uploadId, sourceSegmentId)]
+  });
+  const saved = repository.saveCardPipelineV2({
+    accountId,
+    reflectionId: input.reflectionId,
+    expectedVersion: extracting.version,
+    leaseOwner: fence.leaseOwner,
+    attemptVersion: fence.attemptVersion,
+    candidates: [{
+      id: hiddenCandidateId,
+      ordinal: 0,
+      candidateKind: "decision",
+      proposedText: "我决定继续推进这个方向。",
+      evidenceIds: [sourceSegmentId],
+      confidence: 0.91,
+      caution: "route fixture",
+      actionClaimed: false
+    }],
+    cards: [{
+      id: cardId,
+      cardKind: "decision",
+      proposedTitle: "继续推进",
+      proposedText: "我决定继续推进这个方向。",
+      sourceCandidateIds: [hiddenCandidateId],
+      evidenceIds: [sourceSegmentId],
+      clusterId: `${input.reflectionId}_cluster`,
+      clusterTitle: "下一步",
+      displayTier: "primary",
+      rank: 0,
+      confidence: 0.91,
+      importance: 0.9,
+      durability: 0.8,
+      novelty: 0.7,
+      epistemicStatus: "explicit_user_statement",
+      riskFlags: [],
+      actionClaimed: false,
+      reviewStatus: "pending"
+    }],
+    audit: {
+      modelName: "route-test-model",
+      promptVersion: "route-test-prompt-v1",
+      policy: { extractionInputTokenBudget: 100 },
+      windowCount: 1,
+      providerCallCount: 2,
+      hiddenCandidateCount: 1,
+      clusterCount: 1,
+      cardCount: 1,
+      inputTokenEstimate: 50,
+      outputTokenBudget: 100
+    }
+  });
+  const review = repository.transitionStatus({
+    accountId,
+    reflectionId: input.reflectionId,
+    expectedVersion: saved.reflection.version,
+    status: "review_pending",
+    leaseOwner: fence.leaseOwner,
+    attemptVersion: fence.attemptVersion
+  });
+  repository.releaseExecutionLease({
+    accountId,
+    reflectionId: input.reflectionId,
+    leaseOwner: fence.leaseOwner,
+    attemptVersion: fence.attemptVersion
+  });
+  return { reflection: review, cardId };
+}
+
+function createLegacyV2CandidateReviewPending(input: {
+  reflectionId: string;
+  operationKey: string;
+}) {
+  const uploadId = `upload_${input.reflectionId}`;
+  const sourceSegmentId = `segment_${input.reflectionId}`;
+  const candidateId = `${input.reflectionId}_candidate`;
+  const created = repository.createReflectionV2({
+    id: input.reflectionId,
+    accountId,
+    uploadId,
+    operationKey: input.operationKey,
+    inputAdapter: "file_picker",
+    sourceOrigin: "user_reflection",
+    capturePurpose: "inspiration_capture",
+    recordingDate: "2026-08-13"
+  }).reflection;
+  const uploading = repository.transitionStatus({
+    accountId,
+    reflectionId: input.reflectionId,
+    expectedVersion: created.version,
+    status: "uploading"
+  });
+  const transcribing = repository.transitionStatus({
+    accountId,
+    reflectionId: input.reflectionId,
+    expectedVersion: uploading.version,
+    status: "transcribing"
+  });
+  const extracting = repository.transitionStatus({
+    accountId,
+    reflectionId: input.reflectionId,
+    expectedVersion: transcribing.version,
+    status: "extracting"
+  });
+  const fence = repository.claimExecutionLease({
+    accountId,
+    reflectionId: input.reflectionId,
+    leaseOwner: `legacy-v2-route:${input.reflectionId}`,
+    leaseDurationMs: 60_000,
+    allowedStatuses: ["extracting"]
+  });
+  if (!fence) throw new Error("expected legacy V2 route fence");
+  repository.publishAssetUnderExecutionFence({
+    accountId,
+    reflectionId: input.reflectionId,
+    leaseOwner: fence.leaseOwner,
+    attemptVersion: fence.attemptVersion,
+    assetKind: "upload",
+    payload: uploadRecord({ reflectionId: input.reflectionId, uploadId })
+  });
+  repository.publishAssetUnderExecutionFence({
+    accountId,
+    reflectionId: input.reflectionId,
+    leaseOwner: fence.leaseOwner,
+    attemptVersion: fence.attemptVersion,
+    assetKind: "segments",
+    payload: [segment(uploadId, sourceSegmentId)]
+  });
+  const saved = repository.savePendingCandidatesV2({
+    accountId,
+    reflectionId: input.reflectionId,
+    expectedVersion: extracting.version,
+    leaseOwner: fence.leaseOwner,
+    attemptVersion: fence.attemptVersion,
+    candidates: [{
+      id: candidateId,
+      ordinal: 0,
+      candidateKind: "insight",
+      proposedText: "历史 V2 Candidate 保持原来的写入路径。",
+      evidenceIds: [sourceSegmentId],
+      confidence: 0.88,
+      caution: "legacy route fixture",
+      actionClaimed: false
+    }]
+  });
+  const review = repository.transitionStatus({
+    accountId,
+    reflectionId: input.reflectionId,
+    expectedVersion: saved.reflection.version,
+    status: "review_pending",
+    leaseOwner: fence.leaseOwner,
+    attemptVersion: fence.attemptVersion
+  });
+  repository.releaseExecutionLease({
+    accountId,
+    reflectionId: input.reflectionId,
+    leaseOwner: fence.leaseOwner,
+    attemptVersion: fence.attemptVersion
+  });
+  const decided = repository.updateCandidateDecisions({
+    accountId,
+    reflectionId: input.reflectionId,
+    expectedVersion: review.version,
+    candidates: [{
+      candidateId,
+      status: "kept",
+      userText: null,
+      subjectPersonId: null
+    }]
+  });
+  return { reflection: decided.reflection, candidateId };
+}
+
 function createFailedReflection(input: {
   reflectionId: string;
   uploadId: string;
@@ -486,6 +740,37 @@ beforeEach(async () => {
         reasonCode: "verified_owner_required",
         errorCode: null,
         operationKey: `test-operation:${candidate.candidateId}`,
+        updatedAt: "2026-08-13T08:00:00.000Z"
+      }));
+    return repository.completeAdmissionOperation({
+      accountId: input.accountId,
+      reflectionId: input.reflectionId,
+      leaseOwner: claim.executionFence.leaseOwner,
+      attemptVersion: claim.executionFence.attemptVersion,
+      results
+    }).results;
+  });
+  admitDailyReflectionMemoryProposalUnderLeaseMock.mockImplementation(async (input: {
+    accountId: string;
+    reflectionId: string;
+    leaseOwner: string;
+    leaseDurationMs: number;
+  }) => {
+    const claim = repository.startAdmissionOperation(input);
+    if (!claim.executionFence) {
+      return repository.listAdmissionResults(input.accountId, claim.operation.id);
+    }
+    const confirmation = repository.getConfirmation(input.accountId, input.reflectionId);
+    if (!confirmation) throw new Error("confirmation missing in Proposal admission mock");
+    const results = confirmation.candidateSnapshots
+      .filter((candidate) => candidate.status === "kept")
+      .map((candidate) => ({
+        candidateId: candidate.candidateId,
+        status: "rejected" as const,
+        memoryId: null,
+        reasonCode: "decision_score_below_threshold",
+        errorCode: null,
+        operationKey: `daily-reflection-card:${candidate.candidateId}`,
         updatedAt: "2026-08-13T08:00:00.000Z"
       }));
     return repository.completeAdmissionOperation({
@@ -1835,6 +2120,8 @@ describe("Daily Reflection workflow API", () => {
       accountId,
       repository.getAdmissionOperation(accountId, reflectionId)!.id
     )).toHaveLength(1);
+    expect(admitDailyReflectionUnderLeaseMock).toHaveBeenCalledTimes(2);
+    expect(admitDailyReflectionMemoryProposalUnderLeaseMock).not.toHaveBeenCalled();
 
     const cancelled = await cancelDailyReflection(
       new Request(`http://localhost/api/daily-reflections/${reflectionId}/cancel`, {
@@ -1845,6 +2132,146 @@ describe("Daily Reflection workflow API", () => {
     expect(cancelled.status).toBe(409);
     expect(repository.getReflection(accountId, reflectionId).status).toBe("completed");
     expect(repository.listCandidates(accountId, reflectionId)).toHaveLength(1);
+  });
+
+  it("routes V2 retained Cards through Memory Proposals and preserves the finalize DTO", async () => {
+    const reflectionId = "reflection_v2_proposal_finalize_route";
+    const operationKey = "operation_v2_proposal_finalize_route";
+    const setup = createV2CardReviewPending({ reflectionId, operationKey });
+    const decided = repository.updateReflectionCards({
+      accountId,
+      reflectionId,
+      expectedVersion: setup.reflection.version,
+      cards: [{
+        cardId: setup.cardId,
+        reviewStatus: "kept",
+        userTitle: null,
+        userText: null
+      }]
+    });
+    const request = new Request(
+      `http://localhost/api/daily-reflections/${reflectionId}/finalize`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          expectedVersion: decided.reflection.version,
+          operationKey,
+          saveIntent: "retain_selected"
+        })
+      }
+    );
+
+    const response = await finalizeDailyReflection(request, params(reflectionId));
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({
+      reflection: { id: reflectionId, status: "completed" },
+      confirmation: {
+        contractVersion: 2,
+        operationKey,
+        saveIntent: "retain_selected",
+        candidateSnapshots: [{
+          candidateId: setup.cardId,
+          status: "kept"
+        }]
+      },
+      admission: {
+        exists: true,
+        operation: {
+          status: "completed",
+          admittedCount: 0,
+          rejectedCount: 1,
+          excludedCount: 0
+        },
+        results: [{
+          candidateId: setup.cardId,
+          status: "rejected",
+          reasonCode: "decision_score_below_threshold"
+        }]
+      },
+      reused: false
+    });
+    expect(repository.getAdmissionExecutionMethod(accountId, reflectionId))
+      .toBe("memory_proposal_v1");
+    expect(admitDailyReflectionMemoryProposalUnderLeaseMock).toHaveBeenCalledOnce();
+    expect(admitDailyReflectionUnderLeaseMock).not.toHaveBeenCalled();
+  });
+
+  it("fails closed when a V2 retain operation has no recognized execution method", async () => {
+    const reflectionId = "reflection_v2_unknown_finalize_method";
+    const operationKey = "operation_v2_unknown_finalize_method";
+    const setup = createV2CardReviewPending({ reflectionId, operationKey });
+    const decided = repository.updateReflectionCards({
+      accountId,
+      reflectionId,
+      expectedVersion: setup.reflection.version,
+      cards: [{
+        cardId: setup.cardId,
+        reviewStatus: "kept",
+        userTitle: null,
+        userText: null
+      }]
+    });
+    const method = vi.spyOn(repository, "getAdmissionExecutionMethod")
+      .mockReturnValueOnce(null as never);
+    const response = await finalizeDailyReflection(
+      new Request(`http://localhost/api/daily-reflections/${reflectionId}/finalize`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          expectedVersion: decided.reflection.version,
+          operationKey,
+          saveIntent: "retain_selected"
+        })
+      }),
+      params(reflectionId)
+    );
+    method.mockRestore();
+
+    expect(response.status).toBe(409);
+    await expect(response.json()).resolves.toEqual({
+      error: "daily_reflection_v2_admission_contract_conflict",
+      retryable: true
+    });
+    expect(admitDailyReflectionMemoryProposalUnderLeaseMock).not.toHaveBeenCalled();
+    expect(admitDailyReflectionUnderLeaseMock).not.toHaveBeenCalled();
+  });
+
+  it("keeps legacy V2 Candidate retention on the direct admission service", async () => {
+    const reflectionId = "reflection_legacy_v2_finalize_route";
+    const operationKey = "operation_legacy_v2_finalize_route";
+    const setup = createLegacyV2CandidateReviewPending({ reflectionId, operationKey });
+    const response = await finalizeDailyReflection(
+      new Request(`http://localhost/api/daily-reflections/${reflectionId}/finalize`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          expectedVersion: setup.reflection.version,
+          operationKey,
+          saveIntent: "retain_selected"
+        })
+      }),
+      params(reflectionId)
+    );
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({
+      reflection: { id: reflectionId, status: "completed" },
+      admission: {
+        exists: true,
+        operation: { status: "completed", rejectedCount: 1 },
+        results: [{
+          candidateId: setup.candidateId,
+          status: "rejected",
+          reasonCode: "verified_owner_required"
+        }]
+      }
+    });
+    expect(repository.getAdmissionExecutionMethod(accountId, reflectionId))
+      .toBe("legacy_direct_v1");
+    expect(admitDailyReflectionUnderLeaseMock).toHaveBeenCalledOnce();
+    expect(admitDailyReflectionMemoryProposalUnderLeaseMock).not.toHaveBeenCalled();
   });
 
   it("finalizes a V2 recap without invoking Memory admission", async () => {
@@ -1955,6 +2382,7 @@ describe("Daily Reflection workflow API", () => {
     setAccount(otherAccountId);
     expect((await finalizeDailyReflection(request(), params(reflectionId))).status).toBe(404);
     expect(admitDailyReflectionUnderLeaseMock).not.toHaveBeenCalled();
+    expect(admitDailyReflectionMemoryProposalUnderLeaseMock).not.toHaveBeenCalled();
 
     setAccount(accountId);
     const first = await finalizeDailyReflection(request(), params(reflectionId));
@@ -1975,6 +2403,7 @@ describe("Daily Reflection workflow API", () => {
       reused: false
     });
     expect(admitDailyReflectionUnderLeaseMock).not.toHaveBeenCalled();
+    expect(admitDailyReflectionMemoryProposalUnderLeaseMock).not.toHaveBeenCalled();
     expect(repository.getAdmissionOperation(accountId, reflectionId)).toBeNull();
     expect(database.prepare(
       "SELECT COUNT(*) AS count FROM dr_candidate_admission_receipts"
@@ -1999,6 +2428,7 @@ describe("Daily Reflection workflow API", () => {
       reused: true
     });
     expect(admitDailyReflectionUnderLeaseMock).not.toHaveBeenCalled();
+    expect(admitDailyReflectionMemoryProposalUnderLeaseMock).not.toHaveBeenCalled();
 
     const deleted = await deleteDailyReflection(
       new Request(`http://localhost/api/daily-reflections/${reflectionId}`, {

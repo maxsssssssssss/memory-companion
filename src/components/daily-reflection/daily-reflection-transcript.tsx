@@ -67,7 +67,8 @@ export function DailyReflectionTranscript({
     setHighlightedSegmentId(focusRequest.segmentId);
     const timer = window.setTimeout(() => {
       const node = segmentNodes.current.get(focusRequest.segmentId);
-      node?.scrollIntoView?.({ behavior: "smooth", block: "center" });
+      const reduceMotion = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false;
+      node?.scrollIntoView?.({ behavior: reduceMotion ? "auto" : "smooth", block: "center" });
       node?.focus();
     }, 0);
     return () => window.clearTimeout(timer);
@@ -105,7 +106,6 @@ export function DailyReflectionTranscript({
               const highlighted = segment.id === highlightedSegmentId;
               return (
                 <li
-                  aria-label={`${speakerLabel(segment)}，${formatTimestamp(segment.startSeconds)}`}
                   className={`${styles.transcriptLine} ${highlighted ? styles.transcriptLineHighlighted : ""}`}
                   data-highlighted={highlighted ? "true" : undefined}
                   data-segment-id={segment.id}

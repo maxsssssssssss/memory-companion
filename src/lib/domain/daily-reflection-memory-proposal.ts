@@ -13,12 +13,18 @@ import {
 import { DailyReflectionWorkingCardKindSchema } from "./daily-reflection-working-card";
 
 export const DailyReflectionMemoryProposalTypeSchema = z.enum([
+  "summary",
+  "question",
   "decision",
   "commitment",
   "preference",
   "person_fact",
   "event"
 ]);
+
+export type DailyReflectionMemoryProposalType = z.infer<
+  typeof DailyReflectionMemoryProposalTypeSchema
+>;
 
 export const DailyReflectionMemoryProposalStatusSchema = z.enum([
   "pending",
@@ -35,6 +41,49 @@ export const DailyReflectionMemoryProposalReasonSchema = z.string()
   .trim()
   .min(1)
   .max(256);
+
+export const DailyReflectionMemoryProposalAcknowledgementSchema = z.enum([
+  "acknowledge_sensitive_content",
+  "acknowledge_inference",
+  "acknowledge_attribution_uncertainty"
+]);
+
+export const DailyReflectionMemoryProposalConfirmationRequirementCodeSchema = z.enum([
+  ...DailyReflectionMemoryProposalAcknowledgementSchema.options,
+  "verify_fact_owner"
+]);
+
+export const DailyReflectionMemoryProposalConfirmationRequirementSchema = z.object({
+  code: DailyReflectionMemoryProposalConfirmationRequirementCodeSchema,
+  resolution: z.enum(["acknowledgement", "verified_owner"])
+}).strict();
+
+export type DailyReflectionMemoryProposalAcknowledgement = z.infer<
+  typeof DailyReflectionMemoryProposalAcknowledgementSchema
+>;
+
+export type DailyReflectionMemoryProposalConfirmationRequirement = z.infer<
+  typeof DailyReflectionMemoryProposalConfirmationRequirementSchema
+>;
+
+const CONFIRMATION_REQUIRED_PREFIX = "confirmation_required:";
+
+export function memoryProposalConfirmationRequirements(
+  reasons: string[]
+): DailyReflectionMemoryProposalConfirmationRequirement[] {
+  const codes = new Set(reasons.flatMap((reason) => {
+    if (!reason.startsWith(CONFIRMATION_REQUIRED_PREFIX)) return [];
+    const parsed = DailyReflectionMemoryProposalConfirmationRequirementCodeSchema
+      .safeParse(reason.slice(CONFIRMATION_REQUIRED_PREFIX.length));
+    return parsed.success ? [parsed.data] : [];
+  }));
+  return [...codes].sort().map((code) => ({
+    code,
+    resolution: code === "verify_fact_owner"
+      ? "verified_owner" as const
+      : "acknowledgement" as const
+  }));
+}
 
 export const DailyReflectionMemoryProposalEvidenceSnapshotSchema = z.object({
   sourceSegmentId: DailyReflectionIdSchema,
@@ -232,8 +281,19 @@ export const DailyReflectionMemoryProposalEvaluateRequestSchema = z.object({
 }).strict();
 
 export const DailyReflectionMemoryProposalAdmitRequestSchema = z.object({
-  expectedVersion: DailyReflectionVersionSchema
-}).strict();
+  expectedVersion: DailyReflectionVersionSchema,
+  acknowledgements: z.array(
+    DailyReflectionMemoryProposalAcknowledgementSchema
+  ).max(3).default([])
+}).strict().superRefine((request, context) => {
+  if (new Set(request.acknowledgements).size !== request.acknowledgements.length) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["acknowledgements"],
+      message: "acknowledgements must be unique"
+    });
+  }
+});
 
 export const DailyReflectionMemoryProposalPublicSchema =
   DailyReflectionMemoryProposalSchema.transform((proposal) => ({
@@ -259,6 +319,7 @@ export const DailyReflectionMemoryProposalPublicSchema =
     policyVersion: proposal.policyVersion,
     score: proposal.score,
     reasons: proposal.reasons,
+    confirmationRequirements: memoryProposalConfirmationRequirements(proposal.reasons),
     memoryId: proposal.memoryId,
     sourceOrigin: proposal.sourceOrigin,
     recordingDate: proposal.recordingDate,
@@ -292,15 +353,66 @@ export const DailyReflectionMemoryProposalListResponseSchema = z.object({
 }).strict();
 
 export const DailyReflectionMemoryProposalAdmissionResponseSchema = z.object({
-  status: z.enum(["approved", "rejected", "admitted", "already_exists"]),
+  status: z.enum([
+    "approved",
+    "needs_confirmation",
+    "rejected",
+    "admitted",
+    "already_exists"
+  ]),
   proposal: DailyReflectionMemoryProposalPublicSchema,
   memoryId: DailyReflectionIdSchema.nullable(),
-  reasons: z.array(DailyReflectionMemoryProposalReasonSchema).max(64)
+  reasons: z.array(DailyReflectionMemoryProposalReasonSchema).max(64),
+  confirmationRequirements: z.array(
+    DailyReflectionMemoryProposalConfirmationRequirementSchema
+  ).max(4).default([])
 }).strict();
+
+export const DailyReflectionMemoryRecommendationSchema = z.object({
+  cardId: DailyReflectionIdSchema,
+  memoryType: DailyReflectionMemoryProposalTypeSchema,
+  rank: z.number().int().min(1).max(5),
+  score: z.number().min(0).max(1),
+  clusterId: DailyReflectionIdSchema,
+  sourceOrigin: DailyReflectionV2SourceOriginSchema,
+  reasons: z.array(DailyReflectionMemoryProposalReasonSchema).min(1).max(8),
+  defaultSelected: z.literal(false)
+}).strict();
+
+export const DailyReflectionMemoryRecommendationResponseSchema = z.object({
+  reflectionId: DailyReflectionIdSchema,
+  policyVersion: z.string().trim().min(1).max(128),
+  recommendationFingerprint: z.string().regex(/^[a-f0-9]{64}$/u),
+  maxRecommendations: z.literal(5),
+  eligibleCount: z.number().int().nonnegative(),
+  recommendations: z.array(DailyReflectionMemoryRecommendationSchema).max(5)
+}).strict().superRefine((response, context) => {
+  if (response.recommendations.some((item, index) => item.rank !== index + 1)) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["recommendations"],
+      message: "recommendation ranks must be contiguous and stable"
+    });
+  }
+  const cardIds = response.recommendations.map((item) => item.cardId);
+  if (new Set(cardIds).size !== cardIds.length) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["recommendations"],
+      message: "recommendations must contain unique Cards"
+    });
+  }
+});
 
 export type DailyReflectionMemoryProposal = z.infer<
   typeof DailyReflectionMemoryProposalSchema
 >;
 export type DailyReflectionMemoryProposalEvent = z.infer<
   typeof DailyReflectionMemoryProposalEventSchema
+>;
+export type DailyReflectionMemoryRecommendation = z.infer<
+  typeof DailyReflectionMemoryRecommendationSchema
+>;
+export type DailyReflectionMemoryRecommendationResponse = z.infer<
+  typeof DailyReflectionMemoryRecommendationResponseSchema
 >;

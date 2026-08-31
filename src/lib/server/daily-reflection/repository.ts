@@ -53,11 +53,13 @@ import {
 } from "@/lib/domain/daily-reflection";
 import {
   DailyReflectionWorkingCardKindSchema,
+  DailyReflectionWorkingCardMemoryLifecycleStatusSchema,
   DailyReflectionWorkingCardSchema,
   DailyReflectionWorkingCardStatusSchema,
   workingCardKindForReflectionCard,
   type DailyReflectionWorkingCard,
   type DailyReflectionWorkingCardKind,
+  type DailyReflectionWorkingCardMemoryLifecycleStatus,
   type DailyReflectionWorkingCardStatus
 } from "@/lib/domain/daily-reflection-working-card";
 import {
@@ -272,6 +274,7 @@ type AdmissionOperationRow = {
   created_at: string;
   updated_at: string;
   completed_at: string | null;
+  execution_method: "legacy_direct_v1" | "memory_proposal_v1";
 };
 
 type AdmissionReceiptRow = {
@@ -1279,6 +1282,75 @@ export class DailyReflectionRepository {
     );
   }
 
+  private saveWorkingCardForRetainedCard(
+    accountId: string,
+    card: ReflectionCard,
+    now: string
+  ) {
+    const working = this.requireWorkingCardRow(accountId, card.id);
+    const title = card.userTitle ?? card.proposedTitle;
+    const content = card.userText ?? card.proposedText;
+    const cardKind = workingCardKindForReflectionCard(card.cardKind);
+    const evidenceIdsJson = JSON.stringify(card.evidenceIds);
+    const snapshotMatches = working.title === title
+      && working.content === content
+      && working.card_kind === cardKind
+      && working.evidence_ids_json === evidenceIdsJson
+      && working.source_unavailable === 0;
+    if (working.status === "saved") {
+      if (!snapshotMatches || working.memory_lifecycle_status !== "not_admitted") {
+        throw new DailyReflectionConflictError(
+          "daily_reflection_working_card_retention_conflict"
+        );
+      }
+      return this.workingCardFromRow(working);
+    }
+    if (
+      working.saved_at !== null
+      || (working.status !== "generated" && working.status !== "review_pending")
+      || working.memory_lifecycle_status !== "not_admitted"
+    ) {
+      throw new DailyReflectionConflictError(
+        "daily_reflection_working_card_retention_conflict"
+      );
+    }
+    const updated = this.database.prepare(`
+      UPDATE dr_working_cards
+      SET title = ?, content = ?, card_kind = ?, evidence_ids_json = ?,
+          status = 'saved', source_unavailable = 0, saved_at = ?,
+          version = version + 1, updated_at = ?
+      WHERE account_id = ? AND id = ? AND version = ?
+        AND saved_at IS NULL AND status IN ('generated', 'review_pending')
+        AND memory_lifecycle_status = 'not_admitted'
+    `).run(
+      title,
+      content,
+      cardKind,
+      evidenceIdsJson,
+      now,
+      now,
+      accountId,
+      card.id,
+      working.version
+    );
+    if (updated.changes !== 1) {
+      throw new DailyReflectionConflictError(
+        "daily_reflection_working_card_retention_conflict"
+      );
+    }
+    const saved = this.requireWorkingCardRow(accountId, card.id);
+    this.recordWorkingCardEvent({
+      accountId,
+      cardId: card.id,
+      eventType: "saved",
+      fromStatus: working.status,
+      toStatus: saved.status,
+      cardVersion: saved.version,
+      createdAt: now
+    });
+    return this.workingCardFromRow(saved);
+  }
+
   private setWorkingCardSourceUnavailable(row: WorkingCardRow, now: string) {
     if (row.source_unavailable === 1) return row;
     const updated = this.database.prepare(`
@@ -1432,7 +1504,7 @@ export class DailyReflectionRepository {
     const parsedReflectionId = DailyReflectionIdSchema.parse(reflectionId);
     this.requireReflectionRow(parsedAccountId, parsedReflectionId);
     return (this.database.prepare(`
-      SELECT id, status, version
+      SELECT id, status, memory_lifecycle_status, version
       FROM dr_working_cards
       WHERE account_id = ?
         AND saved_at IS NOT NULL
@@ -1444,10 +1516,14 @@ export class DailyReflectionRepository {
     `).all(parsedAccountId, parsedReflectionId) as Array<{
       id: string;
       status: DailyReflectionWorkingCardStatus;
+      memory_lifecycle_status: DailyReflectionWorkingCardMemoryLifecycleStatus;
       version: number;
     }>).map((row) => ({
       id: DailyReflectionIdSchema.parse(row.id),
       status: DailyReflectionWorkingCardStatusSchema.parse(row.status),
+      memoryLifecycleStatus: DailyReflectionWorkingCardMemoryLifecycleStatusSchema.parse(
+        row.memory_lifecycle_status
+      ),
       version: z.number().int().nonnegative().parse(row.version)
     }));
   }
@@ -1490,6 +1566,14 @@ export class DailyReflectionRepository {
     }
     const evidence = card.evidenceIds.map((evidenceId) => evidenceById.get(evidenceId));
     return evidence.some((item) => !item) ? null : evidence as Array<NonNullable<typeof evidence[number]>>;
+  }
+
+  readWorkingCardWithEvidence(accountId: string, cardId: string) {
+    const card = this.getWorkingCard(accountId, cardId);
+    return {
+      card,
+      evidence: this.resolveWorkingCardEvidence(card) ?? []
+    };
   }
 
   getWorkingCardWithEvidence(accountId: string, cardId: string) {
@@ -3301,6 +3385,67 @@ export class DailyReflectionRepository {
         now,
         now
       );
+      if (evidenceIds.length > 0) {
+        const manualTitle = input.proposedText
+          .split(/[\r\n。！？]/u)[0]!
+          .trim()
+          .slice(0, 80) || "手写补充";
+        this.database.prepare(`
+          INSERT INTO dr_candidate_v2_roles (
+            account_id, reflection_id, candidate_id, candidate_role, created_at
+          ) VALUES (?, ?, ?, 'card_projection', ?)
+        `).run(input.accountId, input.reflectionId, candidateId, now);
+        this.database.prepare(`
+          INSERT INTO dr_reflection_cards (
+            id, account_id, reflection_id, card_kind, proposed_title,
+            proposed_text, user_title, user_text, source_candidate_ids_json,
+            evidence_ids_json, cluster_id, cluster_title, display_tier, rank,
+            confidence, importance, durability, novelty, epistemic_status,
+            risk_flags_json, action_claimed, review_status, version,
+            created_at, updated_at
+          ) VALUES (
+            ?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?, ?, '手写补充', 'primary', ?,
+            ?, 0.5, 0.5, 0.5, 'explicit_user_statement', '[]', ?, 'pending',
+            0, ?, ?
+          )
+        `).run(
+          candidateId,
+          input.accountId,
+          input.reflectionId,
+          input.candidateKind,
+          manualTitle,
+          input.proposedText,
+          JSON.stringify([candidateId]),
+          JSON.stringify(evidenceIds),
+          `manual_${candidateId}`,
+          ordinal,
+          input.confidence,
+          input.actionClaimed ? 1 : 0,
+          now,
+          now
+        );
+        this.database.prepare(`
+          INSERT INTO dr_working_cards (
+            id, account_id, source_reflection_ids_json, title, content,
+            card_kind, evidence_ids_json, status, importance, novelty,
+            related_card_ids_json, tags_json, visibility, source_unavailable,
+            saved_at, version, created_at, updated_at
+          ) VALUES (
+            ?, ?, ?, ?, ?, ?, ?, 'review_pending', 0.5, 0.5,
+            '[]', '[]', 'private', 0, NULL, 0, ?, ?
+          )
+        `).run(
+          candidateId,
+          input.accountId,
+          JSON.stringify([input.reflectionId]),
+          manualTitle,
+          input.proposedText,
+          workingCardKindForReflectionCard(input.candidateKind),
+          JSON.stringify(evidenceIds),
+          now,
+          now
+        );
+      }
       const updated = this.database.prepare(`
         UPDATE dr_reflections
         SET status = 'review_pending', error_code = NULL, error_message = NULL,
@@ -3637,13 +3782,35 @@ export class DailyReflectionRepository {
   getRememberedCandidateCount(accountId: string, reflectionId: string) {
     const operation = this.getAdmissionOperation(accountId, reflectionId);
     if (!operation) return 0;
-    const admitted = this.listAdmissionResults(accountId, operation.id).filter(
-      (result) => result.status === "admitted" || result.status === "already_admitted"
-    ).length;
-    const revoked = this.listCandidateRevocationReceipts(accountId, reflectionId).filter(
-      (receipt) => receipt.outcome === "revoked"
-    ).length;
-    return Math.max(0, admitted - revoked);
+    if (this.getAdmissionExecutionMethod(accountId, reflectionId) === "memory_proposal_v1") {
+      return (this.database.prepare(`
+        SELECT COUNT(*) AS count
+        FROM dr_candidate_admission_receipts receipt
+        JOIN dr_working_cards card
+          ON card.account_id = receipt.account_id
+         AND card.id = receipt.candidate_id
+        WHERE receipt.account_id = ? AND receipt.operation_id = ?
+          AND receipt.status IN ('admitted', 'already_admitted')
+          AND card.memory_lifecycle_status = 'active'
+      `).get(accountId, operation.id) as { count: number }).count;
+    }
+    return (this.database.prepare(`
+      SELECT COUNT(DISTINCT receipt.candidate_id) AS count
+      FROM dr_candidate_admission_receipts receipt
+      LEFT JOIN dr_working_cards card
+        ON card.account_id = receipt.account_id
+       AND card.id = receipt.candidate_id
+      WHERE receipt.account_id = ? AND receipt.operation_id = ?
+        AND receipt.status IN ('admitted', 'already_admitted')
+        AND (card.id IS NULL OR card.memory_lifecycle_status = 'active')
+        AND NOT EXISTS (
+          SELECT 1 FROM dr_candidate_revocation_receipts revocation
+          WHERE revocation.account_id = receipt.account_id
+            AND revocation.reflection_id = receipt.reflection_id
+            AND revocation.candidate_id = receipt.candidate_id
+            AND revocation.outcome = 'revoked'
+        )
+    `).get(accountId, operation.id) as { count: number }).count;
   }
 
   prepareCandidateRevocation(rawInput: {
@@ -3694,6 +3861,14 @@ export class DailyReflectionRepository {
       if (!confirmation || !admissionOperation || admissionOperation.status !== "completed") {
         throw new DailyReflectionConflictError(
           "daily_reflection_candidate_revocation_admission_incomplete"
+        );
+      }
+      if (
+        this.getAdmissionExecutionMethod(accountId, reflectionId)
+        === "memory_proposal_v1"
+      ) {
+        throw new DailyReflectionConflictError(
+          "daily_reflection_card_revocation_required"
         );
       }
       const candidate = this.database.prepare(`
@@ -4828,6 +5003,13 @@ export class DailyReflectionRepository {
     return run();
   }
 
+  getAdmissionExecutionMethod(accountId: string, reflectionId: string) {
+    const parsedAccountId = DailyReflectionIdSchema.parse(accountId);
+    const parsedReflectionId = DailyReflectionIdSchema.parse(reflectionId);
+    return this.findAdmissionOperationRow(parsedAccountId, parsedReflectionId)
+      ?.execution_method ?? null;
+  }
+
   finalizeReviewV2(rawInput: {
     accountId: string;
     reflectionId: string;
@@ -5035,6 +5217,9 @@ export class DailyReflectionRepository {
             status, card.userText, now,
             input.accountId, input.reflectionId, card.id
           );
+          if (input.saveIntent === "retain_selected" && status === "kept") {
+            this.saveWorkingCardForRetainedCard(input.accountId, card, now);
+          }
         }
       }
       const confirmationFingerprint = stableFingerprint({
@@ -5087,8 +5272,11 @@ export class DailyReflectionRepository {
           INSERT INTO dr_admission_operations (
             id, account_id, reflection_id, confirmation_id, status,
             admitted_count, rejected_count, excluded_count, error_code,
-            created_at, updated_at, completed_at
-          ) VALUES (?, ?, ?, ?, 'confirmation_ready', 0, 0, ?, NULL, ?, ?, NULL)
+            created_at, updated_at, completed_at, execution_method
+          ) VALUES (
+            ?, ?, ?, ?, 'confirmation_ready', 0, 0, ?, NULL, ?, ?, NULL,
+            ?
+          )
         `).run(
           operationId,
           input.accountId,
@@ -5096,7 +5284,8 @@ export class DailyReflectionRepository {
           confirmationId,
           excludedCount,
           now,
-          now
+          now,
+          cards.length > 0 ? "memory_proposal_v1" : "legacy_direct_v1"
         );
         const updated = this.database.prepare(`
           UPDATE dr_reflections
@@ -5547,7 +5736,10 @@ export class DailyReflectionRepository {
     const run = this.database.transaction(() => {
       const reflectionRow = this.requireReflectionRow(input.accountId, input.reflectionId);
       const reflection = reflectionFromRow(reflectionRow);
-      if (reflection.status !== "review_pending") {
+      if (
+        reflectionRow.status !== "review_pending"
+        || reflectionRow.review_status !== null
+      ) {
         throw new DailyReflectionConflictError("daily_reflection_card_update_conflict");
       }
       if (reflection.version !== input.expectedVersion) {
@@ -5612,10 +5804,17 @@ export class DailyReflectionRepository {
           : decision.reviewStatus === "excluded" ? "excluded" : "pending";
         this.database.prepare(`
           UPDATE dr_candidates
-          SET user_text = ?, status = ?, version = version + 1, updated_at = ?
+          SET user_text = ?, status = ?, candidate_type = ?,
+              version = version + 1, updated_at = ?
           WHERE account_id = ? AND reflection_id = ? AND id = ?
         `).run(
-          decision.userText, candidateStatus, now,
+          decision.userText,
+          candidateStatus,
+          legacyCandidateKindForV2({
+            candidateKind: card.cardKind,
+            actionClaimed
+          }),
+          now,
           input.accountId, input.reflectionId, decision.cardId
         );
         this.database.prepare(`

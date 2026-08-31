@@ -17,22 +17,39 @@ function policyInput(
     actionClaimed: false,
     epistemicStatus: "explicit_user_statement",
     epistemicCaution: null,
+    riskFlags: [],
     sourceAvailable: true,
     evidenceValid: true,
     subjectPersonConfirmed: false,
     existingPersonPathEligible: false,
+    verifiedOwnerAvailable: true,
     importance: 0.8,
     durability: 0.8,
     novelty: 0.6,
     sensitivity: 0.1,
     existingAdmissionEligible: true,
     existingAdmissionReasons: ["specific_summary"],
+    acknowledgements: [],
     ...overrides
   };
 }
 
-describe("Daily Reflection Memory proposal policy v1", () => {
+describe("Daily Reflection Memory proposal policy v2", () => {
   it.each([
+    {
+      name: "an explicit user insight",
+      input: policyInput({
+        memoryType: "summary",
+        cardKind: "insight"
+      })
+    },
+    {
+      name: "an explicit open question",
+      input: policyInput({
+        memoryType: "question",
+        cardKind: "question"
+      })
+    },
     {
       name: "an explicit decision",
       input: policyInput()
@@ -79,24 +96,26 @@ describe("Daily Reflection Memory proposal policy v1", () => {
   ])("approves $name", ({ input }) => {
     expect(evaluateDailyReflectionMemoryProposalPolicy(input)).toMatchObject({
       status: "approved",
-      reasons: ["policy_threshold_met"],
+      reasons: expect.arrayContaining(["user_selected_working_card"]),
+      confirmationRequirements: [],
       policyVersion: DAILY_REFLECTION_MEMORY_PROPOSAL_POLICY_VERSION
     });
   });
 
-  it("rejects an occasional coffee choice when existing admission identifies it as one-time", () => {
+  it("treats durability and one-time heuristics as recommendation signals after explicit selection", () => {
     const result = evaluateDailyReflectionMemoryProposalPolicy(policyInput({
       memoryType: "preference",
       cardKind: "insight",
+      durability: 0.1,
       existingAdmissionEligible: false,
       existingAdmissionReasons: ["one_time_or_ambiguous_choice"]
     }));
 
-    expect(result.status).toBe("rejected");
-    expect(result.reasons).toEqual([
-      "existing_admission_rejected",
-      "existing_admission:one_time_or_ambiguous_choice"
-    ]);
+    expect(result.status).toBe("approved");
+    expect(result.reasons).toEqual(expect.arrayContaining([
+      "legacy_signal:one_time_or_ambiguous_choice",
+      "user_selected_working_card"
+    ]));
   });
 
   it("rejects an unclaimed action even when the existing evaluator accepts its wording", () => {
@@ -125,7 +144,7 @@ describe("Daily Reflection Memory proposal policy v1", () => {
 
     expect(result.status).toBe("rejected");
     expect(result.reasons).toEqual(expect.arrayContaining([
-      "epistemic_status_not_durable",
+      "fact_epistemic_status_not_explicit",
       "person_fact_explicit_statement_required",
       "reported_inference_person_fact_forbidden"
     ]));
@@ -134,12 +153,33 @@ describe("Daily Reflection Memory proposal policy v1", () => {
   it.each([
     ["archived Card", { cardStatus: "archived" as const }, "card_not_saved"],
     ["unavailable source", { sourceAvailable: false }, "source_unavailable"],
-    ["invalid canonical Evidence", { evidenceValid: false }, "canonical_evidence_invalid"],
-    ["high sensitivity", { sensitivity: 0.8 }, "high_sensitivity"]
+    ["invalid canonical Evidence", { evidenceValid: false }, "canonical_evidence_invalid"]
   ])("rejects %s", (_name, overrides, reason) => {
     const result = evaluateDailyReflectionMemoryProposalPolicy(policyInput(overrides));
     expect(result.status).toBe("rejected");
     expect(result.reasons).toContain(reason);
+  });
+
+  it("returns a structured confirmation requirement for sensitive content", () => {
+    const pending = evaluateDailyReflectionMemoryProposalPolicy(policyInput({
+      sensitivity: 0.8
+    }));
+    expect(pending).toMatchObject({
+      status: "needs_confirmation",
+      confirmationRequirements: [{
+        code: "acknowledge_sensitive_content",
+        resolution: "acknowledgement"
+      }]
+    });
+
+    const confirmed = evaluateDailyReflectionMemoryProposalPolicy(policyInput({
+      sensitivity: 0.8,
+      acknowledgements: ["acknowledge_sensitive_content"]
+    }));
+    expect(confirmed.status).toBe("approved");
+    expect(confirmed.reasons).toContain(
+      "user_confirmation:acknowledge_sensitive_content"
+    );
   });
 
   it("requires both a confirmed subject and the existing Person admission path", () => {
@@ -158,21 +198,21 @@ describe("Daily Reflection Memory proposal policy v1", () => {
     ]));
   });
 
-  it("does not upgrade a reported event into a decision", () => {
+  it("requires acknowledgement before retaining a reported event as a derived decision", () => {
     const result = evaluateDailyReflectionMemoryProposalPolicy(policyInput({
       memoryType: "decision",
       cardKind: "decision",
       epistemicStatus: "reported_event"
     }));
 
-    expect(result.status).toBe("rejected");
-    expect(result.reasons).toEqual(expect.arrayContaining([
-      "reported_event_semantic_upgrade_forbidden",
-      "decision_explicit_statement_required"
-    ]));
+    expect(result.status).toBe("needs_confirmation");
+    expect(result.confirmationRequirements).toEqual([{
+      code: "acknowledge_attribution_uncertainty",
+      resolution: "acknowledgement"
+    }]);
   });
 
-  it("uses durability and the metric score as independent type gates", () => {
+  it("never uses durability or aggregate score as a post-selection veto", () => {
     const lowDurability = evaluateDailyReflectionMemoryProposalPolicy(policyInput({
       memoryType: "commitment",
       cardKind: "action",
@@ -189,8 +229,51 @@ describe("Daily Reflection Memory proposal policy v1", () => {
       sensitivity: 0.7
     }));
 
-    expect(lowDurability.reasons).toContain("commitment_durability_below_threshold");
-    expect(lowScore.reasons).toContain("decision_score_below_threshold");
+    expect(lowDurability.status).toBe("approved");
+    expect(lowScore.status).toBe("approved");
+    expect(lowScore.score).toBeLessThan(0.62);
+  });
+
+  it("does not let an acknowledgement replace verified ownership for facts", () => {
+    const result = evaluateDailyReflectionMemoryProposalPolicy(policyInput({
+      memoryType: "commitment",
+      cardKind: "action",
+      actionClaimed: true,
+      verifiedOwnerAvailable: false,
+      acknowledgements: ["acknowledge_attribution_uncertainty"]
+    }));
+    expect(result).toMatchObject({
+      status: "needs_confirmation",
+      confirmationRequirements: [{
+        code: "verify_fact_owner",
+        resolution: "verified_owner"
+      }]
+    });
+  });
+
+  it.each([
+    ["resolved_or_generic_question", "question" as const, "question" as const],
+    [
+      "verified_identity_required_for_long_term_memory",
+      "summary" as const,
+      "insight" as const
+    ]
+  ])("does not let legacy soft reason %s veto an ordinary selected Card", (
+    legacyReason,
+    memoryType,
+    cardKind
+  ) => {
+    const result = evaluateDailyReflectionMemoryProposalPolicy(policyInput({
+      memoryType,
+      cardKind,
+      existingAdmissionEligible: false,
+      existingAdmissionReasons: [legacyReason],
+      importance: 0.3,
+      durability: 0.2,
+      novelty: 0.1
+    }));
+    expect(result.status).toBe("approved");
+    expect(result.reasons).toContain(`legacy_signal:${legacyReason}`);
   });
 
   it("returns stable unique reasons regardless of existing reason order or duplicates", () => {
@@ -210,10 +293,7 @@ describe("Daily Reflection Memory proposal policy v1", () => {
     expect(first).toEqual(second);
     expect(first.reasons).toEqual([
       "card_not_saved",
-      "source_unavailable",
-      "existing_admission_rejected",
-      "existing_admission:a_reason",
-      "existing_admission:z_reason"
+      "source_unavailable"
     ]);
     expect(new Set(first.reasons).size).toBe(first.reasons.length);
   });
@@ -221,7 +301,7 @@ describe("Daily Reflection Memory proposal policy v1", () => {
   it("rejects unknown proposal types at the schema boundary", () => {
     expect(DailyReflectionMemoryProposalPolicyInputSchema.safeParse({
       ...policyInput(),
-      memoryType: "summary"
+      memoryType: "topic"
     }).success).toBe(false);
   });
 });

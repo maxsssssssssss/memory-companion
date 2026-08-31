@@ -25,6 +25,7 @@ import type {
 import {
   loadDateCompanionSubjectSuggestions
 } from "@/lib/client/date-companion-subject-suggestions";
+import { ProductEvidence, ProductReviewCompletion, ProductState } from "@/components/product-system/product-primitives";
 
 import { CompanionTranscript, type TranscriptChapterPresentation } from "./companion-transcript";
 import styles from "./date-companion.module.css";
@@ -51,6 +52,7 @@ type CompanionRecapProps = {
   memoryBridgeState?: DateCompanionMemoryBridgeState;
   memoryMutationState?: DateCompanionMemoryMutationState;
   proactiveObservation?: ReactNode;
+  proactiveObservationStatus?: "ready" | "fallback";
   questionControl?: ReactNode;
   onFinalize?: (
     assignments: CompanionParticipantMutation[],
@@ -191,15 +193,19 @@ function RecapSourceList({
 }) {
   return (
     <details className={styles.sourceDetails}>
-      <summary><span>{sources.length} 个真实来源</span><span>展开来源</span></summary>
+      <summary><span>{sources.length} 条来源</span><span>查看原话</span></summary>
       <ul className={styles.sourceList}>
         {sources.map((source) => {
           const firstSegmentId = source.segmentIds.find((segmentId) => availableSegmentIds.has(segmentId));
           return (
             <li className={styles.sourceItem} key={source.id}>
-              <blockquote>{source.presentation === "direct_quote" ? `“${source.quote}”` : source.quote}</blockquote>
+              <ProductEvidence
+                label={sourcePresentationLabel(source)}
+                meta={formatTimestamp(source.startSeconds)}
+              >
+                {source.presentation === "direct_quote" ? `“${source.quote}”` : source.quote}
+              </ProductEvidence>
               <div className={styles.sourceMeta}>
-                <span>{sourcePresentationLabel(source)} · {formatTimestamp(source.startSeconds)}</span>
                 {firstSegmentId ? (
                   <button className={styles.sourceJump} onClick={() => onJump(firstSegmentId)} type="button">在文字稿中查看</button>
                 ) : <span className={styles.evidenceOnlyLabel}>已保留可核对原话</span>}
@@ -286,6 +292,7 @@ export function CompanionRecap({
   memoryBridgeState = { status: "idle" },
   memoryMutationState = { status: "idle" },
   proactiveObservation,
+  proactiveObservationStatus = "ready",
   questionControl,
   onFinalize,
   onMemorySync,
@@ -300,6 +307,9 @@ export function CompanionRecap({
   const [editingItemId, setEditingItemId] = useState<string | null>(null);
   const [editingText, setEditingText] = useState("");
   const [rememberVoiceGroupId, setRememberVoiceGroupId] = useState<string | null>(null);
+  const [participantReviewOpen, setParticipantReviewOpen] = useState(false);
+  const [reviewedSpeakerIds, setReviewedSpeakerIds] = useState<Set<string>>(() => new Set());
+  const [includeLongTerm, setIncludeLongTerm] = useState(false);
   const [localOperation, setLocalOperation] = useState<"finalize" | "sync" | "refresh" | null>(null);
   const [localError, setLocalError] = useState<string | null>(null);
   const [localErrorOperation, setLocalErrorOperation] = useState<"finalize" | "sync" | "refresh" | null>(null);
@@ -325,7 +335,19 @@ export function CompanionRecap({
   const speakerSyncKey = speakers.map((speaker) => speaker.id).join("|");
 
   useEffect(() => {
-    setRoles(initialRoles(speakers, participants));
+    const nextRoles = initialRoles(speakers, participants);
+    const nextReviewedSpeakerIds = new Set(
+      speakers.flatMap((speaker) => participants.some(
+        (participant) => participant.speakerId === speaker.id && participant.state === "confirmed"
+      ) ? [speaker.id] : [])
+    );
+    setRoles(nextRoles);
+    setReviewedSpeakerIds(nextReviewedSpeakerIds);
+    setParticipantReviewOpen(
+      Boolean(onFinalize)
+      && interaction?.persistenceStatus !== "confirmed"
+      && speakers.length > 0
+    );
   }, [interaction?.id, participantSyncKey, speakerSyncKey]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
@@ -336,6 +358,7 @@ export function CompanionRecap({
     setEditingItemId(null);
     setEditingText("");
     setRememberVoiceGroupId(null);
+    setIncludeLongTerm(false);
     setSubjectSuggestionState({ status: "idle" });
     setLocalError(null);
     setLocalErrorOperation(null);
@@ -343,6 +366,8 @@ export function CompanionRecap({
 
   const editable = Boolean(onFinalize);
   const confirmed = interaction?.persistenceStatus === "confirmed";
+  const participantReviewComplete = speakers.every((speaker) => reviewedSpeakerIds.has(speaker.id));
+  const participantReviewCollapsible = confirmed || !editable || participantReviewComplete;
   const rolesBySourceSpeaker = useMemo(
     () => sourceSpeakerRoles(participants, roles),
     [participants, roles]
@@ -420,9 +445,9 @@ export function CompanionRecap({
     || memoryStatus === "pending"
     || memoryStatus === "processing";
   const subjectEditable = Boolean(
-    longTermReady &&
-    (
-      interaction?.persistenceStatus !== "confirmed"
+    longTermReady
+    && (
+      (interaction?.persistenceStatus !== "confirmed" && includeLongTerm)
       || memoryStatus === "not_queued"
       || relationshipReconfirmationRequired
     )
@@ -458,8 +483,8 @@ export function CompanionRecap({
       setSubjectSuggestionState({
         status: "error",
         message: error instanceof Error && error.message === "subject_suggestion_provider_unavailable"
-          ? "这次人物范围暂时没有整理好；你仍可只保存本次复盘。"
-          : "这次内容范围暂时没有整理好；你仍可只保存本次复盘。"
+          ? "这次人物范围暂时没有整理好；你仍可完成本次复盘。"
+          : "这次内容范围暂时没有整理好；你仍可完成本次复盘。"
       });
     });
     return () => controller.abort();
@@ -593,7 +618,11 @@ export function CompanionRecap({
       "",
       `${targetUrl.pathname}${targetUrl.search}${targetUrl.hash}`
     );
-    requestAnimationFrame(() => document.getElementById("full-transcript")?.scrollIntoView({ behavior: "smooth", block: "start" }));
+    const reduceMotion = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false;
+    requestAnimationFrame(() => document.getElementById("full-transcript")?.scrollIntoView({
+      behavior: reduceMotion ? "auto" : "smooth",
+      block: "start"
+    }));
   };
 
   const runMutation = async (
@@ -647,6 +676,10 @@ export function CompanionRecap({
     );
     return (
       <div className={styles.recapItemEditor} data-disposition={disposition} key={item.id}>
+        <div className={styles.recapItemHeading}>
+          <h4>{item.title}</h4>
+          <span>{disposition === "kept" ? (confirmed ? "已保留" : "将保留") : "未保留"}</span>
+        </div>
         {editing ? (
           <div className={styles.recapOptionalEditor}>
             <label htmlFor={`recap-edit-${item.id}`}>修改整理后的文字</label>
@@ -717,414 +750,371 @@ export function CompanionRecap({
     );
   };
 
+  const renderRecapGroup = (group: (typeof GROUPS)[number]) => {
+    const groupItems = validItems.filter((item) => item.kind === group.kind);
+    const presentations = groupItems.map(recapItemPresentation);
+    const includedItems = presentations.filter((item) => item.disposition !== "excluded");
+    const excludedItems = presentations.filter((item) => item.disposition === "excluded");
+    const expanded = expandedGroups.has(group.kind);
+    const visibleItems = expanded ? includedItems : includedItems.slice(0, 5);
+    const hiddenCount = includedItems.length - visibleItems.length;
+    return (
+      <section className={styles.recapReviewGroup} data-card-kind={group.kind} key={group.kind}>
+        <header>
+          <span>{group.eyebrow}</span>
+          <h3>{group.title}</h3>
+        </header>
+        <div id={`recap-group-${group.kind}-items`}>
+          {includedItems.length === 0
+            ? <p className={styles.recapGroupEmpty}>{group.empty}</p>
+            : visibleItems.map(renderRecapItem)}
+        </div>
+        {includedItems.length > 5 ? (
+          <button
+            aria-controls={`recap-group-${group.kind}-items`}
+            aria-expanded={expanded}
+            className={styles.recapGroupToggle}
+            onClick={() => setExpandedGroups((current) => {
+              const next = new Set(current);
+              if (next.has(group.kind)) next.delete(group.kind);
+              else next.add(group.kind);
+              return next;
+            })}
+            type="button"
+          >
+            {expanded ? "收起，仅显示前 5 条" : `展开其余 ${hiddenCount} 条`}
+          </button>
+        ) : null}
+        {excludedItems.length > 0 ? (
+          <details className={styles.recapExcludedGroup}>
+            <summary>未保留 {excludedItems.length} 条</summary>
+            <div>{excludedItems.map(renderRecapItem)}</div>
+          </details>
+        ) : null}
+      </section>
+    );
+  };
+
+  const participantReviewPanel = (
+    <details
+      className={`${styles.contentPanel} ${styles.participantPanel}`}
+      data-panel-state={confirmed ? "confirmed" : editable ? "current" : "readonly"}
+      data-review-complete={participantReviewComplete ? "true" : "false"}
+      onToggle={(event) => {
+        if (!event.currentTarget.open && !participantReviewCollapsible) {
+          event.currentTarget.open = true;
+          setParticipantReviewOpen(true);
+          return;
+        }
+        setParticipantReviewOpen(event.currentTarget.open);
+      }}
+      open={participantReviewOpen}
+    >
+      <summary
+        className={styles.participantSummary}
+        onClick={(event) => {
+          if (participantReviewOpen && !participantReviewCollapsible) event.preventDefault();
+        }}
+      >
+        <div>
+          <h2>核对说话人</h2>
+          <p>{confirmed
+            ? "本次说话人归属已保存；需要时可以重新展开核对。"
+            : participantReviewComplete
+              ? "说话人已核对；你可以收起这一段，继续阅读复盘。"
+              : "请为每个声音明确选择“我”“Ta”或“暂不确定”；全部核对后可以收起。"}</p>
+        </div>
+        <span aria-hidden="true" className={styles.participantSummaryAction}>
+          {!participantReviewCollapsible ? "请先核对" : participantReviewOpen ? "收起" : "展开"}
+        </span>
+      </summary>
+      <div className={styles.participantPanelBody}>
+        {unassignedTranscriptCount > 0 ? (
+          <p className={styles.boundaryNote} role="note">
+            有 {unassignedTranscriptCount} 段文字没有稳定的说话人标记；它们仍可查看，但不会被合并成虚构人物或进入长期记录。
+          </p>
+        ) : null}
+        {speakers.length > 0 ? (
+          <div className={styles.participantList}>
+            {speakers.map((speaker, index) => {
+              const speakerName = speaker.label?.trim() || `说话人 ${index + 1}`;
+              const review = participants.find((participant) => participant.speakerId === speaker.id);
+              const memberSpeakerIds = participantMemberSpeakerIds(review, speaker.id);
+              const audioSpeakerId = review?.audioSpeakerId ?? (memberSpeakerIds.length === 1 ? memberSpeakerIds[0] : undefined);
+              const audioAvailable = Boolean(interaction?.relationshipInteractionId && audioSpeakerId && !audioErrors[speaker.id]);
+              return (
+                <article className={styles.participantCard} key={speaker.id}>
+                  <span className={styles.speakerMark} aria-hidden="true">{index + 1}</span>
+                  <div className={styles.participantCopy}>
+                    <b>{speakerName}</b>
+                    <small>{speaker.label ? "本次录音中的声音" : "请试听后确认"}</small>
+                    {review?.roleSuggestion ? <small className={styles.participantSuggestion}>已按上次确认预选，请再核对一次</small> : null}
+                    {audioAvailable ? (
+                      <label className={styles.participantAudio}>
+                        <span>播放声音节选</span>
+                        <audio
+                          aria-label={`${speakerName}的声音节选`}
+                          controls
+                          onError={() => setAudioErrors((current) => ({ ...current, [speaker.id]: true }))}
+                          preload="metadata"
+                          src={`/api/date-companion/interactions/${encodeURIComponent(interaction!.relationshipInteractionId!)}/participants/${encodeURIComponent(audioSpeakerId!)}/audio`}
+                        />
+                      </label>
+                    ) : <small>声音节选暂不可用，请结合原话判断。</small>}
+                    <ul className={styles.participantSamples}>
+                      {speaker.samples.map((sample) => <li key={sample}>“{sample}”</li>)}
+                    </ul>
+                    {editable ? (
+                      <div className={styles.participantRoleGroup} aria-label={`${speakerName}的身份`}>
+                        {ROLE_OPTIONS.map((option) => (
+                          <button
+                            aria-pressed={(roles[speaker.id] ?? "unresolved") === option.role}
+                            className={`${styles.roleChoice} ${(roles[speaker.id] ?? "unresolved") === option.role ? styles.roleChoiceActive : ""}`}
+                            disabled={confirmed || saving}
+                            key={option.role}
+                            onClick={() => {
+                              setRoles((current) => ({ ...current, [speaker.id]: option.role }));
+                              setReviewedSpeakerIds((current) => new Set(current).add(speaker.id));
+                              if (option.role !== "companion" && rememberVoiceGroupId === speaker.id) setRememberVoiceGroupId(null);
+                            }}
+                            type="button"
+                          >{option.label}</button>
+                        ))}
+                      </div>
+                    ) : (
+                      <span className={styles.readOnlyBadge}>{(roles[speaker.id] ?? "unresolved") === "self" ? "已确认：我" : (roles[speaker.id] ?? "unresolved") === "companion" ? "已确认：Ta" : "尚未核对"}</span>
+                    )}
+                    {editable && !confirmed && roles[speaker.id] === "companion" && enrollmentEligibleGroups.some((candidate) => candidate.speaker.id === speaker.id) ? (
+                      <label className={styles.voiceEnrollmentChoice}>
+                        <input
+                          checked={rememberVoiceGroupId === speaker.id}
+                          disabled={saving}
+                          name="date-companion-voice-enrollment"
+                          onChange={() => setRememberVoiceGroupId(speaker.id)}
+                          type="radio"
+                        />
+                        <span><b>记住这段声音，方便下次认出 Ta</b><small>整次最多选择一段；默认关闭。</small></span>
+                      </label>
+                    ) : null}
+                  </div>
+                </article>
+              );
+            })}
+          </div>
+        ) : <div className={styles.emptyState}><div><b>没有可核对的说话人</b><span>{unassignedTranscriptCount > 0 ? "文字稿没有稳定的说话人标记。" : "文字稿中没有识别到可用内容。"}</span></div></div>}
+      </div>
+    </details>
+  );
+
   return (
-    <div className={`${styles.twoColumnPage} ${styles.recapPage}`}>
-      <header className={`${styles.stickyHero} ${styles.recapHero}`}>
-        <span className={styles.recapMoon} aria-hidden="true" />
-        <p>{interaction?.recordingDate ?? "这次相处"}</p>
-        <h1>{interaction?.status === "ready" ? "这次相处，已经整理好了" : interaction?.status === "failed" ? "这次整理没有完成" : "这次相处，正在整理"}</h1>
-        <span>{editable
-          ? confirmed ? "这次复盘已经留下，对应原话会继续保留。" : "只需要核对每段声音属于我、Ta，还是暂不确定；复盘内容不再要求逐条确认。"
-          : "你可以核对来源，但不会在这里修改或确认写入长期记录。"}</span>
+    <main className={styles.recapReviewPage}>
+      <header className={styles.recapReviewHeader}>
+        <div>
+          <p className={styles.eyebrow}>{interaction?.recordingDate ?? "这次相处"}</p>
+          <h1>{!interaction
+            ? "还没有相处记录"
+            : interaction.status === "ready"
+              ? confirmed ? "这次相处的复盘已完成" : "完成这次相处的复盘"
+              : interaction.status === "failed" ? "这次整理没有完成" : "这次相处正在整理"}</h1>
+          <p>{!interaction
+            ? "上传一段录音后，这里会出现可核对的复盘。"
+            : interaction.status === "ready"
+              ? confirmed
+                ? "你留下的内容和原话仍可随时核对。"
+                : "先读这次相处里值得带走的内容，再处理真正需要你确认的部分。"
+              : interaction.status === "failed"
+                ? "录音和已有内容不会因此丢失。"
+                : "录音正在转成文字并整理重点。"}</p>
+        </div>
         {interaction ? (
-          <div className={styles.heroFile}>
-            <small>本次录音</small>
-            <b>{interaction.fileName}</b>
+          <div className={styles.recapHeaderMeta} aria-label="本次录音信息">
+            <span>{interaction.fileName}</span>
             <span>{[duration, interaction.status === "ready" ? "已整理" : interaction.status === "failed" ? "处理失败" : "正在处理"].filter(Boolean).join(" · ")}</span>
           </div>
         ) : null}
         {questionControl ? <div className={styles.recapQaControl}>{questionControl}</div> : null}
       </header>
 
-      <div
-        aria-label="这次相处详情"
-        className={`${styles.contentColumn} ${styles.recapContent}`}
-        role="region"
-        tabIndex={0}
-      >
+      <div aria-label="这次相处详情" className={styles.recapReviewBody} role="region">
         {!interaction ? (
-          <section className={styles.contentPanel}>
-            <h2>还没有一次相处记录</h2>
-            <div className={styles.emptyState}><div><b>先上传一段录音</b><span>整理完成后，这里会显示有真实来源的复盘和文字稿。</span><a href="/date-companion/a">返回上传</a></div></div>
-          </section>
+          <ProductState
+            action={<Link href="/date-companion/a">返回上传</Link>}
+            description="整理完成后，这里会显示带真实来源的复盘和文字稿。"
+            title="先上传一段录音"
+            tone="empty"
+          />
         ) : interaction.status !== "ready" ? (
-          <section className={styles.contentPanel}>
-            <h2>{interaction.status === "failed" ? "处理失败" : "还在整理"}</h2>
-            <p className={styles.contentIntro}>{interaction.status === "failed" ? "请返回首页查看服务端返回的错误；“重新读取”不会重新执行处理。" : `当前真实进度${typeof interaction.progress === "number" ? `为 ${Math.round(interaction.progress)}%` : "暂未返回"}。内容为空不代表最终没有内容。`}</p>
-          </section>
+          <ProductState
+            action={<Link href="/date-companion/a">返回此刻</Link>}
+            description={interaction.status === "failed"
+              ? "请返回此刻查看失败原因并选择是否重试。"
+              : `当前进度${typeof interaction.progress === "number" ? ` ${Math.round(interaction.progress)}%` : "正在更新"}；现在没有内容不代表最终结果为空。`}
+            title={interaction.status === "failed" ? "整理暂未完成" : "还在整理"}
+            tone={interaction.status === "failed" ? "error" : "loading"}
+          />
         ) : (
           <>
+            {pageError ? <p className={styles.inlineError} role="alert">{pageError}</p> : null}
+
+            {participantReviewPanel}
+
+            <section className={styles.recapOverview} aria-labelledby="recap-overview-title">
+              <div>
+                <h2 id="recap-overview-title">这次相处里，整理出 {validItems.length} 条有原话支撑的内容</h2>
+                <p>复盘会保存你确认的说话人和内容；长期记忆不会自动改变。</p>
+              </div>
+              <span>{confirmed ? "已完成" : editable ? "等你看看" : "只读查看"}</span>
+            </section>
+
             {proactiveObservation ? (
-              <section className={`${styles.contentPanel} ${styles.recapProactivePanel}`} aria-labelledby="current-proactive-observation-title">
-                <h2 id="current-proactive-observation-title">一个小发现</h2>
-                <p className={styles.contentIntro}>这是从你确认留下的原话中整理的一点提示。</p>
-                {proactiveObservation}
+              <section
+                className={styles.recapObservation}
+                data-observation-origin={proactiveObservationStatus}
+                aria-labelledby="current-proactive-observation-title"
+              >
+                <span aria-hidden="true" className={styles.recapObservationMark}>
+                  {proactiveObservationStatus === "ready" ? "AI" : "原话"}
+                </span>
+                <div className={styles.recapObservationBody}>
+                  <header className={styles.recapObservationHeader}>
+                    <h2 id="current-proactive-observation-title">
+                      {proactiveObservationStatus === "ready" ? "AI 观察" : "原话线索"}
+                    </h2>
+                    <p>{proactiveObservationStatus === "ready"
+                      ? "基于这次可核对的原话，提供一个值得再看一眼的角度。"
+                      : "从这次可核对的原话里，整理出一个值得留意的线索。"}</p>
+                  </header>
+                  {proactiveObservation}
+                </div>
               </section>
             ) : null}
 
-            <div className={styles.processSteps} aria-label="本次录音整理阶段">
-              <span><b>01</b>录音已上传</span>
-              <span><b>02</b>已经转成文字</span>
-              <span
-                className={styles.processActive}
-                data-stage-state={confirmed ? "confirmed" : editable ? "current" : "readonly"}
-              ><b>03</b>{confirmed ? "已确认留下" : editable ? "核对并确认" : "只读核对来源"}</span>
-            </div>
-
-            {pageError ? <p className={styles.inlineError} role="alert">{pageError}</p> : null}
-
-            <details
-              className={`${styles.contentPanel} ${styles.participantPanel}`}
-              data-panel-state={confirmed ? "confirmed" : editable ? "current" : "readonly"}
-              open
-            >
-              <summary className={styles.participantSummary}>
-                <h2>这次录音里的说话人</h2>
-                <span aria-hidden="true" className={styles.participantSummaryAction} />
-              </summary>
-              <div className={styles.participantPanelBody}>
-                <p className={styles.contentIntro}>请由你确认“我”“Ta”或“暂不确定”。已有昵称和说话人编号都不会被当成人物身份。</p>
-                {unassignedTranscriptCount > 0 ? (
-                  <p className={styles.boundaryNote} role="note">
-                    有 {unassignedTranscriptCount} 段文字没有稳定的说话人标记，仍可在完整文字稿中查看，但不会被合并成一个虚构人物，也不能进入长期记录。
-                  </p>
-                ) : null}
-                {speakers.length > 0 ? (
-                  <div className={styles.participantList}>
-                    {speakers.map((speaker, index) => (
-                      <article className={styles.participantCard} key={speaker.id}>
-                      <span className={styles.speakerMark} aria-hidden="true">{index + 1}</span>
-                      <div className={styles.participantCopy}>
-                        {(() => {
-                          const speakerName = speaker.label?.trim() || `说话人 ${index + 1}`;
-                          const review = participants.find(
-                            (participant) => participant.speakerId === speaker.id
-                          );
-                          const memberSpeakerIds = participantMemberSpeakerIds(review, speaker.id);
-                          const audioSpeakerId = review?.audioSpeakerId
-                            ?? (memberSpeakerIds.length === 1 ? memberSpeakerIds[0] : undefined);
-                          const audioAvailable = Boolean(
-                            interaction.relationshipInteractionId
-                            && audioSpeakerId
-                            && !audioErrors[speaker.id]
-                          );
-                          return (
-                            <>
-                              <b>{speakerName}</b>
-                              <small>{speaker.label ? "本次录音中的声音" : "请试听后确认"}</small>
-                              {review?.roleSuggestion ? (
-                                <small className={styles.participantSuggestion}>
-                                  已按你上次的确认预选，请再听一次核对
-                                </small>
-                              ) : null}
-                              {audioAvailable ? (
-                                <label className={styles.participantAudio}>
-                                  <span>播放这段声音的节选</span>
-                                  <audio
-                                    aria-label={`${speakerName}的声音节选`}
-                                    controls
-                                    onError={() => setAudioErrors((current) => ({ ...current, [speaker.id]: true }))}
-                                    preload="metadata"
-                                    src={`/api/date-companion/interactions/${encodeURIComponent(interaction.relationshipInteractionId!)}/participants/${encodeURIComponent(audioSpeakerId!)}/audio`}
-                                  />
-                                </label>
-                              ) : <small>声音节选暂不可用，请结合下面的原话判断。</small>}
-                            </>
-                          );
-                        })()}
-                        <ul className={styles.participantSamples}>
-                          {speaker.samples.map((sample) => <li key={sample}>“{sample}”</li>)}
-                        </ul>
-                        {editable ? (
-                          <div className={styles.participantRoleGroup} aria-label={`${speaker.label?.trim() || `说话人 ${index + 1}`}的身份`}>
-                            {ROLE_OPTIONS.map((option) => (
-                              <button
-                                aria-pressed={(roles[speaker.id] ?? "unresolved") === option.role}
-                                className={`${styles.roleChoice} ${(roles[speaker.id] ?? "unresolved") === option.role ? styles.roleChoiceActive : ""}`}
-                                disabled={confirmed || saving}
-                                key={option.role}
-                                onClick={() => {
-                                  setRoles((current) => ({ ...current, [speaker.id]: option.role }));
-                                  if (option.role !== "companion" && rememberVoiceGroupId === speaker.id) {
-                                    setRememberVoiceGroupId(null);
-                                  }
-                                }}
-                                type="button"
-                              >{option.label}</button>
-                            ))}
-                          </div>
-                        ) : (
-                          <span className={styles.readOnlyBadge}>
-                            {(roles[speaker.id] ?? "unresolved") === "self"
-                              ? "已确认：我"
-                              : (roles[speaker.id] ?? "unresolved") === "companion"
-                                ? "已确认：Ta"
-                                : "尚未核对"}
-                          </span>
-                        )}
-                        {editable
-                           && !confirmed
-                           && roles[speaker.id] === "companion"
-                           && enrollmentEligibleGroups.some((candidate) => candidate.speaker.id === speaker.id) ? (
-                             <label className={styles.voiceEnrollmentChoice}>
-                               <input
-                                 checked={rememberVoiceGroupId === speaker.id}
-                                 disabled={saving}
-                                 name="date-companion-voice-enrollment"
-                                 onChange={() => setRememberVoiceGroupId(speaker.id)}
-                                 type="radio"
-                               />
-                               <span><b>记住这段声音，方便下次认出 Ta</b><small>整次最多选择一段；仅在你明确选择后提交，默认关闭。</small></span>
-                             </label>
-                          ) : null}
-                      </div>
-                      </article>
-                    ))}
-                  </div>
-                ) : <div className={styles.emptyState}><div><b>没有可核对的说话人</b><span>{unassignedTranscriptCount > 0 ? "这次文字稿没有稳定的说话人标记，因此暂不能确认人物归属。" : "文字稿中没有识别到可用内容。"}</span></div></div>}
+            <section className={styles.recapFindings} aria-labelledby="recap-findings-title">
+              <header>
+                <h2 id="recap-findings-title">值得带走</h2>
+                <p>先阅读内容；需要时再编辑、移除或查看原话。</p>
+              </header>
+              <div className={styles.recapPrimaryGroups}>
+                {GROUPS.slice(0, 2).map(renderRecapGroup)}
               </div>
-            </details>
+              <details className={styles.recapMore}>
+                <summary>
+                  <span>更多可能有用的内容</span>
+                  <span>{validItems.filter((item) => GROUPS.slice(2).some((group) => group.kind === item.kind)).length} 条</span>
+                </summary>
+                <div className={styles.recapSecondaryGroups}>
+                  {GROUPS.slice(2).map(renderRecapGroup)}
+                </div>
+              </details>
+            </section>
 
             <section className={styles.memoryAdmissionPanel} aria-labelledby="long-term-review-title">
-              <div>
-                <p className={styles.eyebrow}>长期保留</p>
-                <h2 id="long-term-review-title">看看哪些内容值得留下</h2>
-                {memoryBridgeState.status === "idle" || memoryBridgeState.status === "loading" ? (
-                  <p>正在读取人物设置。你仍然可以先完成这次单次复盘。</p>
-                ) : memoryBridgeState.status === "error" ? (
-                  <p>人物设置暂时没有读取成功；这次复盘仍可保存，但不会加入长期记录。</p>
-                ) : !readyMemoryBridge?.setting.enabled ? (
-                  <p>长期保留目前关闭。这次复盘仍会保存；如果希望未来内容进入人物页，请先开启。</p>
-                ) : !mapping || mapping.status !== "confirmed" || mapping.selfPersonId === mapping.companionPersonId ? (
-                  <p>需要先确认两个不同的人物，才能把内容整理进长期记录。</p>
-                ) : (
-                  <p>我会根据原话，把内容整理为关于我、关于 Ta、关于我们或暂不确定。你可以展开核对；确认时会整体接受这些归属，只需另外决定哪些内容值得留下。</p>
-                )}
-              </div>
-              {!longTermReady ? (
-                <Link className={styles.textButton} href="/date-companion/a/people">前往人物与长期保留</Link>
-              ) : (
-                <span className={styles.memoryStatusBadge} data-status={memoryStatus}>{MEMORY_STATUS_COPY[memoryStatus]}</span>
-              )}
-              {longTermReady && memoryStillProcessing ? (
+              <header>
                 <div>
-                  <p>{saving
-                    ? "整理完成后会自动更新这里，无需刷新页面。"
-                    : "整理仍在后台继续；你可以查看一次最新结果，无需重新提交。"}</p>
-                  {!saving && onMemoryRefresh ? (
-                    <button
-                      className={styles.secondaryButton}
-                      onClick={() => void runMutation("refresh", onMemoryRefresh)}
-                      type="button"
-                    >{localOperation === "refresh" ? "正在查看…" : "查看整理结果"}</button>
-                  ) : null}
+                  <h2 id="long-term-review-title">长期记忆（可选）</h2>
+                  <p>只在你明确选择时使用；不影响“完成本次复盘”。</p>
+                </div>
+                {!longTermReady
+                  ? <Link className={styles.textButton} href="/date-companion/a/people">查看人物设置</Link>
+                  : <span className={styles.memoryStatusBadge} data-status={memoryStatus}>{MEMORY_STATUS_COPY[memoryStatus]}</span>}
+              </header>
+              {!confirmed && longTermReady ? (
+                <label className={styles.longTermChoice}>
+                  <input checked={includeLongTerm} disabled={saving} onChange={(event) => setIncludeLongTerm(event.currentTarget.checked)} type="checkbox" />
+                  <span><b>这次也整理进长期记忆</b><small>会先展示内容归属；你不选择时，不会写入长期记忆。</small></span>
+                </label>
+              ) : null}
+              {memoryBridgeState.status === "error" ? <p>人物设置暂时没有读取成功；本次复盘仍可完成。</p> : null}
+              {longTermReady && memoryStillProcessing ? (
+                <div className={styles.longTermStatus}>
+                  <p>{saving ? "正在整理；本次复盘仍可单独完成。" : "长期整理仍在后台继续。"}</p>
+                  {!saving && onMemoryRefresh ? <button className={styles.secondaryButton} onClick={() => void runMutation("refresh", onMemoryRefresh)} type="button">{localOperation === "refresh" ? "正在查看…" : "查看整理结果"}</button> : null}
                 </div>
               ) : null}
-              {subjectEditable && subjectSuggestionState.status === "loading" ? (
-                <p>正在结合整次相处，帮你分清这些内容主要关于谁…</p>
-              ) : null}
-              {subjectEditable && subjectSuggestionState.status === "error" ? (
-                <p className={styles.inlineError} role="alert">{subjectSuggestionState.message}</p>
-              ) : null}
+              {subjectEditable && subjectSuggestionState.status === "loading" ? <p role="status">正在整理内容归属；你仍可先完成本次复盘。</p> : null}
+              {subjectEditable && subjectSuggestionState.status === "error" ? <p className={styles.inlineError} role="alert">{subjectSuggestionState.message}</p> : null}
               {subjectEditable && subjectSuggestionBatch ? (
                 <div className={styles.subjectReview}>
-                  <p>已经整理好</p>
+                  <p>准备长期保留的内容归属</p>
                   <div className={styles.subjectReadOnly} aria-label="内容范围统计">
-                    <span>关于 Ta {subjectCounts.companion}</span>
-                    <span>关于我们 {subjectCounts.both}</span>
-                    <span>关于我 {subjectCounts.self}</span>
-                    <span>暂不确定 {subjectCounts.unknown}</span>
+                    <span>关于 Ta {subjectCounts.companion}</span><span>关于我们 {subjectCounts.both}</span><span>关于我 {subjectCounts.self}</span><span>暂不确定 {subjectCounts.unknown}</span>
                   </div>
-                  {subjectSuggestionBatch.status === "degraded" ? (
-                    <small>有些内容目前还不能确定和谁有关，会先保持“暂不确定”，不会自动关联人物。</small>
-                  ) : null}
+                  {subjectSuggestionBatch.status === "degraded" ? <small>无法确认归属的内容会保持“暂不确定”，不会自动关联人物。</small> : null}
                   {subjectThemes.map((theme) => (
-                    <div className={styles.subjectSource} key={theme.kind}>
-                      <p>{theme.title} · {theme.suggestions.length} 条原话</p>
+                    <details className={styles.subjectSource} key={theme.kind}>
+                      <summary>{theme.title} · {theme.suggestions.length} 条原话</summary>
                       <div className={styles.subjectReadOnly} aria-label={`${theme.title}的内容范围`}>
-                        {SUBJECT_OPTIONS.flatMap((option) => theme.counts[option.subject] > 0
-                          ? [<span key={option.subject}>{option.label} {theme.counts[option.subject]}</span>]
-                          : [])}
+                        {SUBJECT_OPTIONS.flatMap((option) => theme.counts[option.subject] > 0 ? [<span key={option.subject}>{option.label} {theme.counts[option.subject]}</span>] : [])}
                       </div>
-                      <details className={styles.sourceDetails}>
-                        <summary><span>查看每条归属</span><span>{theme.suggestions.length} 条</span></summary>
-                        <ul className={styles.sourceList}>
-                          {theme.suggestions.map((suggestion, suggestionIndex) => (
-                            <li className={styles.sourceItem} key={suggestion.canonicalSourceKey}>
-                              <p>“{suggestion.quote}”</p>
-                              <div
-                                className={styles.subjectReadOnly}
-                                aria-label={`${theme.title}第 ${suggestionIndex + 1} 条原话的内容范围`}
-                              >
-                                <span>{SUBJECT_OPTIONS.find((option) => option.subject === suggestion.subject)?.label ?? "暂不确定"}</span>
-                              </div>
-                            </li>
-                          ))}
-                        </ul>
-                      </details>
-                    </div>
+                      <ol className={styles.subjectSourceList}>
+                        {theme.suggestions.map((suggestion, index) => (
+                          <li key={suggestion.canonicalSourceKey}>
+                            <q>{suggestion.quote}</q>
+                            <span aria-label={`${theme.title}第 ${index + 1} 条原话的内容范围`}>
+                              {SUBJECT_OPTIONS.find((option) => option.subject === suggestion.subject)?.label ?? "暂不确定"}
+                            </span>
+                          </li>
+                        ))}
+                      </ol>
+                    </details>
                   ))}
-                  <small>点击确认会整体接受以上归属；真正留下哪些内容，仍以你在下方的保留或删除为准。</small>
+                  <small>完成复盘时会接受这些归属；真正长期保留哪些内容，仍受现有安全规则约束。</small>
                 </div>
               ) : null}
-              {relationshipReconfirmationRequired ? (
-                <p className={styles.boundaryNote} role="note">
-                  这段长期关系记录之前已被清理。重新启用后，我会按你刚确认的归属继续整理。
-                </p>
-              ) : memoryStatus === "needs_review" ? (
-                <p className={styles.boundaryNote} role="note">
-                  {memoryReview?.kind === "evidence_review_required"
-                    ? "这次原话来源已经变化，暂时不能继续整理长期记录。"
-                    : "人物设置已经变化，需要重新确认后才能继续整理长期记录。"}
-                </p>
-              ) : null}
+              {relationshipReconfirmationRequired ? <p className={styles.boundaryNote} role="note">这段长期关系记录之前已被清理；重新启用后会按你确认的归属继续整理。</p> : memoryStatus === "needs_review" ? <p className={styles.boundaryNote} role="note">{memoryReview?.kind === "evidence_review_required" ? "这次原话来源已经变化，暂时不能继续长期整理。" : "人物设置已经变化，需要重新确认后才能继续长期整理。"}</p> : null}
               {memorySyncError ? <p className={styles.inlineError} role="alert">{memorySyncError}</p> : null}
-              {confirmed && longTermReady && onMemorySync && (
-                memoryStatus === "not_queued" ||
-                memoryStatus === "retryable_failed" ||
-                relationshipReconfirmationRequired
-              ) ? (
+              {confirmed && longTermReady && onMemorySync && (memoryStatus === "not_queued" || memoryStatus === "retryable_failed" || relationshipReconfirmationRequired) ? (
                 <button
                   className={styles.secondaryButton}
                   disabled={saving || (memoryStatus !== "retryable_failed" && !automaticSubjectsComplete)}
                   onClick={() => void runMutation("sync", async () => {
-                    if (memoryStatus === "retryable_failed") {
-                      await onMemorySync();
-                      return;
-                    }
-                    if (!subjectSuggestionConfirmation || !automaticSubjectsComplete) {
-                      throw new Error("内容范围还没有整理完成，请稍后再试。");
-                    }
-                    if (relationshipReconfirmationRequired && !relationshipReconfirmation) {
-                      throw new Error("长期关系恢复信息还没有准备好，请稍后再试。");
-                    }
-                    if (relationshipReconfirmation) {
-                      await onMemorySync(
-                        memoryAdmissionSelections,
-                        subjectSuggestionConfirmation,
-                        relationshipReconfirmation
-                      );
-                      return;
-                    }
-                    await onMemorySync(memoryAdmissionSelections, subjectSuggestionConfirmation);
+                    if (memoryStatus === "retryable_failed") return onMemorySync();
+                    if (!subjectSuggestionConfirmation || !automaticSubjectsComplete) throw new Error("内容归属还没有整理完成，请稍后再试。");
+                    if (relationshipReconfirmationRequired && !relationshipReconfirmation) throw new Error("长期关系恢复信息还没有准备好，请稍后再试。");
+                    return relationshipReconfirmation
+                      ? onMemorySync(memoryAdmissionSelections, subjectSuggestionConfirmation, relationshipReconfirmation)
+                      : onMemorySync(memoryAdmissionSelections, subjectSuggestionConfirmation);
                   })}
                   type="button"
-                >{localOperation === "sync" || (memoryMutationState.status === "saving" && memoryMutationState.operation === "sync")
-                    ? "正在整理…"
-                    : memoryStatus === "retryable_failed"
-                      ? "重新整理"
-                      : relationshipReconfirmationRequired
-                        ? "重新启用并继续整理"
-                        : "接受以上归属并开始整理"}</button>
+                >{localOperation === "sync" || (memoryMutationState.status === "saving" && memoryMutationState.operation === "sync") ? "正在整理…" : memoryStatus === "retryable_failed" ? "重新整理" : relationshipReconfirmationRequired ? "重新启用并继续整理" : "开始长期整理"}</button>
               ) : null}
             </section>
 
-            <section className={styles.recapGrid} aria-label="这次相处复盘">
-              {GROUPS.map((group) => {
-                const groupItems = validItems.filter((item) => item.kind === group.kind);
-                const presentations = groupItems.map(recapItemPresentation);
-                const includedItems = presentations.filter((item) => item.disposition !== "excluded");
-                const excludedItems = presentations.filter((item) => item.disposition === "excluded");
-                const expanded = expandedGroups.has(group.kind);
-                const visibleItems = expanded ? includedItems : includedItems.slice(0, 5);
-                const hiddenCount = includedItems.length - visibleItems.length;
-                return (
-                  <article className={styles.recapCard} data-card-kind={group.kind} key={group.kind}>
-                    <span className={styles.recapNumber}>{group.eyebrow}</span>
-                    <h3>{group.title}</h3>
-                    <div id={`recap-group-${group.kind}-items`}>
-                      {includedItems.length === 0 ? <p className={styles.recapText}>{group.empty}</p> : visibleItems.map(renderRecapItem)}
-                    </div>
-                    {includedItems.length > 5 ? (
-                      <button
-                        aria-controls={`recap-group-${group.kind}-items`}
-                        aria-expanded={expanded}
-                        className={styles.recapGroupToggle}
-                        onClick={() => setExpandedGroups((current) => {
-                          const next = new Set(current);
-                          if (next.has(group.kind)) next.delete(group.kind);
-                          else next.add(group.kind);
-                          return next;
-                        })}
-                        type="button"
-                      >
-                        {expanded ? "收起，仅显示前 5 条" : `展开其余 ${hiddenCount} 条`}
-                      </button>
-                    ) : null}
-                    {excludedItems.length > 0 ? (
-                      <details className={styles.recapExcludedGroup}>
-                        <summary>未留下 {excludedItems.length} 条</summary>
-                        <div>{excludedItems.map(renderRecapItem)}</div>
-                      </details>
-                    ) : null}
-                  </article>
-                );
-              })}
-            </section>
-
             {editable ? (
-              <section className={styles.confirmRecapPanel} aria-labelledby="confirm-recap-title">
-                <div>
-                  <p className={styles.eyebrow}>一次确认</p>
-                  <h2 id="confirm-recap-title">核对说话人和要留下的内容</h2>
-                  <p>{confirmed
-                    ? "这次复盘已经确认。只有通过说话人核对、并带真实原话的内容会出现在关于 Ta、搜索、准备或约定里。"
-                    : keptCount === 0 ? "目前没有能安全归属并留下的内容。把能确认的声音标为“我”或“Ta”后再试；不确定的声音可以继续保持“暂不确定”。"
-                      : `这一次点击会同时保存上面的说话人判断，并留下 ${keptCount} 条有原话且人物归属一致的内容${excludedCount > 0 ? `；另有 ${excludedCount} 条没有留下，可在上方展开查看原因` : ""}。长期归属保持“暂不确定”的原话不会进入人物页。`}</p>
-                </div>
-                <div className={styles.confirmRecapActions}>
-                  {longTermReady ? (
-                    <>
-                      <button
-                        className={styles.primaryButton}
-                        disabled={!canFinalize || !memoryAdmission}
-                        onClick={() => memoryAdmission && onFinalize && void runMutation(
-                          "finalize",
-                          () => onFinalize(
-                            participantAssignments,
-                            finalizeItems,
-                            voiceEnrollmentIntents,
-                            memoryAdmission
-                          )
-                        )}
-                        type="button"
-                      ><span>{confirmed ? "已经确认留下" : localOperation === "finalize" || (mutationState.status === "saving" && mutationState.operation === "finalize") ? "正在确认…" : "接受以上归属并留下"}</span><span aria-hidden="true">✓</span></button>
-                      <button
-                        className={styles.secondaryButton}
-                        disabled={!canFinalize}
-                        onClick={() => onFinalize && void runMutation(
-                          "finalize",
-                          () => onFinalize(participantAssignments, finalizeItems, voiceEnrollmentIntents)
-                        )}
-                        type="button"
-                      >只保存本次复盘，不做长期保留</button>
-                    </>
-                  ) : (
-                    <button
-                      className={styles.primaryButton}
-                      disabled={!canFinalize}
-                      onClick={() => onFinalize && void runMutation(
-                        "finalize",
-                        () => onFinalize(participantAssignments, finalizeItems, voiceEnrollmentIntents)
-                      )}
-                      type="button"
-                    ><span>{confirmed ? "已经确认留下" : localOperation === "finalize" || (mutationState.status === "saving" && mutationState.operation === "finalize") ? "正在确认…" : "确认并留下这次相处"}</span><span aria-hidden="true">✓</span></button>
-                  )}
-                </div>
-              </section>
+              <ProductReviewCompletion
+                action={!confirmed ? (
+                  <button
+                    className={styles.primaryButton}
+                    disabled={!canFinalize}
+                    onClick={() => onFinalize && void runMutation("finalize", () => (
+                      includeLongTerm && memoryAdmission
+                        ? onFinalize(participantAssignments, finalizeItems, voiceEnrollmentIntents, memoryAdmission)
+                        : onFinalize(participantAssignments, finalizeItems, voiceEnrollmentIntents)
+                    ))}
+                    type="button"
+                  >{localOperation === "finalize" || (mutationState.status === "saving" && mutationState.operation === "finalize") ? "正在完成…" : "完成本次复盘"}</button>
+                ) : <span className={styles.recapCompletionStatus}>已完成</span>}
+                className={styles.recapCompletion}
+                description={confirmed
+                  ? `已保留 ${keptCount} 条带原话的内容。长期记忆只会保留你明确选择并通过安全核对的部分。`
+                  : keptCount === 0
+                    ? "需要先确认至少一条有真实来源、且说话人归属一致的内容。"
+                    : `将保留 ${keptCount} 条内容${excludedCount > 0 ? `，另有 ${excludedCount} 条未保留` : ""}。${includeLongTerm ? (memoryAdmission ? "你还选择了长期整理。" : "长期整理尚未准备好，但不会阻止完成复盘。") : "不会自动写入长期记忆。"}`}
+                title={confirmed ? "本次复盘已完成" : "准备好就完成本次复盘"}
+              />
             ) : null}
 
             {interaction.transcript.length > 0 ? (
               <CompanionTranscript chapters={chapters} highlightedSegmentId={highlightedSegmentId} lines={interaction.transcript} />
             ) : (
               <section className={styles.contentPanel}>
-                <h2>可核对的原话</h2>
-                <p className={styles.contentIntro}>这台设备没有完整文字稿；上面的来源片段仍会保留，不会生成点开后失效的入口。</p>
+                <h2>完整文字记录</h2>
+                <p className={styles.contentIntro}>这台设备没有完整文字稿；上面的来源片段仍可核对，不会生成失效入口。</p>
               </section>
             )}
           </>
         )}
       </div>
-    </div>
+    </main>
   );
 }

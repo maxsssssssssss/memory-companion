@@ -7,6 +7,10 @@ import type {
   BrowserAudioRecorderSnapshot,
   BrowserAudioRecording
 } from "@/lib/client/browser-audio-recorder";
+import {
+  createDailyReflectionApi,
+  type DailyReflectionApi
+} from "@/lib/client/daily-reflection-api";
 import type { DailyReflectionSessionValue } from "@/lib/client/daily-reflection-session";
 import type {
   DailyReflectionCardView,
@@ -245,6 +249,90 @@ function detail(
   };
 }
 
+type ClientMemoryProposal = Awaited<ReturnType<
+  DailyReflectionApi["createWorkingCardMemoryProposal"]
+>>["proposal"];
+
+function memoryProposal(
+  cardId = "card-0",
+  overrides: Partial<ClientMemoryProposal> = {}
+): ClientMemoryProposal {
+  return {
+    id: `proposal-${cardId}`,
+    cardId,
+    reflectionId: "reflection-1",
+    title: "整理重点 1",
+    cardKind: "insight",
+    actionClaimed: false,
+    memoryType: "summary",
+    content: "卡片内容 1",
+    evidenceIds: ["segment-early"],
+    evidenceSnapshots: [{
+      sourceSegmentId: "segment-early",
+      uploadId: "upload-reflection",
+      startSeconds: 8,
+      endSeconds: 14,
+      effectiveOrigin: "direct_conversation"
+    }],
+    riskFlags: [],
+    subjectPersonId: null,
+    importance: 0.8,
+    durability: 0.7,
+    novelty: 0.6,
+    sensitivity: 0.1,
+    epistemicStatus: "explicit_user_statement",
+    epistemicCaution: null,
+    status: "pending",
+    policyVersion: "unassessed",
+    score: 0,
+    reasons: [],
+    confirmationRequirements: [],
+    memoryId: null,
+    sourceOrigin: "direct_conversation",
+    recordingDate: "2026-08-13",
+    version: 0,
+    createdAt: "2026-08-13T08:04:00.000Z",
+    updatedAt: "2026-08-13T08:04:00.000Z",
+    admittedAt: null,
+    ...overrides
+  };
+}
+
+function memoryRecommendationResponse(
+  recommendations: Array<{
+    cardId: string;
+    memoryType: "summary" | "question" | "decision" | "commitment" | "event";
+  }>
+) {
+  return {
+    reflectionId: "reflection-1",
+    policyVersion: "daily_reflection_memory_recommendation_v1",
+    recommendationFingerprint: "a".repeat(64),
+    maxRecommendations: 5 as const,
+    eligibleCount: recommendations.length,
+    recommendations: recommendations.map((item, index) => ({
+      ...item,
+      rank: index + 1,
+      score: 0.9 - index * 0.05,
+      clusterId: `cluster-${index}`,
+      sourceOrigin: "direct_conversation" as const,
+      reasons: ["saved_working_card"],
+      defaultSelected: false as const
+    }))
+  };
+}
+
+function memoryApi(overrides: Partial<DailyReflectionApi> = {}): DailyReflectionApi {
+  const unusedFetcher = vi.fn(async () => {
+    throw new Error("unexpected HTTP request");
+  }) as unknown as typeof fetch;
+  return {
+    ...createDailyReflectionApi(unusedFetcher),
+    getMemoryRecommendations: async (reflectionId) => memoryRecommendationResponse([]),
+    ...overrides
+  };
+}
+
 function session(
   overrides: Partial<DailyReflectionSessionValue> = {}
 ): DailyReflectionSessionValue {
@@ -280,7 +368,7 @@ function session(
     updateCandidates: vi.fn(async () => undefined),
     updateCard: vi.fn(async () => undefined),
     updateCards: vi.fn(async () => undefined),
-    saveWorkingCard: vi.fn(async () => undefined),
+    saveWorkingCard: vi.fn(async () => true),
     archiveWorkingCard: vi.fn(async () => undefined),
     restoreWorkingCard: vi.fn(async () => undefined),
     removeWorkingCard: vi.fn(async () => undefined),
@@ -460,6 +548,53 @@ describe("DailyReflectionShellContent", () => {
     expect(screen.queryByRole("button", { name: "开始说" })).not.toBeInTheDocument();
   });
 
+  it("autostarts one voice recording without inventing a source and does not repeat on rerender", async () => {
+    const { factory, instances } = controlledRecorderFactory();
+    const view = render(
+      <DailyReflectionShellContent
+        autoStartVoice
+        browserRecordingEnabled
+        createBrowserRecorder={factory}
+        session={session()}
+      />
+    );
+
+    await waitFor(() => expect(screen.getByRole("button", { name: "结束表达" })).toBeVisible());
+    expect(instances[0]?.start).toHaveBeenCalledTimes(1);
+    expect(screen.getAllByRole("radio").every((choice) => !(choice as HTMLInputElement).checked)).toBe(true);
+
+    view.rerender(
+      <DailyReflectionShellContent
+        autoStartVoice
+        browserRecordingEnabled
+        createBrowserRecorder={factory}
+        session={session()}
+      />
+    );
+    expect(instances[0]?.start).toHaveBeenCalledTimes(1);
+  });
+
+  it("fails closed after an autostart permission denial and offers an explicit retry", async () => {
+    const { factory, instances } = controlledRecorderFactory(
+      new DOMException("private detail", "NotAllowedError")
+    );
+    render(
+      <DailyReflectionShellContent
+        autoStartVoice
+        browserRecordingEnabled
+        createBrowserRecorder={factory}
+        session={session()}
+      />
+    );
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("没有获得麦克风权限");
+    expect(screen.queryByRole("button", { name: "结束表达" })).not.toBeInTheDocument();
+    const retry = screen.getByRole("button", { name: "重新尝试" });
+    expect(retry).toBeEnabled();
+    fireEvent.click(retry);
+    await waitFor(() => expect(instances[0]?.start).toHaveBeenCalledTimes(2));
+  });
+
   it("keeps toy sync off by default and preserves manual upload when it is enabled", () => {
     const { rerender } = render(<DailyReflectionShellContent session={session()} />);
     expect(screen.queryByRole("heading", { name: "连接玩偶录音" })).not.toBeInTheDocument();
@@ -487,11 +622,67 @@ describe("DailyReflectionShellContent", () => {
     chooseBrowserRecordingSource();
     fireEvent.click(screen.getByRole("button", { name: "开始说" }));
     await waitFor(() => expect(screen.getByRole("alert")).toHaveTextContent(message));
+    expect(screen.getByRole("button", { name: "重新尝试" })).toBeEnabled();
     fireEvent.click(screen.getByRole("tab", { name: "上传录音" }));
     expect(screen.getByRole("form", { name: "上传日常复盘录音" })).toBeVisible();
     fireEvent.click(screen.getByRole("tab", { name: "开始说" }));
-    expect(screen.getByRole("button", { name: "开始说" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "重新尝试" })).toBeEnabled();
     expect(screen.queryByText("private detail")).not.toBeInTheDocument();
+  });
+
+  it("keeps active recording visible and disables other capture modes until it ends", async () => {
+    const { factory } = controlledRecorderFactory();
+    render(
+      <DailyReflectionShellContent
+        browserRecordingEnabled
+        createBrowserRecorder={factory}
+        session={session()}
+        toySyncEnabled
+      />
+    );
+
+    chooseBrowserRecordingSource();
+    fireEvent.click(screen.getByRole("button", { name: "开始说" }));
+    await waitFor(() => expect(screen.getByRole("button", { name: "结束表达" })).toBeVisible());
+    expect(screen.getByRole("tab", { name: "上传录音" })).toBeDisabled();
+    expect(screen.getByRole("tab", { name: "从玩偶导入" })).toBeDisabled();
+    expect(screen.getByRole("tabpanel", { name: "开始说" })).toBeVisible();
+
+    fireEvent.click(screen.getByRole("button", { name: "取消这次表达" }));
+    expect(screen.getByRole("tab", { name: "上传录音" })).toBeEnabled();
+    expect(screen.getByRole("tab", { name: "从玩偶导入" })).toBeEnabled();
+  });
+
+  it("supports roving capture tabs with arrow, Home, and End keys", () => {
+    const { factory } = controlledRecorderFactory();
+    render(
+      <DailyReflectionShellContent
+        browserRecordingEnabled
+        createBrowserRecorder={factory}
+        session={session()}
+        toySyncEnabled
+      />
+    );
+
+    const tablist = screen.getByRole("tablist", { name: "选择表达方式" });
+    const voice = screen.getByRole("tab", { name: "开始说" });
+    voice.focus();
+    expect(voice).toHaveAttribute("tabindex", "0");
+
+    fireEvent.keyDown(tablist, { key: "ArrowRight" });
+    const upload = screen.getByRole("tab", { name: "上传录音" });
+    expect(upload).toHaveFocus();
+    expect(upload).toHaveAttribute("aria-selected", "true");
+
+    fireEvent.keyDown(tablist, { key: "End" });
+    const toy = screen.getByRole("tab", { name: "从玩偶导入" });
+    expect(toy).toHaveFocus();
+    expect(toy).toHaveAttribute("aria-selected", "true");
+
+    fireEvent.keyDown(tablist, { key: "Home" });
+    expect(voice).toHaveFocus();
+    expect(voice).toHaveAttribute("aria-selected", "true");
+    expect(new Set([voice.id, upload.id, toy.id]).size).toBe(3);
   });
 
   it("supports start, stop, cancel, rerecord, local deletion, and recorder disposal", async () => {
@@ -717,13 +908,13 @@ describe("DailyReflectionShellContent", () => {
     expect(screen.getByText("这次表达里有什么值得带走")).toBeInTheDocument();
     expect(screen.getAllByRole("button", { name: "展开全部原话" })).toHaveLength(5);
     expect(screen.queryByRole("button", { name: "查看全部" })).not.toBeInTheDocument();
-    expect(screen.getByDisplayValue("待确认内容 4")).toBeVisible();
-    expect(screen.getByDisplayValue("待确认内容 5")).toBeVisible();
-    expect(screen.getByText("发生的事")).toBeInTheDocument();
-    expect(screen.getByText("约定与行动")).toBeInTheDocument();
-    expect(screen.getByText("仍待回答的问题")).toBeInTheDocument();
-    expect(screen.getByText("这段内容的整理")).toBeInTheDocument();
-    expect(screen.getByText("表达的偏好")).toBeInTheDocument();
+    expect(screen.getByText("待确认内容 4")).toBeVisible();
+    expect(screen.getByText("待确认内容 5")).toBeVisible();
+    expect(screen.getByRole("heading", { name: "发生的事" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "约定与行动" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "仍待回答的问题" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "这段内容的整理" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "表达的偏好" })).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "展开 5 段" }));
     const transcript = screen.getByRole("region", { name: "完整文字稿" });
@@ -796,6 +987,7 @@ describe("DailyReflectionShellContent", () => {
     fireEvent.click(screen.getByRole("button", { name: "完成这次复盘" }));
     expect(finalize).toHaveBeenCalledWith("recap_only");
 
+    fireEvent.click(screen.getByRole("button", { name: "编辑" }));
     fireEvent.change(screen.getByLabelText("编辑发生的事"), { target: { value: "我重新写过的内容" } });
     fireEvent.click(screen.getByRole("button", { name: "长期记住" }));
     expect(updateCandidate).toHaveBeenLastCalledWith({
@@ -815,7 +1007,7 @@ describe("DailyReflectionShellContent", () => {
     });
   });
 
-  it("restores the proposed text without exposing any Person selector", () => {
+  it("restores the proposed text and keeps legacy editing open until server truth refreshes", async () => {
     const keptCandidate: DailyReflectionCandidateView = {
       ...candidate(0, "event", "segment-early", "AI 原文内容"),
       userText: "我改过的内容",
@@ -824,20 +1016,21 @@ describe("DailyReflectionShellContent", () => {
       version: 2
     };
     const updateCandidate = vi.fn(async () => undefined);
-    render(<DailyReflectionShellContent session={session({
+    const { rerender } = render(<DailyReflectionShellContent session={session({
       state: "review_pending",
       reflectionId: "reflection-1",
       detail: detail({ candidates: [keptCandidate] }),
       updateCandidate
     })} />);
 
+    fireEvent.click(screen.getByRole("button", { name: "编辑" }));
     const editor = screen.getByLabelText("编辑发生的事");
     expect(editor).toHaveValue("我改过的内容");
     fireEvent.click(screen.getByRole("button", { name: "恢复最初整理" }));
     expect(editor).toHaveValue("AI 原文内容");
 
     expect(screen.queryByRole("combobox")).not.toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "保存修改" }));
+    fireEvent.click(screen.getByRole("button", { name: "保存编辑" }));
 
     expect(updateCandidate).toHaveBeenCalledWith({
       candidateId: "candidate-0",
@@ -845,6 +1038,19 @@ describe("DailyReflectionShellContent", () => {
       userText: null,
       subjectPersonId: null
     });
+    expect(screen.getByLabelText("编辑发生的事")).toBeVisible();
+
+    rerender(<DailyReflectionShellContent session={session({
+      state: "review_pending",
+      reflectionId: "reflection-1",
+      detail: detail({ candidates: [{
+        ...keptCandidate,
+        userText: null,
+        version: keptCandidate.version + 1
+      }] }),
+      updateCandidate
+    })} />);
+    await waitFor(() => expect(screen.queryByLabelText("编辑发生的事")).not.toBeInTheDocument());
   });
 
   it("shows the full completion summary only after the user has selected content", () => {
@@ -859,7 +1065,7 @@ describe("DailyReflectionShellContent", () => {
       })
     })} />);
 
-    expect(screen.getByText("0 张卡片 · 1 条长期记忆")).toBeVisible();
+    expect(screen.getByText("已保存 0 张卡片 · 已选择长期记住 1 条")).toBeVisible();
     expect(screen.queryByText("看完后，完成这次复盘")).not.toBeInTheDocument();
   });
 
@@ -1071,7 +1277,9 @@ describe("DailyReflectionShellContent", () => {
       finalize
     })} />);
 
-    fireEvent.click(screen.getByRole("button", { name: "重新保存" }));
+    expect(screen.getByRole("heading", { name: "长期记忆还没有保存完成" })).toBeVisible();
+    expect(screen.getByText("卡片和原始记录已经保留，但长期记忆暂时没有保存完成。你可以重新保存。")).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "重新保存长期记忆" }));
     expect(finalize).toHaveBeenCalledOnce();
     expect(container.textContent).not.toContain("internal-safe-code");
   });
@@ -1101,8 +1309,8 @@ describe("DailyReflectionShellContent", () => {
     expect(screen.getByText("这次表达里有什么值得带走")).toBeVisible();
     expect(screen.getAllByRole("button", { name: "展开全部原话" })).toHaveLength(5);
     expect(screen.queryByRole("button", { name: "查看全部" })).not.toBeInTheDocument();
-    expect(screen.getByDisplayValue("待确认内容 4")).toBeVisible();
-    expect(screen.getByDisplayValue("待确认内容 5")).toBeVisible();
+    expect(screen.getByText("待确认内容 4")).toBeVisible();
+    expect(screen.getByText("待确认内容 5")).toBeVisible();
   });
 
   it("shows real progress and only the actions allowed while processing", () => {
@@ -1120,7 +1328,7 @@ describe("DailyReflectionShellContent", () => {
     expect(screen.getByText("37%")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "取消整理" })).toBeVisible();
     expect(screen.getByRole("button", { name: "删除原始记录" })).not.toBeVisible();
-    fireEvent.click(screen.getByText("更多"));
+    fireEvent.click(screen.getByLabelText("更多"));
     expect(screen.getByRole("button", { name: "删除原始记录" })).toBeVisible();
     expect(screen.queryByRole("button", { name: "重试整理" })).not.toBeInTheDocument();
   });
@@ -1188,7 +1396,7 @@ describe("DailyReflectionShellContent", () => {
 
   it("presents Card digest with Primary first, More collapsed, risks conditional, and Evidence before Transcript", async () => {
     const updateCard = vi.fn(async () => undefined);
-    const saveWorkingCard = vi.fn(async () => undefined);
+    const saveWorkingCard = vi.fn(async () => true);
     const finalize = vi.fn(async () => undefined);
     const acceptAllCandidates = vi.fn(async () => undefined);
     const onLocalReviewMetric = vi.fn();
@@ -1228,6 +1436,11 @@ describe("DailyReflectionShellContent", () => {
     expect(container.textContent).not.toContain("Provider");
     expect(container.textContent).not.toContain("Candidate #");
     expect(screen.queryByText("第一段真实原话。")).not.toBeInTheDocument();
+    const transcriptHeading = screen.getByText("完整文字记录");
+    const completionHeading = screen.getByText("看完后，完成这次复盘");
+    expect(transcriptHeading.compareDocumentPosition(completionHeading)
+      & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(screen.getAllByRole("button", { name: "完成这次复盘" })).toHaveLength(1);
     await waitFor(() => expect(onLocalReviewMetric).toHaveBeenCalledWith({
       name: "cards_shown",
       value: 3,
@@ -1290,6 +1503,519 @@ describe("DailyReflectionShellContent", () => {
       userText: primaryInsight.userText
     }));
     expect(acceptAllCandidates).not.toHaveBeenCalled();
+  });
+
+  it("keeps a V2 Card editor open until the refreshed Card version confirms the save", async () => {
+    const updateCard = vi.fn(async () => undefined);
+    const original = card(0, "insight", ["segment-early"], {
+      proposedTitle: "值得继续的想法",
+      proposedText: "先把这一点写清楚。"
+    });
+    const { rerender } = render(<DailyReflectionShellContent session={session({
+      state: "review_pending",
+      reflectionId: "reflection-1",
+      detail: detail({ candidates: [], cards: [original] }),
+      updateCard
+    })} />);
+
+    fireEvent.click(screen.getByLabelText("更多选择"));
+    fireEvent.click(screen.getByRole("button", { name: "编辑" }));
+    fireEvent.change(screen.getByLabelText("编辑标题：值得继续的想法"), {
+      target: { value: "我确认后的想法" }
+    });
+    fireEvent.click(screen.getByRole("button", { name: "保存编辑" }));
+
+    expect(updateCard).toHaveBeenCalledWith(expect.objectContaining({
+      cardId: original.id,
+      userTitle: "我确认后的想法"
+    }));
+    expect(screen.getByLabelText("编辑标题：值得继续的想法")).toBeVisible();
+
+    rerender(<DailyReflectionShellContent session={session({
+      state: "review_pending",
+      reflectionId: "reflection-1",
+      detail: detail({ candidates: [], cards: [{
+        ...original,
+        userTitle: "我确认后的想法",
+        version: original.version + 1
+      }] }),
+      updateCard
+    })} />);
+    await waitFor(() => expect(screen.queryByLabelText("编辑标题：值得继续的想法")).not.toBeInTheDocument());
+    expect(screen.getByRole("heading", { name: "我确认后的想法" })).toBeVisible();
+  });
+
+  it("retains eligible Cards without letting an unclaimed action block the batch", () => {
+    const finalize = vi.fn(async () => undefined);
+    const insight = card(0, "insight", ["segment-early"], {
+      reviewStatus: "kept"
+    });
+    const unclaimedAction = card(1, "user_action", ["segment-second"], {
+      reviewStatus: "kept",
+      actionClaimed: false
+    });
+    render(<DailyReflectionShellContent session={session({
+      state: "review_pending",
+      reflectionId: "reflection-1",
+      detail: detail({ candidates: [], cards: [insight, unclaimedAction] }),
+      finalize
+    })} />);
+
+    expect(screen.getByText("有 1 条行动还没有由你认领，只能随本次复盘保存。")).toBeVisible();
+    expect(screen.getByText("已保存 0 张卡片 · 已选择长期记住 1 条")).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "完成这次复盘" }));
+    expect(finalize).toHaveBeenCalledWith("retain_selected");
+  });
+
+  it("keeps save-only explicit while long-term selection saves the Card first", async () => {
+    const updateCard = vi.fn(async () => undefined);
+    const saveWorkingCard = vi.fn(async () => true);
+    const insight = card(0, "insight", ["segment-early"]);
+    render(<DailyReflectionShellContent session={session({
+      state: "review_pending",
+      reflectionId: "reflection-1",
+      detail: detail({ candidates: [], cards: [insight] }),
+      updateCard,
+      saveWorkingCard
+    })} />);
+
+    const item = screen.getByRole("heading", { name: "整理重点 1" }).closest("li")!;
+    const saveButton = within(item).getByRole("button", { name: "保存为卡片" });
+    const retainButton = within(item).getByRole("button", { name: "长期记住" });
+    expect(retainButton).toHaveAttribute("aria-pressed", "false");
+
+    fireEvent.click(saveButton);
+    await waitFor(() => expect(saveWorkingCard).toHaveBeenCalledWith(insight.id, {
+        userTitle: null,
+        userText: null
+      }));
+    expect(updateCard).not.toHaveBeenCalled();
+
+    saveWorkingCard.mockClear();
+    fireEvent.click(retainButton);
+    await waitFor(() => {
+      expect(saveWorkingCard).toHaveBeenCalledWith(insight.id, {
+        userTitle: null,
+        userText: null
+      });
+      expect(updateCard).toHaveBeenCalledWith(expect.objectContaining({
+        cardId: insight.id,
+        reviewStatus: "kept"
+      }));
+    });
+    expect(saveWorkingCard.mock.invocationCallOrder[0])
+      .toBeLessThan(updateCard.mock.invocationCallOrder[0]!);
+  });
+
+  it("does not select long-term retention when the automatic Card save fails", async () => {
+    const updateCard = vi.fn(async () => undefined);
+    const saveWorkingCard = vi.fn(async () => false);
+    const insight = card(0, "insight", ["segment-early"]);
+    render(<DailyReflectionShellContent session={session({
+      state: "review_pending",
+      reflectionId: "reflection-1",
+      detail: detail({ candidates: [], cards: [insight] }),
+      updateCard,
+      saveWorkingCard
+    })} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "长期记住" }));
+    await waitFor(() => expect(saveWorkingCard).toHaveBeenCalledOnce());
+    expect(updateCard).not.toHaveBeenCalled();
+  });
+
+  it("does not offer long-term retention for an unclaimed action", () => {
+    const updateCard = vi.fn(async () => undefined);
+    const saveWorkingCard = vi.fn(async () => true);
+    const action = card(0, "user_action", ["segment-early"], {
+      actionClaimed: false,
+      reviewStatus: "kept"
+    });
+    render(<DailyReflectionShellContent session={session({
+      state: "review_pending",
+      reflectionId: "reflection-1",
+      detail: detail({ candidates: [], cards: [action] }),
+      updateCard,
+      saveWorkingCard
+    })} />);
+
+    const item = screen.getByRole("heading", { name: "整理重点 1" }).closest("li")!;
+    const retainButton = within(item).getByRole("button", { name: "先确认“这是我要做的”" });
+    expect(retainButton).toBeDisabled();
+    expect(retainButton).toHaveAttribute("aria-pressed", "false");
+    expect(within(item).getByText("尚未选择长期记住")).toBeVisible();
+    expect(within(item).queryByText("已选择长期记住")).not.toBeInTheDocument();
+    expect(within(item).queryByRole("button", { name: "长期记住" })).not.toBeInTheDocument();
+    fireEvent.click(retainButton);
+    expect(updateCard).not.toHaveBeenCalled();
+
+    fireEvent.click(within(item).getByRole("button", { name: "保存为卡片" }));
+    expect(saveWorkingCard).toHaveBeenCalledOnce();
+    expect(updateCard).not.toHaveBeenCalled();
+  });
+
+  it("uses Proposal results instead of Card review state for long-term status", () => {
+    const admitted = card(0, "insight", ["segment-early"], {
+      reviewStatus: "kept"
+    });
+    const rejected = card(1, "user_action", ["segment-second"], {
+      reviewStatus: "kept",
+      actionClaimed: false
+    });
+    const base = detail();
+    const completedDetail = detail({
+        reflection: { ...base.reflection, status: "completed", version: 8 },
+        candidates: [],
+        cards: [admitted, rejected],
+        admissionOperation: {
+          id: "operation-1",
+          reflectionId: "reflection-1",
+          confirmationId: "confirmation-1",
+          accountId: "user-1",
+          status: "completed",
+          admittedCount: 1,
+          rejectedCount: 1,
+          excludedCount: 0,
+          errorCode: null,
+          createdAt: "2026-08-13T08:05:00.000Z",
+          updatedAt: "2026-08-13T08:05:00.000Z",
+          completedAt: "2026-08-13T08:05:00.000Z"
+        },
+        admissionResults: [{
+          candidateId: admitted.id,
+          status: "admitted",
+          memoryId: "memory-1",
+          reasonCode: null,
+          errorCode: null,
+          operationKey: `daily-reflection-card:${admitted.id}`,
+          updatedAt: "2026-08-13T08:05:00.000Z"
+        }, {
+          candidateId: rejected.id,
+          status: "rejected",
+          memoryId: null,
+          reasonCode: "commitment_requires_explicit_action_claim",
+          errorCode: null,
+          operationKey: `daily-reflection-card:${rejected.id}`,
+          updatedAt: "2026-08-13T08:05:00.000Z"
+        }],
+        rememberedCount: 1
+      });
+    const { rerender } = render(<DailyReflectionShellContent session={session({
+      state: "completed",
+      reflectionId: "reflection-1",
+      detail: completedDetail,
+      workingCardStates: {
+        [admitted.id]: { status: "saved", memoryLifecycleStatus: "active", version: 1 },
+        [rejected.id]: { status: "saved", memoryLifecycleStatus: "not_admitted", version: 1 }
+      }
+    })} />);
+
+    expect(screen.getByText("已长期记住")).toBeVisible();
+    expect(screen.getByText("暂未长期保存")).toBeVisible();
+    expect(screen.getByText("长期记住").nextElementSibling).toHaveTextContent("1");
+
+    rerender(<DailyReflectionShellContent session={session({
+      state: "completed",
+      reflectionId: "reflection-1",
+      detail: { ...completedDetail, rememberedCount: 0 },
+      workingCardStates: {
+        [admitted.id]: { status: "saved", memoryLifecycleStatus: "revoked", version: 1 },
+        [rejected.id]: { status: "saved", memoryLifecycleStatus: "not_admitted", version: 1 }
+      }
+    })} />);
+    expect(screen.getByText("已撤销长期记忆")).toBeVisible();
+    expect(screen.queryByText("已长期记住")).not.toBeInTheDocument();
+  });
+
+  it("shows at most five server-owned Memory recommendations before any Card is kept", async () => {
+    const cards = [
+      card(0, "insight", ["segment-early"], { reviewStatus: "pending" }),
+      card(1, "open_question", ["segment-second"], { reviewStatus: "pending" }),
+      card(2, "decision", ["segment-third"], { reviewStatus: "not_proposed" }),
+      card(3, "insight", ["segment-late"], { reviewStatus: "pending" }),
+      card(4, "open_question", ["segment-fifth"], { reviewStatus: "not_proposed" })
+    ];
+    const ordered = [cards[4], cards[1], cards[3], cards[0], cards[2]];
+    const recommendations = memoryRecommendationResponse(ordered.map((item) => ({
+      cardId: item.id,
+      memoryType: item.cardKind === "open_question"
+        ? "question" as const
+        : item.cardKind === "decision"
+          ? "decision" as const
+          : "summary" as const
+    })));
+    recommendations.recommendations[0]!.reasons.push("recommendation_high_importance");
+    const getMemoryRecommendations = vi.fn(async () => recommendations);
+    const base = detail();
+    render(<DailyReflectionShellContent
+      api={memoryApi({ getMemoryRecommendations })}
+      session={session({
+        state: "completed",
+        reflectionId: "reflection-1",
+        detail: detail({
+          reflection: { ...base.reflection, status: "completed", version: 8 },
+          candidates: [],
+          cards,
+          rememberedCount: 0
+        }),
+        workingCardStates: Object.fromEntries(cards.map((item) => [
+          item.id,
+          { status: "saved" as const, memoryLifecycleStatus: "not_admitted" as const, version: 1 }
+        ]))
+      })}
+    />);
+
+    const region = await screen.findByRole("region", { name: "建议长期记住" });
+    expect(within(region).getAllByRole("heading", { level: 4 }).map((heading) => heading.textContent))
+      .toEqual(ordered.map((item) => item.proposedTitle));
+    expect(within(region).getAllByRole("button", { name: "长期记住" })).toHaveLength(5);
+    expect(within(region).queryByRole("checkbox")).not.toBeInTheDocument();
+    expect(screen.queryByText("recommendation_high_importance")).not.toBeInTheDocument();
+    expect(getMemoryRecommendations).toHaveBeenCalledWith(
+      "reflection-1",
+      expect.any(AbortSignal)
+    );
+  });
+
+  it("shows optional recommendations before the Card review and saves before selecting", async () => {
+    const cards = [
+      card(0, "insight", ["segment-early"], { reviewStatus: "pending" }),
+      card(1, "open_question", ["segment-second"], { reviewStatus: "pending" }),
+      card(2, "decision", ["segment-third"], { reviewStatus: "not_proposed" }),
+      card(3, "insight", ["segment-late"], { reviewStatus: "not_proposed" }),
+      card(4, "open_question", ["segment-fifth"], { reviewStatus: "not_proposed" }),
+      card(5, "decision", ["segment-early"], {
+        displayTier: "primary",
+        reviewStatus: "pending"
+      })
+    ];
+    const recommended = cards.slice(0, 5);
+    const getMemoryRecommendations = vi.fn(async () => memoryRecommendationResponse(
+      recommended.map((item) => ({
+        cardId: item.id,
+        memoryType: item.cardKind === "open_question"
+          ? "question" as const
+          : item.cardKind === "decision"
+            ? "decision" as const
+            : "summary" as const
+      }))
+    ));
+    const saveWorkingCard = vi.fn(async () => true);
+    const updateCard = vi.fn(async () => undefined);
+    const { container } = render(<DailyReflectionShellContent
+      api={memoryApi({ getMemoryRecommendations })}
+      session={session({
+        state: "review_pending",
+        reflectionId: "reflection-1",
+        detail: detail({ candidates: [], cards }),
+        saveWorkingCard,
+        updateCard,
+        workingCardStates: Object.fromEntries(cards.map((item, index) => [
+          item.id,
+          {
+            status: index < 4 ? "review_pending" as const : "generated" as const,
+            memoryLifecycleStatus: "not_admitted" as const,
+            version: 1
+          }
+        ]))
+      })}
+    />);
+
+    const region = await screen.findByRole("region", { name: "建议长期记住" });
+    const ordinaryHeading = screen.getByRole("heading", { name: "值得带走" });
+    expect(region.compareDocumentPosition(ordinaryHeading) & Node.DOCUMENT_POSITION_FOLLOWING)
+      .toBeTruthy();
+    expect(within(region).getAllByRole("button", { name: "长期记住" })).toHaveLength(5);
+    expect(within(region).getAllByRole("button", { name: "查看来源" })).toHaveLength(5);
+    for (const item of recommended) {
+      expect(within(region).getByText(item.proposedTitle)).toBeVisible();
+    }
+    expect(screen.getByText(cards[5]!.proposedTitle)).toBeVisible();
+
+    fireEvent.click(within(region).getAllByRole("button", { name: "查看来源" })[0]!);
+    expect(within(region).getByText("第一段真实原话。")).toBeVisible();
+    fireEvent.click(within(region).getByRole("button", { name: "在完整文字记录中查看" }));
+    await waitFor(() => {
+      const source = container.querySelector('[data-segment-id="segment-early"]');
+      expect(source).toHaveAttribute("data-highlighted", "true");
+    });
+
+    fireEvent.click(within(region).getAllByRole("button", { name: "长期记住" })[0]!);
+    await waitFor(() => expect(saveWorkingCard).toHaveBeenCalledWith(cards[0]!.id, {
+      userTitle: cards[0]!.userTitle,
+      userText: cards[0]!.userText
+    }));
+    await waitFor(() => expect(updateCard).toHaveBeenCalledWith(expect.objectContaining({
+      cardId: cards[0]!.id,
+      reviewStatus: "kept"
+    })));
+    expect(saveWorkingCard.mock.invocationCallOrder[0])
+      .toBeLessThan(updateCard.mock.invocationCallOrder[0]!);
+  });
+
+  it("hides an empty recommendation section while keeping explicit Card retention available", async () => {
+    const saved = card(0, "insight", ["segment-early"], { reviewStatus: "pending" });
+    const getMemoryRecommendations = vi.fn(async () => memoryRecommendationResponse([]));
+    const base = detail();
+    render(<DailyReflectionShellContent
+      api={memoryApi({ getMemoryRecommendations })}
+      session={session({
+        state: "completed",
+        reflectionId: "reflection-1",
+        detail: detail({
+          reflection: { ...base.reflection, status: "completed", version: 8 },
+          candidates: [],
+          cards: [saved],
+          rememberedCount: 0
+        }),
+        workingCardStates: {
+          [saved.id]: { status: "saved", memoryLifecycleStatus: "not_admitted", version: 3 }
+        }
+      })}
+    />);
+
+    await waitFor(() => expect(getMemoryRecommendations).toHaveBeenCalledOnce());
+    expect(screen.queryByRole("region", { name: "建议长期记住" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "长期记住" })).toBeVisible();
+  });
+
+  it("creates and admits one explicit Card proposal, then shows the durable result", async () => {
+    const saved = card(0, "insight", ["segment-early"], { reviewStatus: "pending" });
+    const createdProposal = memoryProposal(saved.id, { version: 2 });
+    const admittedProposal = memoryProposal(saved.id, {
+      status: "admitted",
+      memoryId: "memory-1",
+      policyVersion: "daily_reflection_memory_proposal_v2",
+      score: 1,
+      version: 3,
+      admittedAt: "2026-08-13T08:05:00.000Z"
+    });
+    const createProposal = vi.fn<DailyReflectionApi["createWorkingCardMemoryProposal"]>(
+      async () => ({ proposal: createdProposal, reused: false })
+    );
+    const admitProposal = vi.fn<DailyReflectionApi["admitMemoryProposal"]>(
+      async () => ({
+        status: "admitted",
+        proposal: admittedProposal,
+        memoryId: "memory-1",
+        reasons: [],
+        confirmationRequirements: []
+      })
+    );
+    const reload = vi.fn(async () => undefined);
+    const base = detail();
+    render(<DailyReflectionShellContent
+      api={memoryApi({
+        getMemoryRecommendations: async () => memoryRecommendationResponse([]),
+        createWorkingCardMemoryProposal: createProposal,
+        admitMemoryProposal: admitProposal
+      })}
+      session={session({
+        state: "completed",
+        reflectionId: "reflection-1",
+        detail: detail({
+          reflection: { ...base.reflection, status: "completed", version: 8 },
+          candidates: [],
+          cards: [saved],
+          rememberedCount: 0
+        }),
+        reload,
+        workingCardStates: {
+          [saved.id]: { status: "saved", memoryLifecycleStatus: "not_admitted", version: 3 }
+        }
+      })}
+    />);
+
+    fireEvent.click(screen.getByRole("button", { name: "长期记住" }));
+    await waitFor(() => expect(screen.getByText("已长期记住")).toBeVisible());
+    expect(createProposal).toHaveBeenCalledWith(saved.id, {
+      expectedCardVersion: 3,
+      memoryType: "summary"
+    });
+    expect(admitProposal).toHaveBeenCalledWith(createdProposal.id, {
+      expectedVersion: 2,
+      acknowledgements: []
+    });
+    expect(reload).toHaveBeenCalledOnce();
+  });
+
+  it("continues the same Proposal after an explicit inference confirmation", async () => {
+    const saved = card(0, "insight", ["segment-early"], { reviewStatus: "pending" });
+    const requirement = {
+      code: "acknowledge_inference" as const,
+      resolution: "acknowledgement" as const
+    };
+    const waitingProposal = memoryProposal(saved.id, {
+      policyVersion: "daily_reflection_memory_proposal_v2",
+      reasons: ["needs_inference_acknowledgement"],
+      confirmationRequirements: [requirement],
+      version: 4
+    });
+    const admittedProposal = memoryProposal(saved.id, {
+      status: "admitted",
+      policyVersion: "daily_reflection_memory_proposal_v2",
+      memoryId: "memory-1",
+      score: 1,
+      version: 5,
+      admittedAt: "2026-08-13T08:05:00.000Z"
+    });
+    const admitProposal = vi.fn<DailyReflectionApi["admitMemoryProposal"]>()
+      .mockResolvedValueOnce({
+        status: "needs_confirmation",
+        proposal: waitingProposal,
+        memoryId: null,
+        reasons: ["needs_inference_acknowledgement"],
+        confirmationRequirements: [requirement]
+      })
+      .mockResolvedValueOnce({
+        status: "admitted",
+        proposal: admittedProposal,
+        memoryId: "memory-1",
+        reasons: [],
+        confirmationRequirements: []
+      });
+    const base = detail();
+    render(<DailyReflectionShellContent
+      api={memoryApi({
+        getMemoryRecommendations: async () => memoryRecommendationResponse([]),
+        createWorkingCardMemoryProposal: async () => ({
+          proposal: memoryProposal(saved.id, { version: 2 }),
+          reused: false
+        }),
+        admitMemoryProposal: admitProposal
+      })}
+      session={session({
+        state: "completed",
+        reflectionId: "reflection-1",
+        detail: detail({
+          reflection: { ...base.reflection, status: "completed", version: 8 },
+          candidates: [],
+          cards: [saved],
+          rememberedCount: 0
+        }),
+        workingCardStates: {
+          [saved.id]: { status: "saved", memoryLifecycleStatus: "not_admitted", version: 3 }
+        }
+      })}
+    />);
+
+    fireEvent.click(screen.getByRole("button", { name: "长期记住" }));
+    const checkbox = await screen.findByRole("checkbox", {
+      name: "这部分包含系统整理出的推测；请确认它符合你的意思。"
+    });
+    expect(screen.getByRole("button", { name: "确认并长期记住" })).toBeDisabled();
+    fireEvent.click(checkbox);
+    fireEvent.click(screen.getByRole("button", { name: "确认并长期记住" }));
+
+    await waitFor(() => expect(screen.getByText("已长期记住")).toBeVisible());
+    expect(admitProposal).toHaveBeenNthCalledWith(1, "proposal-card-0", {
+      expectedVersion: 2,
+      acknowledgements: []
+    });
+    expect(admitProposal).toHaveBeenNthCalledWith(2, "proposal-card-0", {
+      expectedVersion: 4,
+      acknowledgements: ["acknowledge_inference"]
+    });
   });
 
   it("opens and highlights a valid deep-linked Transcript segment", async () => {

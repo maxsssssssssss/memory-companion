@@ -15,7 +15,9 @@ vi.mock("next/navigation", () => ({
 vi.mock("@/components/date-companion/date-companion-shell", () => ({
   DateCompanionPersistentShell: (props: {
     entry: "companion";
+    dailyReflectionEnabled: boolean;
     initialInteractionId: string | null;
+    initialPersonId: string | null;
     initialSegmentId: string | null;
     screen: string;
     toySyncEnabled: boolean;
@@ -28,6 +30,7 @@ vi.mock("@/components/date-companion/date-companion-shell", () => ({
 
 const originalSharedFlag = process.env.DAILY_BRIEF_TOY_SYNC_ENABLED;
 const originalLegacyFlag = process.env.DAILY_REFLECTION_TOY_SYNC_ENABLED;
+const originalReflectionFlag = process.env.DAILY_REFLECTION_UPLOAD_ENABLED;
 
 function restoreFlag(name: string, value: string | undefined) {
   if (value === undefined) delete process.env[name];
@@ -39,6 +42,7 @@ describe("Date Companion screen page", () => {
     navigationMocks.notFound.mockClear();
     restoreFlag("DAILY_BRIEF_TOY_SYNC_ENABLED", originalSharedFlag);
     restoreFlag("DAILY_REFLECTION_TOY_SYNC_ENABLED", originalLegacyFlag);
+    restoreFlag("DAILY_REFLECTION_UPLOAD_ENABLED", originalReflectionFlag);
   });
 
   it.each([
@@ -51,6 +55,7 @@ describe("Date Companion screen page", () => {
     async (sharedFlag, legacyFlag, expected) => {
       restoreFlag("DAILY_BRIEF_TOY_SYNC_ENABLED", sharedFlag);
       restoreFlag("DAILY_REFLECTION_TOY_SYNC_ENABLED", legacyFlag);
+      process.env.DAILY_REFLECTION_UPLOAD_ENABLED = "true";
 
       const element = await DateCompanionScreenPage({
         params: Promise.resolve({}),
@@ -59,7 +64,9 @@ describe("Date Companion screen page", () => {
 
       expect(element.props.children.props).toMatchObject({
         entry: "companion",
+        dailyReflectionEnabled: true,
         initialInteractionId: null,
+        initialPersonId: null,
         initialSegmentId: null,
         screen: "home",
         toySyncEnabled: expected
@@ -93,6 +100,18 @@ describe("Date Companion screen page", () => {
     expect(arrayElement.props.children.props.initialSegmentId).toBeNull();
   });
 
+  it("maps a confirmed Person deep link onto the shared Person detail", async () => {
+    const element = await DateCompanionScreenPage({
+      params: Promise.resolve({ screen: ["people", "person-confirmed"] }),
+      searchParams: Promise.resolve({})
+    });
+
+    expect(element.props.children.props).toMatchObject({
+      initialPersonId: "person-confirmed",
+      screen: "person"
+    });
+  });
+
   it("rejects unsupported or nested screens", async () => {
     await expect(DateCompanionScreenPage({
       params: Promise.resolve({ screen: ["missing"] }),
@@ -102,6 +121,10 @@ describe("Date Companion screen page", () => {
       params: Promise.resolve({ screen: ["home", "nested"] }),
       searchParams: Promise.resolve({})
     })).rejects.toThrow("NEXT_NOT_FOUND");
-    expect(navigationMocks.notFound).toHaveBeenCalledTimes(2);
+    await expect(DateCompanionScreenPage({
+      params: Promise.resolve({ screen: ["people", "person", "nested"] }),
+      searchParams: Promise.resolve({})
+    })).rejects.toThrow("NEXT_NOT_FOUND");
+    expect(navigationMocks.notFound).toHaveBeenCalledTimes(3);
   });
 });

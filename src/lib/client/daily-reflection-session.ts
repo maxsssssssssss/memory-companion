@@ -13,7 +13,10 @@ import type {
   DailyReflectionStatus,
   DailyReflectionV2Input
 } from "@/lib/domain/daily-reflection";
-import type { DailyReflectionWorkingCardStatus } from "@/lib/domain/daily-reflection-working-card";
+import type {
+  DailyReflectionWorkingCardMemoryLifecycleStatus,
+  DailyReflectionWorkingCardStatus
+} from "@/lib/domain/daily-reflection-working-card";
 
 import {
   DailyReflectionApiError,
@@ -74,6 +77,7 @@ export type DailyReflectionSessionSnapshot = {
   activeCandidateId: string | null;
   workingCardStates: Readonly<Record<string, Readonly<{
     status: DailyReflectionWorkingCardStatus;
+    memoryLifecycleStatus?: DailyReflectionWorkingCardMemoryLifecycleStatus;
     version: number;
   }>>>;
   errorMessage: string | null;
@@ -120,7 +124,7 @@ export type DailyReflectionSessionValue = DailyReflectionSessionSnapshot & {
   saveWorkingCard(
     cardId: string,
     draft?: Pick<DailyReflectionCardDecision, "userTitle" | "userText">
-  ): Promise<void>;
+  ): Promise<boolean>;
   archiveWorkingCard(cardId: string): Promise<void>;
   restoreWorkingCard(cardId: string): Promise<void>;
   removeWorkingCard(cardId: string): Promise<void>;
@@ -783,6 +787,7 @@ export class DailyReflectionSessionController {
       workingCardStates: Object.fromEntries(
         (detail.workingCards ?? []).map((card) => [card.id, {
           status: card.status,
+          memoryLifecycleStatus: card.memoryLifecycleStatus,
           version: card.version
         }])
       ),
@@ -1233,7 +1238,7 @@ export class DailyReflectionSessionController {
   readonly saveWorkingCard = async (
     cardId: string,
     draft?: Pick<DailyReflectionCardDecision, "userTitle" | "userText">
-  ): Promise<void> => {
+  ): Promise<boolean> => {
     const detail = this.snapshot.detail;
     const reflectionId = this.snapshot.reflectionId;
     const card = detail?.cards.find((item) => item.id === cardId);
@@ -1243,7 +1248,7 @@ export class DailyReflectionSessionController {
       || !detail
       || !card
       || this.snapshot.operation !== "idle"
-    ) return;
+    ) return false;
     const { controller, generation } = this.beginWork();
     this.update({
       operation: "saving_working_card",
@@ -1266,7 +1271,7 @@ export class DailyReflectionSessionController {
             userText: draft.userText
           }]
         }, controller.signal);
-        if (!this.isCurrentWork(controller, generation)) return;
+        if (!this.isCurrentWork(controller, generation)) return false;
         const updatedCard = updated.cards.find((item) => item.id === cardId);
         if (!updatedCard) throw new Error("Daily Reflection Card update response mismatch");
         cardVersion = updatedCard.version;
@@ -1287,7 +1292,7 @@ export class DailyReflectionSessionController {
         { expectedVersion: cardVersion },
         controller.signal
       );
-      if (!this.isCurrentWork(controller, generation)) return;
+      if (!this.isCurrentWork(controller, generation)) return false;
       const nextWorkingCards = [
         ...(latestDetail.workingCards ?? []).filter((item) => item.id !== cardId),
         { id: cardId, status: result.card.status, version: result.card.version }
@@ -1305,11 +1310,12 @@ export class DailyReflectionSessionController {
         },
         errorMessage: null
       });
+      return true;
     } catch (error) {
-      if (isAbortError(error) || !this.isCurrentWork(controller, generation)) return;
+      if (isAbortError(error) || !this.isCurrentWork(controller, generation)) return false;
       if (isUnauthorized(error)) {
         this.expireAuthentication();
-        return;
+        return false;
       }
       if (error instanceof DailyReflectionApiError && error.status === 409) {
         try {
@@ -1324,13 +1330,14 @@ export class DailyReflectionSessionController {
         } catch (refreshError) {
           if (isUnauthorized(refreshError)) this.expireAuthentication();
         }
-        return;
+        return false;
       }
       this.update({
         operation: "idle",
         activeCandidateId: null,
         errorMessage: friendlyError(error, "这张卡片没有保存到 My Cards，请稍后重试。")
       });
+      return false;
     } finally {
       if (this.workController === controller) this.workController = null;
     }

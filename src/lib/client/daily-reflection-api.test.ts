@@ -141,6 +141,48 @@ function workingCardResponse(status: "saved" | "archived" | "removed" = "saved")
   };
 }
 
+function memoryProposalResponse(overrides: Record<string, unknown> = {}) {
+  return {
+    id: "proposal_1",
+    cardId: "card_1",
+    reflectionId: "reflection_1",
+    title: "一个工作卡片",
+    cardKind: "insight",
+    actionClaimed: false,
+    memoryType: "summary",
+    content: "这张卡片保留了可核对的依据。",
+    evidenceIds: ["segment_1"],
+    evidenceSnapshots: [{
+      sourceSegmentId: "segment_1",
+      uploadId: "upload_1",
+      startSeconds: 0,
+      endSeconds: 8,
+      effectiveOrigin: "user_reflection"
+    }],
+    riskFlags: [],
+    subjectPersonId: null,
+    importance: 0.8,
+    durability: 0.8,
+    novelty: 0.6,
+    sensitivity: 0.1,
+    epistemicStatus: "explicit_user_statement",
+    epistemicCaution: null,
+    status: "pending",
+    policyVersion: "unassessed",
+    score: 0,
+    reasons: [],
+    confirmationRequirements: [],
+    memoryId: null,
+    sourceOrigin: "user_reflection",
+    recordingDate: "2026-08-13",
+    version: 0,
+    createdAt: "2026-08-13T08:00:00.000Z",
+    updatedAt: "2026-08-13T08:00:00.000Z",
+    admittedAt: null,
+    ...overrides
+  };
+}
+
 describe("createDailyReflectionApi", () => {
   it("exports the exact public file-upload source contract", () => {
     expect(DailyReflectionUploadSourceSchema.options).toEqual([
@@ -908,6 +950,192 @@ describe("createDailyReflectionApi", () => {
       ["/api/daily-reflections/cards/card_1/restore", "POST"],
       ["/api/daily-reflections/cards/card_1", "DELETE"]
     ]);
+  });
+
+  it("creates then admits one Working Card Memory Proposal with returned versions", async () => {
+    const pending = memoryProposalResponse();
+    const admitted = memoryProposalResponse({
+      status: "admitted",
+      policyVersion: "daily_reflection_memory_proposal_policy_v1",
+      score: 0.82,
+      reasons: ["policy_threshold_met"],
+      memoryId: "memory_1",
+      version: 3,
+      admittedAt: "2026-08-13T08:01:00.000Z"
+    });
+    const fetcher = vi.fn<typeof fetch>()
+      .mockResolvedValueOnce(jsonResponse({ proposal: pending, reused: false }, 201))
+      .mockResolvedValueOnce(jsonResponse({
+        status: "admitted",
+        proposal: admitted,
+        memoryId: "memory_1",
+        reasons: ["policy_threshold_met"],
+        confirmationRequirements: []
+      }));
+    const api = createDailyReflectionApi(fetcher);
+
+    const created = await api.createWorkingCardMemoryProposal("card_1", {
+      expectedCardVersion: 1,
+      memoryType: "summary"
+    });
+    await expect(api.admitMemoryProposal(created.proposal.id, {
+      expectedVersion: created.proposal.version,
+      acknowledgements: []
+    })).resolves.toMatchObject({ status: "admitted", memoryId: "memory_1" });
+
+    expect(fetcher.mock.calls.map(([path, init]) => [path, init?.method])).toEqual([
+      ["/api/daily-reflections/cards/card_1/memory-proposals", "POST"],
+      ["/api/daily-reflections/memory-proposals/proposal_1/admit", "POST"]
+    ]);
+    expect(JSON.parse(String(fetcher.mock.calls[0]?.[1]?.body))).toEqual({
+      expectedCardVersion: 1,
+      memoryType: "summary"
+    });
+    expect(JSON.parse(String(fetcher.mock.calls[1]?.[1]?.body))).toEqual({
+      expectedVersion: 0,
+      acknowledgements: []
+    });
+    expect(fetcher.mock.calls.every(([, init]) => init?.credentials === "same-origin"))
+      .toBe(true);
+
+    const replay = vi.fn<typeof fetch>().mockResolvedValue(jsonResponse({
+      status: "already_exists",
+      proposal: admitted,
+      memoryId: "memory_1",
+      reasons: ["policy_threshold_met"],
+      confirmationRequirements: []
+    }));
+    await expect(createDailyReflectionApi(replay).admitMemoryProposal("proposal_1", {
+      expectedVersion: 3,
+      acknowledgements: []
+    })).resolves.toMatchObject({ status: "already_exists", memoryId: "memory_1" });
+  });
+
+  it("keeps one Proposal while resolving explicit Memory confirmations", async () => {
+    const requirement = {
+      code: "acknowledge_inference" as const,
+      resolution: "acknowledgement" as const
+    };
+    const waiting = memoryProposalResponse({
+      policyVersion: "daily_reflection_memory_proposal_policy_v2",
+      reasons: ["confirmation_required:acknowledge_inference"],
+      confirmationRequirements: [requirement],
+      version: 1
+    });
+    const admitted = memoryProposalResponse({
+      status: "admitted",
+      policyVersion: "daily_reflection_memory_proposal_policy_v2",
+      reasons: ["user_confirmation:acknowledge_inference"],
+      confirmationRequirements: [],
+      memoryId: "memory_1",
+      version: 3,
+      admittedAt: "2026-08-13T08:01:00.000Z"
+    });
+    const fetcher = vi.fn<typeof fetch>()
+      .mockResolvedValueOnce(jsonResponse({
+        status: "needs_confirmation",
+        proposal: waiting,
+        memoryId: null,
+        reasons: waiting.reasons,
+        confirmationRequirements: [requirement]
+      }))
+      .mockResolvedValueOnce(jsonResponse({
+        status: "admitted",
+        proposal: admitted,
+        memoryId: "memory_1",
+        reasons: admitted.reasons,
+        confirmationRequirements: []
+      }));
+    const api = createDailyReflectionApi(fetcher);
+
+    await expect(api.admitMemoryProposal("proposal_1", {
+      expectedVersion: 0,
+      acknowledgements: []
+    })).resolves.toMatchObject({
+      status: "needs_confirmation",
+      proposal: { id: "proposal_1", version: 1 }
+    });
+    await expect(api.admitMemoryProposal("proposal_1", {
+      expectedVersion: 1,
+      acknowledgements: ["acknowledge_inference"]
+    })).resolves.toMatchObject({ status: "admitted", memoryId: "memory_1" });
+
+    expect(fetcher.mock.calls.map(([path]) => path)).toEqual([
+      "/api/daily-reflections/memory-proposals/proposal_1/admit",
+      "/api/daily-reflections/memory-proposals/proposal_1/admit"
+    ]);
+    expect(JSON.parse(String(fetcher.mock.calls[1]?.[1]?.body))).toEqual({
+      expectedVersion: 1,
+      acknowledgements: ["acknowledge_inference"]
+    });
+  });
+
+  it("reads strict server-owned Memory recommendations without selecting them", async () => {
+    const response = {
+      reflectionId: "reflection_1",
+      policyVersion: "daily_reflection_memory_recommendation_v1",
+      recommendationFingerprint: "a".repeat(64),
+      maxRecommendations: 5,
+      eligibleCount: 2,
+      recommendations: [{
+        cardId: "card_1",
+        memoryType: "summary",
+        rank: 1,
+        score: 0.82,
+        clusterId: "cluster_1",
+        sourceOrigin: "user_reflection",
+        reasons: ["canonical_evidence_valid"],
+        defaultSelected: false
+      }]
+    };
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(jsonResponse(response));
+
+    await expect(createDailyReflectionApi(fetcher).getMemoryRecommendations("reflection_1"))
+      .resolves.toEqual(response);
+    expect(fetcher).toHaveBeenCalledWith(
+      "/api/daily-reflections/reflection_1/memory-recommendations",
+      { method: "GET", signal: undefined, credentials: "same-origin" }
+    );
+
+    const unsafe = vi.fn<typeof fetch>().mockResolvedValue(jsonResponse({
+      ...response,
+      recommendations: [{ ...response.recommendations[0], defaultSelected: true }]
+    }));
+    await expect(createDailyReflectionApi(unsafe).getMemoryRecommendations("reflection_1"))
+      .rejects.toMatchObject({ code: "invalid_response" });
+  });
+
+  it("rejects invalid Proposal input and unsafe or inconsistent public responses", async () => {
+    const noTransport = vi.fn<typeof fetch>();
+    await expect(createDailyReflectionApi(noTransport).createWorkingCardMemoryProposal(
+      "card_1",
+      { expectedCardVersion: 1, memoryType: "insight" as never }
+    )).rejects.toMatchObject({
+      status: 400,
+      code: "invalid_daily_reflection_memory_proposal"
+    });
+    expect(noTransport).not.toHaveBeenCalled();
+
+    const unsafe = vi.fn<typeof fetch>().mockResolvedValue(jsonResponse({
+      proposal: { ...memoryProposalResponse(), accountId: "must_not_leak" },
+      reused: false
+    }));
+    await expect(createDailyReflectionApi(unsafe).createWorkingCardMemoryProposal(
+      "card_1",
+      { expectedCardVersion: 1, memoryType: "summary" }
+    )).rejects.toMatchObject({ code: "invalid_response" });
+
+    const inconsistent = vi.fn<typeof fetch>().mockResolvedValue(jsonResponse({
+      status: "admitted",
+      proposal: memoryProposalResponse(),
+      memoryId: "memory_1",
+      reasons: [],
+      confirmationRequirements: []
+    }));
+    await expect(createDailyReflectionApi(inconsistent).admitMemoryProposal(
+      "proposal_1",
+      { expectedVersion: 0, acknowledgements: [] }
+    )).rejects.toMatchObject({ code: "invalid_response" });
   });
 
   it("rejects technical fields and unavailable-source Evidence in Working Card responses", async () => {

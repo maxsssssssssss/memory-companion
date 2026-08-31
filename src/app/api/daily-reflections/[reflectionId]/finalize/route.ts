@@ -17,9 +17,11 @@ import {
 import {
   DailyReflectionConflictError,
   DailyReflectionMemoryAdmissionError,
+  DailyReflectionMemoryProposalConfirmationRequiredError,
   DailyReflectionNotFoundError,
   DailyReflectionVersionConflictError,
   getDailyReflectionMemoryAdmissionService,
+  getDailyReflectionMemoryProposalFinalizeService,
   getDailyReflectionRepository,
   isDailyReflectionUploadEnabled
 } from "@/lib/server/daily-reflection";
@@ -96,7 +98,19 @@ export async function POST(
     }
 
     try {
-      await getDailyReflectionMemoryAdmissionService().admitUnderLease({
+      const executionMethod = repository.getAdmissionExecutionMethod(
+        authContext.user.id,
+        reflectionId.data
+      );
+      const admissionService = executionMethod === "memory_proposal_v1"
+        ? getDailyReflectionMemoryProposalFinalizeService()
+        : executionMethod === "legacy_direct_v1"
+          ? getDailyReflectionMemoryAdmissionService()
+          : null;
+      if (!admissionService) {
+        return conflict("daily_reflection_v2_admission_contract_conflict", true);
+      }
+      await admissionService.admitUnderLease({
         accountId: authContext.user.id,
         reflectionId: reflectionId.data,
         leaseOwner: `daily-reflection-finalize:${randomUUID()}`,
@@ -104,6 +118,15 @@ export async function POST(
       });
     } catch (error) {
       if (error instanceof DailyReflectionNotFoundError) return missing();
+      if (error instanceof DailyReflectionMemoryProposalConfirmationRequiredError) {
+        return NextResponse.json({
+          error: error.code,
+          proposalId: error.proposalId,
+          cardId: error.cardId,
+          confirmationRequirements: error.confirmationRequirements,
+          retryable: false
+        }, { status: 409 });
+      }
       if (error instanceof DailyReflectionConflictError) {
         if (
           error.code === "daily_reflection_admission_busy"

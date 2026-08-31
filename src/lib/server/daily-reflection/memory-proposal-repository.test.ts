@@ -61,6 +61,11 @@ function createHarness() {
   let workingStatus = "saved" as "saved" | "archived";
   let cardDurability = 0.9;
   let segment = canonicalSegment();
+  let saveIntent = "recap_only" as "recap_only" | "retain_selected";
+  let reflectionStatus = "completed" as "completed" | "admitting";
+  let snapshotStatus = "excluded" as "excluded" | "kept";
+  let sourceReviewStatus = "pending" as "pending" | "kept" | "excluded";
+  let executionMethod = null as null | "memory_proposal_v1";
   const detail = () => ({
     card: {
       id: "card_1",
@@ -97,7 +102,7 @@ function createHarness() {
       id: "reflection_1",
       accountId: "account_1",
       uploadId: "upload_1",
-      status: "completed",
+      status: reflectionStatus,
       version: 5
     }),
     getConfirmation: () => ({
@@ -115,14 +120,14 @@ function createHarness() {
       inputAdapter: "file_picker",
       capturePurpose: "inspiration_capture",
       recordingDate: "2026-08-24",
-      saveIntent: "recap_only",
+      saveIntent,
       candidateSnapshots: [{
         contractVersion: 2,
         candidateId: "card_1",
         proposedText: "我平时更喜欢安静的位置。",
         userText: null,
         finalText: "我平时更喜欢安静的位置。",
-        status: "excluded",
+        status: snapshotStatus,
         candidateKind: "insight",
         candidateType: "summary",
         evidenceIds: ["segment_1"],
@@ -142,6 +147,8 @@ function createHarness() {
       }],
       createdAt: NOW
     }),
+    getAdmissionOperation: () => executionMethod ? ({ status: "admitting" }) : null,
+    getAdmissionExecutionMethod: () => executionMethod,
     getProcessingPlan: () => ({
       planVersion: 2,
       reflectionId: "reflection_1",
@@ -176,7 +183,13 @@ function createHarness() {
     listReflectionCards: () => [{
       id: "card_1",
       cardKind: "insight",
+      proposedTitle: "长期偏好",
+      userTitle: null,
+      proposedText: "我平时更喜欢安静的位置。",
+      userText: null,
+      evidenceIds: ["segment_1"],
       actionClaimed: false,
+      reviewStatus: sourceReviewStatus,
       durability: cardDurability,
       epistemicStatus: "explicit_user_statement",
       riskFlags: []
@@ -205,6 +218,19 @@ function createHarness() {
     },
     setCardDurability(value: number) {
       cardDurability = value;
+    },
+    useRetainSelected() {
+      saveIntent = "retain_selected";
+      reflectionStatus = "admitting";
+      snapshotStatus = "kept";
+      sourceReviewStatus = "kept";
+      executionMethod = "memory_proposal_v1";
+    },
+    excludeRetainedSnapshot() {
+      snapshotStatus = "excluded";
+    },
+    setSourceReviewStatus(value: "pending" | "kept" | "excluded") {
+      sourceReviewStatus = value;
     },
     changeCanonicalText(value: string) {
       segment = { ...segment, text: value };
@@ -262,6 +288,141 @@ describe("Daily Reflection Memory Proposal repository", () => {
       expectedCardVersion: 1,
       memoryType: "event"
     })).toThrow(DailyReflectionConflictError);
+  });
+
+  it("accepts only an exact kept Card from an authoritative retain_selected operation", () => {
+    fixture.useRetainSelected();
+    const created = fixture.repository.create({
+      accountId: "account_1",
+      cardId: "card_1",
+      expectedCardVersion: 1,
+      memoryType: "summary"
+    });
+    expect(created.proposal).toMatchObject({
+      memoryType: "summary",
+      cardId: "card_1",
+      status: "pending"
+    });
+    expect(fixture.database.prepare(`
+      SELECT memory_type, memory_type_v2
+      FROM dr_memory_proposals
+      WHERE account_id = 'account_1' AND card_id = 'card_1'
+    `).get()).toEqual({ memory_type: "decision", memory_type_v2: "summary" });
+  });
+
+  it("rejects an excluded Card from retain_selected before creating a Proposal", () => {
+    fixture.useRetainSelected();
+    fixture.excludeRetainedSnapshot();
+    expect(() => fixture.repository.create({
+      accountId: "account_1",
+      cardId: "card_1",
+      expectedCardVersion: 1,
+      memoryType: "summary"
+    })).toThrowError(expect.objectContaining({
+      code: "daily_reflection_memory_proposal_confirmation_ineligible"
+    }));
+    expect(fixture.database.prepare(
+      "SELECT COUNT(*) AS count FROM dr_memory_proposals"
+    ).get()).toEqual({ count: 0 });
+  });
+
+  it("fails closed when a saved Working Card points to an excluded source Card", () => {
+    fixture.useRetainSelected();
+    fixture.setSourceReviewStatus("excluded");
+
+    expect(() => fixture.repository.create({
+      accountId: "account_1",
+      cardId: "card_1",
+      expectedCardVersion: 1,
+      memoryType: "summary"
+    })).toThrowError(expect.objectContaining({
+      code: "daily_reflection_memory_proposal_confirmation_ineligible"
+    }));
+    expect(fixture.database.prepare(
+      "SELECT COUNT(*) AS count FROM dr_memory_proposals"
+    ).get()).toEqual({ count: 0 });
+  });
+
+  it("re-evaluates a stable V1 soft rejection under V2 without changing its operation key", () => {
+    const created = fixture.repository.create({
+      accountId: "account_1",
+      cardId: "card_1",
+      expectedCardVersion: 1,
+      memoryType: "summary"
+    }).proposal;
+    const rejected = fixture.repository.evaluate({
+      accountId: "account_1",
+      proposalId: created.id,
+      expectedVersion: created.version,
+      decision: "rejected",
+      policyVersion: "daily_reflection_memory_proposal_policy_v1",
+      score: 0.32,
+      reasons: ["resolved_or_generic_question"]
+    }).proposal;
+
+    const upgraded = fixture.repository.evaluate({
+      accountId: "account_1",
+      proposalId: created.id,
+      expectedVersion: rejected.version,
+      decision: "approved",
+      policyVersion: "daily_reflection_memory_proposal_policy_v2",
+      score: 0.31,
+      reasons: [
+        "legacy_signal:resolved_or_generic_question",
+        "user_selected_working_card"
+      ]
+    }).proposal;
+
+    expect(upgraded).toMatchObject({
+      id: created.id,
+      operationKey: created.operationKey,
+      status: "approved",
+      policyVersion: "daily_reflection_memory_proposal_policy_v2"
+    });
+    expect(fixture.repository.listEvents("account_1", created.id)
+      .map((event) => event.event_type)).toEqual([
+      "created",
+      "evaluated",
+      "evaluated"
+    ]);
+  });
+
+  it("persists a needs-confirmation assessment as replayable pending policy state", () => {
+    const created = fixture.repository.create({
+      accountId: "account_1",
+      cardId: "card_1",
+      expectedCardVersion: 1,
+      memoryType: "summary"
+    }).proposal;
+    const assessment = {
+      accountId: "account_1",
+      proposalId: created.id,
+      expectedVersion: created.version,
+      decision: "needs_confirmation" as const,
+      policyVersion: "daily_reflection_memory_proposal_policy_v2",
+      score: 0.4,
+      reasons: ["confirmation_required:acknowledge_sensitive_content"]
+    };
+    const first = fixture.repository.evaluate(assessment);
+    const replay = fixture.repository.evaluate({
+      ...assessment,
+      expectedVersion: first.proposal.version
+    });
+
+    expect(first.proposal).toMatchObject({
+      status: "pending",
+      reasons: ["confirmation_required:acknowledge_sensitive_content"]
+    });
+    expect(replay).toEqual({ proposal: first.proposal, reused: true });
+    expect(() => fixture.repository.startAdmission({
+      accountId: "account_1",
+      proposalId: created.id,
+      leaseOwner: "worker_1",
+      leaseDurationMs: 60_000,
+      now: NOW
+    })).toThrowError(expect.objectContaining({
+      code: "daily_reflection_memory_proposal_not_approved"
+    }));
   });
 
   it("revalidates the current Card and canonical Transcript before admission", () => {
@@ -552,10 +713,9 @@ describe("Daily Reflection Memory Proposal repository", () => {
     }
   });
 
-  it("keeps a rejected Proposal at zero Memory, Evidence, Person, publication, and index writes", async () => {
+  it("keeps a hard-rejected person fact at zero Memory, Evidence, Person, publication, and index writes", async () => {
     const memoryDatabase = openMemoryDatabase({ filePath: ":memory:" });
     try {
-      fixture.setCardDurability(0.2);
       const onPublicationVisible = vi.fn();
       const service = createDailyReflectionMemoryProposalService({
         proposalRepository: fixture.repository,
@@ -569,7 +729,7 @@ describe("Daily Reflection Memory Proposal repository", () => {
         accountId: "account_1",
         cardId: "card_1",
         expectedCardVersion: 1,
-        memoryType: "preference"
+        memoryType: "person_fact"
       });
       const rejected = await service.admit({
         accountId: "account_1",
@@ -577,6 +737,58 @@ describe("Daily Reflection Memory Proposal repository", () => {
         expectedVersion: created.proposal.version
       });
       expect(rejected.status).toBe("rejected");
+      for (const table of [
+        "memory_items",
+        "memory_evidence",
+        "memory_daily_reflection_publications",
+        "memory_daily_reflection_candidate_receipts",
+        "memory_daily_reflection_evidence_provenance",
+        "person_evidence"
+      ]) {
+        expect(memoryDatabase.prepare(
+          `SELECT COUNT(*) AS count FROM ${table}`
+        ).get()).toEqual({ count: 0 });
+      }
+      expect(onPublicationVisible).not.toHaveBeenCalled();
+    } finally {
+      memoryDatabase.close();
+    }
+  });
+
+  it("keeps an excluded source Card at zero Memory, Evidence, Person, publication, and index writes", async () => {
+    const memoryDatabase = openMemoryDatabase({ filePath: ":memory:" });
+    try {
+      fixture.useRetainSelected();
+      const onPublicationVisible = vi.fn();
+      const service = createDailyReflectionMemoryProposalService({
+        proposalRepository: fixture.repository,
+        admissionRepository: createDailyReflectionProposalAdmissionRepository(memoryDatabase),
+        personRepository: { getConfirmedPerson: () => null } as never,
+        now: () => NOW,
+        leaseOwnerFactory: () => "worker_excluded_source",
+        onPublicationVisible
+      });
+      const created = service.create({
+        accountId: "account_1",
+        cardId: "card_1",
+        expectedCardVersion: 1,
+        memoryType: "summary"
+      });
+      fixture.setSourceReviewStatus("excluded");
+
+      const rejected = await service.admit({
+        accountId: "account_1",
+        proposalId: created.proposal.id,
+        expectedVersion: created.proposal.version
+      });
+
+      expect(rejected).toMatchObject({
+        status: "rejected",
+        reasons: expect.arrayContaining([
+          "canonical_evidence_invalid",
+          "source_unavailable"
+        ])
+      });
       for (const table of [
         "memory_items",
         "memory_evidence",

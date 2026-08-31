@@ -25,6 +25,7 @@ import {
 import {
   DailyReflectionWorkingCardKindSchema,
   DailyReflectionWorkingCardBaseSchema,
+  DailyReflectionWorkingCardMemoryLifecycleStatusSchema,
   DailyReflectionWorkingCardStatusSchema
 } from "./daily-reflection-working-card";
 import {
@@ -278,6 +279,7 @@ export const DailyReflectionWorkingCardDetailResponseSchema = z.object({
 export const DailyReflectionWorkingCardStateViewSchema = z.object({
   id: DailyReflectionIdSchema,
   status: DailyReflectionWorkingCardStatusSchema,
+  memoryLifecycleStatus: DailyReflectionWorkingCardMemoryLifecycleStatusSchema.optional(),
   version: DailyReflectionVersionSchema
 }).strict();
 
@@ -669,6 +671,12 @@ export const DailyReflectionDetailResponseSchema = z.object({
     const admittedIds = new Set(detail.admissionResults
       .filter((result) => result.status === "admitted" || result.status === "already_admitted")
       .map((result) => result.candidateId));
+    const inactiveWorkingCardIds = new Set((detail.workingCards ?? [])
+      .filter((card) => (
+        card.memoryLifecycleStatus === "revocation_requested"
+        || card.memoryLifecycleStatus === "revoked"
+      ))
+      .map((card) => card.id));
     detail.revokedCandidateIds.forEach((candidateId, index) => {
       if (!candidateIds.has(candidateId) || !admittedIds.has(candidateId)) {
         addIssue(
@@ -679,7 +687,10 @@ export const DailyReflectionDetailResponseSchema = z.object({
       }
     });
     const expectedRememberedCount = [...admittedIds]
-      .filter((candidateId) => !revoked.has(candidateId)).length;
+      .filter((candidateId) => (
+        !revoked.has(candidateId)
+        && !inactiveWorkingCardIds.has(candidateId)
+      )).length;
     if (detail.rememberedCount !== expectedRememberedCount) {
       addIssue(
         context,

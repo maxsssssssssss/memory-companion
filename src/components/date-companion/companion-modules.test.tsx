@@ -1,26 +1,60 @@
 import { cleanup, render, screen } from "@testing-library/react";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+import { productPreferenceKey } from "@/components/product-system/product-preference";
 
 import { CompanionModules } from "./companion-modules";
 
 describe("CompanionModules", () => {
+  beforeEach(() => window.localStorage.clear());
   afterEach(cleanup);
 
-  it("keeps the everyday card unavailable and unchanged when Daily Reflection is off", () => {
-    render(<CompanionModules dailyReflectionEnabled={false} onLogout={vi.fn()} userLabel="user@example.com" />);
+  it("renders one neutral entry with two products and one honest undeveloped product", () => {
+    render(
+      <CompanionModules
+        accountId="account_1"
+        dailyReflectionEnabled
+        onLogout={vi.fn()}
+        userLabel="user@example.com"
+      />
+    );
 
-    expect(screen.getByRole("heading", { name: "日常闲聊" })).toBeInTheDocument();
-    expect(screen.getAllByText("暂不可进入", { selector: "span" })).toHaveLength(2);
-    expect(screen.queryByRole("link", { name: /日常复盘/u })).not.toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "选择一个空间" })).toBeVisible();
+    expect(screen.getByRole("link", { name: /约会陪伴/u })).toHaveAttribute("href", "/date-companion/a");
+    expect(screen.getByRole("link", { name: /日常复盘/u })).toHaveAttribute("href", "/reflection");
+    expect(screen.getByRole("heading", { name: "办公复盘" })).toBeVisible();
+    expect(screen.getByText("开发中")).toBeVisible();
+    expect(screen.queryByText(/统计|最近任务|内部开放/u)).not.toBeInTheDocument();
   });
 
-  it("turns only the third card into the internal Daily Reflection link when enabled", () => {
-    render(<CompanionModules dailyReflectionEnabled onLogout={vi.fn()} userLabel="user@example.com" />);
+  it("keeps the Daily Reflection feature flag fail closed", () => {
+    render(
+      <CompanionModules
+        accountId="account_1"
+        dailyReflectionEnabled={false}
+        onLogout={vi.fn()}
+        userLabel="user@example.com"
+      />
+    );
 
-    const reflectionLink = screen.getByRole("link", { name: /日常复盘/u });
-    expect(reflectionLink).toHaveAttribute("href", "/reflection");
-    expect(screen.getByText("先选择一个空间。日常复盘目前仅作内部开放。")).toBeInTheDocument();
-    expect(screen.queryByRole("heading", { name: "日常闲聊" })).not.toBeInTheDocument();
-    expect(screen.getByRole("link", { name: /约会陪伴/u })).toHaveAttribute("href", "/date-companion/a");
+    expect(screen.queryByRole("link", { name: /日常复盘/u })).not.toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "日常复盘" })).toBeVisible();
+    expect(screen.getByText("暂未开放")).toBeVisible();
+  });
+
+  it("recovers the last module only inside the current account", async () => {
+    window.localStorage.setItem(productPreferenceKey("account_1"), "daily_reflection");
+    window.localStorage.setItem(productPreferenceKey("account_2"), "date_companion");
+    render(
+      <CompanionModules
+        accountId="account_1"
+        dailyReflectionEnabled
+        onLogout={vi.fn()}
+        userLabel="user@example.com"
+      />
+    );
+
+    expect(await screen.findByText("上次使用")).toBeVisible();
+    expect(screen.getByRole("link", { name: /日常复盘/u })).toHaveTextContent("继续进入");
   });
 });

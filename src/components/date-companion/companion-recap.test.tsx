@@ -64,25 +64,43 @@ describe("CompanionRecap", () => {
 
   afterEach(() => vi.unstubAllGlobals());
 
-  it("places at most one async observation above the deterministic recap stages", () => {
+  it("places speaker review first and one AI observation above the deterministic recap stages", () => {
     render(
       <CompanionRecap
         interaction={interaction}
         items={items}
         proactiveObservation={<p>只出现一次的小发现</p>}
+        proactiveObservationStatus="ready"
       />
     );
 
-    expect(screen.getAllByRole("heading", { name: "一个小发现" })).toHaveLength(1);
-    const proactivePanel = screen.getByRole("heading", { name: "一个小发现" }).closest("section")!;
-    const processSteps = screen.getByLabelText("本次录音整理阶段");
-    expect(proactivePanel.compareDocumentPosition(processSteps) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(screen.getAllByRole("heading", { name: "AI 观察" })).toHaveLength(1);
+    const participantPanel = screen.getByRole("heading", { name: "核对说话人" }).closest("details")!;
+    const overview = screen.getByRole("heading", { name: /这次相处里，整理出/u }).closest("section")!;
+    const proactivePanel = screen.getByRole("heading", { name: "AI 观察" }).closest("section")!;
+    const findings = screen.getByRole("heading", { name: "值得带走" }).closest("section")!;
+    expect(participantPanel.compareDocumentPosition(overview) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(proactivePanel.compareDocumentPosition(findings) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
+  it("labels deterministic fallback content as a raw-text clue instead of AI output", () => {
+    render(
+      <CompanionRecap
+        interaction={interaction}
+        items={items}
+        proactiveObservation={<p>只依据原话整理的线索</p>}
+        proactiveObservationStatus="fallback"
+      />
+    );
+
+    expect(screen.getByRole("heading", { name: "原话线索" })).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "AI 观察" })).not.toBeInTheDocument();
   });
 
   it("writes the real segment id into the URL and highlights the matching transcript line", async () => {
     render(<CompanionRecap interaction={interaction} items={items} />);
 
-    fireEvent.click(screen.getByText("展开来源"));
+    fireEvent.click(screen.getByText("查看原话"));
     fireEvent.click(screen.getByRole("button", { name: "在文字稿中查看" }));
 
     expect(window.location.pathname).toBe("/date-companion/a/recap");
@@ -119,10 +137,10 @@ describe("CompanionRecap", () => {
     );
     expect(screen.queryByText(/Provider/u)).not.toBeInTheDocument();
     fireEvent.error(audio);
-    expect(screen.getByText("声音节选暂不可用，请结合下面的原话判断。")).toBeInTheDocument();
+    expect(screen.getByText("声音节选暂不可用，请结合原话判断。")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "暂不确定" })).toHaveAttribute("aria-pressed", "true");
     fireEvent.click(screen.getByRole("button", { name: "我" }));
-    fireEvent.click(screen.getByRole("button", { name: "确认并留下这次相处" }));
+    fireEvent.click(screen.getByRole("button", { name: "完成本次复盘" }));
 
     await waitFor(() => expect(onFinalize).toHaveBeenCalledWith(
       [{ speakerId: "speaker_1", role: "self" }],
@@ -203,10 +221,11 @@ describe("CompanionRecap", () => {
       />
     );
 
-    expect(await screen.findByText("正在结合整次相处，帮你分清这些内容主要关于谁…")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("checkbox", { name: /这次也整理进长期记忆/u }));
+    expect(await screen.findByText("正在整理内容归属；你仍可先完成本次复盘。")).toBeInTheDocument();
     await waitFor(() => expect(fetchSuggestion).toHaveBeenCalledTimes(2));
     resolveSuggestion(Response.json({ batch }));
-    await screen.findByText("已经整理好");
+    await screen.findByText("准备长期保留的内容归属");
     expect(fetchSuggestion).toHaveBeenCalledTimes(2);
     expect(screen.getAllByText("暂不确定 1")).toHaveLength(2);
     expect(screen.getByText("这次值得记住 · 1 条原话")).toBeInTheDocument();
@@ -214,11 +233,11 @@ describe("CompanionRecap", () => {
     expect(within(themeSummary).getByText("暂不确定 1")).toBeInTheDocument();
     expect(within(themeSummary).queryByRole("button")).not.toBeInTheDocument();
     expect(screen.queryByLabelText("这次值得记住的 Subject")).not.toBeInTheDocument();
-    fireEvent.click(screen.getByText("查看每条归属"));
+    fireEvent.click(screen.getByText("这次值得记住 · 1 条原话"));
     const sourceMapping = screen.getByLabelText("这次值得记住第 1 条原话的内容范围");
     expect(sourceMapping.closest("li")).toHaveTextContent("这是一条可以核对的原话。");
     expect(sourceMapping).toHaveTextContent("暂不确定");
-    fireEvent.click(screen.getByRole("button", { name: "接受以上归属并留下" }));
+    fireEvent.click(screen.getByRole("button", { name: "完成本次复盘" }));
 
     await waitFor(() => expect(onFinalize).toHaveBeenCalledWith(
       [{ speakerId: "speaker_1", role: "companion" }],
@@ -323,10 +342,10 @@ describe("CompanionRecap", () => {
     );
     const { rerender } = render(subjectBackfill("kept"));
 
-    await screen.findByText("已经整理好");
-    expect(screen.getByRole("button", { name: "接受以上归属并开始整理" })).toBeDisabled();
+    await screen.findByText("准备长期保留的内容归属");
+    expect(screen.getByRole("button", { name: "开始长期整理" })).toBeDisabled();
     rerender(subjectBackfill("excluded"));
-    const syncButton = screen.getByRole("button", { name: "接受以上归属并开始整理" });
+    const syncButton = screen.getByRole("button", { name: "开始长期整理" });
     expect(syncButton).toBeEnabled();
     fireEvent.click(syncButton);
     await waitFor(() => expect(onMemorySync).toHaveBeenCalledWith(
@@ -428,8 +447,8 @@ describe("CompanionRecap", () => {
     );
     const { rerender } = render(recoveryRecap(1, now));
 
-    const panel = screen.getByRole("heading", { name: "看看哪些内容值得留下" }).closest("section")!;
-    expect(await within(panel).findByText("这段长期关系记录之前已被清理。重新启用后，我会按你刚确认的归属继续整理。")).toBeInTheDocument();
+    const panel = screen.getByRole("heading", { name: "长期记忆（可选）" }).closest("section")!;
+    expect(await within(panel).findByText("这段长期关系记录之前已被清理；重新启用后会按你确认的归属继续整理。")).toBeInTheDocument();
     const button = within(panel).getByRole("button", { name: "重新启用并继续整理" });
     fireEvent.click(button);
     expect(within(panel).getByRole("button", { name: "正在整理…" })).toBeDisabled();
@@ -508,7 +527,7 @@ describe("CompanionRecap", () => {
       />
     );
 
-    expect(screen.getByText("这次原话来源已经变化，暂时不能继续整理长期记录。")).toBeInTheDocument();
+    expect(screen.getByText("这次原话来源已经变化，暂时不能继续长期整理。")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /整理|重新启用/u })).not.toBeInTheDocument();
   });
 
@@ -565,9 +584,10 @@ describe("CompanionRecap", () => {
       />
     );
 
-    expect(await screen.findByRole("alert")).toHaveTextContent("仍可只保存本次复盘");
-    expect(screen.getByRole("button", { name: "接受以上归属并留下" })).toBeDisabled();
-    fireEvent.click(screen.getByRole("button", { name: "只保存本次复盘，不做长期保留" }));
+    fireEvent.click(screen.getByRole("checkbox", { name: /这次也整理进长期记忆/u }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("仍可完成本次复盘");
+    expect(screen.getByRole("button", { name: "完成本次复盘" })).toBeEnabled();
+    fireEvent.click(screen.getByRole("button", { name: "完成本次复盘" }));
     await waitFor(() => expect(onFinalize).toHaveBeenCalledWith(
       [{ speakerId: "speaker_1", role: "companion" }],
       [{ id: "recap-1", version: 3, disposition: "kept" }],
@@ -733,7 +753,7 @@ describe("CompanionRecap", () => {
       />
     );
 
-    expect(screen.getByText("整理仍在后台继续；你可以查看一次最新结果，无需重新提交。")).toBeInTheDocument();
+    expect(screen.getByText("长期整理仍在后台继续。")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "查看整理结果" }));
     await waitFor(() => expect(onMemoryRefresh).toHaveBeenCalledTimes(1));
     expect(onMemorySync).not.toHaveBeenCalled();
@@ -766,7 +786,7 @@ describe("CompanionRecap", () => {
       />
     );
 
-    expect(screen.getByText("已按你上次的确认预选，请再听一次核对")).toBeInTheDocument();
+    expect(screen.getByText("已按上次确认预选，请再核对一次")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Ta" })).toHaveAttribute("aria-pressed", "true");
     expect(screen.queryByRole("radio", { name: /记住这段声音/u })).not.toBeInTheDocument();
   });
@@ -827,7 +847,7 @@ describe("CompanionRecap", () => {
     const enrollment = screen.getByRole("radio", { name: /记住这段声音/u });
     expect(enrollment).not.toBeChecked();
     fireEvent.click(enrollment);
-    fireEvent.click(screen.getByRole("button", { name: "确认并留下这次相处" }));
+    fireEvent.click(screen.getByRole("button", { name: "完成本次复盘" }));
 
     await waitFor(() => expect(onFinalize).toHaveBeenCalledWith(
       [
@@ -887,7 +907,7 @@ describe("CompanionRecap", () => {
     fireEvent.click(enrollmentChoices[1]);
     expect(enrollmentChoices[0]).not.toBeChecked();
     expect(enrollmentChoices[1]).toBeChecked();
-    fireEvent.click(screen.getByRole("button", { name: "确认并留下这次相处" }));
+    fireEvent.click(screen.getByRole("button", { name: "完成本次复盘" }));
 
     await waitFor(() => expect(onFinalize).toHaveBeenCalledWith(
       [
@@ -932,7 +952,7 @@ describe("CompanionRecap", () => {
       "data-disposition",
       "kept"
     );
-    fireEvent.click(screen.getByRole("button", { name: "确认并留下这次相处" }));
+    fireEvent.click(screen.getByRole("button", { name: "完成本次复盘" }));
 
     await waitFor(() => expect(onFinalize).toHaveBeenCalledWith(
       [
@@ -974,16 +994,16 @@ describe("CompanionRecap", () => {
 
     expect(screen.getByRole("button", { name: "修改" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "这条不留下" })).toBeInTheDocument();
-    expect(screen.getByText("未留下 1 条")).toBeInTheDocument();
+    expect(screen.getByText("未保留 1 条")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "修改" }));
     const editor = screen.getByRole("textbox", { name: "修改这条：值得记住" });
     fireEvent.change(editor, { target: { value: "用户修改后的内容" } });
     fireEvent.click(screen.getByRole("button", { name: "应用修改" }));
     fireEvent.click(screen.getByRole("button", { name: "这条不留下" }));
     expect(screen.getAllByText("你选择不留下这条")).toHaveLength(1);
-    fireEvent.click(screen.getAllByText("未留下 1 条")[0]);
+    fireEvent.click(screen.getAllByText("未保留 1 条")[0]);
     fireEvent.click(screen.getByRole("button", { name: "恢复这条" }));
-    fireEvent.click(screen.getByRole("button", { name: "确认并留下这次相处" }));
+    fireEvent.click(screen.getByRole("button", { name: "完成本次复盘" }));
     await waitFor(() => expect(onFinalize).toHaveBeenCalledWith(
       [{ speakerId: "speaker_1", role: "self" }],
       [
@@ -1003,9 +1023,12 @@ describe("CompanionRecap", () => {
       />
     );
 
-    const summary = screen.getByText("这次录音里的说话人").closest("summary");
+    const summary = screen.getByText("核对说话人").closest("summary");
     const details = summary?.closest("details");
     expect(details).toHaveAttribute("open");
+    fireEvent.click(summary!);
+    expect(details).toHaveAttribute("open");
+    expect(screen.getByText("请先核对")).toBeInTheDocument();
     const selfChoice = screen.getByRole("button", { name: "我" });
     fireEvent.click(selfChoice);
     expect(selfChoice).toHaveAttribute("aria-pressed", "true");
@@ -1015,6 +1038,52 @@ describe("CompanionRecap", () => {
     fireEvent.click(summary!);
     expect(details).toHaveAttribute("open");
     expect(selfChoice).toHaveAttribute("aria-pressed", "true");
+  });
+
+  it("treats an explicit unresolved choice as reviewed while keeping it fail closed", () => {
+    const { container } = render(
+      <CompanionRecap
+        interaction={{ ...interaction, persistenceStatus: "draft", relationshipInteractionId: "interaction-1" }}
+        items={items}
+        onFinalize={vi.fn()}
+      />
+    );
+
+    const summary = screen.getByText("核对说话人").closest("summary")!;
+    const details = summary.closest("details")!;
+    fireEvent.click(screen.getByRole("button", { name: "暂不确定" }));
+    expect(details).toHaveAttribute("data-review-complete", "true");
+    fireEvent.click(summary);
+    expect(details).not.toHaveAttribute("open");
+    expect(container.querySelector('[data-card-kind="moment"]')).toHaveTextContent("未保留");
+    expect(container.querySelector('[data-card-kind="moment"]')).toHaveTextContent("说话人暂不确定");
+  });
+
+  it("does not treat a previous role suggestion as confirmation in this review", () => {
+    render(
+      <CompanionRecap
+        interaction={{ ...interaction, persistenceStatus: "draft", relationshipInteractionId: "interaction-1" }}
+        items={items}
+        onFinalize={vi.fn()}
+        participants={[{
+          speakerId: "speaker_1",
+          displayLabel: "说话人 1",
+          state: "unresolved",
+          role: "companion",
+          roleSuggestion: {
+            role: "companion",
+            source: "previous_confirmation"
+          },
+          sampleQuotes: []
+        }]}
+      />
+    );
+
+    const summary = screen.getByText("核对说话人").closest("summary")!;
+    const details = summary.closest("details")!;
+    expect(details).toHaveAttribute("data-review-complete", "false");
+    fireEvent.click(summary);
+    expect(details).toHaveAttribute("open");
   });
 
   it("shows only five recap items until that group is expanded", () => {
@@ -1071,8 +1140,8 @@ describe("CompanionRecap", () => {
       />
     );
 
-    fireEvent.click(screen.getByText("展开来源"));
-    expect(screen.getByText("已保留可核对原话")).toBeInTheDocument();
+    fireEvent.click(screen.getByText("查看原话"));
+    expect(screen.getByText("原话片段")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "在文字稿中查看" })).not.toBeInTheDocument();
     expect(screen.getByText(/这台设备没有完整文字稿/u)).toBeInTheDocument();
   });
@@ -1126,7 +1195,7 @@ describe("CompanionRecap", () => {
       "/api/date-companion/interactions/interaction-1/participants/speaker_2/audio"
     );
     expect(screen.getAllByText("“Ta 在服务端保留的原话。”")).toHaveLength(2);
-    fireEvent.click(screen.getByRole("button", { name: "确认并留下这次相处" }));
+    fireEvent.click(screen.getByRole("button", { name: "完成本次复盘" }));
 
     await waitFor(() => expect(onFinalize).toHaveBeenCalledWith(
       [
@@ -1174,7 +1243,7 @@ describe("CompanionRecap", () => {
       />
     );
 
-    const finalButton = screen.getByRole("button", { name: "确认并留下这次相处" });
+    const finalButton = screen.getByRole("button", { name: "完成本次复盘" });
     expect(finalButton).toBeEnabled();
     fireEvent.click(finalButton);
     await waitFor(() => expect(onFinalize).toHaveBeenCalledWith(
@@ -1206,6 +1275,6 @@ describe("CompanionRecap", () => {
 
     expect(screen.getAllByText(/没有稳定的说话人标记/u)).toHaveLength(2);
     expect(screen.getByText("没有可核对的说话人")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "确认并留下这次相处" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "完成本次复盘" })).toBeDisabled();
   });
 });

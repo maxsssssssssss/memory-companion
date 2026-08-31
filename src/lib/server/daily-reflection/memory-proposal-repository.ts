@@ -17,6 +17,8 @@ import {
   AudioUploadSchema,
   type TranscriptSegment
 } from "@/lib/domain/types";
+import { workingCardKindForReflectionCard } from
+  "@/lib/domain/daily-reflection-working-card";
 
 import { parseDailyReflectionCanonicalTranscript } from "./canonical-transcript";
 import {
@@ -39,7 +41,11 @@ type ProposalRow = {
   title: string;
   card_kind: DailyReflectionMemoryProposal["cardKind"];
   action_claimed: 0 | 1;
-  memory_type: DailyReflectionMemoryProposal["memoryType"];
+  memory_type: Exclude<
+    DailyReflectionMemoryProposal["memoryType"],
+    "summary" | "question"
+  >;
+  memory_type_v2: DailyReflectionMemoryProposal["memoryType"] | null;
   content: string;
   evidence_ids_json: string;
   evidence_snapshots_json: string;
@@ -89,10 +95,10 @@ const ProposalIdentitySchema = z.object({
 
 const PolicyDecisionInputSchema = ProposalIdentitySchema.extend({
   expectedVersion: z.number().int().nonnegative(),
-  decision: z.enum(["approved", "rejected"]),
+  decision: z.enum(["approved", "needs_confirmation", "rejected"]),
   policyVersion: z.string().trim().min(1).max(128),
   score: z.number().min(0).max(1),
-  reasons: z.array(z.string().trim().min(1).max(256)).max(32)
+  reasons: z.array(z.string().trim().min(1).max(256)).min(1).max(32)
 }).strict().superRefine((input, context) => {
   if (input.decision === "rejected" && input.reasons.length === 0) {
     context.addIssue({
@@ -189,7 +195,7 @@ function proposalFromRow(row: ProposalRow): DailyReflectionMemoryProposal {
     title: row.title,
     cardKind: row.card_kind,
     actionClaimed: row.action_claimed === 1,
-    memoryType: row.memory_type,
+    memoryType: row.memory_type_v2 ?? row.memory_type,
     content: row.content,
     evidenceIds: JSON.parse(row.evidence_ids_json) as unknown,
     evidenceSnapshots: snapshots.map((item) => ({
@@ -226,6 +232,19 @@ function proposalFromRow(row: ProposalRow): DailyReflectionMemoryProposal {
     updatedAt: row.updated_at,
     admittedAt: row.admitted_at
   });
+}
+
+function legacyMemoryTypeForV2(
+  type: DailyReflectionMemoryProposal["memoryType"]
+): ProposalRow["memory_type"] {
+  switch (type) {
+    case "summary":
+      return "decision";
+    case "question":
+      return "event";
+    default:
+      return type;
+  }
 }
 
 export class DailyReflectionMemoryProposalBusyError extends Error {
@@ -365,7 +384,7 @@ export class DailyReflectionMemoryProposalRepository {
     if (existing) {
       if (
         existing.card_version !== input.expectedCardVersion
-        || existing.memory_type !== input.memoryType
+        || (existing.memory_type_v2 ?? existing.memory_type) !== input.memoryType
       ) {
         throw new DailyReflectionConflictError(
           "daily_reflection_memory_proposal_idempotency_conflict"
@@ -397,17 +416,37 @@ export class DailyReflectionMemoryProposalRepository {
     }
     const reflectionId = card.sourceReflectionIds[0]!;
     const reflection = this.sourceRepository.getReflection(input.accountId, reflectionId);
-    if (reflection.status !== "completed") {
-      throw new DailyReflectionConflictError(
-        "daily_reflection_memory_proposal_reflection_not_completed"
-      );
-    }
     const confirmation = ReflectionConfirmationV2Schema.safeParse(
       this.sourceRepository.getConfirmation(input.accountId, reflectionId)
     );
-    if (!confirmation.success || confirmation.data.saveIntent !== "recap_only") {
+    const retainedConfirmation = confirmation.success
+      && confirmation.data.saveIntent === "retain_selected";
+    const operation = retainedConfirmation
+      ? this.sourceRepository.getAdmissionOperation(input.accountId, reflectionId)
+      : null;
+    const executionMethod = retainedConfirmation
+      ? this.sourceRepository.getAdmissionExecutionMethod(input.accountId, reflectionId)
+      : null;
+    const retainedSnapshot = confirmation.success
+      ? confirmation.data.candidateSnapshots.find(
+        (snapshot) => snapshot.candidateId === card.id
+      )
+      : undefined;
+    const recapOnlyEligible = confirmation.success
+      && confirmation.data.saveIntent === "recap_only"
+      && reflection.status === "completed";
+    const retainedEligible = confirmation.success
+      && confirmation.data.saveIntent === "retain_selected"
+      && reflection.status === "admitting"
+      && operation?.status === "admitting"
+      && executionMethod === "memory_proposal_v1"
+      && retainedSnapshot?.status === "kept"
+      && retainedSnapshot.finalText === card.content
+      && JSON.stringify(retainedSnapshot.evidenceIds) === JSON.stringify(card.evidenceIds)
+      && workingCardKindForReflectionCard(retainedSnapshot.candidateKind) === card.cardKind;
+    if (!recapOnlyEligible && !retainedEligible) {
       throw new DailyReflectionConflictError(
-        "daily_reflection_memory_proposal_requires_recap_only"
+        "daily_reflection_memory_proposal_confirmation_ineligible"
       );
     }
     const plan = ProcessingPlanV2Schema.safeParse(
@@ -468,9 +507,11 @@ export class DailyReflectionMemoryProposalRepository {
     const reflectionCard = this.sourceRepository
       .listReflectionCards(input.accountId, reflectionId)
       .find((item) => item.id === card.id);
-    if (!reflectionCard) {
+    if (!reflectionCard || reflectionCard.reviewStatus === "excluded") {
       throw new DailyReflectionConflictError(
-        "daily_reflection_memory_proposal_card_snapshot_missing"
+        reflectionCard
+          ? "daily_reflection_memory_proposal_confirmation_ineligible"
+          : "daily_reflection_memory_proposal_card_snapshot_missing"
       );
     }
     const candidate = this.sourceRepository
@@ -480,6 +521,22 @@ export class DailyReflectionMemoryProposalRepository {
     const actionClaimed = card.cardKind === "action"
       && reflectionCard.cardKind === "user_action"
       && reflectionCard.actionClaimed;
+    const retainSelected = confirmation.success
+      && confirmation.data.saveIntent === "retain_selected";
+    if (
+      retainSelected
+      && (
+        (reflectionCard.userText ?? reflectionCard.proposedText) !== card.content
+        || (reflectionCard.userTitle ?? reflectionCard.proposedTitle) !== card.title
+        || workingCardKindForReflectionCard(reflectionCard.cardKind) !== card.cardKind
+        || JSON.stringify(reflectionCard.evidenceIds) !== JSON.stringify(card.evidenceIds)
+        || retainedSnapshot?.actionClaimed !== actionClaimed
+      )
+    ) {
+      throw new DailyReflectionConflictError(
+        "daily_reflection_memory_proposal_card_snapshot_changed"
+      );
+    }
     const epistemicCaution = reflectionCard.epistemicStatus === "reported_event"
       && reflectionCard.riskFlags.includes("attribution_uncertain")
       ? "reported_inference" as const
@@ -543,7 +600,7 @@ export class DailyReflectionMemoryProposalRepository {
       this.database.prepare(`
         INSERT INTO dr_memory_proposals (
           id, account_id, card_id, reflection_id, title, card_kind,
-          action_claimed, memory_type, content, evidence_ids_json,
+          action_claimed, memory_type, memory_type_v2, content, evidence_ids_json,
           evidence_snapshots_json, risk_flags_json, subject_person_id,
           importance, durability, novelty, sensitivity, epistemic_status,
           epistemic_caution, status, policy_version, score, reasons_json,
@@ -552,7 +609,7 @@ export class DailyReflectionMemoryProposalRepository {
           admission_method, card_version, version, lease_owner, lease_until,
           attempt_version, error_code, created_at, updated_at, admitted_at
         ) VALUES (
-          ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+          ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
           'pending', ?, 0, '[]', ?, ?, NULL, ?, ?, ?, ?, 'user',
           'daily_reflection_memory_proposal_v1', ?, 0, NULL, NULL, 0, NULL,
           ?, ?, NULL
@@ -565,6 +622,7 @@ export class DailyReflectionMemoryProposalRepository {
         card.title,
         card.cardKind,
         actionClaimed ? 1 : 0,
+        legacyMemoryTypeForV2(input.memoryType),
         input.memoryType,
         card.content,
         JSON.stringify(card.evidenceIds),
@@ -599,7 +657,7 @@ export class DailyReflectionMemoryProposalRepository {
     accountId: string;
     proposalId: string;
     expectedVersion: number;
-    decision: "approved" | "rejected";
+    decision: "approved" | "needs_confirmation" | "rejected";
     policyVersion: string;
     score: number;
     reasons: string[];
@@ -613,8 +671,11 @@ export class DailyReflectionMemoryProposalRepository {
         );
       }
       const stableReasons = [...new Set(input.reasons)].sort();
+      const targetStatus = input.decision === "needs_confirmation"
+        ? "pending" as const
+        : input.decision;
       const existingReasons = z.array(z.string()).parse(JSON.parse(current.reasons_json));
-      if (current.status === input.decision) {
+      if (current.status === targetStatus) {
         if (
           current.policy_version === input.policyVersion
           && current.score === input.score
@@ -622,11 +683,14 @@ export class DailyReflectionMemoryProposalRepository {
         ) {
           return { proposal: proposalFromRow(current), reused: true };
         }
-        throw new DailyReflectionConflictError(
-          "daily_reflection_memory_proposal_policy_conflict"
-        );
+        if (current.status !== "pending") {
+          throw new DailyReflectionConflictError(
+            "daily_reflection_memory_proposal_policy_conflict"
+          );
+        }
       }
-      if (current.status !== "pending") {
+      const policyUpgrade = current.policy_version !== input.policyVersion;
+      if (current.status !== "pending" && !policyUpgrade) {
         throw new DailyReflectionConflictError(
           "daily_reflection_memory_proposal_policy_conflict"
         );
@@ -635,20 +699,26 @@ export class DailyReflectionMemoryProposalRepository {
         throw new DailyReflectionVersionConflictError(current.version);
       }
       const now = this.now();
+      if (current.lease_owner && current.lease_until && current.lease_until > now) {
+        throw new DailyReflectionMemoryProposalBusyError();
+      }
       const updated = this.database.prepare(`
         UPDATE dr_memory_proposals
         SET status = ?, policy_version = ?, score = ?, reasons_json = ?,
             version = version + 1, updated_at = ?, error_code = NULL
-        WHERE account_id = ? AND id = ? AND version = ? AND status = 'pending'
+        WHERE account_id = ? AND id = ? AND version = ? AND status = ?
+          AND (lease_owner IS NULL OR lease_until <= ?)
       `).run(
-        input.decision,
+        targetStatus,
         input.policyVersion,
         input.score,
         JSON.stringify(stableReasons),
         now,
         input.accountId,
         input.proposalId,
-        input.expectedVersion
+        input.expectedVersion,
+        current.status,
+        now
       );
       if (updated.changes !== 1) {
         throw new DailyReflectionVersionConflictError(
@@ -951,6 +1021,43 @@ export class DailyReflectionMemoryProposalRepository {
       const confirmation = ReflectionConfirmationV2Schema.safeParse(
         this.sourceRepository.getConfirmation(identity.accountId, proposal.reflectionId)
       );
+      const retainedConfirmation = confirmation.success
+        && confirmation.data.saveIntent === "retain_selected";
+      const operation = retainedConfirmation
+        ? this.sourceRepository.getAdmissionOperation(
+          identity.accountId,
+          proposal.reflectionId
+        )
+        : null;
+      const executionMethod = retainedConfirmation
+        ? this.sourceRepository.getAdmissionExecutionMethod(
+          identity.accountId,
+          proposal.reflectionId
+        )
+        : null;
+      const retainedSnapshot = confirmation.success
+        ? confirmation.data.candidateSnapshots.find(
+          (snapshot) => snapshot.candidateId === proposal.cardId
+        )
+        : undefined;
+      const currentReflectionCard = this.sourceRepository
+        .listReflectionCards(identity.accountId, proposal.reflectionId)
+        .find((item) => item.id === proposal.cardId);
+      const recapOnlyEligible = confirmation.success
+        && confirmation.data.saveIntent === "recap_only"
+        && reflection.status === "completed";
+      const retainedEligible = confirmation.success
+        && confirmation.data.saveIntent === "retain_selected"
+        && executionMethod === "memory_proposal_v1"
+        && (reflection.status === "admitting" || reflection.status === "completed")
+        && (operation?.status === "admitting" || operation?.status === "completed")
+        && retainedSnapshot?.status === "kept"
+        && retainedSnapshot.finalText === proposal.content
+        && JSON.stringify(retainedSnapshot.evidenceIds)
+          === JSON.stringify(proposal.evidenceIds)
+        && retainedSnapshot.actionClaimed === proposal.actionClaimed
+        && workingCardKindForReflectionCard(retainedSnapshot.candidateKind)
+          === proposal.cardKind;
       currentSegments = parseDailyReflectionCanonicalTranscript(
         this.sourceRepository.readPublishedAsset({
           accountId: identity.accountId,
@@ -968,13 +1075,13 @@ export class DailyReflectionMemoryProposalRepository {
         || card.content !== proposal.content
         || card.cardKind !== proposal.cardKind
         || JSON.stringify(card.evidenceIds) !== JSON.stringify(proposal.evidenceIds)
-        || reflection.status !== "completed"
+        || !currentReflectionCard
+        || currentReflectionCard.reviewStatus === "excluded"
+        || (!recapOnlyEligible && !retainedEligible)
         || !plan.success
         || plan.data.sourceOrigin !== proposal.sourceOrigin
         || plan.data.inputAdapter !== proposal.inputAdapter
         || plan.data.capturePurpose !== proposal.capturePurpose
-        || !confirmation.success
-        || confirmation.data.saveIntent !== "recap_only"
         || !currentSegments
         || snapshots.some((snapshot) => {
           const current = currentById.get(snapshot.sourceSegmentId);

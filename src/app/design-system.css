@@ -1,0 +1,48 @@
+:root {
+  --db-bg: #f6f3ec;
+  --db-surface: #fffdf8;
+  --db-surface-muted: #f1ede4;
+  --db-surface-inset: #ece8df;
+  --db-text: #252720;
+  --db-text-secondary: #60655c;
+  --db-text-muted: #74786f;
+  --db-accent: #315945;
+  --db-accent-hover: #274a39;
+  --db-accent-soft: #e4ece4;
+  --db-warm: #9b624d;
+  --db-warm-soft: #f2e6de;
+  --db-border: #ddd7cc;
+  --db-border-strong: #c9c1b4;
+  --db-danger: #9b4937;
+  --db-danger-soft: #f5e5df;
+  --db-focus: #315945;
+  --db-font-ui: "Avenir Next", "Noto Sans SC", "PingFang SC", "Microsoft YaHei", sans-serif;
+  --db-font-display: "Songti SC", "Noto Serif SC", Georgia, serif;
+  --db-space-1: 4px;
+  --db-space-2: 8px;
+  --db-space-3: 12px;
+  --db-space-4: 16px;
+  --db-space-5: 20px;
+  --db-space-6: 24px;
+  --db-space-8: 32px;
+  --db-space-10: 40px;
+  --db-space-12: 48px;
+  --db-radius-control: 12px;
+  --db-radius-card: 16px;
+  --db-radius-surface: 22px;
+  --db-radius-overlay: 24px;
+  --db-shadow-hover: 0 18px 42px -32px rgba(37, 39, 32, 0.55);
+  --db-shadow-overlay: 0 30px 80px -28px rgba(37, 39, 32, 0.62);
+  --db-shell-width: 1280px;
+  --db-workspace-width: 1160px;
+  --db-content-width: 960px;
+  --db-reading-width: 760px;
+  --db-touch-target: 44px;
+  --db-z-header: 30;
+  --db-z-popover: 80;
+  --db-z-overlay: 100;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root { scroll-behavior: auto; }
+}

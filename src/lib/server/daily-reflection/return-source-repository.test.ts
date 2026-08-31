@@ -35,6 +35,7 @@ type HarnessOptions = {
   actionClaimed?: boolean;
   epistemicStatus?: "explicit_user_statement" | "reported_event" | "ai_inference" | "unknown";
   recordingDate?: string;
+  sourceOrigin?: "user_reflection" | "direct_conversation";
   text?: string;
 };
 
@@ -73,6 +74,7 @@ function createHarness(options: HarnessOptions = {}) {
   const actionClaimed = options.actionClaimed ?? true;
   const epistemicStatus = options.epistemicStatus ?? "explicit_user_statement";
   const recordingDate = options.recordingDate ?? "2026-08-24";
+  const sourceOrigin = options.sourceOrigin ?? "user_reflection";
   const text = options.text ?? "我确认本周提交项目复盘。";
   const reflectionId = "reflection_1";
   const uploadId = "upload_1";
@@ -120,6 +122,8 @@ function createHarness(options: HarnessOptions = {}) {
   let listedWorkingCards: DailyReflectionWorkingCard[] = [];
   let confirmationSnapshotStatus: "kept" | "excluded" =
     reviewStatus === "kept" ? "kept" : "excluded";
+  let confirmationSaveIntent: "recap_only" | "retain_selected" = "recap_only";
+  let admissionOperationStatus: "admitting" | "completed" = "completed";
   const reflectionCard = {
     id: cardId,
     reflectionId,
@@ -144,7 +148,7 @@ function createHarness(options: HarnessOptions = {}) {
         evidence: [{
           sourceSegmentId: segmentId,
           uploadId,
-          effectiveOrigin: "user_reflection" as const,
+          effectiveOrigin: sourceOrigin,
           startSeconds: segment.startSeconds,
           endSeconds: segment.endSeconds,
           text: canonicalText
@@ -165,20 +169,20 @@ function createHarness(options: HarnessOptions = {}) {
     getConfirmation() {
       return {
         contractVersion: 2,
-        id: "confirmation_1",
+        id: proposalId,
         reflectionId,
         accountId,
         fingerprint: "a".repeat(64),
         requestFingerprint: "b".repeat(64),
         idempotencyKey: "confirmation_1",
         operationKey: "operation_1",
-        sourceOrigin: "user_reflection",
+        sourceOrigin,
         inputMethod: "file_upload",
         processingProfile: "quick_reflection",
         inputAdapter: "file_picker",
         capturePurpose: "inspiration_capture",
         recordingDate,
-        saveIntent: "recap_only",
+        saveIntent: confirmationSaveIntent,
         candidateSnapshots: [{
           contractVersion: 2,
           candidateId: cardId,
@@ -200,7 +204,7 @@ function createHarness(options: HarnessOptions = {}) {
             startSeconds: segment.startSeconds,
             endSeconds: segment.endSeconds,
             text,
-            effectiveOrigin: "user_reflection"
+            effectiveOrigin: sourceOrigin
           }],
           confidence: 0.9,
           caution: "fixture",
@@ -216,7 +220,7 @@ function createHarness(options: HarnessOptions = {}) {
         reflectionId,
         uploadId,
         inputMethod: "file_upload",
-        sourceOrigin: "user_reflection",
+        sourceOrigin,
         processingProfile: "quick_reflection",
         ingestionContext: "daily_reflection",
         reviewPolicy: "required",
@@ -231,7 +235,7 @@ function createHarness(options: HarnessOptions = {}) {
       return {
         operationKey: "operation_1",
         inputAdapter: "file_picker",
-        sourceOrigin: "user_reflection",
+        sourceOrigin,
         capturePurpose: "inspiration_capture",
         recordingDate
       };
@@ -256,6 +260,16 @@ function createHarness(options: HarnessOptions = {}) {
         ? [{ id: cardId, subjectConfirmed: false, subjectPersonId: null }]
         : [];
     },
+    getAdmissionOperation() {
+      return confirmationSaveIntent === "retain_selected"
+        ? { status: admissionOperationStatus }
+        : null;
+    },
+    getAdmissionExecutionMethod() {
+      return confirmationSaveIntent === "retain_selected"
+        ? "memory_proposal_v1"
+        : null;
+    },
     listWorkingCards(input: { accountId: string }) {
       const cards = input.accountId === accountId ? listedWorkingCards : [];
       return { cards, total: cards.length, limit: 100, offset: 0 };
@@ -268,14 +282,14 @@ function createHarness(options: HarnessOptions = {}) {
       ingestion_context, status, version, idempotency_key,
       create_fingerprint, source_origin, created_at, updated_at
     ) VALUES (?, ?, ?, 'file_upload', 'quick_reflection',
-              'daily_reflection', 'review_pending', 1, ?, ?,
-              'user_reflection', ?, ?)
+              'daily_reflection', 'review_pending', 1, ?, ?, ?, ?, ?)
   `).run(
     reflectionId,
     accountId,
     uploadId,
     `reflection-operation-${cardId}`,
     "c".repeat(64),
+    sourceOrigin,
     NOW,
     NOW
   );
@@ -284,8 +298,7 @@ function createHarness(options: HarnessOptions = {}) {
       id, account_id, reflection_id, idempotency_key,
       request_fingerprint, confirmation_fingerprint, source_origin,
       input_method, processing_profile, candidate_snapshots_json, created_at
-    ) VALUES (?, ?, ?, ?, ?, ?, 'user_reflection',
-              'file_upload', 'quick_reflection', ?, ?)
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, 'file_upload', 'quick_reflection', ?, ?)
   `).run(
     `legacy-confirmation-${cardId}`,
     accountId,
@@ -293,6 +306,7 @@ function createHarness(options: HarnessOptions = {}) {
     `legacy-confirmation-operation-${cardId}`,
     "d".repeat(64),
     "e".repeat(64),
+    sourceOrigin,
     JSON.stringify([{ candidateId: cardId, status: reviewStatus }]),
     NOW
   );
@@ -350,7 +364,7 @@ function createHarness(options: HarnessOptions = {}) {
     publicationFingerprint: "publication_fingerprint_1",
     publicationDigest: "publication_digest_1",
     uploadId,
-    sourceOrigin: "user_reflection",
+    sourceOrigin,
     inputAdapter: "file_picker",
     capturePurpose: "inspiration_capture",
     recordingDate,
@@ -366,7 +380,7 @@ function createHarness(options: HarnessOptions = {}) {
         uploadId,
         sourceSegmentId: segmentId,
         quote: text,
-        sourceOrigin: "user_reflection"
+        sourceOrigin
       })
     }],
     sourceSegments: [segment],
@@ -397,6 +411,11 @@ function createHarness(options: HarnessOptions = {}) {
     },
     showWorkingCard() {
       listedWorkingCards = [workingCard];
+    },
+    setRetainOperationStatus(status: "admitting" | "completed") {
+      confirmationSaveIntent = "retain_selected";
+      confirmationSnapshotStatus = "kept";
+      admissionOperationStatus = status;
     },
     createProposal(status: "pending" | "rejected") {
       confirmationSnapshotStatus = "excluded";
@@ -478,6 +497,266 @@ describe("Daily Reflection Return source authority", () => {
       emergingCards: [],
       relations: []
     });
+  });
+
+  it("returns direct-conversation Memory using effective source provenance", () => {
+    const fixture = createHarness({ sourceOrigin: "direct_conversation" });
+
+    const result = fixture.repository.snapshot(
+      fixture.accountId,
+      "2026-08-18",
+      "2026-08-24"
+    );
+
+    expect(result.admitted).toEqual([expect.objectContaining({
+      memoryId: fixture.memoryId,
+      cardId: fixture.cardId,
+      evidence: [expect.objectContaining({
+        sourceOrigin: "direct_conversation",
+        sourceSegmentId: "segment_1"
+      })]
+    })]);
+  });
+
+  it("returns every admitted Proposal from one Reflection even when publication keeps the first Proposal id", () => {
+    const fixture = createHarness();
+    const firstProposal = fixture.createProposal("pending");
+    fixture.dailyReflectionDatabase.prepare(`
+      UPDATE dr_memory_proposals
+      SET status = 'admitted', memory_id = ?, admitted_at = ?,
+          version = version + 1, updated_at = ?
+      WHERE id = ?
+    `).run(fixture.memoryId, NOW, NOW, firstProposal.id);
+
+    const secondCardId = "card_2";
+    const secondMemoryId = "memory_2";
+    const secondEvidenceId = "memory_evidence_2";
+    const secondText = "我确认下周整理项目风险清单。";
+    const secondSegment: TranscriptSegment = {
+      id: "segment_2",
+      uploadId: "upload_1",
+      startSeconds: 14,
+      endSeconds: 22,
+      speaker: "speaker_0",
+      text: secondText,
+      confidence: 0.95,
+      sceneLabels: [],
+      valueLabels: []
+    };
+    const secondWorkingCard: DailyReflectionWorkingCard = {
+      ...fixture.workingCard,
+      id: secondCardId,
+      title: "整理项目风险清单",
+      content: secondText,
+      evidenceIds: [secondSegment.id]
+    };
+    const secondReflectionCard = {
+      id: secondCardId,
+      reflectionId: "reflection_1",
+      cardKind: "user_action" as const,
+      proposedTitle: secondWorkingCard.title,
+      proposedText: secondWorkingCard.content,
+      userTitle: null,
+      userText: null,
+      actionClaimed: true,
+      epistemicStatus: "explicit_user_statement" as const,
+      reviewStatus: "kept" as const,
+      durability: 0.9,
+      riskFlags: []
+    };
+    const firstGetWithEvidence = fixture.sourceRepository
+      .getWorkingCardWithEvidence.bind(fixture.sourceRepository);
+    fixture.sourceRepository.getWorkingCardWithEvidence = ((accountId, cardId) => (
+      cardId === secondCardId
+        ? {
+            card: secondWorkingCard,
+            evidence: [{
+              sourceSegmentId: secondSegment.id,
+              uploadId: secondSegment.uploadId,
+              effectiveOrigin: "user_reflection" as const,
+              startSeconds: secondSegment.startSeconds,
+              endSeconds: secondSegment.endSeconds,
+              text: secondSegment.text
+            }]
+          }
+        : firstGetWithEvidence(accountId, cardId)
+    )) as typeof fixture.sourceRepository.getWorkingCardWithEvidence;
+    const firstGetWorkingCard = fixture.sourceRepository.getWorkingCard
+      .bind(fixture.sourceRepository);
+    fixture.sourceRepository.getWorkingCard = ((accountId, cardId) => (
+      cardId === secondCardId
+        ? secondWorkingCard
+        : firstGetWorkingCard(accountId, cardId)
+    )) as typeof fixture.sourceRepository.getWorkingCard;
+    const firstListReflectionCards = fixture.sourceRepository.listReflectionCards
+      .bind(fixture.sourceRepository);
+    fixture.sourceRepository.listReflectionCards = ((accountId, reflectionId) => [
+      ...firstListReflectionCards(accountId, reflectionId),
+      secondReflectionCard
+    ]) as typeof fixture.sourceRepository.listReflectionCards;
+    const firstListCandidates = fixture.sourceRepository.listCandidates
+      .bind(fixture.sourceRepository);
+    fixture.sourceRepository.listCandidates = ((accountId, reflectionId) => [
+      ...firstListCandidates(accountId, reflectionId),
+      { id: secondCardId, subjectConfirmed: false, subjectPersonId: null }
+    ]) as typeof fixture.sourceRepository.listCandidates;
+    const firstReadPublishedAsset = fixture.sourceRepository.readPublishedAsset
+      .bind(fixture.sourceRepository);
+    const firstSegments = firstReadPublishedAsset({ assetKind: "segments" }) as
+      TranscriptSegment[];
+    fixture.sourceRepository.readPublishedAsset = ((input) => (
+      input.assetKind === "segments"
+        ? [...firstSegments, secondSegment]
+        : firstReadPublishedAsset(input)
+    )) as typeof fixture.sourceRepository.readPublishedAsset;
+
+    fixture.dailyReflectionDatabase.prepare(`
+      INSERT INTO dr_working_cards (
+        id, account_id, source_reflection_ids_json, title, content, card_kind,
+        evidence_ids_json, status, importance, novelty, related_card_ids_json,
+        tags_json, visibility, source_unavailable, memory_lifecycle_status,
+        memory_lifecycle_version, memory_lifecycle_updated_at, saved_at, version,
+        created_at, updated_at
+      ) VALUES (?, ?, '["reflection_1"]', ?, ?, 'action', ?, 'saved', 0.9,
+                0.8, '[]', '[]', 'private', 0, 'active', 1, ?, ?, 1, ?, ?)
+    `).run(
+      secondCardId,
+      fixture.accountId,
+      secondWorkingCard.title,
+      secondWorkingCard.content,
+      JSON.stringify(secondWorkingCard.evidenceIds),
+      NOW,
+      NOW,
+      NOW,
+      NOW
+    );
+    const proposalRepository = createDailyReflectionMemoryProposalRepository(
+      fixture.dailyReflectionDatabase,
+      { sourceRepository: fixture.sourceRepository as never, now: () => NOW }
+    );
+    const secondProposal = proposalRepository.create({
+      accountId: fixture.accountId,
+      cardId: secondCardId,
+      expectedCardVersion: secondWorkingCard.version,
+      memoryType: "commitment"
+    }).proposal;
+    const secondMemory: MemoryWriteInput = {
+      id: secondMemoryId,
+      type: "commitment",
+      title: secondWorkingCard.title,
+      summary: secondText,
+      importance: 0.9,
+      status: "active",
+      date: "2026-08-24",
+      createdAt: NOW,
+      updatedAt: NOW,
+      evidence: [{
+        id: secondEvidenceId,
+        sourceType: "transcript",
+        sourceId: secondSegment.id,
+        uploadId: secondSegment.uploadId,
+        date: "2026-08-24",
+        quote: secondText,
+        createdAt: NOW
+      }]
+    };
+    createDailyReflectionProposalAdmissionRepository(fixture.memoryDatabase)
+      .applyProposal({
+        userId: fixture.accountId,
+        reflectionId: "reflection_1",
+        proposalId: secondProposal.id,
+        cardId: secondCardId,
+        operationKey: `daily-reflection-card:${secondCardId}`,
+        payloadDigest: "payload_digest_2",
+        publicationId: "publication_1",
+        publicationFingerprint: "publication_fingerprint_1",
+        publicationDigest: "publication_digest_1",
+        uploadId: "upload_1",
+        sourceOrigin: "user_reflection",
+        inputAdapter: "file_picker",
+        capturePurpose: "inspiration_capture",
+        recordingDate: "2026-08-24",
+        memory: secondMemory,
+        ownerAttribution: owner(secondMemory),
+        evidenceDigests: [{
+          memoryEvidenceId: secondEvidenceId,
+          sourceSegmentId: secondSegment.id,
+          contentDigest: digest({
+            version: 1,
+            accountId: fixture.accountId,
+            reflectionId: "reflection_1",
+            uploadId: "upload_1",
+            sourceSegmentId: secondSegment.id,
+            quote: secondText,
+            sourceOrigin: "user_reflection"
+          })
+        }],
+        sourceSegments: [...firstSegments, secondSegment],
+        now: NOW
+      });
+    fixture.dailyReflectionDatabase.prepare(`
+      UPDATE dr_memory_proposals
+      SET status = 'admitted', memory_id = ?, admitted_at = ?,
+          version = version + 1, updated_at = ?
+      WHERE id = ?
+    `).run(secondMemoryId, NOW, NOW, secondProposal.id);
+
+    const publication = fixture.memoryDatabase.prepare(`
+      SELECT confirmation_id FROM memory_daily_reflection_publications
+      WHERE user_id = ? AND reflection_id = 'reflection_1'
+    `).get(fixture.accountId) as { confirmation_id: string };
+    expect(publication.confirmation_id).toBe(firstProposal.id);
+    expect(fixture.repository.snapshot(
+      fixture.accountId,
+      "2026-08-18",
+      "2026-08-24"
+    ).admitted.map((source) => source.memoryId)).toEqual([
+      fixture.memoryId,
+      secondMemoryId
+    ]);
+  });
+
+  it("hides retain-selected Proposal publication until the outer receipt is completed", () => {
+    const fixture = createHarness();
+    const created = fixture.createProposal("pending");
+    fixture.dailyReflectionDatabase.prepare(`
+      UPDATE dr_memory_proposals
+      SET status = 'admitted', memory_id = ?, admitted_at = ?,
+          version = version + 1, updated_at = ?
+      WHERE id = ?
+    `).run(fixture.memoryId, NOW, NOW, created.id);
+
+    fixture.setRetainOperationStatus("admitting");
+    expect(fixture.repository.snapshot(
+      fixture.accountId,
+      "2026-08-18",
+      "2026-08-24"
+    ).admitted).toEqual([]);
+
+    fixture.setRetainOperationStatus("completed");
+    expect(fixture.repository.snapshot(
+      fixture.accountId,
+      "2026-08-18",
+      "2026-08-24"
+    ).admitted).toEqual([expect.objectContaining({
+      memoryId: fixture.memoryId,
+      cardId: fixture.cardId
+    })]);
+  });
+
+  it("fails closed when a legacy current authority no longer matches publication confirmation", () => {
+    const fixture = createHarness();
+    fixture.memoryDatabase.prepare(`
+      UPDATE memory_daily_reflection_publications
+      SET confirmation_id = 'legacy_confirmation_drift'
+      WHERE user_id = ? AND reflection_id = 'reflection_1'
+    `).run(fixture.accountId);
+
+    expect(fixture.repository.snapshot(
+      fixture.accountId,
+      "2026-08-18",
+      "2026-08-24"
+    ).admitted).toEqual([]);
   });
 
   it.each([

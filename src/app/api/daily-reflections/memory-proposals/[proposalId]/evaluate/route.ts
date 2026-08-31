@@ -50,10 +50,11 @@ export async function POST(
       ...payload.data
     });
     return NextResponse.json(proposalAdmissionResponse({
-      status: evaluated.proposal.status === "approved" ? "approved" : "rejected",
+      status: evaluated.decision.status,
       proposal: evaluated.proposal,
       memoryId: null,
-      reasons: evaluated.decision.reasons
+      reasons: evaluated.decision.reasons,
+      confirmationRequirements: evaluated.decision.confirmationRequirements
     }));
   } catch (error) {
     return memoryProposalRouteError(error);

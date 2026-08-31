@@ -1,0 +1,231 @@
+.globalEntry,
+.globalEntry * { box-sizing: border-box; }
+.globalEntry {
+  min-height: 100svh;
+  padding: 0 max(24px, env(safe-area-inset-right)) 64px max(24px, env(safe-area-inset-left));
+  background:
+    radial-gradient(circle at 8% 10%, rgba(155, 98, 77, .08), transparent 28rem),
+    radial-gradient(circle at 92% 78%, rgba(49, 89, 69, .07), transparent 25rem),
+    var(--db-bg);
+  color: var(--db-text);
+  font-family: var(--db-font-ui);
+}
+.globalEntry a { color: inherit; text-decoration: none; }
+.globalEntry a,
+.globalEntry button,
+.productSwitcherTrigger,
+.productSwitcher a,
+.accountTrigger,
+.accountMenu button,
+.tabList button,
+.dialog button { touch-action: manipulation; }
+.globalEntryHeader {
+  display: flex;
+  width: min(100%, var(--db-shell-width));
+  min-height: calc(76px + env(safe-area-inset-top));
+  align-items: center;
+  justify-content: space-between;
+  margin-inline: auto;
+  padding-top: env(safe-area-inset-top);
+  border-bottom: 1px solid color-mix(in srgb, var(--db-border) 82%, transparent);
+}
+.globalWordmark { display: inline-flex; min-height: var(--db-touch-target); align-items: center; gap: 11px; }
+.globalWordmark > span,
+.productSwitcherTrigger > span:first-child {
+  display: grid;
+  width: 38px;
+  height: 38px;
+  place-items: center;
+  border-radius: 13px;
+  background: var(--db-accent);
+  color: var(--db-surface);
+  font-family: var(--db-font-display);
+  font-size: 11px;
+}
+.globalWordmark b { font-family: var(--db-font-display); font-size: 16px; font-weight: 620; }
+.globalEntryIntro { width: min(100%, var(--db-workspace-width)); margin: 0 auto; padding: clamp(64px, 10vh, 104px) 0 32px; }
+.globalEntryStatus { width: min(100%, 560px); margin: 0 auto; padding-top: clamp(80px, 18vh, 180px); }
+.globalEntryStatus button { min-height: var(--db-touch-target); padding: 0 15px; border: 1px solid var(--db-border-strong); border-radius: var(--db-radius-control); background: var(--db-surface); color: var(--db-accent); cursor: pointer; font: 700 12px/1 var(--db-font-ui); }
+.globalEntryIntro h1 { max-width: 760px; margin: 0; font-family: var(--db-font-display); font-size: clamp(42px, 5vw, 62px); font-weight: 570; letter-spacing: -.045em; line-height: 1.12; text-wrap: balance; }
+.globalEntryIntro p { margin: 16px 0 0; color: var(--db-text-secondary); font-size: 15px; line-height: 1.7; }
+.globalProductGrid { display: grid; width: min(100%, var(--db-workspace-width)); grid-template-columns: repeat(2, minmax(0, 1fr)); margin-inline: auto; gap: 18px; }
+.globalProductCard,
+.globalProductUnavailable {
+  position: relative;
+  display: grid;
+  min-height: 280px;
+  align-content: start;
+  padding: clamp(24px, 3vw, 36px);
+  gap: 17px;
+  border: 1px solid var(--db-border);
+  border-radius: var(--db-radius-surface);
+  background: color-mix(in srgb, var(--db-surface) 88%, transparent);
+}
+.globalProductCard::before { position: absolute; top: 22px; bottom: 22px; left: 0; width: 3px; border-radius: 0 3px 3px 0; background: var(--db-accent); content: ""; }
+.globalProductCard[data-product="daily_reflection"]::before { background: var(--db-warm); }
+.globalProductCard > div,
+.globalProductUnavailable > div { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+.globalProductCard > div > span,
+.globalProductUnavailable > div > span { display: grid; width: 38px; height: 38px; place-items: center; border-radius: 12px; background: var(--db-accent-soft); color: var(--db-accent); font-weight: 760; }
+.globalProductCard > div > small,
+.globalProductUnavailable small { color: var(--db-text-muted); font-size: 11px; font-weight: 700; }
+.globalProductCard h2,
+.globalProductUnavailable h2 { margin: 10px 0 0; font-family: var(--db-font-display); font-size: clamp(28px, 3vw, 38px); font-weight: 580; letter-spacing: -.035em; }
+.globalProductCard p,
+.globalProductUnavailable p { max-width: 500px; margin: 0; color: var(--db-text-secondary); font-size: 14px; line-height: 1.7; }
+.globalProductCard > b { display: inline-flex; min-height: var(--db-touch-target); align-items: center; align-self: end; justify-self: start; margin-top: 12px; gap: 10px; color: var(--db-accent); font-size: 13px; }
+.globalProductCard:hover,
+.globalProductCard:focus-visible { border-color: var(--db-border-strong); background: var(--db-surface); box-shadow: var(--db-shadow-hover); }
+.globalEntry a:focus-visible,
+.globalEntry button:focus-visible,
+.productSwitcherTrigger:focus-visible,
+.productSwitcher a:focus-visible,
+.accountTrigger:focus-visible,
+.accountMenu button:focus-visible { outline: 3px solid var(--db-focus); outline-offset: 3px; }
+.globalProductUnavailable { min-height: 190px; grid-column: 1 / -1; grid-template-columns: auto minmax(0, 1fr); align-items: center; align-content: center; opacity: .76; }
+.globalProductUnavailable > div { align-self: start; grid-row: 1 / span 2; }
+.globalProductUnavailable h2 { margin: 0; font-size: 25px; }
+.globalProductUnavailable p { grid-column: 2; }
+
+.productSwitcher,
+.productSwitcher * { box-sizing: border-box; }
+.productSwitcher { position: relative; z-index: var(--db-z-popover); flex: none; font-family: var(--db-font-ui); }
+.productSwitcherTrigger {
+  display: inline-flex;
+  min-height: var(--db-touch-target);
+  align-items: center;
+  padding: 3px 10px 3px 3px;
+  gap: 8px;
+  border: 1px solid color-mix(in srgb, var(--db-border) 88%, transparent);
+  border-radius: 15px;
+  background: color-mix(in srgb, var(--db-surface) 76%, transparent);
+  color: var(--db-text);
+  cursor: pointer;
+  font: inherit;
+}
+.productSwitcherTrigger:hover { border-color: var(--db-border-strong); background: var(--db-surface); }
+.productSwitcherTrigger > span:first-child { width: 34px; height: 34px; border-radius: 11px; font-size: 9px; }
+.productSwitcherTrigger b { max-width: 112px; overflow: hidden; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+.productSwitcherTrigger i { color: var(--db-text-muted); font-size: 11px; font-style: normal; }
+.productSwitcherMenu {
+  position: absolute;
+  top: calc(100% + 9px);
+  left: 0;
+  display: grid;
+  width: 260px;
+  padding: 10px;
+  gap: 3px;
+  border: 1px solid var(--db-border);
+  border-radius: var(--db-radius-card);
+  background: var(--db-surface);
+  box-shadow: var(--db-shadow-overlay);
+}
+.productSwitcherMenu > p { margin: 4px 8px 7px; color: var(--db-text-muted); font-size: 11px; font-weight: 750; letter-spacing: .06em; }
+.productSwitcherMenu > a,
+.productSwitcherDisabled { display: grid; min-height: var(--db-touch-target); grid-template-columns: 30px minmax(0, 1fr); align-items: center; padding: 7px 9px; gap: 9px; border-radius: 11px; color: var(--db-text); text-decoration: none; }
+.productSwitcherMenu > a:first-of-type { display: flex; padding-left: 12px; color: var(--db-text-secondary); font-size: 12px; }
+.productSwitcherMenu > a:hover,
+.productSwitcherMenu > a[aria-current="page"] { background: var(--db-accent-soft); }
+.productSwitcherMenu > a > span:first-child,
+.productSwitcherDisabled > span:first-child { display: grid; width: 28px; height: 28px; place-items: center; border-radius: 9px; background: var(--db-surface-muted); color: var(--db-accent); font-size: 11px; font-weight: 760; }
+.productSwitcherMenu > a > span:last-child,
+.productSwitcherDisabled > span:last-child { display: grid; gap: 1px; }
+.productSwitcherMenu b,
+.productSwitcherDisabled b { font-size: 12px; }
+.productSwitcherMenu small,
+.productSwitcherDisabled small { color: var(--db-text-muted); font-size: 11px; }
+.productSwitcherDisabled { opacity: .58; }
+
+.accountPopover,
+.accountPopover * { box-sizing: border-box; }
+.accountPopover { position: relative; z-index: var(--db-z-popover); flex: none; color: var(--db-text); font-family: var(--db-font-ui); }
+.accountTrigger {
+  display: inline-flex;
+  min-width: var(--db-touch-target);
+  min-height: var(--db-touch-target);
+  max-width: 250px;
+  align-items: center;
+  justify-content: center;
+  padding: 3px 10px 3px 3px;
+  gap: 8px;
+  border: 1px solid color-mix(in srgb, var(--db-border) 88%, transparent);
+  border-radius: 15px;
+  background: color-mix(in srgb, var(--db-surface) 76%, transparent);
+  color: var(--db-text-secondary);
+  cursor: pointer;
+  font: inherit;
+}
+.accountTrigger:hover { border-color: var(--db-border-strong); background: var(--db-surface); color: var(--db-text); }
+.accountInitial { display: grid; width: 34px; height: 34px; flex: none; place-items: center; border-radius: 11px; background: var(--db-surface-muted); color: var(--db-accent); font-size: 12px; font-weight: 800; }
+.accountTriggerLabel { min-width: 0; max-width: 160px; overflow: hidden; font-size: 12px; font-weight: 700; text-overflow: ellipsis; white-space: nowrap; }
+.accountChevron { color: var(--db-text-muted); font-size: 11px; }
+.accountMenu {
+  position: absolute;
+  top: calc(100% + 9px);
+  right: 0;
+  display: grid;
+  width: min(280px, calc(100vw - 24px));
+  padding: 12px;
+  gap: 8px;
+  border: 1px solid var(--db-border);
+  border-radius: var(--db-radius-card);
+  background: var(--db-surface);
+  box-shadow: var(--db-shadow-overlay);
+}
+.accountMenu > p { margin: 2px 4px 0; color: var(--db-text-muted); font-size: 11px; font-weight: 750; letter-spacing: .06em; }
+.accountMenu > strong { min-width: 0; overflow: hidden; padding: 2px 4px 6px; font-size: 13px; text-overflow: ellipsis; white-space: nowrap; }
+.accountMenu > button { min-height: var(--db-touch-target); padding: 0 13px; border: 1px solid var(--db-border); border-radius: 11px; background: var(--db-surface-muted); color: var(--db-text-secondary); cursor: pointer; font: 750 12px/1 var(--db-font-ui); text-align: left; }
+.accountMenu > button:hover { border-color: var(--db-border-strong); background: var(--db-surface); color: var(--db-text); }
+.accountMenu > button:disabled { cursor: wait; opacity: .62; }
+.accountError { padding: 9px 10px; border-radius: 10px; background: var(--db-danger-soft); color: var(--db-danger); font-size: 11px; line-height: 1.5; }
+
+.productState { display: grid; min-height: 112px; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; padding: 20px; gap: 14px; border: 1px solid var(--db-border); border-radius: var(--db-radius-card); background: var(--db-surface); color: var(--db-text); font-family: var(--db-font-ui); }
+.stateMark { width: 9px; height: 9px; border-radius: 50%; background: var(--db-accent); }
+.productState[data-tone="loading"] .stateMark { box-shadow: 0 0 0 6px var(--db-accent-soft); }
+.productState[data-tone="empty"] .stateMark { background: var(--db-text-muted); }
+.productState[data-tone="error"] .stateMark { background: var(--db-danger); box-shadow: 0 0 0 6px var(--db-danger-soft); }
+.productState h2 { margin: 0; font-size: 15px; }
+.productState p { margin: 5px 0 0; color: var(--db-text-secondary); font-size: 13px; line-height: 1.55; }
+.evidence { margin: 0; padding: 15px 17px; border-left: 3px solid var(--db-accent); border-radius: 0 var(--db-radius-control) var(--db-radius-control) 0; background: var(--db-surface-inset); color: var(--db-text); font-family: var(--db-font-ui); }
+.evidence figcaption { display: flex; justify-content: space-between; gap: 12px; color: var(--db-text-muted); font-size: 11px; }
+.evidence blockquote { margin: 10px 0 0; overflow-wrap: anywhere; font-size: 14px; line-height: 1.68; }
+.reviewCompletion { display: flex; align-items: center; justify-content: space-between; padding: 20px 22px; gap: 22px; border: 1px solid var(--db-border); border-radius: var(--db-radius-surface); background: var(--db-surface); color: var(--db-text); font-family: var(--db-font-ui); }
+.reviewCompletion > div { max-width: 690px; }
+.reviewCompletion h2 { margin: 0; font-size: 18px; font-weight: 740; }
+.reviewCompletion p { margin: 5px 0 0; color: var(--db-text-secondary); font-size: 12px; line-height: 1.65; }
+.tabList { display: inline-flex; padding: 4px; gap: 3px; border: 1px solid var(--db-border); border-radius: 14px; background: var(--db-surface-muted); }
+.tabList button { min-height: var(--db-touch-target); padding: 0 16px; border: 0; border-radius: 10px; background: transparent; color: var(--db-text-secondary); cursor: pointer; font: 700 12px/1 var(--db-font-ui); }
+.tabList button[aria-selected="true"] { background: var(--db-surface); color: var(--db-accent); box-shadow: var(--db-shadow-hover); }
+.tabList button:focus-visible { outline: 3px solid var(--db-focus); outline-offset: 2px; }
+.tabPanel { padding-top: 18px; }
+.dialogBackdrop { position: fixed; z-index: var(--db-z-overlay); inset: 0; display: grid; place-items: center; padding: 20px; background: rgba(37, 39, 32, .34); backdrop-filter: blur(5px); }
+.dialog { display: grid; width: min(100%, 560px); max-height: min(82dvh, 760px); overflow: hidden; overscroll-behavior: contain; border: 1px solid color-mix(in srgb, var(--db-border) 74%, white); border-radius: var(--db-radius-overlay); background: var(--db-surface); box-shadow: var(--db-shadow-overlay); color: var(--db-text); font-family: var(--db-font-ui); }
+.dialog > header { display: flex; align-items: center; justify-content: space-between; padding: 20px 22px 14px; gap: 20px; }
+.dialog h2 { margin: 0; font-family: var(--db-font-display); font-size: 25px; font-weight: 600; }
+.dialog > header button { display: grid; width: var(--db-touch-target); height: var(--db-touch-target); place-items: center; border: 1px solid var(--db-border); border-radius: 50%; background: transparent; color: var(--db-text-secondary); cursor: pointer; font-size: 20px; }
+.dialogBody { min-height: 0; padding: 8px 22px 22px; overflow-y: auto; }
+.dialog > footer { display: flex; justify-content: flex-end; padding: 14px 22px calc(14px + env(safe-area-inset-bottom)); gap: 9px; border-top: 1px solid var(--db-border); }
+
+@media (max-width: 700px) {
+  .globalEntry { padding-inline: max(14px, env(safe-area-inset-right)) max(14px, env(safe-area-inset-left)); }
+  .globalEntryHeader { min-height: calc(64px + env(safe-area-inset-top)); }
+  .accountTriggerLabel { display: none; }
+  .globalEntryIntro { padding: 52px 2px 24px; }
+  .globalEntryStatus { padding-top: 72px; }
+  .globalEntryIntro h1 { font-size: 38px; }
+  .globalEntryIntro p { max-width: 300px; font-size: 13px; }
+  .globalProductGrid { grid-template-columns: 1fr; gap: 12px; }
+  .globalProductCard { min-height: 220px; padding: 23px 21px; gap: 12px; }
+  .globalProductCard h2 { font-size: 29px; }
+  .globalProductUnavailable { min-height: 150px; grid-template-columns: 1fr; padding: 20px; }
+  .globalProductUnavailable > div { grid-row: auto; }
+  .globalProductUnavailable p { grid-column: 1; }
+  .productSwitcherMenu { position: fixed; top: calc(66px + env(safe-area-inset-top)); right: 12px; left: 12px; width: auto; }
+  .productSwitcherTrigger b { max-width: 82px; }
+  .accountMenu { position: fixed; top: calc(66px + env(safe-area-inset-top)); right: 12px; left: 12px; width: auto; }
+  .productState { grid-template-columns: auto minmax(0, 1fr); }
+  .stateAction { grid-column: 1 / -1; }
+  .reviewCompletion { align-items: stretch; flex-direction: column; padding: 14px; gap: 10px; border-radius: var(--db-radius-card); }
+  .dialogBackdrop { align-items: end; padding: 12px; }
+  .dialog { max-height: 86dvh; border-radius: 20px; }
+}

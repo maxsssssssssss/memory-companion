@@ -32,10 +32,18 @@ export function proposalListResponse(input: {
 }
 
 export function proposalAdmissionResponse(input: {
-  status: "approved" | "rejected" | "admitted" | "already_exists";
+  status: "approved" | "needs_confirmation" | "rejected" | "admitted" | "already_exists";
   proposal: DailyReflectionMemoryProposal;
   memoryId: string | null;
   reasons: string[];
+  confirmationRequirements: Array<{
+    code:
+      | "acknowledge_sensitive_content"
+      | "acknowledge_inference"
+      | "acknowledge_attribution_uncertainty"
+      | "verify_fact_owner";
+    resolution: "acknowledgement" | "verified_owner";
+  }>;
 }) {
   return DailyReflectionMemoryProposalAdmissionResponseSchema.parse(input);
 }

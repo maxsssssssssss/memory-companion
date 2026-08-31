@@ -7,7 +7,10 @@ import type {
 import type {
   DailyReflectionMemoryProposal
 } from "@/lib/domain/daily-reflection-memory-proposal";
-import type { ReflectionCard } from "@/lib/domain/daily-reflection";
+import {
+  ReflectionConfirmationV2Schema,
+  type ReflectionCard
+} from "@/lib/domain/daily-reflection";
 import type {
   DailyReflectionWorkingCardKind
 } from "@/lib/domain/daily-reflection-working-card";
@@ -25,6 +28,7 @@ import { getMemoryDatabase } from "@/lib/server/memory/db";
 
 type AuthorityRow = {
   publication_id: string;
+  publication_confirmation_id: string;
   reflection_id: string;
   proposal_id: string;
   card_id: string;
@@ -144,6 +148,7 @@ export class DailyReflectionReturnSourceRepository {
   private authorityRows(accountId: string) {
     return this.memoryDatabase.prepare(`
       SELECT publication.id AS publication_id,
+             publication.confirmation_id AS publication_confirmation_id,
              publication.reflection_id,
              current.confirmation_id AS proposal_id,
              current.candidate_id AS card_id,
@@ -168,7 +173,6 @@ export class DailyReflectionReturnSourceRepository {
         AND current.publication_id = receipt.publication_id
         AND current.candidate_id = receipt.candidate_id
         AND current.reflection_id = publication.reflection_id
-        AND current.confirmation_id = publication.confirmation_id
         AND current.status = 'active'
       INNER JOIN memory_daily_reflection_candidate_payloads payload
         ON payload.user_id = current.user_id
@@ -187,7 +191,8 @@ export class DailyReflectionReturnSourceRepository {
         AND provenance.reflection_id = publication.reflection_id
         AND provenance.confirmation_id = current.confirmation_id
         AND provenance.upload_id = publication.upload_id
-        AND provenance.source_origin = publication.effective_source_origin
+        AND provenance.effective_source_origin = publication.effective_source_origin
+        AND provenance.content_kind = publication.content_kind
       INNER JOIN memory_evidence evidence
         ON evidence.id = provenance.memory_evidence_id
         AND evidence.memory_id = current.current_memory_id
@@ -224,16 +229,18 @@ export class DailyReflectionReturnSourceRepository {
   private legacyCardConfirmed(
     accountId: string,
     reflectionId: string,
-    cardId: string
+    cardId: string,
+    confirmationId: string
   ) {
     try {
       const confirmation = this.sourceRepository.getConfirmation(
         accountId,
         reflectionId
       );
-      return Boolean(confirmation?.candidateSnapshots.some((snapshot) => (
-        snapshot.candidateId === cardId && snapshot.status === "kept"
-      )));
+      return confirmation?.id === confirmationId
+        && Boolean(confirmation.candidateSnapshots.some((snapshot) => (
+          snapshot.candidateId === cardId && snapshot.status === "kept"
+        )));
     } catch {
       return false;
     }
@@ -268,6 +275,8 @@ export class DailyReflectionReturnSourceRepository {
         || plan.sourceOrigin !== first.effective_source_origin
         || rows.some((row) => (
           row.current_memory_id !== first.current_memory_id
+          || row.publication_confirmation_id !== first.publication_confirmation_id
+          || row.proposal_id !== first.proposal_id
           || row.reflection_id !== first.reflection_id
           || row.upload_id !== first.upload_id
           || row.recording_date !== first.recording_date
@@ -278,6 +287,25 @@ export class DailyReflectionReturnSourceRepository {
       }
       const proposal = this.proposalRepository.getByCard(accountId, card.id);
       if (proposal) {
+        const confirmation = ReflectionConfirmationV2Schema.safeParse(
+          this.sourceRepository.getConfirmation(accountId, first.reflection_id)
+        );
+        if (!confirmation.success) return null;
+        if (confirmation.data.saveIntent === "retain_selected") {
+          const operation = this.sourceRepository.getAdmissionOperation(
+            accountId,
+            first.reflection_id
+          );
+          if (
+            operation?.status !== "completed"
+            || this.sourceRepository.getAdmissionExecutionMethod(
+              accountId,
+              first.reflection_id
+            ) !== "memory_proposal_v1"
+          ) {
+            return null;
+          }
+        }
         if (
           proposal.id !== first.proposal_id
           || proposal.status !== "admitted"
@@ -334,11 +362,13 @@ export class DailyReflectionReturnSourceRepository {
       if (
         !proposal
         && (
-          reflectionCard?.reviewStatus !== "kept"
+          first.proposal_id !== first.publication_confirmation_id
+          || reflectionCard?.reviewStatus !== "kept"
           || !this.legacyCardConfirmed(
             accountId,
             first.reflection_id,
-            card.id
+            card.id,
+            first.publication_confirmation_id
           )
         )
       ) {

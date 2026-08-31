@@ -112,16 +112,16 @@ beforeEach(() => {
   const approved = proposal({
     status: "approved",
     version: 1,
-    policyVersion: "daily_reflection_memory_proposal_policy_v1",
+    policyVersion: "daily_reflection_memory_proposal_policy_v2",
     score: 0.8,
-    reasons: ["policy_threshold_met"]
+    reasons: ["user_selected_working_card"]
   });
   const admitted = proposal({
     status: "admitted",
     version: 3,
-    policyVersion: "daily_reflection_memory_proposal_policy_v1",
+    policyVersion: "daily_reflection_memory_proposal_policy_v2",
     score: 0.8,
-    reasons: ["policy_threshold_met"],
+    reasons: ["user_selected_working_card"],
     memoryId: "memory_1",
     admittedAt: "2026-08-24T08:01:00.000Z"
   });
@@ -133,8 +133,9 @@ beforeEach(() => {
     decision: {
       status: "approved",
       score: 0.8,
-      reasons: ["policy_threshold_met"],
-      policyVersion: "daily_reflection_memory_proposal_policy_v1"
+      reasons: ["user_selected_working_card"],
+      confirmationRequirements: [],
+      policyVersion: "daily_reflection_memory_proposal_policy_v2"
     },
     reused: false
   });
@@ -142,7 +143,8 @@ beforeEach(() => {
     status: "admitted",
     proposal: admitted,
     memoryId: "memory_1",
-    reasons: ["policy_threshold_met"]
+    reasons: ["user_selected_working_card"],
+    confirmationRequirements: []
   });
   state.service.provenance.mockReturnValue({
     proposal: admitted,
@@ -217,6 +219,49 @@ describe("Daily Reflection Memory Proposal routes", () => {
     const admittedPayload = await admitted.json();
     expect(admittedPayload).toMatchObject({ status: "admitted", memoryId: "memory_1" });
     expectPublicProposal(admittedPayload.proposal);
+    expect(state.service.admit).toHaveBeenCalledWith({
+      accountId: "account_1",
+      proposalId: "proposal_1",
+      expectedVersion: 1,
+      acknowledgements: []
+    });
+  });
+
+  it("returns structured confirmation requirements and forwards acknowledgements", async () => {
+    const pending = proposal({
+      policyVersion: "daily_reflection_memory_proposal_policy_v2",
+      version: 1,
+      reasons: ["confirmation_required:acknowledge_sensitive_content"]
+    });
+    state.service.admit.mockResolvedValueOnce({
+      status: "needs_confirmation",
+      proposal: pending,
+      memoryId: null,
+      reasons: pending.reasons,
+      confirmationRequirements: [{
+        code: "acknowledge_sensitive_content",
+        resolution: "acknowledgement"
+      }]
+    });
+    const response = await admitProposal(new Request("http://localhost", {
+      method: "POST",
+      body: JSON.stringify({
+        expectedVersion: 1,
+        acknowledgements: ["acknowledge_sensitive_content"]
+      })
+    }), { params: Promise.resolve({ proposalId: "proposal_1" }) });
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({
+      status: "needs_confirmation",
+      confirmationRequirements: [{
+        code: "acknowledge_sensitive_content",
+        resolution: "acknowledgement"
+      }]
+    });
+    expect(state.service.admit).toHaveBeenCalledWith(expect.objectContaining({
+      acknowledgements: ["acknowledge_sensitive_content"]
+    }));
   });
 
   it("returns provenance metadata without Transcript text", async () => {
@@ -238,7 +283,7 @@ describe("Daily Reflection Memory Proposal routes", () => {
   it("fails closed for invalid bodies and cross-account targets", async () => {
     const invalid = await createProposal(new Request("http://localhost", {
       method: "POST",
-      body: JSON.stringify({ expectedCardVersion: 1, memoryType: "summary" })
+      body: JSON.stringify({ expectedCardVersion: 1, memoryType: "insight" })
     }), { params: Promise.resolve({ cardId: "card_1" }) });
     expect(invalid.status).toBe(400);
 

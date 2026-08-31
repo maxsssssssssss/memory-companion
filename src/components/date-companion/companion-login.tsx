@@ -1,6 +1,6 @@
 "use client";
 
-import { type FormEvent, useEffect, useRef, useState } from "react";
+import { type FormEvent, type KeyboardEvent, useEffect, useRef, useState } from "react";
 
 import type { RegisterInput } from "@/lib/client/date-companion-api";
 
@@ -38,6 +38,8 @@ export function CompanionLogin({
   const emailInput = useRef<HTMLInputElement>(null);
   const isRegister = mode === "register";
   const isBusy = busy || submitting;
+  const errorId = "daily-brief-auth-error";
+  const activeTabId = isRegister ? "daily-brief-register-tab" : "daily-brief-login-tab";
   const canSubmit = Boolean(
     email.trim()
     && password
@@ -45,8 +47,8 @@ export function CompanionLogin({
   );
 
   useEffect(() => {
-    emailInput.current?.focus();
-  }, [mode]);
+    if (errorMessage) emailInput.current?.focus();
+  }, [errorMessage]);
 
   const switchMode = (nextMode: CompanionAuthMode) => {
     if (nextMode === mode || isBusy) return;
@@ -54,6 +56,24 @@ export function CompanionLogin({
     setInviteCode("");
     setSubmitting(false);
     onModeChange(nextMode);
+  };
+
+  const handleTabKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
+    if (isBusy) return;
+    const tabs = event.currentTarget.querySelectorAll<HTMLButtonElement>("[role='tab']");
+    if (event.key === "ArrowLeft" || event.key === "ArrowRight") {
+      event.preventDefault();
+      const nextMode = isRegister ? "login" : "register";
+      switchMode(nextMode);
+      tabs[nextMode === "login" ? 0 : 1]?.focus();
+      return;
+    }
+    if (event.key === "Home" || event.key === "End") {
+      event.preventDefault();
+      const nextMode = event.key === "Home" ? "login" : "register";
+      switchMode(nextMode);
+      tabs[nextMode === "login" ? 0 : 1]?.focus();
+    }
   };
 
   const submit = async (event: FormEvent<HTMLFormElement>) => {
@@ -82,7 +102,11 @@ export function CompanionLogin({
   };
 
   return (
-    <main className={styles.loginRoot} aria-labelledby="date-companion-login-title">
+    <main
+      aria-busy={isBusy}
+      aria-labelledby="daily-brief-login-title"
+      className={styles.loginRoot}
+    >
       <div className={styles.loginAtmosphere} aria-hidden="true">
         <span />
         <span />
@@ -95,109 +119,132 @@ export function CompanionLogin({
         </div>
         <span className={styles.privateReady}>
           <i aria-hidden="true" />
-          只属于你的私人空间
+          一个账号，回到每个私人空间
         </span>
-        <h1 id="date-companion-login-title">把重要的人和片段，轻轻放在这里。</h1>
-        <p>登录后，你可以把一次相处整理成有来源的文字和片段。</p>
+        <h1 id="daily-brief-login-title">登录，回到你的私人空间。</h1>
+        <p>约会陪伴与日常复盘都从这里进入，内容仍留在各自的空间里。</p>
       </section>
 
       <section className={styles.loginStage} aria-label={isRegister ? "注册 Daily Brief" : "登录 Daily Brief"}>
         <div className={styles.loginCard}>
-          <p className={styles.eyebrow}>Daily Brief</p>
-          <div className={styles.authModeTabs} role="tablist" aria-label="账号入口">
+          <div
+            aria-label="账号入口"
+            className={styles.authModeTabs}
+            onKeyDown={handleTabKeyDown}
+            role="tablist"
+          >
             <button
-              aria-controls="date-companion-auth-form"
+              aria-controls="daily-brief-auth-panel"
               aria-selected={!isRegister}
               disabled={isBusy}
+              id="daily-brief-login-tab"
               onClick={() => switchMode("login")}
               role="tab"
+              tabIndex={isRegister ? -1 : 0}
               type="button"
             >登录</button>
             <button
-              aria-controls="date-companion-auth-form"
+              aria-controls="daily-brief-auth-panel"
               aria-selected={isRegister}
               disabled={isBusy}
+              id="daily-brief-register-tab"
               onClick={() => switchMode("register")}
               role="tab"
+              tabIndex={isRegister ? 0 : -1}
               type="button"
             >注册</button>
           </div>
-          <h2>{isRegister ? "创建你的空间" : "欢迎回来"}</h2>
-          <p>{isRegister
-            ? "使用真实信息创建账号。注册成功后，会直接进入你的私人空间。"
-            : "使用你的真实账号进入。认证失败时不会切换到演示身份。"}</p>
+          <div
+            aria-labelledby={activeTabId}
+            className={styles.authModePanel}
+            id="daily-brief-auth-panel"
+            role="tabpanel"
+          >
+            <h2>{isRegister ? "创建你的账号" : "欢迎回来"}</h2>
+            <p>{isRegister
+              ? "创建账号后，直接进入空间选择。"
+              : "输入邮箱和密码，继续进入 Daily Brief。"}</p>
 
-          <form className={styles.loginForm} id="date-companion-auth-form" onSubmit={submit}>
-            {isRegister ? (
+            <form className={styles.loginForm} onSubmit={submit}>
+              {isRegister ? (
+                <label className={styles.field}>
+                  昵称（可选）
+                  <input
+                    autoComplete="name"
+                    maxLength={80}
+                    name="name"
+                    onChange={(event) => setName(event.target.value)}
+                    placeholder="想让我们怎么称呼你…"
+                    value={name}
+                  />
+                </label>
+              ) : null}
               <label className={styles.field}>
-                昵称（可选）
+                邮箱
                 <input
-                  autoComplete="name"
-                  maxLength={80}
-                  name="name"
-                  onChange={(event) => setName(event.target.value)}
-                  placeholder="想让我们怎么称呼你"
-                  value={name}
+                  aria-describedby={errorMessage ? errorId : undefined}
+                  aria-invalid={errorMessage ? true : undefined}
+                  autoComplete="email"
+                  inputMode="email"
+                  name="email"
+                  onChange={(event) => setEmail(event.target.value)}
+                  placeholder="例如 you@example.com…"
+                  ref={emailInput}
+                  required
+                  spellCheck={false}
+                  type="email"
+                  value={email}
                 />
               </label>
-            ) : null}
-            <label className={styles.field}>
-              邮箱
-              <input
-                autoComplete="email"
-                inputMode="email"
-                name="email"
-                onChange={(event) => setEmail(event.target.value)}
-                placeholder="you@example.com"
-                ref={emailInput}
-                required
-                type="email"
-                value={email}
-              />
-            </label>
-            <label className={styles.field}>
-              密码
-              <input
-                aria-label="密码"
-                autoComplete={isRegister ? "new-password" : "current-password"}
-                minLength={isRegister ? 8 : undefined}
-                name="password"
-                onChange={(event) => setPassword(event.target.value)}
-                required
-                type="password"
-                value={password}
-              />
-              {isRegister ? <small>至少 8 位，仅用于保护你的账号。</small> : null}
-            </label>
-            {isRegister ? (
               <label className={styles.field}>
-                邀请码
+                密码
                 <input
-                  aria-label="邀请码"
-                  autoComplete="off"
-                  maxLength={200}
-                  name="inviteCode"
-                  onChange={(event) => setInviteCode(event.target.value)}
-                  placeholder="请输入管理员提供的邀请码"
+                  aria-describedby={errorMessage ? errorId : undefined}
+                  aria-invalid={errorMessage ? true : undefined}
+                  aria-label="密码"
+                  autoComplete={isRegister ? "new-password" : "current-password"}
+                  minLength={isRegister ? 8 : undefined}
+                  name="password"
+                  onChange={(event) => setPassword(event.target.value)}
                   required
                   type="password"
-                  value={inviteCode}
+                  value={password}
                 />
-                <small>邀请码由管理员提供，不会保存在浏览器中。</small>
+                {isRegister ? <small>至少 8 位，仅用于保护你的账号。</small> : null}
               </label>
-            ) : null}
-            {errorMessage ? <p className={styles.loginError} role="alert">{errorMessage}</p> : null}
-            <button className={styles.primaryButton} disabled={isBusy || !canSubmit} type="submit">
-              <span>{isBusy ? "正在处理…" : isRegister ? "注册并进入" : "登录"}</span>
-              <span aria-hidden="true">→</span>
-            </button>
-          </form>
+              {isRegister ? (
+                <label className={styles.field}>
+                  邀请码
+                  <input
+                    aria-describedby={errorMessage ? errorId : undefined}
+                    aria-invalid={errorMessage ? true : undefined}
+                    aria-label="邀请码"
+                    autoComplete="off"
+                    maxLength={200}
+                    name="inviteCode"
+                    onChange={(event) => setInviteCode(event.target.value)}
+                    placeholder="管理员提供的邀请码…"
+                    required
+                    spellCheck={false}
+                    type="password"
+                    value={inviteCode}
+                  />
+                  <small>邀请码由管理员提供，不会保存在浏览器中。</small>
+                </label>
+              ) : null}
+              {errorMessage ? <p className={styles.loginError} id={errorId} role="alert">{errorMessage}</p> : null}
+              <button className={styles.primaryButton} disabled={isBusy || !canSubmit} type="submit">
+                <span aria-live="polite">{isBusy ? "正在处理…" : isRegister ? "注册并进入" : "登录"}</span>
+                <span aria-hidden="true">→</span>
+              </button>
+            </form>
 
-          <small className={styles.loginBoundary}>
-            {isRegister
-              ? "注册由真实认证服务完成；失败时不会创建演示身份，也不会自动改为登录。"
-              : "登录状态由安全会话保护；认证失败时不会进入任何演示账号。"}
-          </small>
+            <small className={styles.loginBoundary}>
+              {isRegister
+                ? "注册成功后会进入空间选择；失败时保留在当前表单。"
+                : "你的会话只用于确认账号身份。"}
+            </small>
+          </div>
         </div>
       </section>
     </main>

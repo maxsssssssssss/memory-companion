@@ -1,6 +1,6 @@
 import type Database from "better-sqlite3";
 
-export const DAILY_REFLECTION_SCHEMA_VERSION = 12;
+export const DAILY_REFLECTION_SCHEMA_VERSION = 13;
 
 // Version one intentionally represents the pre-provenance workflow shape.
 // Version two adds source_origin with a fail-closed legacy backfill and the
@@ -1194,6 +1194,29 @@ const DAILY_REFLECTION_SCHEMA_V12 = `
   END;
 `;
 
+// V13 makes the Stage 8 Memory Proposal path authoritative for new V2
+// retain_selected finalizations while preserving legacy direct-admission
+// receipts for replay/revocation. The proposal type extension is deliberately
+// additive: old rows continue to read from memory_type, while every new writer
+// persists the canonical V2 type in memory_type_v2.
+const DAILY_REFLECTION_SCHEMA_V13 = `
+  ALTER TABLE dr_admission_operations
+    ADD COLUMN execution_method TEXT NOT NULL DEFAULT 'legacy_direct_v1'
+      CHECK (execution_method IN ('legacy_direct_v1', 'memory_proposal_v1'));
+
+  ALTER TABLE dr_memory_proposals
+    ADD COLUMN memory_type_v2 TEXT CHECK (
+      memory_type_v2 IS NULL OR memory_type_v2 IN (
+        'summary', 'question', 'decision', 'commitment',
+        'preference', 'person_fact', 'event'
+      )
+    );
+
+  UPDATE dr_memory_proposals
+  SET memory_type_v2 = memory_type
+  WHERE memory_type_v2 IS NULL;
+`;
+
 const MIGRATIONS = [
   { version: 1, sql: DAILY_REFLECTION_SCHEMA_V1 },
   { version: 2, sql: DAILY_REFLECTION_SCHEMA_V2 },
@@ -1206,8 +1229,47 @@ const MIGRATIONS = [
   { version: 9, sql: DAILY_REFLECTION_SCHEMA_V9 },
   { version: 10, sql: DAILY_REFLECTION_SCHEMA_V10 },
   { version: 11, sql: DAILY_REFLECTION_SCHEMA_V11 },
-  { version: 12, sql: DAILY_REFLECTION_SCHEMA_V12 }
+  { version: 12, sql: DAILY_REFLECTION_SCHEMA_V12 },
+  { version: 13, sql: DAILY_REFLECTION_SCHEMA_V13 }
 ] as const;
+
+function tableHasColumn(
+  database: Database.Database,
+  table: "dr_admission_operations" | "dr_memory_proposals",
+  column: string
+) {
+  return (database.pragma(`table_info(${table})`) as Array<{ name: string }>)
+    .some((item) => item.name === column);
+}
+
+function repairCurrentAdditiveColumns(database: Database.Database) {
+  const repair = database.transaction(() => {
+    if (!tableHasColumn(database, "dr_admission_operations", "execution_method")) {
+      database.exec(`
+        ALTER TABLE dr_admission_operations
+          ADD COLUMN execution_method TEXT NOT NULL DEFAULT 'legacy_direct_v1'
+            CHECK (execution_method IN ('legacy_direct_v1', 'memory_proposal_v1'));
+      `);
+    }
+    if (!tableHasColumn(database, "dr_memory_proposals", "memory_type_v2")) {
+      database.exec(`
+        ALTER TABLE dr_memory_proposals
+          ADD COLUMN memory_type_v2 TEXT CHECK (
+            memory_type_v2 IS NULL OR memory_type_v2 IN (
+              'summary', 'question', 'decision', 'commitment',
+              'preference', 'person_fact', 'event'
+            )
+          );
+      `);
+    }
+    database.exec(`
+      UPDATE dr_memory_proposals
+      SET memory_type_v2 = memory_type
+      WHERE memory_type_v2 IS NULL;
+    `);
+  });
+  repair.immediate();
+}
 
 export function migrateDailyReflectionSchema(database: Database.Database) {
   database.exec(`
@@ -1234,4 +1296,8 @@ export function migrateDailyReflectionSchema(database: Database.Database) {
     });
     applyMigration.immediate();
   }
+  // A prior drift repair can recreate an older table after newer migration
+  // markers already exist. Validate the current additive columns themselves
+  // instead of assuming the markers prove those columns survived.
+  repairCurrentAdditiveColumns(database);
 }

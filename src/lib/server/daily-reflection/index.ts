@@ -17,6 +17,7 @@ export * from "./job-store";
 export * from "./input-orchestrator";
 export * from "./memory-admission";
 export * from "./memory-proposal-policy";
+export * from "./memory-proposal-finalize-service";
 export * from "./memory-proposal-repository";
 export * from "./memory-proposal-service";
 export * from "./process-upload";

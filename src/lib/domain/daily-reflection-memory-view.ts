@@ -13,7 +13,15 @@ const DailyReflectionMemoryViewSchema = z.object({
   cardId: DailyReflectionIdSchema,
   reflectionId: DailyReflectionIdSchema,
   recordingDate: z.string().date(),
-  memoryType: z.enum(["decision", "commitment", "preference", "person_fact", "event", "question"]),
+  memoryType: z.enum([
+    "summary",
+    "question",
+    "decision",
+    "commitment",
+    "preference",
+    "person_fact",
+    "event"
+  ]),
   cardKind: DailyReflectionWorkingCardKindSchema,
   epistemicStatus: ReflectionCardEpistemicStatusSchema,
   epistemicCaution: DailyReflectionMemoryProposalEpistemicCautionSchema,

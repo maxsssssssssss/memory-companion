@@ -8,6 +8,7 @@ import { ReflectionAppShell } from "./reflection-app-shell";
 const state = vi.hoisted(() => ({
   pathname: "/reflection",
   router: {
+    push: vi.fn(),
     replace: vi.fn()
   },
   session: null as unknown as DailyReflectionSessionValue
@@ -52,11 +53,32 @@ describe("ReflectionAppShell", () => {
     const desktop = screen.getByRole("navigation", { name: "日常复盘主导航" });
     expect(within(desktop).getByRole("link", { name: "卡片" })).toHaveAttribute("aria-current", "page");
     expect(within(desktop).getByRole("link", { name: "记忆" })).toHaveAttribute("href", "/reflection/memory");
-    expect(within(screen.getByRole("banner")).getByRole("link", { name: /开始表达/u }))
-      .toHaveAttribute("href", "/reflection/capture?new=1");
+    expect(within(desktop).getByRole("link", { name: "一起想" })).toHaveAttribute("href", "/reflection/think");
+    expect(within(desktop).queryByRole("link", { name: "问问过去" })).not.toBeInTheDocument();
+    expect(within(screen.getByRole("banner")).getByRole("link", { name: /开始讲述/u }))
+      .toHaveAttribute("href", "/reflection/capture?new=1&method=record");
+    expect(within(screen.getByRole("banner")).queryByRole("button", { name: "头脑风暴" }))
+      .toBeVisible();
+    expect(within(screen.getByRole("banner")).getByRole("button", { name: /切换产品/u })).toBeVisible();
     const mobile = screen.getByRole("navigation", { name: "日常复盘移动导航" });
-    expect(within(mobile).getByText("开始表达").closest("a")).toHaveAttribute("href", "/reflection/capture?new=1");
+    expect(within(mobile).getByRole("link", { name: "开始讲述" })).toHaveAttribute("href", "/reflection/capture?new=1&method=record");
+    expect(within(mobile).getByRole("link", { name: "一起想" })).toHaveAttribute("href", "/reflection/think");
     expect(within(mobile).queryByText("记忆")).not.toBeInTheDocument();
+  });
+
+  it("opens and closes the shared Quick Panel from the global brainstorm action", async () => {
+    render(
+      <ReflectionAppShell browserRecordingEnabled toySyncEnabled={false}>
+        <p>页面内容</p>
+      </ReflectionAppShell>
+    );
+
+    const trigger = within(screen.getByRole("banner")).getByRole("button", { name: "头脑风暴" });
+    fireEvent.click(trigger);
+    expect(screen.getByRole("dialog", { name: "先把这个念头打开" })).toBeVisible();
+    fireEvent.keyDown(document, { key: "Escape" });
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    await waitFor(() => expect(trigger).toHaveFocus());
   });
 
   it("uses a local return header and removes the mobile bottom navigation in focused flows", () => {
@@ -96,5 +118,25 @@ describe("ReflectionAppShell", () => {
     expect(screen.getByRole("alert")).toHaveTextContent("登录状态暂时无法确认。");
     fireEvent.click(screen.getByRole("button", { name: "重新尝试" }));
     expect(state.session.initialize).toHaveBeenCalledTimes(1);
+  });
+
+  it("uses the shared account menu and returns to login after logout", async () => {
+    const logout = vi.fn(async () => undefined);
+    state.session = {
+      ...state.session,
+      logout
+    };
+    render(
+      <ReflectionAppShell browserRecordingEnabled toySyncEnabled={false}>
+        <p>页面内容</p>
+      </ReflectionAppShell>
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: /账号菜单/u }));
+    expect(screen.getByText("小满")).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "退出登录" }));
+
+    await waitFor(() => expect(logout).toHaveBeenCalledTimes(1));
+    expect(state.router.replace).toHaveBeenCalledWith("/date-companion");
   });
 });

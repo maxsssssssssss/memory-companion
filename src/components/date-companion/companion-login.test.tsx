@@ -5,15 +5,18 @@ import { describe, expect, it, vi } from "vitest";
 import { CompanionLogin, type CompanionAuthMode } from "./companion-login";
 
 function AuthHarness({
+  errorMessage,
   onLogin = vi.fn(),
   onRegister = vi.fn()
 }: {
+  errorMessage?: string;
   onLogin?: React.ComponentProps<typeof CompanionLogin>["onLogin"];
   onRegister?: React.ComponentProps<typeof CompanionLogin>["onRegister"];
 }) {
   const [mode, setMode] = useState<CompanionAuthMode>("login");
   return (
     <CompanionLogin
+      errorMessage={errorMessage}
       mode={mode}
       onLogin={onLogin}
       onModeChange={setMode}
@@ -98,5 +101,32 @@ describe("CompanionLogin", () => {
     expect(screen.getByRole("button", { name: "正在处理…" })).toBeDisabled();
     finish();
     await waitFor(() => expect(screen.getByRole("button", { name: "注册并进入" })).toBeDisabled());
+  });
+
+  it("uses neutral product copy and complete keyboard tab semantics", () => {
+    render(<AuthHarness />);
+
+    expect(screen.getByRole("heading", { level: 1 })).toHaveTextContent("私人空间");
+    expect(screen.getByText(/约会陪伴与日常复盘/u)).toBeVisible();
+    expect(screen.queryByText(/演示身份/u)).not.toBeInTheDocument();
+
+    const loginTab = screen.getByRole("tab", { name: "登录" });
+    loginTab.focus();
+    fireEvent.keyDown(loginTab, { key: "ArrowRight" });
+    expect(screen.getByRole("tab", { name: "注册" })).toHaveAttribute("aria-selected", "true");
+    expect(screen.getByRole("tab", { name: "注册" })).toHaveFocus();
+    expect(screen.getByRole("tabpanel")).toHaveAccessibleName("注册");
+    fireEvent.keyDown(screen.getByRole("tablist"), { key: "Home" });
+    expect(screen.getByRole("tab", { name: "登录" })).toHaveAttribute("aria-selected", "true");
+  });
+
+  it("associates safe authentication errors with affected fields", () => {
+    render(<AuthHarness errorMessage="邮箱或密码不正确。" />);
+
+    const alert = screen.getByRole("alert");
+    expect(alert).toHaveTextContent("邮箱或密码不正确");
+    expect(screen.getByLabelText("邮箱")).toHaveAttribute("aria-invalid", "true");
+    expect(screen.getByLabelText("邮箱")).toHaveAttribute("aria-describedby", alert.id);
+    expect(screen.getByLabelText("密码")).toHaveAttribute("aria-describedby", alert.id);
   });
 });

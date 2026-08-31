@@ -283,6 +283,63 @@ describe("Daily Reflection V2 candidate mutation contract", () => {
     }));
   });
 
+  it("projects an Evidence-backed manual candidate into a Working Card before retention", () => {
+    const setup = setupV2({
+      operationKey: "operation_manual_card",
+      finalStatus: "failed"
+    });
+    const created = repository.createManualCandidateV2({
+      accountId: "account_1",
+      reflectionId: setup.reflection.id,
+      expectedVersion: setup.reflection.version,
+      candidateKind: "open_question",
+      proposedText: "这个方向下一步应该先验证什么？",
+      evidenceIds: ["segment_1"],
+      confidence: 0.8,
+      caution: "User-authored Card.",
+      actionClaimed: false
+    });
+    expect(created.retentionEligibility).toBe("retain_selected");
+    const detail = repository.getReflectionDetail("account_1", setup.reflection.id);
+    expect(detail.cards).toEqual([
+      expect.objectContaining({
+        id: created.candidate.id,
+        cardKind: "open_question",
+        reviewStatus: "pending",
+        epistemicStatus: "explicit_user_statement"
+      })
+    ]);
+    expect(repository.getWorkingCard("account_1", created.candidate.id)).toMatchObject({
+      status: "review_pending",
+      cardKind: "question",
+      evidenceIds: ["segment_1"]
+    });
+    const reviewed = repository.updateReflectionCards({
+      accountId: "account_1",
+      reflectionId: setup.reflection.id,
+      expectedVersion: created.reflection.version,
+      cards: [{
+        cardId: created.candidate.id,
+        reviewStatus: "kept",
+        userTitle: null,
+        userText: null
+      }]
+    });
+    repository.finalizeReviewV2({
+      accountId: "account_1",
+      reflectionId: setup.reflection.id,
+      expectedVersion: reviewed.reflection.version,
+      operationKey: setup.reserved.input.operationKey,
+      saveIntent: "retain_selected"
+    });
+    expect(repository.getAdmissionExecutionMethod(
+      "account_1",
+      setup.reflection.id
+    )).toBe("memory_proposal_v1");
+    expect(repository.getWorkingCard("account_1", created.candidate.id).status)
+      .toBe("saved");
+  });
+
   it("soft-excludes one candidate, omits it from confirmation, and restores via PATCH semantics", () => {
     const setup = setupV2({
       operationKey: "operation_candidate_exclude",

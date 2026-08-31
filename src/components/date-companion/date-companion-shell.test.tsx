@@ -2,6 +2,7 @@ import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/re
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { useDateCompanionSession, type DateCompanionSessionValue } from "@/lib/client/date-companion-session";
+import { useDateCompanionPersonArchive } from "@/lib/client/date-companion-people";
 import {
   emptyDateCompanionViewModel,
   type DateCompanionMemoryBridgeState,
@@ -25,6 +26,10 @@ vi.mock("@/lib/client/date-companion-session", () => ({
   useDateCompanionSession: vi.fn()
 }));
 
+vi.mock("@/lib/client/date-companion-people", () => ({
+  useDateCompanionPersonArchive: vi.fn()
+}));
+
 vi.mock("@/components/daily-reflection/daily-reflection-toy-sync", () => ({
   ToyAudioSync: ({ accountId }: { accountId: string }) => (
     <div data-testid="date-companion-toy-sync">{accountId}</div>
@@ -32,6 +37,7 @@ vi.mock("@/components/daily-reflection/daily-reflection-toy-sync", () => ({
 }));
 
 const mockedUseDateCompanionSession = vi.mocked(useDateCompanionSession);
+const mockedUseDateCompanionPersonArchive = vi.mocked(useDateCompanionPersonArchive);
 
 function makeSession(overrides: Partial<DateCompanionSessionValue> = {}): DateCompanionSessionValue {
   return {
@@ -114,9 +120,19 @@ function viewModelWithInteraction(interaction: InteractionVM): DateCompanionView
 }
 
 function readyMemoryBridgeState(personQaSources: SourceRefVM[] = []): DateCompanionMemoryBridgeState {
+  const personRecord = (id: string, displayName: string) => ({
+    id,
+    displayName,
+    status: "confirmed" as const,
+    version: 1,
+    explicitlyConfirmed: true as const,
+    confirmedAt: "2026-08-04T10:00:00.000Z",
+    createdAt: "2026-08-04T10:00:00.000Z",
+    updatedAt: "2026-08-04T10:00:00.000Z"
+  });
   return {
     status: "ready",
-    people: [],
+    people: [personRecord("person-self", "我"), personRecord("person-ta", "林澄")],
     selfBinding: null,
     setting: { enabled: true, version: 1, createdAt: "2026-08-04T10:00:00.000Z", updatedAt: "2026-08-04T10:00:00.000Z", enabledAt: "2026-08-04T10:00:00.000Z", disabledAt: null },
     mapping: { id: "mapping-1", selfPersonId: "person-self", companionPersonId: "person-ta", relationshipType: "dating", status: "confirmed", version: 2, confirmedAt: "2026-08-04T10:00:00.000Z", createdAt: "2026-08-04T10:00:00.000Z", updatedAt: "2026-08-04T10:00:00.000Z" },
@@ -138,6 +154,7 @@ describe("DateCompanionShell", () => {
       callback(0);
       return 1;
     });
+    mockedUseDateCompanionPersonArchive.mockReturnValue({ status: "idle" });
   });
 
   afterEach(() => {
@@ -203,6 +220,18 @@ describe("DateCompanionShell", () => {
     expect(screen.getByRole("alert")).toHaveTextContent(expected);
   });
 
+  it("uses the shared fail-closed state when an authenticated session expires", () => {
+    mockedUseDateCompanionSession.mockReturnValue(makeSession({
+      auth: { status: "error", message: "unauthenticated" }
+    }));
+
+    render(<DateCompanionShell entry="companion" screen="home" />);
+
+    expect(screen.getByRole("alert")).toHaveTextContent("登录状态没有确认");
+    expect(screen.getByRole("alert")).toHaveTextContent("登录状态已失效，请重新登录");
+    expect(screen.getByRole("link", { name: "返回登录" })).toHaveAttribute("href", "/date-companion");
+  });
+
   it("replaces the login route with module selection after authentication", async () => {
     mockedUseDateCompanionSession.mockReturnValue(makeSession({
       auth: {
@@ -214,7 +243,7 @@ describe("DateCompanionShell", () => {
     render(<DateCompanionShell entry="login" />);
 
     expect(screen.getByRole("status")).toHaveTextContent("正在进入你的空间…");
-    await waitFor(() => expect(routerMocks.replace).toHaveBeenCalledWith("/date-companion/modules"));
+    await waitFor(() => expect(routerMocks.replace).toHaveBeenCalledWith("/"));
   });
 
   it("logs out from module selection and replaces the route with login", async () => {
@@ -228,7 +257,8 @@ describe("DateCompanionShell", () => {
     }));
 
     render(<DateCompanionShell entry="modules" />);
-    fireEvent.click(screen.getByRole("button", { name: "退出" }));
+    fireEvent.click(screen.getByRole("button", { name: /账号菜单/u }));
+    fireEvent.click(screen.getByRole("button", { name: "退出登录" }));
 
     await waitFor(() => expect(logout).toHaveBeenCalledTimes(1));
     expect(routerMocks.replace).toHaveBeenCalledWith("/date-companion");
@@ -280,7 +310,7 @@ describe("DateCompanionShell", () => {
 
     render(<DateCompanionShell entry="companion" screen="home" />);
 
-    expect(screen.getByRole("link", { name: "此刻" })).toHaveAttribute("aria-current", "page");
+    expect(screen.getByRole("link", { name: "首页" })).toHaveAttribute("aria-current", "page");
     expect(screen.getByText("约会陪伴 · 小林")).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "你和 小林" })).toBeInTheDocument();
     expect(screen.getByText("Ta 最近在准备考试")).toBeInTheDocument();
@@ -289,6 +319,29 @@ describe("DateCompanionShell", () => {
     fireEvent.click(screen.getByRole("button", { name: /Ta 以前明确提到过哪些在意的事/u }));
     fireEvent.click(screen.getByRole("button", { name: "发送" }));
     expect(ask).toHaveBeenCalledWith("Ta 以前明确提到过哪些在意的事？");
+  });
+
+  it("exposes the shared account contract inside the Date Companion shell", async () => {
+    const logout = vi.fn(async () => undefined);
+    mockedUseDateCompanionSession.mockReturnValue(makeSession({
+      auth: {
+        status: "authenticated",
+        user: { id: "user-1", email: "user@example.com", name: "小满" }
+      },
+      logout,
+      relationshipState: {
+        status: "ready",
+        relationship: { id: "relationship-1", displayName: "小林", participantState: "confirmed", version: 1 }
+      }
+    }));
+
+    render(<DateCompanionShell dailyReflectionEnabled entry="companion" screen="home" />);
+    fireEvent.click(screen.getByRole("button", { name: /账号菜单/u }));
+    expect(screen.getByText("小满")).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "退出登录" }));
+
+    await waitFor(() => expect(logout).toHaveBeenCalledTimes(1));
+    expect(routerMocks.replace).toHaveBeenCalledWith("/date-companion");
   });
 
   it("keeps Toy Sync hidden by default and resets the upload form when the authenticated account changes", () => {
@@ -356,7 +409,7 @@ describe("DateCompanionShell", () => {
     expect(screen.getByRole("textbox", { name: "向 Ta 的相处记录提问" })).toBeDisabled();
   });
 
-  it("wires the relationship observation and its editable suggested question without blocking the person page", async () => {
+  it("keeps proactive inference out of the Person record while reusing its editable QA suggestion", async () => {
     const retainedSource = {
       id: "snapshot_1",
       uploadId: "upload-1",
@@ -416,8 +469,13 @@ describe("DateCompanionShell", () => {
 
     render(<DateCompanionShell entry="companion" screen="person" />);
 
-    expect(screen.getByRole("heading", { name: "关于你们的一点观察" })).toBeInTheDocument();
-    await waitFor(() => expect(screen.getByText("Ta 这次更在意你有没有先听完。")).toBeInTheDocument());
+    expect(screen.getByRole("heading", { name: "林澄", level: 1 })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "人物" })).toHaveAttribute("aria-current", "page");
+    expect(screen.queryByText("Ta 这次更在意你有没有先听完。")).not.toBeInTheDocument();
+    await waitFor(() => expect(fetcher).toHaveBeenCalledWith(
+      "/api/date-companion/relationships/relationship-1/proactive-value",
+      expect.objectContaining({ method: "GET", credentials: "same-origin" })
+    ));
     expect(fetcher).toHaveBeenCalledWith(
       "/api/date-companion/relationships/relationship-1/proactive-value",
       expect.objectContaining({ method: "GET", credentials: "same-origin" })
@@ -427,6 +485,24 @@ describe("DateCompanionShell", () => {
     expect(screen.getByRole("textbox", { name: "向 Ta 的相处记录提问" })).toHaveValue(
       "Ta 之前还在哪些时刻提到过类似感受？"
     );
+  });
+
+  it.each([
+    ["person-self", "the current account self"],
+    ["person-unknown", "an unavailable or cross-account id"]
+  ])("fails closed for a Person deep link targeting %s (%s)", (initialPersonId) => {
+    mockedUseDateCompanionSession.mockReturnValue(makeSession({
+      auth: { status: "authenticated", user: { id: "user-1", email: "user@example.com" } },
+      relationshipState: {
+        status: "ready",
+        relationship: { id: "relationship-1", displayName: "Ta", participantState: "confirmed", version: 1 }
+      },
+      memoryBridgeState: readyMemoryBridgeState()
+    }));
+
+    render(<DateCompanionShell entry="companion" initialPersonId={initialPersonId} screen="person" />);
+    expect(screen.getByRole("heading", { name: "没有找到这位人物" })).toBeVisible();
+    expect(mockedUseDateCompanionPersonArchive).toHaveBeenCalledWith(null);
   });
 
   it("restores a confirmed recap from the URL and loads its current-interaction observation", async () => {
@@ -551,7 +627,7 @@ describe("DateCompanionShell", () => {
         screen="recap"
       />
     );
-    expect(screen.getByLabelText("本次录音整理阶段")).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "这次相处的复盘已完成" })).toBeInTheDocument();
     await waitFor(() => expect(screen.getByText("这次你们都给下次相处留了一个自然入口。")).toBeInTheDocument());
     expect(fetcher).toHaveBeenCalledWith(
       "/api/date-companion/interactions/interaction-1/proactive-value",
@@ -616,11 +692,11 @@ describe("DateCompanionShell", () => {
     }));
 
     render(<DateCompanionShell entry="companion" screen="recap" />);
-    expect(screen.getByRole("main")).toHaveAttribute("data-screen", "recap");
-    expect(screen.getByRole("region", { name: "这次相处详情" })).toHaveAttribute("tabindex", "0");
+    expect(document.querySelector('main[data-screen="recap"]')).toBeInTheDocument();
+    expect(screen.getByRole("region", { name: "这次相处详情" })).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Ta" }));
     fireEvent.click(screen.getByRole("radio", { name: /记住这段声音/u }));
-    fireEvent.click(screen.getByRole("button", { name: "确认并留下这次相处" }));
+    fireEvent.click(screen.getByRole("button", { name: "完成本次复盘" }));
 
     await waitFor(() => expect(finalizeRecap).toHaveBeenCalledWith(
       "interaction-1",

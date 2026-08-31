@@ -4,7 +4,8 @@ export const REFLECTION_ROUTES = {
   cards: "/reflection/cards",
   memory: "/reflection/memory",
   reflect: "/reflection/reflect",
-  ask: "/reflection/ask"
+  think: "/reflection/think",
+  legacyAsk: "/reflection/ask"
 } as const;
 
 export const REFLECTION_DESKTOP_NAV = [
@@ -12,15 +13,15 @@ export const REFLECTION_DESKTOP_NAV = [
   { href: REFLECTION_ROUTES.cards, label: "卡片", match: "prefix" },
   { href: REFLECTION_ROUTES.memory, label: "记忆", match: "prefix" },
   { href: REFLECTION_ROUTES.reflect, label: "回看", match: "prefix" },
-  { href: REFLECTION_ROUTES.ask, label: "问问过去", match: "prefix" }
+  { href: REFLECTION_ROUTES.think, label: "一起想", match: "prefix" }
 ] as const;
 
 export const REFLECTION_MOBILE_NAV = [
   { href: REFLECTION_ROUTES.home, label: "今天", icon: "今", match: "exact" },
   { href: REFLECTION_ROUTES.cards, label: "卡片", icon: "卡", match: "prefix" },
-  { href: REFLECTION_ROUTES.capture, label: "开始表达", icon: "+", match: "prefix", primary: true },
+  { href: REFLECTION_ROUTES.capture, label: "开始讲述", icon: "+", match: "prefix", primary: true },
   { href: REFLECTION_ROUTES.reflect, label: "回看", icon: "回", match: "prefix" },
-  { href: REFLECTION_ROUTES.ask, label: "问问", icon: "问", match: "prefix" }
+  { href: REFLECTION_ROUTES.think, label: "一起想", icon: "想", match: "prefix" }
 ] as const;
 
 export const REFLECTION_TRUST_COPY =
