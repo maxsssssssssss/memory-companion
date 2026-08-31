@@ -17,8 +17,8 @@ module.exports = {
       env: {
         NODE_ENV: "production",
         PIPELINE_EXECUTION_MODE: "queue",
-        DAILY_REFLECTION_UPLOAD_ENABLED: "false",
-        DAILY_REFLECTION_BROWSER_RECORDING_ENABLED: "false"
+        DAILY_REFLECTION_UPLOAD_ENABLED: "true",
+        DAILY_REFLECTION_BROWSER_RECORDING_ENABLED: "true"
       }
     },
     {
@@ -39,8 +39,8 @@ module.exports = {
       env: {
         NODE_ENV: "production",
         PIPELINE_EXECUTION_MODE: "queue",
-        DAILY_REFLECTION_UPLOAD_ENABLED: "false",
-        DAILY_REFLECTION_BROWSER_RECORDING_ENABLED: "false"
+        DAILY_REFLECTION_UPLOAD_ENABLED: "true",
+        DAILY_REFLECTION_BROWSER_RECORDING_ENABLED: "true"
       }
     }
   ]

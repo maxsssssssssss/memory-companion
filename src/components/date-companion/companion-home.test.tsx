@@ -246,7 +246,7 @@ describe("CompanionHome", () => {
     expect(onUpload.mock.calls[0]?.[2]?.toyOperation).toEqual(expect.objectContaining({
       destination: "date_companion",
       relationshipId: "relationship_1",
-      operationKey: expect.stringMatching(/^toyop_v1_[a-f0-9]{64}$/u)
+      operationKey: expect.stringMatching(/^toyop_v2_[a-f0-9]{64}$/u)
     }));
     const savedStates = vi.mocked(fixture.runtime.persistence.saveState).mock.calls
       .map((call) => call[1]);

@@ -9,13 +9,13 @@ describe("Next server package configuration", () => {
     );
   });
 
-  it("cuts the root entry over to Date Companion with a rollback-friendly redirect", async () => {
-    await expect(nextConfig.redirects()).resolves.toEqual([
-      {
-        source: "/",
-        destination: "/date-companion",
-        permanent: false
-      }
-    ]);
+  it("keeps the root route available for the neutral product entry", () => {
+    expect(nextConfig.redirects).toBeUndefined();
+  });
+
+  it("excludes runtime and evaluation data from every server trace", () => {
+    expect(nextConfig.outputFileTracingExcludes).toEqual({
+      "/*": ["./.data/**/*", "./test-data/**/*"]
+    });
   });
 });

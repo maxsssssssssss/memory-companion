@@ -122,6 +122,43 @@ Expected host endpoint:
 
 The Compose project uses a dedicated named volume, AOF persistence with `appendfsync everysec`, `maxmemory-policy=noeviction`, and a healthcheck. Confirm the Compose project name and volume ownership before making changes on a server that hosts other Docker projects.
 
+## Daily Reflection Release Contract
+
+Daily Reflection is an enabled production capability in this release. Web and
+Worker must receive the same release flags:
+
+```env
+DAILY_REFLECTION_UPLOAD_ENABLED=true
+DAILY_REFLECTION_BROWSER_RECORDING_ENABLED=true
+```
+
+`DAILY_REFLECTION_UPLOAD_ENABLED` is the product-wide gate for file upload,
+Cards, Memory recommendations and confirmation, Reflect/Return, and Together
+Think. Browser recording additionally requires
+`DAILY_REFLECTION_BROWSER_RECORDING_ENABLED=true`; the upload route enforces the
+recording-origin gate again on the server.
+
+When `TRANSCRIPTION_PROVIDER=speaker-asr`, both processes must also receive the
+same non-empty `DAILY_REFLECTION_AUDIO_CAPABILITY_SECRET` and the reviewed
+`SPEAKER_ASR_AUDIO_BASE_URL`. The capability secret is deployment-only, must not
+be committed, and must not reuse `SPEAKER_ASR_AUDIO_ACCESS_TOKEN`. Candidate,
+Card-organizer, and Thinking Provider credentials/models must likewise be
+injected through the deployment environment rather than committed files.
+
+Toy Sync remains a separate release decision. Unless it has its own approval,
+keep these values fail-closed:
+
+```env
+DAILY_BRIEF_TOY_SYNC_ENABLED=false
+DAILY_BRIEF_TOY_INGESTION_MODE=off
+```
+
+The PM2 configuration in this release pins the two Daily Reflection flags to
+`true` for both processes. Changing `.env.local` alone will not override those
+entries. A rollback must use a reviewed PM2 configuration (or the previous
+release) that sets both flags to `false`, followed by `--update-env`; disabling
+the surface does not delete existing Reflection, Card, Memory, or Evidence data.
+
 ## PM2
 
 The PM2 configuration defines exactly two application processes:
