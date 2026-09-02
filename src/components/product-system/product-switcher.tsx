@@ -7,16 +7,21 @@ import { PRODUCT_CATALOG, type ProductId } from "./product-catalog";
 import { ProductPopover } from "./product-popover";
 import { rememberLastProduct } from "./product-preference";
 import styles from "./product-system.module.css";
+import { useProductCapabilities } from "./product-capabilities";
 
 export function ProductSwitcher({
   accountId,
   currentProduct,
-  dailyReflectionEnabled = true
+  dailyReflectionEnabled = true,
+  workReviewEnabled
 }: Readonly<{
   accountId: string;
-  currentProduct: Exclude<ProductId, "office_review">;
+  currentProduct: ProductId;
   dailyReflectionEnabled?: boolean;
+  workReviewEnabled?: boolean;
 }>) {
+  const capabilities = useProductCapabilities();
+  const workReviewAvailable = workReviewEnabled ?? capabilities.workReviewEnabled;
   useEffect(() => {
     rememberLastProduct(accountId, currentProduct);
   }, [accountId, currentProduct]);
@@ -40,13 +45,14 @@ export function ProductSwitcher({
       <Link href="/">全部产品</Link>
       {PRODUCT_CATALOG.map((product) => {
         const enabled = product.id === "date_companion"
-          || (product.id === "daily_reflection" && dailyReflectionEnabled);
+          || (product.id === "daily_reflection" && dailyReflectionEnabled)
+          || (product.id === "office_review" && workReviewAvailable);
         return product.href && enabled ? (
           <Link
             aria-current={product.id === currentProduct ? "page" : undefined}
             href={product.href}
             key={product.id}
-            onClick={() => rememberLastProduct(accountId, product.id as Exclude<ProductId, "office_review">)}
+            onClick={() => rememberLastProduct(accountId, product.id)}
           >
             <span aria-hidden="true">{product.mark}</span>
             <span><b>{product.name}</b><small>{product.id === currentProduct ? "当前空间" : "进入"}</small></span>

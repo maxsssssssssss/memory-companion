@@ -66,6 +66,7 @@ describe("parseStructuredJsonResponse", () => {
       jsonInstruction: "Return JSON.",
       mode: "json",
       maxOutputTokens: 3_000,
+      reasoning: { effort: "minimal" },
       requestOptions: { timeout: 45_000, maxRetries: 1 }
     });
 
@@ -74,7 +75,8 @@ describe("parseStructuredJsonResponse", () => {
     expect(create).toHaveBeenCalledWith(
       expect.objectContaining({
         model: "test-model",
-        max_output_tokens: 3_000
+        max_output_tokens: 3_000,
+        reasoning: { effort: "minimal" }
       }),
       { timeout: 45_000, maxRetries: 1 }
     );

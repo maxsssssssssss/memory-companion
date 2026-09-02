@@ -4,6 +4,7 @@ import { ZodError, type z } from "zod";
 
 type ResponseInput = Parameters<OpenAI["responses"]["parse"]>[0]["input"];
 type ResponseRequestOptions = Exclude<Parameters<OpenAI["responses"]["create"]>[1], undefined>;
+type ResponseReasoning = Parameters<OpenAI["responses"]["create"]>[0]["reasoning"];
 
 export type StructuredJsonResponseMode = "auto" | "structured" | "json";
 
@@ -363,6 +364,7 @@ export async function parseStructuredJsonResponse<TSchema extends z.ZodTypeAny>(
   jsonInstruction: string;
   mode?: StructuredJsonResponseMode;
   maxOutputTokens?: number;
+  reasoning?: ResponseReasoning;
   requestOptions?: ResponseRequestOptions;
   normalize?: (value: unknown) => unknown;
   onDiagnostics?: (diagnostics: StructuredJsonDiagnostics) => void;
@@ -372,12 +374,14 @@ export async function parseStructuredJsonResponse<TSchema extends z.ZodTypeAny>(
 }): Promise<z.infer<TSchema>> {
   const outputLimit =
     input.maxOutputTokens === undefined ? {} : { max_output_tokens: input.maxOutputTokens };
+  const reasoning = input.reasoning === undefined ? {} : { reasoning: input.reasoning };
   const validate = (value: unknown) => input.schema.parse(input.normalize ? input.normalize(value) : value);
   const parseStructured = async () => {
     const request = {
       model: input.model,
       input: input.requestInput,
       ...outputLimit,
+      ...reasoning,
       text: {
         format: zodTextFormat(input.schema, input.name)
       }
@@ -393,7 +397,8 @@ export async function parseStructuredJsonResponse<TSchema extends z.ZodTypeAny>(
     const request = {
       model: input.model,
       input: withJsonInstruction(input.requestInput, input.jsonInstruction),
-      ...outputLimit
+      ...outputLimit,
+      ...reasoning
     };
     const response = input.requestOptions
       ? await input.client.responses.create(request, input.requestOptions)

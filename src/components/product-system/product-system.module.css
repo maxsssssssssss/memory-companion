@@ -187,7 +187,7 @@
 .productState h2 { margin: 0; font-size: 15px; }
 .productState p { margin: 5px 0 0; color: var(--db-text-secondary); font-size: 13px; line-height: 1.55; }
 .evidence { margin: 0; padding: 15px 17px; border-left: 3px solid var(--db-accent); border-radius: 0 var(--db-radius-control) var(--db-radius-control) 0; background: var(--db-surface-inset); color: var(--db-text); font-family: var(--db-font-ui); }
-.evidence figcaption { display: flex; justify-content: space-between; gap: 12px; color: var(--db-text-muted); font-size: 11px; }
+.evidence figcaption { display: flex; justify-content: space-between; gap: 12px; color: var(--db-text-secondary); font-size: 11px; }
 .evidence blockquote { margin: 10px 0 0; overflow-wrap: anywhere; font-size: 14px; line-height: 1.68; }
 .reviewCompletion { display: flex; align-items: center; justify-content: space-between; padding: 20px 22px; gap: 22px; border: 1px solid var(--db-border); border-radius: var(--db-radius-surface); background: var(--db-surface); color: var(--db-text); font-family: var(--db-font-ui); }
 .reviewCompletion > div { max-width: 690px; }

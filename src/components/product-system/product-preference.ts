@@ -6,12 +6,12 @@ export function productPreferenceKey(accountId: string) {
 
 export function readLastProduct(accountId: string, storage: Pick<Storage, "getItem"> = window.localStorage) {
   const value = storage.getItem(productPreferenceKey(accountId));
-  return isProductId(value) && value !== "office_review" ? value : null;
+  return isProductId(value) ? value : null;
 }
 
 export function rememberLastProduct(
   accountId: string,
-  productId: Exclude<ProductId, "office_review">,
+  productId: ProductId,
   storage: Pick<Storage, "setItem"> = window.localStorage
 ) {
   storage.setItem(productPreferenceKey(accountId), productId);

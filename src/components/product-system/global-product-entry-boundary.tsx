@@ -22,10 +22,12 @@ type AuthState =
 
 export function GlobalProductEntryBoundary({
   api,
-  dailyReflectionEnabled
+  dailyReflectionEnabled,
+  workReviewEnabled
 }: Readonly<{
   api?: GlobalEntryAuthApi;
   dailyReflectionEnabled: boolean;
+  workReviewEnabled: boolean;
 }>) {
   const router = useRouter();
   const authApi = useMemo(() => api ?? createDateCompanionApi(), [api]);
@@ -78,6 +80,7 @@ export function GlobalProductEntryBoundary({
         router.replace("/date-companion");
       }}
       userLabel={userLabel}
+      workReviewEnabled={workReviewEnabled}
     />
   );
 }

@@ -27,9 +27,9 @@ export const PRODUCT_CATALOG: readonly ProductDefinition[] = [
   },
   {
     id: "office_review",
-    name: "办公复盘",
-    description: "为工作沟通与决策保留连续的复盘空间。",
-    href: null,
+    name: "工作复盘",
+    description: "上传会议录音，核对讨论、决定、承诺和行动事项。",
+    href: "/work-review",
     mark: "复"
   }
 ] as const;

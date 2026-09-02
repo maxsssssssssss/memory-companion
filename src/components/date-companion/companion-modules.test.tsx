@@ -1,4 +1,4 @@
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, render, screen, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { productPreferenceKey } from "@/components/product-system/product-preference";
@@ -22,8 +22,9 @@ describe("CompanionModules", () => {
     expect(screen.getByRole("heading", { name: "选择一个空间" })).toBeVisible();
     expect(screen.getByRole("link", { name: /约会陪伴/u })).toHaveAttribute("href", "/date-companion/a");
     expect(screen.getByRole("link", { name: /日常复盘/u })).toHaveAttribute("href", "/reflection");
-    expect(screen.getByRole("heading", { name: "办公复盘" })).toBeVisible();
-    expect(screen.getByText("开发中")).toBeVisible();
+    const workReviewEntry = screen.getByRole("heading", { name: "工作复盘" }).closest("article");
+    expect(workReviewEntry).not.toBeNull();
+    expect(within(workReviewEntry!).getByText("暂未开放")).toBeVisible();
     expect(screen.queryByText(/统计|最近任务|内部开放/u)).not.toBeInTheDocument();
   });
 
@@ -38,8 +39,9 @@ describe("CompanionModules", () => {
     );
 
     expect(screen.queryByRole("link", { name: /日常复盘/u })).not.toBeInTheDocument();
-    expect(screen.getByRole("heading", { name: "日常复盘" })).toBeVisible();
-    expect(screen.getByText("暂未开放")).toBeVisible();
+    const reflectionEntry = screen.getByRole("heading", { name: "日常复盘" }).closest("article");
+    expect(reflectionEntry).not.toBeNull();
+    expect(within(reflectionEntry!).getByText("暂未开放")).toBeVisible();
   });
 
   it("recovers the last module only inside the current account", async () => {

@@ -12,6 +12,7 @@ import {
   type DailyReflectionRecoveryReport
 } from "./daily-reflection-recovery";
 import { recoverPipelineJobs, type PipelineRecoveryReport } from "./recovery";
+import { runWorkReviewStartupRecovery } from "./work-review-recovery-runtime";
 import {
   processEmbeddingIndexJob,
   type EmbeddingIndexWorkerResult
@@ -44,6 +45,7 @@ import {
 export type PipelineWorkerRuntime = {
   recovery: PipelineRecoveryReport;
   dailyReflectionRecovery: DailyReflectionRecoveryReport;
+  workReviewRecovery: Awaited<ReturnType<typeof runWorkReviewStartupRecovery>>;
   runPromise: Promise<void>;
   close(): Promise<void>;
 };
@@ -214,6 +216,7 @@ export async function startPipelineWorker(): Promise<PipelineWorkerRuntime> {
           racesSkipped: 0,
           provisionalCleaned: 0
         };
+    const workReviewRecovery = await runWorkReviewStartupRecovery();
     let embeddingIndexEnqueued = 0;
     let embeddingIndexExisting = 0;
     if (resolveQaHybridRetrievalMode() !== "off") {
@@ -281,6 +284,7 @@ export async function startPipelineWorker(): Promise<PipelineWorkerRuntime> {
     return {
       recovery,
       dailyReflectionRecovery,
+      workReviewRecovery,
       runPromise,
       close() {
         closePromise ??= (async () => {

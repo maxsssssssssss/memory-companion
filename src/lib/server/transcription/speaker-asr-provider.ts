@@ -6,8 +6,10 @@ import {
   createTranscriptionAudioAccessCapability,
   DAILY_REFLECTION_AUDIO_CAPABILITY_SECRET_ENV,
   getDailyReflectionAudioCapabilitySecret,
+  getWorkReviewAudioCapabilitySecret,
   TRANSCRIPTION_AUDIO_ACCESS_PURPOSE,
-  TRANSCRIPTION_AUDIO_ACCESS_TTL_SECONDS
+  TRANSCRIPTION_AUDIO_ACCESS_TTL_SECONDS,
+  WORK_REVIEW_AUDIO_CAPABILITY_SECRET_ENV
 } from "./audio-access-capability";
 import { ChunkTranscriptionError, type ChunkTranscriptionAdapter } from "./chunks/adapter";
 import { createTranscriptChunkFromLocalSegments } from "./chunks/transcript-merge";
@@ -215,11 +217,12 @@ function buildLegacyAudioUrl(input: SpeakerAsrAudioInput, userId: string | undef
   return appendChunkId(url, input.chunkId);
 }
 
-function buildDailyReflectionCapabilityAudioUrl(
+function buildCapabilityAudioUrl(
   input: SpeakerAsrAudioInput,
-  userId: string | undefined
+  userId: string | undefined,
+  capabilitySecret: string | undefined,
+  capabilitySecretEnv: string
 ) {
-  const capabilitySecret = getDailyReflectionAudioCapabilitySecret();
   const template = readStringEnv(AUDIO_URL_TEMPLATE_ENV);
 
   if (template) {
@@ -251,7 +254,7 @@ function buildDailyReflectionCapabilityAudioUrl(
       })
       : (() => {
         throw new Error(
-          `${DAILY_REFLECTION_AUDIO_CAPABILITY_SECRET_ENV} and a user-scoped upload file path are required to build speaker-asr audio_url`
+          `${capabilitySecretEnv} and a user-scoped upload file path are required to build speaker-asr audio_url`
         );
       })();
   }
@@ -259,7 +262,7 @@ function buildDailyReflectionCapabilityAudioUrl(
   const audioBaseUrl = readStringEnv(AUDIO_BASE_URL_ENV);
   if (!audioBaseUrl || !capabilitySecret || !userId) {
     throw new Error(
-      `${AUDIO_BASE_URL_ENV}, ${DAILY_REFLECTION_AUDIO_CAPABILITY_SECRET_ENV}, and a user-scoped upload file path are required to build speaker-asr audio_url`
+      `${AUDIO_BASE_URL_ENV}, ${capabilitySecretEnv}, and a user-scoped upload file path are required to build speaker-asr audio_url`
     );
   }
 
@@ -275,9 +278,24 @@ function buildDailyReflectionCapabilityAudioUrl(
 
 function buildAudioUrl(input: SpeakerAsrAudioInput) {
   const userId = input.userId ?? parseUserIdFromUploadPath(input.filePath);
-  return (input.audioAccessPolicy ?? "legacy_bearer") === "daily_reflection_capability"
-    ? buildDailyReflectionCapabilityAudioUrl(input, userId)
-    : buildLegacyAudioUrl(input, userId);
+  const policy = input.audioAccessPolicy ?? "legacy_bearer";
+  if (policy === "daily_reflection_capability") {
+    return buildCapabilityAudioUrl(
+      input,
+      userId,
+      getDailyReflectionAudioCapabilitySecret(),
+      DAILY_REFLECTION_AUDIO_CAPABILITY_SECRET_ENV
+    );
+  }
+  if (policy === "work_review_capability") {
+    return buildCapabilityAudioUrl(
+      input,
+      userId,
+      getWorkReviewAudioCapabilitySecret(),
+      WORK_REVIEW_AUDIO_CAPABILITY_SECRET_ENV
+    );
+  }
+  return buildLegacyAudioUrl(input, userId);
 }
 
 async function parseJsonResponse(response: Response): Promise<SpeakerAsrSubmitResponse> {

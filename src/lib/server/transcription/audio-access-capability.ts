@@ -4,9 +4,16 @@ export const TRANSCRIPTION_AUDIO_ACCESS_PURPOSE = "transcription";
 export const TRANSCRIPTION_AUDIO_ACCESS_TTL_SECONDS = 5 * 60;
 export const DAILY_REFLECTION_AUDIO_CAPABILITY_SECRET_ENV =
   "DAILY_REFLECTION_AUDIO_CAPABILITY_SECRET";
+export const WORK_REVIEW_AUDIO_CAPABILITY_SECRET_ENV =
+  "WORK_REVIEW_AUDIO_CAPABILITY_SECRET";
 
 export function getDailyReflectionAudioCapabilitySecret() {
   const value = process.env[DAILY_REFLECTION_AUDIO_CAPABILITY_SECRET_ENV]?.trim();
+  return value ? value : undefined;
+}
+
+export function getWorkReviewAudioCapabilitySecret() {
+  const value = process.env[WORK_REVIEW_AUDIO_CAPABILITY_SECRET_ENV]?.trim();
   return value ? value : undefined;
 }
 

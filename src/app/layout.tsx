@@ -3,6 +3,10 @@ import "./globals.css";
 import type { Metadata } from "next";
 import type { Viewport } from "next";
 import type { ReactNode } from "react";
+import { ProductCapabilitiesProvider } from "@/components/product-system/product-capabilities";
+import { isWorkReviewEnabled } from "@/lib/server/work-review/runtime-config";
+
+export const dynamic = "force-dynamic";
 
 export const metadata: Metadata = {
   title: "Daily Brief",
@@ -21,7 +25,11 @@ export const viewport: Viewport = {
 export default function RootLayout({ children }: { children: ReactNode }) {
   return (
     <html lang="zh-CN">
-      <body>{children}</body>
+      <body>
+        <ProductCapabilitiesProvider workReviewEnabled={isWorkReviewEnabled()}>
+          {children}
+        </ProductCapabilitiesProvider>
+      </body>
     </html>
   );
 }

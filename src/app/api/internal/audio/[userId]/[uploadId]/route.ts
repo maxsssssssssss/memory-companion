@@ -13,9 +13,13 @@ import {
 } from "@/lib/server/daily-reflection";
 import {
   getDailyReflectionAudioCapabilitySecret,
+  getWorkReviewAudioCapabilitySecret,
   verifyTranscriptionAudioAccessCapability
 } from "@/lib/server/transcription/audio-access-capability";
 import { readAudioChunkCheckpoint } from "@/lib/server/transcription/chunks/checkpoint-store";
+import { getWorkReviewDatabase } from "@/lib/server/work-review/db";
+import { WorkReviewRepository } from "@/lib/server/work-review/repository";
+import { isWorkReviewUploadEnabled } from "@/lib/server/work-review/runtime-config";
 
 type StoredUpload = AudioUpload & {
   filePath?: string;
@@ -44,7 +48,8 @@ function unauthorized() {
 
 export async function GET(request: Request, { params }: { params: Promise<{ userId: string; uploadId: string }> }) {
   const token = configuredToken();
-  const capabilitySecret = getDailyReflectionAudioCapabilitySecret();
+  const dailyReflectionCapabilitySecret = getDailyReflectionAudioCapabilitySecret();
+  const workReviewCapabilitySecret = getWorkReviewAudioCapabilitySecret();
   const requestUrl = new URL(request.url);
   const requestToken = requestUrl.searchParams.get("token")?.trim();
   const { userId, uploadId } = await params;
@@ -56,9 +61,20 @@ export async function GET(request: Request, { params }: { params: Promise<{ user
   if (chunkId && !isSafeKey(chunkId)) {
     return NextResponse.json({ error: "invalid_audio_request" }, { status: 400 });
   }
-  const transcriptionCapabilityValid = Boolean(capabilitySecret) &&
+  const dailyReflectionCapabilityValid = Boolean(dailyReflectionCapabilitySecret) &&
     verifyTranscriptionAudioAccessCapability({
-      secret: capabilitySecret!,
+      secret: dailyReflectionCapabilitySecret!,
+      capability: requestUrl.searchParams.get("capability"),
+      purpose: requestUrl.searchParams.get("purpose"),
+      expiresAtSeconds: Number(requestUrl.searchParams.get("expires")),
+      userId,
+      uploadId,
+      ...(chunkId ? { chunkId } : {})
+    });
+  const workReviewCapabilityValid = uploadId.startsWith("work-meeting-")
+    && Boolean(workReviewCapabilitySecret)
+    && verifyTranscriptionAudioAccessCapability({
+      secret: workReviewCapabilitySecret!,
       capability: requestUrl.searchParams.get("capability"),
       purpose: requestUrl.searchParams.get("purpose"),
       expiresAtSeconds: Number(requestUrl.searchParams.get("expires")),
@@ -67,12 +83,19 @@ export async function GET(request: Request, { params }: { params: Promise<{ user
       ...(chunkId ? { chunkId } : {})
     });
   const legacyTokenValid = Boolean(token) && requestToken === token;
-  if (!transcriptionCapabilityValid && !legacyTokenValid) return unauthorized();
+  if (!dailyReflectionCapabilityValid && !workReviewCapabilityValid && !legacyTokenValid) {
+    return unauthorized();
+  }
 
   const store = getUserScopedStore(userId);
   const repository = getDailyReflectionRepository();
+  const workUpload = uploadId.startsWith("work-meeting-")
+    && isWorkReviewUploadEnabled() && workReviewCapabilityValid
+    ? new WorkReviewRepository(getWorkReviewDatabase())
+      .readTranscribingSourceUploadByUploadId(userId, uploadId)
+    : null;
   const reflection = repository.findReflectionByUpload(userId, uploadId);
-  const upload = reflection
+  const upload = workUpload ?? (reflection
     ? await readDailyReflectionPublishedAsset<StoredUpload>({
         repository,
         store,
@@ -81,15 +104,15 @@ export async function GET(request: Request, { params }: { params: Promise<{ user
         uploadId,
         assetKind: "upload"
       })
-    : await store.read<StoredUpload>("uploads", uploadId);
+    : await store.read<StoredUpload>("uploads", uploadId));
   if (!upload?.filePath) {
     return NextResponse.json({ error: "audio_not_found" }, { status: 404 });
   }
   if (
-    isDailyReflectionUpload(upload)
+    !workUpload && isDailyReflectionUpload(upload)
     && (
       !isDailyReflectionUploadEnabled()
-      || !transcriptionCapabilityValid
+      || !dailyReflectionCapabilityValid
       || upload.status !== "transcribing"
       || (() => {
         const reflection = repository.findReflection(userId, upload.reflectionId);

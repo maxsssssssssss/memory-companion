@@ -34,7 +34,7 @@ describe("product system", () => {
       }),
       logout: vi.fn().mockResolvedValue(undefined)
     };
-    render(<GlobalProductEntryBoundary api={api} dailyReflectionEnabled />);
+    render(<GlobalProductEntryBoundary api={api} dailyReflectionEnabled workReviewEnabled={false} />);
 
     expect(await screen.findByRole("heading", { name: "选择一个空间" })).toBeVisible();
     expect(api.getCurrentUser).toHaveBeenCalledTimes(1);
@@ -52,7 +52,7 @@ describe("product system", () => {
         .mockResolvedValueOnce(null),
       logout: vi.fn().mockResolvedValue(undefined)
     };
-    render(<GlobalProductEntryBoundary api={api} dailyReflectionEnabled />);
+    render(<GlobalProductEntryBoundary api={api} dailyReflectionEnabled workReviewEnabled={false} />);
 
     expect(await screen.findByRole("alert")).toHaveTextContent("暂时无法进入");
     fireEvent.click(screen.getByRole("button", { name: "重新尝试" }));
@@ -71,7 +71,7 @@ describe("product system", () => {
       }),
       logout: vi.fn().mockResolvedValue(undefined)
     };
-    render(<GlobalProductEntryBoundary api={api} dailyReflectionEnabled />);
+    render(<GlobalProductEntryBoundary api={api} dailyReflectionEnabled workReviewEnabled={false} />);
 
     await screen.findByRole("heading", { name: "选择一个空间" });
     fireEvent.click(screen.getByRole("button", { name: /账号菜单/u }));
@@ -90,6 +90,7 @@ describe("product system", () => {
         dailyReflectionEnabled
         onLogout={vi.fn()}
         userLabel="a@example.com"
+        workReviewEnabled
       />
     );
 
@@ -111,7 +112,24 @@ describe("product system", () => {
       screen.getByRole("link", { name: /约会陪伴/u }).querySelector("span[aria-hidden='true']")
     ).toHaveTextContent("约");
     expect(screen.getByRole("link", { name: /日常复盘/u })).toHaveAttribute("href", "/reflection");
-    expect(screen.getByText("办公复盘")).toBeVisible();
+    expect(screen.getByText("工作复盘")).toBeVisible();
+  });
+
+  it("enables the Work Review route and keeps its last-product preference account scoped", async () => {
+    render(
+      <ProductSwitcher
+        accountId="account_a"
+        currentProduct="office_review"
+        workReviewEnabled
+      />
+    );
+
+    expect(screen.getByRole("button", { name: /切换产品，当前为工作复盘/u })).toBeVisible();
+    await waitFor(() => {
+      expect(window.localStorage.getItem(productPreferenceKey("account_a"))).toBe("office_review");
+    });
+    fireEvent.click(screen.getByRole("button", { name: /切换产品/u }));
+    expect(screen.getByRole("link", { name: /工作复盘/u })).toHaveAttribute("href", "/work-review");
   });
 
   it("closes product menus on outside click, repeated click and Escape with focus restored", () => {
@@ -145,7 +163,7 @@ describe("product system", () => {
 
     expect(screen.queryByRole("link", { name: /日常复盘/u })).not.toBeInTheDocument();
     expect(screen.getByText("日常复盘").closest("span[aria-disabled='true']")).toBeVisible();
-    expect(screen.getByText("暂未开放")).toBeVisible();
+    expect(screen.getAllByText("暂未开放")).toHaveLength(2);
   });
 
   it("provides one shared account menu with pending and recoverable logout states", async () => {

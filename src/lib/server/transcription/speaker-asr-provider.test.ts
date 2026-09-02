@@ -154,6 +154,41 @@ describe("speaker-asr transcription provider", () => {
     expect(body.audio_url).not.toContain("capability=");
   });
 
+  it("builds Work Review audio URLs with the Work-scoped capability secret", async () => {
+    const workCapabilitySecret = "work-review-capability-secret-test-only";
+    process.env.SPEAKER_ASR_BASE_URL = "http://speaker-asr.test:8300";
+    process.env.SPEAKER_ASR_AUDIO_BASE_URL = "https://daydiary.example.com";
+    process.env.SPEAKER_ASR_AUDIO_ACCESS_TOKEN = bearerSentinel;
+    process.env.WORK_REVIEW_AUDIO_CAPABILITY_SECRET = workCapabilitySecret;
+    process.env.DAILY_REFLECTION_AUDIO_CAPABILITY_SECRET = capabilitySecret;
+    const fetchMock = vi.fn(async (_url: string, _init?: RequestInit) => new Response(JSON.stringify({
+      code: 0,
+      data: { speaker_result: [{ speaker: "speaker_1", text: "work transcript" }] }
+    }), { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await speakerAsrTranscriptionProvider.transcribe({
+      uploadId: "work-meeting-1",
+      filePath: "/var/data/daily-brief/users/user_1/uploads/work-meeting-1.mp3",
+      mimeType: "audio/mpeg",
+      audioAccessPolicy: "work_review_capability"
+    });
+
+    const body = JSON.parse(String(fetchMock.mock.calls[0][1]?.body));
+    const audioUrl = new URL(body.audio_url as string);
+    const expiresAtSeconds = Number(audioUrl.searchParams.get("expires"));
+    expect(audioUrl.searchParams.get("token")).toBeNull();
+    expect(audioUrl.searchParams.get("capability")).toBe(
+      createTranscriptionAudioAccessCapability(workCapabilitySecret, {
+        userId: "user_1",
+        uploadId: "work-meeting-1",
+        expiresAtSeconds
+      })
+    );
+    expect(JSON.stringify(fetchMock.mock.calls)).not.toContain(workCapabilitySecret);
+    expect(JSON.stringify(fetchMock.mock.calls)).not.toContain(bearerSentinel);
+  });
+
   it("preserves legacy audio URL template token substitution", async () => {
     process.env.SPEAKER_ASR_BASE_URL = "http://speaker-asr.test:8300";
     process.env.SPEAKER_ASR_AUDIO_URL_TEMPLATE =

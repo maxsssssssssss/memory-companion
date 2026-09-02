@@ -12,14 +12,16 @@ export function GlobalProductEntry({
   accountId,
   dailyReflectionEnabled,
   onLogout,
-  userLabel
+  userLabel,
+  workReviewEnabled = false
 }: Readonly<{
   accountId: string;
   dailyReflectionEnabled: boolean;
   onLogout: () => Promise<void> | void;
   userLabel: string;
+  workReviewEnabled?: boolean;
 }>) {
-  const [lastProduct, setLastProduct] = useState<Exclude<ProductId, "office_review"> | null>(null);
+  const [lastProduct, setLastProduct] = useState<ProductId | null>(null);
 
   useEffect(() => {
     setLastProduct(readLastProduct(accountId));
@@ -43,7 +45,8 @@ export function GlobalProductEntry({
       <section aria-label="产品空间" className={styles.globalProductGrid}>
         {PRODUCT_CATALOG.map((product) => {
           const enabled = product.id === "date_companion"
-            || (product.id === "daily_reflection" && dailyReflectionEnabled);
+            || (product.id === "daily_reflection" && dailyReflectionEnabled)
+            || (product.id === "office_review" && workReviewEnabled);
           const wasLast = enabled && product.id === lastProduct;
           if (!product.href || !enabled) {
             return (
@@ -60,7 +63,7 @@ export function GlobalProductEntry({
               data-product={product.id}
               href={product.href}
               key={product.id}
-              onClick={() => rememberLastProduct(accountId, product.id as Exclude<ProductId, "office_review">)}
+              onClick={() => rememberLastProduct(accountId, product.id)}
             >
               <div><span aria-hidden="true">{product.mark}</span>{wasLast ? <small>上次使用</small> : null}</div>
               <h2>{product.name}</h2>
