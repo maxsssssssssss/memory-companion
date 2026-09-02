@@ -2,6 +2,7 @@ import { fireEvent, render, screen, waitFor, within } from "@testing-library/rea
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { DailyReflectionSessionValue } from "@/lib/client/daily-reflection-session";
+import type { DailyReflectionAiReviewApi } from "@/lib/client/daily-reflection-ai-review-api";
 
 import { ReflectionAppShell } from "./reflection-app-shell";
 
@@ -31,6 +32,19 @@ function session(auth: DailyReflectionSessionValue["auth"]): DailyReflectionSess
   } as unknown as DailyReflectionSessionValue;
 }
 
+const aiReviewApi: DailyReflectionAiReviewApi = {
+  get: vi.fn(),
+  ensure: vi.fn(),
+  getSummary: vi.fn(async () => ({
+    schemaVersion: 1 as const,
+    exposureMode: "on" as const,
+    pendingCount: 0,
+    unseenReadyCount: 0,
+    items: []
+  })),
+  markSeen: vi.fn()
+};
+
 beforeEach(() => {
   vi.clearAllMocks();
   state.pathname = "/reflection";
@@ -44,7 +58,7 @@ describe("ReflectionAppShell", () => {
   it("provides one canonical desktop/mobile shell and global capture action", () => {
     state.pathname = "/reflection/cards";
     render(
-      <ReflectionAppShell browserRecordingEnabled toySyncEnabled={false}>
+      <ReflectionAppShell aiReviewApi={aiReviewApi} browserRecordingEnabled toySyncEnabled={false}>
         <p>页面内容</p>
       </ReflectionAppShell>
     );
@@ -66,9 +80,76 @@ describe("ReflectionAppShell", () => {
     expect(within(mobile).queryByText("记忆")).not.toBeInTheDocument();
   });
 
+  it("restores an account-scoped unread badge without replaying an old completion notice", async () => {
+    vi.mocked(aiReviewApi.getSummary).mockResolvedValueOnce({
+      schemaVersion: 1,
+      exposureMode: "on",
+      pendingCount: 0,
+      unseenReadyCount: 1,
+      items: [{
+        reviewId: "review_daily",
+        scope: "daily",
+        startDate: "2026-08-24",
+        endDate: "2026-08-24",
+        completedAt: "2026-08-24T08:00:00.000Z"
+      }]
+    });
+    render(
+      <ReflectionAppShell aiReviewApi={aiReviewApi} browserRecordingEnabled toySyncEnabled={false}>
+        <p>页面内容</p>
+      </ReflectionAppShell>
+    );
+
+    const desktop = screen.getByRole("navigation", { name: "日常复盘主导航" });
+    const mobile = screen.getByRole("navigation", { name: "日常复盘移动导航" });
+    expect(await within(desktop).findByRole("link", { name: /回看.*1 份 AI 深度回看已完成/u })).toBeVisible();
+    expect(within(mobile).getByRole("link", { name: /回看.*1 份 AI 深度回看已完成/u })).toBeVisible();
+    expect(screen.queryByText("今天的 AI 深度回看已完成")).not.toBeInTheDocument();
+  });
+
+  it("announces one newly completed review while the user is on another page", async () => {
+    const getSummary = vi.fn()
+      .mockResolvedValueOnce({
+        schemaVersion: 1 as const,
+        exposureMode: "on" as const,
+        pendingCount: 1,
+        unseenReadyCount: 0,
+        items: []
+      })
+      .mockResolvedValue({
+        schemaVersion: 1 as const,
+        exposureMode: "on" as const,
+        pendingCount: 0,
+        unseenReadyCount: 1,
+        items: [{
+          reviewId: "review_weekly",
+          scope: "weekly" as const,
+          startDate: "2026-08-18",
+          endDate: "2026-08-24",
+          completedAt: "2026-08-24T08:00:00.000Z"
+        }]
+      });
+    const liveApi: DailyReflectionAiReviewApi = { ...aiReviewApi, getSummary };
+    render(
+      <ReflectionAppShell aiReviewApi={liveApi} browserRecordingEnabled toySyncEnabled={false}>
+        <p>页面内容</p>
+      </ReflectionAppShell>
+    );
+    await waitFor(() => expect(getSummary).toHaveBeenCalledTimes(1));
+
+    window.dispatchEvent(new Event("focus"));
+
+    const notice = (await screen.findByText("本周的 AI 深度回看已完成")).closest("aside") as HTMLElement;
+    expect(notice).toHaveAttribute("role", "status");
+    expect(within(notice).getByRole("link", { name: "去看看" }))
+      .toHaveAttribute("href", "/reflection/reflect");
+    fireEvent.click(within(notice).getByRole("button", { name: "关闭 AI 深度回看完成提示" }));
+    expect(screen.queryByText("本周的 AI 深度回看已完成")).not.toBeInTheDocument();
+  });
+
   it("opens and closes the shared Quick Panel from the global brainstorm action", async () => {
     render(
-      <ReflectionAppShell browserRecordingEnabled toySyncEnabled={false}>
+      <ReflectionAppShell aiReviewApi={aiReviewApi} browserRecordingEnabled toySyncEnabled={false}>
         <p>页面内容</p>
       </ReflectionAppShell>
     );
@@ -84,7 +165,7 @@ describe("ReflectionAppShell", () => {
   it("uses a local return header and removes the mobile bottom navigation in focused flows", () => {
     state.pathname = "/reflection/cards/card_1";
     render(
-      <ReflectionAppShell browserRecordingEnabled toySyncEnabled={false}>
+      <ReflectionAppShell aiReviewApi={aiReviewApi} browserRecordingEnabled toySyncEnabled={false}>
         <p>卡片详情</p>
       </ReflectionAppShell>
     );
@@ -97,7 +178,7 @@ describe("ReflectionAppShell", () => {
   it("keeps authentication fail closed and redirects anonymous users", async () => {
     state.session = session({ status: "anonymous" });
     render(
-      <ReflectionAppShell browserRecordingEnabled={false} toySyncEnabled={false}>
+      <ReflectionAppShell aiReviewApi={aiReviewApi} browserRecordingEnabled={false} toySyncEnabled={false}>
         <p>私密内容</p>
       </ReflectionAppShell>
     );
@@ -110,7 +191,7 @@ describe("ReflectionAppShell", () => {
   it("shows an honest auth error and retries the same session boundary", () => {
     state.session = session({ status: "error", message: "登录状态暂时无法确认。" });
     render(
-      <ReflectionAppShell browserRecordingEnabled={false} toySyncEnabled={false}>
+      <ReflectionAppShell aiReviewApi={aiReviewApi} browserRecordingEnabled={false} toySyncEnabled={false}>
         <p>私密内容</p>
       </ReflectionAppShell>
     );
@@ -127,7 +208,7 @@ describe("ReflectionAppShell", () => {
       logout
     };
     render(
-      <ReflectionAppShell browserRecordingEnabled toySyncEnabled={false}>
+      <ReflectionAppShell aiReviewApi={aiReviewApi} browserRecordingEnabled toySyncEnabled={false}>
         <p>页面内容</p>
       </ReflectionAppShell>
     );

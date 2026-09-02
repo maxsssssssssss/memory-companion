@@ -5,6 +5,8 @@ export const PIPELINE_QUEUE_PAYLOAD_VERSION = 1 as const;
 export const PIPELINE_QUEUE_JOB_NAME = "process-upload" as const;
 export const DAILY_REFLECTION_QUEUE_JOB_NAME = "process-daily-reflection-upload" as const;
 export const EMBEDDING_INDEX_QUEUE_JOB_NAME = "refresh-embedding-index" as const;
+export const DAILY_REFLECTION_AI_REVIEW_QUEUE_JOB_NAME =
+  "generate-daily-reflection-ai-review" as const;
 
 const QueueReferenceSchema = z.string().trim().min(1).max(512);
 
@@ -33,6 +35,16 @@ export type DailyReflectionQueuePayload = z.infer<
   typeof DailyReflectionQueuePayloadSchema
 >;
 
+export const DailyReflectionAiReviewQueuePayloadSchema = z.object({
+  version: z.literal(PIPELINE_QUEUE_PAYLOAD_VERSION),
+  reviewId: QueueReferenceSchema,
+  userRef: QueueReferenceSchema
+}).strict();
+
+export type DailyReflectionAiReviewQueuePayload = z.infer<
+  typeof DailyReflectionAiReviewQueuePayloadSchema
+>;
+
 export const EmbeddingIndexQueuePayloadSchema = z
   .object({
     version: z.literal(PIPELINE_QUEUE_PAYLOAD_VERSION),
@@ -47,6 +59,7 @@ export type EmbeddingIndexQueuePayload = z.infer<
 export type DailyBriefQueueJobData =
   | PipelineJobData
   | DailyReflectionQueuePayload
+  | DailyReflectionAiReviewQueuePayload
   | EmbeddingIndexQueuePayload;
 
 export function buildPipelineQueueJobId(
@@ -78,4 +91,15 @@ export function buildEmbeddingIndexQueueJobId(
   const userRef = QueueReferenceSchema.parse(input.userRef);
   const digest = createHash("sha256").update(userRef).digest("hex");
   return `hybrid-index-${digest}`;
+}
+
+export function buildDailyReflectionAiReviewQueueJobId(
+  input: Pick<DailyReflectionAiReviewQueuePayload, "reviewId" | "userRef">
+) {
+  const reviewId = QueueReferenceSchema.parse(input.reviewId);
+  const userRef = QueueReferenceSchema.parse(input.userRef);
+  const digest = createHash("sha256")
+    .update(`${userRef}\u0000${reviewId}`)
+    .digest("hex");
+  return `daily-reflection-ai-review-${digest}`;
 }

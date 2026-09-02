@@ -169,7 +169,8 @@ describe("Daily Reflection SQLite schema", () => {
           { version: 10, count: 1 },
           { version: 11, count: 1 },
           { version: 12, count: 1 },
-          { version: 13, count: 1 }
+          { version: 13, count: 1 },
+          { version: 14, count: 1 }
         ]);
       }
       expect((web.prepare("PRAGMA table_info(dr_reflections)").all() as Array<{
@@ -222,7 +223,8 @@ describe("Daily Reflection SQLite schema", () => {
         { version: 10 },
         { version: 11 },
         { version: 12 },
-        { version: 13 }
+        { version: 13 },
+        { version: 14 }
       ]);
       expect((first.prepare("PRAGMA table_info(dr_reflections)").all() as Array<{
         name: string;
@@ -242,6 +244,8 @@ describe("Daily Reflection SQLite schema", () => {
         { name: "dr_working_card_memory_revocation_receipts" },
         { name: "dr_memory_proposals" },
         { name: "dr_memory_proposal_events" },
+        { name: "dr_ai_review_operations" },
+        { name: "dr_ai_review_source_links" },
         { name: "dr_candidates" },
         { name: "dr_candidate_sources" },
         { name: "dr_processing_plans" },
@@ -270,14 +274,14 @@ describe("Daily Reflection SQLite schema", () => {
     try {
       expect(reopened.prepare(
         "SELECT COUNT(*) AS count FROM dr_schema_migrations"
-      ).get()).toEqual({ count: 13 });
+      ).get()).toEqual({ count: 14 });
       expect(reopened.prepare(
         "SELECT source_origin FROM dr_reflections WHERE id = 'reflection_reopen'"
       ).get()).toEqual({ source_origin: "unknown" });
       migrateDailyReflectionSchema(reopened);
       expect(reopened.prepare(
         "SELECT COUNT(*) AS count FROM dr_schema_migrations"
-      ).get()).toEqual({ count: 13 });
+      ).get()).toEqual({ count: 14 });
       expect(reopened.pragma("foreign_key_check")).toEqual([]);
       expect(reopened.pragma("integrity_check", { simple: true })).toBe("ok");
     } finally {
@@ -312,7 +316,8 @@ describe("Daily Reflection SQLite schema", () => {
         { version: 10 },
         { version: 11 },
         { version: 12 },
-        { version: 13 }
+        { version: 13 },
+        { version: 14 }
       ]);
       expect(database.prepare(`
         SELECT lease_owner, lease_until, attempt_version, upload_fingerprint
@@ -323,6 +328,80 @@ describe("Daily Reflection SQLite schema", () => {
         attempt_version: 0,
         upload_fingerprint: null
       });
+    } finally {
+      database.close();
+    }
+  });
+
+  it("adds V14 AI review fencing and stales content when Evidence is deleted", () => {
+    const database = openDailyReflectionDatabase({ filePath: ":memory:" });
+    try {
+      database.prepare(`
+        INSERT INTO dr_reflections (
+          id, account_id, upload_id, input_method, source_origin,
+          processing_profile, ingestion_context, status, version,
+          idempotency_key, create_fingerprint, error_code, error_message,
+          created_at, updated_at
+        ) VALUES (
+          'reflection_ai_review', 'account_1', 'upload_ai_review',
+          'file_upload', 'user_reflection', 'quick_reflection',
+          'daily_reflection', 'review_pending', 0, NULL, 'fingerprint',
+          NULL, NULL, ?, ?
+        )
+      `).run(timestamp, timestamp);
+      database.prepare(`
+        INSERT INTO dr_working_cards (
+          id, account_id, source_reflection_ids_json, title, content,
+          card_kind, evidence_ids_json, status, importance, novelty,
+          related_card_ids_json, tags_json, visibility, source_unavailable,
+          saved_at, version, created_at, updated_at
+        ) VALUES (
+          'card_ai_review', 'account_1', '["reflection_ai_review"]',
+          'title', 'content', 'insight', '["segment_ai_review"]', 'saved',
+          0.8, 0.7, '[]', '[]', 'private', 0, ?, 1, ?, ?
+        )
+      `).run(timestamp, timestamp, timestamp);
+      database.prepare(`
+        INSERT INTO dr_ai_review_operations (
+          id, account_id, scope, start_date, end_date, source_fingerprint,
+          prompt_version, model, status, result_json, failure_code,
+          claim_token, lease_until, attempt_version, provider_started_at,
+          provider_input_tokens, provider_output_tokens, provider_total_tokens,
+          created_at, updated_at, completed_at, seen_at
+        ) VALUES (
+          'review_ai', 'account_1', 'daily', '2026-09-01', '2026-09-01',
+          ?, 'review-v1', 'gpt', 'ready', '{}', NULL, NULL, NULL, 1, ?,
+          1, 2, 3, ?, ?, ?, NULL
+        )
+      `).run("a".repeat(64), timestamp, timestamp, timestamp, timestamp);
+      database.prepare(`
+        INSERT INTO dr_ai_review_source_links (
+          account_id, review_id, source_id, reflection_id, card_id,
+          evidence_id, position
+        ) VALUES (
+          'account_1', 'review_ai', 'source_ai', 'reflection_ai_review',
+          'card_ai_review', 'segment_ai_review', 0
+        )
+      `).run();
+
+      expect(() => database.prepare(`
+        INSERT INTO dr_ai_review_source_links (
+          account_id, review_id, source_id, reflection_id, card_id,
+          evidence_id, position
+        ) VALUES (
+          'account_2', 'review_ai', 'bad_source', 'reflection_ai_review',
+          'card_ai_review', 'bad_segment', 0
+        )
+      `).run()).toThrow(/FOREIGN KEY/u);
+      database.prepare(`
+        DELETE FROM dr_reflections
+        WHERE account_id = 'account_1' AND id = 'reflection_ai_review'
+      `).run();
+      expect(database.prepare(`
+        SELECT status, result_json, seen_at
+        FROM dr_ai_review_operations WHERE id = 'review_ai'
+      `).get()).toEqual({ status: "stale", result_json: null, seen_at: null });
+      expect(database.pragma("foreign_key_check")).toEqual([]);
     } finally {
       database.close();
     }
@@ -542,7 +621,7 @@ describe("Daily Reflection SQLite schema", () => {
 
       expect(database.prepare(
         "SELECT version FROM dr_schema_migrations ORDER BY version DESC LIMIT 2"
-      ).all()).toEqual([{ version: 13 }, { version: 12 }]);
+      ).all()).toEqual([{ version: 14 }, { version: 13 }]);
       expect(database.prepare(`
         SELECT id, title, content, status, version
         FROM dr_working_cards WHERE id = 'card_v10_proposal'

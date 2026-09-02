@@ -1,4 +1,5 @@
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import type { ReactElement } from "react";
 import { describe, expect, it, vi } from "vitest";
 
 import type {
@@ -9,6 +10,7 @@ import type {
 } from "@/lib/domain/daily-reflection-return";
 
 import { DailyReflectionReturn } from "./daily-reflection-return";
+import { ReflectionAiReviewProvider } from "./reflection-ai-review-provider";
 import { consumeCaptureContextIntent } from "./reflection-capture-intent";
 
 function evidence(cardId = "card_1", recordingDate = "2026-08-23") {
@@ -100,11 +102,54 @@ function api(
   };
 }
 
+const quietAiReviewApi = {
+  get: vi.fn(async ({ scope, referenceDate }: { scope: "daily" | "weekly"; referenceDate: string }) => ({
+    schemaVersion: 1 as const,
+    exposureMode: "shadow" as const,
+    scope,
+    referenceDate,
+    review: {
+      schemaVersion: 1 as const,
+      reviewId: `review_${scope}`,
+      scope,
+      startDate: referenceDate,
+      endDate: referenceDate,
+      status: "ready" as const,
+      sourceFingerprint: "a".repeat(64),
+      promptVersion: "ai-review-v1",
+      model: "shadow-model",
+      content: null,
+      failureCode: null,
+      providerStartedAt: "2026-08-24T08:00:00.000Z",
+      completedAt: "2026-08-24T08:00:01.000Z",
+      seenAt: null,
+      updatedAt: "2026-08-24T08:00:01.000Z"
+    }
+  })),
+  ensure: vi.fn(),
+  getSummary: vi.fn(async () => ({
+    schemaVersion: 1 as const,
+    exposureMode: "shadow" as const,
+    pendingCount: 0,
+    unseenReadyCount: 0,
+    items: []
+  })),
+  markSeen: vi.fn()
+};
+
+function renderReturn(element: ReactElement) {
+  return render(
+    <ReflectionAiReviewProvider accountId="account_1" api={quietAiReviewApi}>
+      {element}
+    </ReflectionAiReviewProvider>
+  );
+}
+
 describe("DailyReflectionReturn", () => {
   it("presents one deterministic Today focus without claiming importance and switches focus locally", async () => {
     window.sessionStorage.clear();
     const returnApi = api();
-    const { container } = render(<DailyReflectionReturn api={returnApi} embedded />);
+    const { container } = renderReturn(<DailyReflectionReturn api={returnApi} embedded />);
 
     expect(await screen.findByText("今天有 3 件过去的内容值得重新看看。")).toBeVisible();
     expect(screen.getByText("2026 年 8 月 24 日")).toBeVisible();
@@ -135,7 +180,7 @@ describe("DailyReflectionReturn", () => {
   });
 
   it("supports Home and End keyboard navigation between Today and Week", async () => {
-    render(<DailyReflectionReturn api={api()} embedded />);
+    renderReturn(<DailyReflectionReturn api={api()} embedded />);
     await screen.findByText("今天有 3 件过去的内容值得重新看看。");
     const today = screen.getByRole("tab", { name: "今天" });
     const week = screen.getByRole("tab", { name: "本周" });
@@ -150,7 +195,7 @@ describe("DailyReflectionReturn", () => {
   });
 
   it("opens an evidence-grounded accessible Quick View and restores scroll and focus", async () => {
-    render(<DailyReflectionReturn api={api()} embedded />);
+    renderReturn(<DailyReflectionReturn api={api()} embedded />);
     const trigger = await screen.findByRole("button", { name: /^继续完成复盘$/ });
     trigger.focus();
     fireEvent.click(trigger);
@@ -178,7 +223,7 @@ describe("DailyReflectionReturn", () => {
   });
 
   it("keeps all eligible Daily items and folds only the items beyond the current three", async () => {
-    render(<DailyReflectionReturn api={api(Promise.resolve(dailyResponse({
+    renderReturn(<DailyReflectionReturn api={api(Promise.resolve(dailyResponse({
       openLoops: [
         dailyItem("open", "open_loop", "继续完成复盘"),
         dailyItem("open_two", "open_loop", "第二条未完成")
@@ -199,7 +244,7 @@ describe("DailyReflectionReturn", () => {
   });
 
   it("renders Weekly as real non-empty categories without inventing a weekly mainline", async () => {
-    render(<DailyReflectionReturn api={api(
+    renderReturn(<DailyReflectionReturn api={api(
       Promise.resolve(dailyResponse()),
       Promise.resolve(weeklyResponse({ changedDecisions: [] }))
     )} embedded />);
@@ -228,7 +273,7 @@ describe("DailyReflectionReturn", () => {
       evidenceIds: [],
       evidence: []
     } as unknown as DailyReflectionReturnItem;
-    render(<DailyReflectionReturn api={api(
+    renderReturn(<DailyReflectionReturn api={api(
       Promise.resolve(dailyResponse({ openLoops: [unsafe], resurfacedMemories: [], reflectionPrompts: [] })),
       Promise.resolve(weeklyResponse({ repeatedThemes: [], changedDecisions: [], openCommitments: [], emergingIdeas: [] }))
     )} embedded />);
@@ -247,7 +292,7 @@ describe("DailyReflectionReturn", () => {
       getDailyReturn,
       getWeeklyReflection: vi.fn(() => Promise.resolve(weeklyResponse()))
     };
-    render(<DailyReflectionReturn api={returnApi} embedded />);
+    renderReturn(<DailyReflectionReturn api={returnApi} embedded />);
 
     const alert = await screen.findByRole("alert");
     expect(alert).toHaveTextContent("今天的回看暂时无法加载。");

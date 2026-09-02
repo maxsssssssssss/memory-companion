@@ -18,7 +18,8 @@ module.exports = {
         NODE_ENV: "production",
         PIPELINE_EXECUTION_MODE: "queue",
         DAILY_REFLECTION_UPLOAD_ENABLED: "true",
-        DAILY_REFLECTION_BROWSER_RECORDING_ENABLED: "true"
+        DAILY_REFLECTION_BROWSER_RECORDING_ENABLED: "true",
+        DAILY_REFLECTION_AI_REVIEW_MODE: "on"
       }
     },
     {
@@ -40,7 +41,8 @@ module.exports = {
         NODE_ENV: "production",
         PIPELINE_EXECUTION_MODE: "queue",
         DAILY_REFLECTION_UPLOAD_ENABLED: "true",
-        DAILY_REFLECTION_BROWSER_RECORDING_ENABLED: "true"
+        DAILY_REFLECTION_BROWSER_RECORDING_ENABLED: "true",
+        DAILY_REFLECTION_AI_REVIEW_MODE: "on"
       }
     }
   ]

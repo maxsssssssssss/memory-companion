@@ -1,6 +1,6 @@
 import type Database from "better-sqlite3";
 
-export const DAILY_REFLECTION_SCHEMA_VERSION = 13;
+export const DAILY_REFLECTION_SCHEMA_VERSION = 14;
 
 // Version one intentionally represents the pre-provenance workflow shape.
 // Version two adds source_origin with a fail-closed legacy backfill and the
@@ -1217,6 +1217,144 @@ const DAILY_REFLECTION_SCHEMA_V13 = `
   WHERE memory_type_v2 IS NULL;
 `;
 
+// V14 persists only asynchronous AI review orchestration and canonical-source
+// links. AI output remains a projection over the existing Return sources and
+// never becomes a Card, Memory, Person source, or Retrieval document.
+const DAILY_REFLECTION_SCHEMA_V14 = `
+  CREATE TABLE dr_ai_review_operations (
+    id TEXT PRIMARY KEY,
+    account_id TEXT NOT NULL,
+    scope TEXT NOT NULL CHECK (scope IN ('daily', 'weekly')),
+    start_date TEXT NOT NULL CHECK (start_date GLOB '????-??-??'),
+    end_date TEXT NOT NULL CHECK (end_date GLOB '????-??-??'),
+    source_fingerprint TEXT NOT NULL CHECK (
+      length(source_fingerprint) = 64
+      AND source_fingerprint NOT GLOB '*[^0-9a-f]*'
+    ),
+    prompt_version TEXT NOT NULL CHECK (
+      length(trim(prompt_version)) > 0 AND length(prompt_version) <= 128
+    ),
+    model TEXT NOT NULL CHECK (
+      length(trim(model)) > 0 AND length(model) <= 256
+    ),
+    status TEXT NOT NULL CHECK (
+      status IN ('queued', 'processing', 'validating', 'ready', 'failed', 'stale')
+    ),
+    result_json TEXT CHECK (result_json IS NULL OR json_valid(result_json)),
+    failure_code TEXT CHECK (
+      failure_code IS NULL OR (
+        length(trim(failure_code)) > 0 AND length(failure_code) <= 128
+      )
+    ),
+    claim_token TEXT,
+    lease_until TEXT,
+    attempt_version INTEGER NOT NULL DEFAULT 0 CHECK (attempt_version >= 0),
+    provider_started_at TEXT,
+    provider_input_tokens INTEGER CHECK (
+      provider_input_tokens IS NULL OR provider_input_tokens >= 0
+    ),
+    provider_output_tokens INTEGER CHECK (
+      provider_output_tokens IS NULL OR provider_output_tokens >= 0
+    ),
+    provider_total_tokens INTEGER CHECK (
+      provider_total_tokens IS NULL OR provider_total_tokens >= 0
+    ),
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    completed_at TEXT,
+    seen_at TEXT,
+    UNIQUE (id, account_id),
+    UNIQUE (
+      account_id, scope, start_date, end_date, source_fingerprint,
+      prompt_version, model
+    ),
+    CHECK (start_date <= end_date),
+    CHECK ((claim_token IS NULL) = (lease_until IS NULL)),
+    CHECK ((status = 'ready') = (result_json IS NOT NULL)),
+    CHECK (status = 'failed' OR failure_code IS NULL),
+    CHECK (status = 'ready' OR seen_at IS NULL)
+  );
+
+  CREATE INDEX idx_dr_ai_review_operations_claim
+    ON dr_ai_review_operations(status, lease_until, updated_at, id);
+
+  CREATE INDEX idx_dr_ai_review_operations_summary
+    ON dr_ai_review_operations(account_id, status, seen_at, completed_at DESC, id);
+
+  CREATE TABLE dr_ai_review_source_links (
+    account_id TEXT NOT NULL,
+    review_id TEXT NOT NULL,
+    source_id TEXT NOT NULL,
+    reflection_id TEXT NOT NULL,
+    card_id TEXT NOT NULL,
+    evidence_id TEXT NOT NULL,
+    position INTEGER NOT NULL CHECK (position >= 0),
+    PRIMARY KEY (account_id, review_id, source_id, evidence_id),
+    FOREIGN KEY (review_id, account_id)
+      REFERENCES dr_ai_review_operations(id, account_id) ON DELETE CASCADE,
+    FOREIGN KEY (reflection_id, account_id)
+      REFERENCES dr_reflections(id, account_id) ON DELETE CASCADE,
+    FOREIGN KEY (card_id, account_id)
+      REFERENCES dr_working_cards(id, account_id) ON DELETE CASCADE
+  );
+
+  CREATE INDEX idx_dr_ai_review_source_links_reflection
+    ON dr_ai_review_source_links(account_id, reflection_id, review_id);
+
+  CREATE INDEX idx_dr_ai_review_source_links_card
+    ON dr_ai_review_source_links(account_id, card_id, review_id);
+
+  CREATE TRIGGER dr_ai_review_source_link_removed_stales_run
+  AFTER DELETE ON dr_ai_review_source_links
+  BEGIN
+    UPDATE dr_ai_review_operations
+    SET status = 'stale', result_json = NULL,
+        failure_code = NULL, claim_token = NULL, lease_until = NULL,
+        completed_at = NULL, seen_at = NULL,
+        updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+    WHERE account_id = OLD.account_id
+      AND id = OLD.review_id
+      AND status <> 'stale';
+  END;
+
+  CREATE TRIGGER dr_ai_review_reflection_lifecycle_stales_run
+  AFTER UPDATE OF status ON dr_reflections
+  WHEN NEW.status IN ('cancelled', 'deleted')
+  BEGIN
+    UPDATE dr_ai_review_operations
+    SET status = 'stale', result_json = NULL,
+        failure_code = NULL, claim_token = NULL, lease_until = NULL,
+        completed_at = NULL, seen_at = NULL,
+        updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+    WHERE account_id = NEW.account_id
+      AND id IN (
+        SELECT review_id FROM dr_ai_review_source_links
+        WHERE account_id = NEW.account_id AND reflection_id = NEW.id
+      )
+      AND status <> 'stale';
+  END;
+
+  CREATE TRIGGER dr_ai_review_card_lifecycle_stales_run
+  AFTER UPDATE OF status, source_unavailable, memory_lifecycle_status
+  ON dr_working_cards
+  WHEN NEW.status = 'removed'
+    OR NEW.source_unavailable = 1
+    OR NEW.memory_lifecycle_status IN ('revocation_requested', 'revoked')
+  BEGIN
+    UPDATE dr_ai_review_operations
+    SET status = 'stale', result_json = NULL,
+        failure_code = NULL, claim_token = NULL, lease_until = NULL,
+        completed_at = NULL, seen_at = NULL,
+        updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+    WHERE account_id = NEW.account_id
+      AND id IN (
+        SELECT review_id FROM dr_ai_review_source_links
+        WHERE account_id = NEW.account_id AND card_id = NEW.id
+      )
+      AND status <> 'stale';
+  END;
+`;
+
 const MIGRATIONS = [
   { version: 1, sql: DAILY_REFLECTION_SCHEMA_V1 },
   { version: 2, sql: DAILY_REFLECTION_SCHEMA_V2 },
@@ -1230,7 +1368,8 @@ const MIGRATIONS = [
   { version: 10, sql: DAILY_REFLECTION_SCHEMA_V10 },
   { version: 11, sql: DAILY_REFLECTION_SCHEMA_V11 },
   { version: 12, sql: DAILY_REFLECTION_SCHEMA_V12 },
-  { version: 13, sql: DAILY_REFLECTION_SCHEMA_V13 }
+  { version: 13, sql: DAILY_REFLECTION_SCHEMA_V13 },
+  { version: 14, sql: DAILY_REFLECTION_SCHEMA_V14 }
 ] as const;
 
 function tableHasColumn(

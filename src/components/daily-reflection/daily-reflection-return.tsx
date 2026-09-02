@@ -22,6 +22,7 @@ import type {
 } from "@/lib/domain/daily-reflection-return";
 
 import styles from "./daily-reflection.module.css";
+import { DailyReflectionAiReview } from "./daily-reflection-ai-review";
 import { armCaptureContextIntent } from "./reflection-capture-intent";
 import { reflectionCardPath, reflectionSessionPath } from "./reflection-product";
 
@@ -513,34 +514,41 @@ export function DailyReflectionReturn({ api: providedApi, embedded = false }: Da
         {activeTab === "daily" ? <section className={styles.returnPanel} id="daily-return-panel" aria-labelledby="return-tab-daily" role="tabpanel">
           {dailyLoading ? <div className={styles.returnState}><ProductState description="正在核对仍然有效的来源。" title="正在准备今天的回看" tone="loading" /></div> : dailyError ? (
             <div className={styles.returnState}><ProductState action={<button className={styles.secondaryButton} onClick={() => setDailyAttempt((value) => value + 1)} type="button">重新尝试</button>} description={dailyError} title="今天的回看暂时没有加载完成" tone="error" /></div>
-          ) : daily && activeDailyItem ? (<>
-            <div className={styles.returnDailyLayout}>
-              <div>
-                <p className={styles.returnSectionLabel}>今天先看</p>
-                <DailyPrimaryCard expanded={quickView?.item.id === activeDailyItem.id} index={activeDailyIndex} item={activeDailyItem} onOpen={openQuickView} referenceDate={daily.referenceDate} total={dailyItems.length} />
+          ) : daily ? <DailyReflectionAiReview
+            hasRuleContent={Boolean(activeDailyItem)}
+            quickViewOpen={quickView !== null}
+            referenceDate={daily.referenceDate}
+            scope="daily"
+            rules={activeDailyItem ? <>
+              <div className={styles.returnDailyLayout}>
+                <div>
+                  <p className={styles.returnSectionLabel}>今天先看</p>
+                  <DailyPrimaryCard expanded={quickView?.item.id === activeDailyItem.id} index={activeDailyIndex} item={activeDailyItem} onOpen={openQuickView} referenceDate={daily.referenceDate} total={dailyItems.length} />
+                </div>
+                {secondaryDailyItems.length > 0 ? <aside aria-labelledby="return-secondary-title" className={styles.returnSecondaryPanel}>
+                  <h2 id="return-secondary-title">另外 {secondaryDailyItems.length} 条值得回看</h2>
+                  <ol className={styles.returnSecondaryList}>
+                    {secondaryDailyItems.map((item) => <DailySecondaryItem expanded={quickView?.item.id === item.id} item={item} key={item.id} onOpen={openQuickView} onSelect={() => setSelectedDailyId(item.id)} referenceDate={daily.referenceDate} />)}
+                  </ol>
+                </aside> : null}
               </div>
-              {secondaryDailyItems.length > 0 ? <aside aria-labelledby="return-secondary-title" className={styles.returnSecondaryPanel}>
-                <h2 id="return-secondary-title">另外 {secondaryDailyItems.length} 条值得回看</h2>
-                <ol className={styles.returnSecondaryList}>
-                  {secondaryDailyItems.map((item) => <DailySecondaryItem expanded={quickView?.item.id === item.id} item={item} key={item.id} onOpen={openQuickView} onSelect={() => setSelectedDailyId(item.id)} referenceDate={daily.referenceDate} />)}
+              {additionalDailyItems.length > 0 ? <details className={styles.returnMore}>
+                <summary>更多值得回看 <span>{additionalDailyItems.length}</span></summary>
+                <ol className={styles.returnMoreList}>
+                  {additionalDailyItems.map((item) => <DailySecondaryItem
+                    expanded={quickView?.item.id === item.id}
+                    item={item}
+                    key={item.id}
+                    onOpen={openQuickView}
+                    onSelect={() => setSelectedDailyId(item.id)}
+                    referenceDate={daily.referenceDate}
+                  />)}
                 </ol>
-              </aside> : null}
-            </div>
-            {additionalDailyItems.length > 0 ? <details className={styles.returnMore}>
-              <summary>更多值得回看 <span>{additionalDailyItems.length}</span></summary>
-              <ol className={styles.returnMoreList}>
-                {additionalDailyItems.map((item) => <DailySecondaryItem
-                  expanded={quickView?.item.id === item.id}
-                  item={item}
-                  key={item.id}
-                  onOpen={openQuickView}
-                  onSelect={() => setSelectedDailyId(item.id)}
-                  referenceDate={daily.referenceDate}
-                />)}
-              </ol>
-            </details> : null}
-          </>
-          ) : (
+              </details> : null}
+            </> : (
+              <div className={styles.returnState}><ProductState description="有来源、仍然有效的内容，会在合适的时候回到这里。" title="今天暂时没有需要重新出现的内容。" tone="empty" /></div>
+            )}
+          /> : (
             <div className={styles.returnState}><ProductState description="有来源、仍然有效的内容，会在合适的时候回到这里。" title="今天暂时没有需要重新出现的内容。" tone="empty" /></div>
           )}
         </section> : null}
@@ -548,18 +556,26 @@ export function DailyReflectionReturn({ api: providedApi, embedded = false }: Da
         {activeTab === "weekly" ? <section className={styles.returnPanel} id="weekly-return-panel" aria-labelledby="return-tab-weekly" role="tabpanel">
           {weeklyLoading ? <div className={styles.returnState}><ProductState description="正在核对本周仍然有效的来源。" title="正在整理本周回看" tone="loading" /></div> : weeklyError ? (
             <div className={styles.returnState}><ProductState action={<button className={styles.secondaryButton} onClick={() => setWeeklyAttempt((value) => value + 1)} type="button">重新尝试</button>} description={weeklyError} title="本周回看暂时没有加载完成" tone="error" /></div>
-          ) : weekly && weeklyItemCount > 0 ? <>
-            <div className={styles.returnWeeklyOverview}>
-              <span>{weeklyCategoryCount} 类线索</span>
-              <strong>{weeklyItemCount} 条有来源的内容</strong>
-            </div>
-            <div className={styles.returnWeeklyGrid}>
-              <WeeklySection expandedItemId={quickView?.item.id ?? null} items={weekly.repeatedThemes} label="反复出现的主题" onOpen={openQuickView} referenceDate={weekly.endDate} type="repeated_theme" />
-              <WeeklySection expandedItemId={quickView?.item.id ?? null} items={weekly.changedDecisions} label="发生变化的决定" onOpen={openQuickView} referenceDate={weekly.endDate} type="changed_decision" />
-              <WeeklySection expandedItemId={quickView?.item.id ?? null} items={weekly.openCommitments} label="仍在继续的承诺" onOpen={openQuickView} referenceDate={weekly.endDate} type="open_commitment" />
-              <WeeklySection expandedItemId={quickView?.item.id ?? null} items={weekly.emergingIdeas} label="正在形成的想法" onOpen={openQuickView} referenceDate={weekly.endDate} type="emerging_idea" />
-            </div>
-          </> : (
+          ) : weekly ? <DailyReflectionAiReview
+            hasRuleContent={weeklyItemCount > 0}
+            quickViewOpen={quickView !== null}
+            referenceDate={weekly.endDate}
+            scope="weekly"
+            rules={weeklyItemCount > 0 ? <>
+              <div className={styles.returnWeeklyOverview}>
+                <span>{weeklyCategoryCount} 类线索</span>
+                <strong>{weeklyItemCount} 条有来源的内容</strong>
+              </div>
+              <div className={styles.returnWeeklyGrid}>
+                <WeeklySection expandedItemId={quickView?.item.id ?? null} items={weekly.repeatedThemes} label="反复出现的主题" onOpen={openQuickView} referenceDate={weekly.endDate} type="repeated_theme" />
+                <WeeklySection expandedItemId={quickView?.item.id ?? null} items={weekly.changedDecisions} label="发生变化的决定" onOpen={openQuickView} referenceDate={weekly.endDate} type="changed_decision" />
+                <WeeklySection expandedItemId={quickView?.item.id ?? null} items={weekly.openCommitments} label="仍在继续的承诺" onOpen={openQuickView} referenceDate={weekly.endDate} type="open_commitment" />
+                <WeeklySection expandedItemId={quickView?.item.id ?? null} items={weekly.emergingIdeas} label="正在形成的想法" onOpen={openQuickView} referenceDate={weekly.endDate} type="emerging_idea" />
+              </div>
+            </> : (
+              <div className={styles.returnState}><ProductState description="新的确认内容会在下一次周度整理时自然出现。" title="本周还没有形成足够清晰的回看线索。" tone="empty" /></div>
+            )}
+          /> : (
             <div className={styles.returnState}><ProductState description="新的确认内容会在下一次周度整理时自然出现。" title="本周还没有形成足够清晰的回看线索。" tone="empty" /></div>
           )}
         </section> : null}

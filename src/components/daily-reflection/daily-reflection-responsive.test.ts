@@ -92,4 +92,20 @@ describe("Daily Reflection responsive product shell", () => {
     expect(css).toMatch(/\.memoryQuickViewBody\s*\{[^}]*overflow-y:\s*auto/u);
     expect(css.slice(reducedMotion)).toContain(".memoryQuickView { animation: none; }");
   });
+
+  it("keeps AI review upgrades calm, source-reachable, and safe above mobile navigation", () => {
+    const phoneMedia = css.lastIndexOf("@media (max-width: 620px)");
+    const reducedMotion = css.lastIndexOf("@media (prefers-reduced-motion: reduce)");
+
+    expect(css).toMatch(/\.aiReviewReady\s*\{[^}]*display:\s*grid[^}]*border-block:\s*1px solid/u);
+    expect(css).toMatch(/\.aiReviewEvidenceList a\s*\{[^}]*min-height:\s*44px/u);
+    expect(css).toMatch(/\.aiReviewSources\s*>\s*summary,[\s\S]*?min-height:\s*44px/u);
+    expect(css.slice(phoneMedia, reducedMotion)).toMatch(
+      /\.aiReviewCompletionNotice\s*\{[^}]*bottom:\s*calc\(var\(--dr-mobile-nav-height\)\s*\+\s*env\(safe-area-inset-bottom\)/u
+    );
+    expect(css.slice(phoneMedia, reducedMotion)).toMatch(
+      /\.aiReviewHeader\s*\{[^}]*flex-direction:\s*column/u
+    );
+    expect(css.slice(reducedMotion)).toContain(".aiReviewCompletionNotice,");
+  });
 });

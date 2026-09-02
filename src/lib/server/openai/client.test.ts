@@ -18,6 +18,8 @@ describe("createOpenAIClient", () => {
   const originalReferer = process.env.OPENROUTER_HTTP_REFERER;
   const originalAppTitle = process.env.OPENROUTER_APP_TITLE;
   const originalAuthHeaderMode = process.env.OPENAI_AUTH_HEADER_MODE;
+  const originalRequestTimeout = process.env.OPENAI_REQUEST_TIMEOUT_MS;
+  const originalMaxRetries = process.env.OPENAI_MAX_RETRIES;
 
   beforeEach(() => {
     OpenAIMock.mockReset();
@@ -58,6 +60,16 @@ describe("createOpenAIClient", () => {
       delete process.env.OPENAI_AUTH_HEADER_MODE;
     } else {
       process.env.OPENAI_AUTH_HEADER_MODE = originalAuthHeaderMode;
+    }
+    if (originalRequestTimeout === undefined) {
+      delete process.env.OPENAI_REQUEST_TIMEOUT_MS;
+    } else {
+      process.env.OPENAI_REQUEST_TIMEOUT_MS = originalRequestTimeout;
+    }
+    if (originalMaxRetries === undefined) {
+      delete process.env.OPENAI_MAX_RETRIES;
+    } else {
+      process.env.OPENAI_MAX_RETRIES = originalMaxRetries;
     }
   });
 
@@ -172,5 +184,18 @@ describe("createOpenAIClient", () => {
     process.env.OPENAI_BASE_URL = "http://tokenhub.vision-intelligence.tech";
 
     expect(resolveOpenAIClientProvider({ openRouterApiKey: "user_openrouter_key" })).toBe("openrouter");
+  });
+
+  it("lets one caller override timeout and retries without changing environment defaults", () => {
+    process.env.OPENAI_API_KEY = "openai_key";
+    process.env.OPENAI_REQUEST_TIMEOUT_MS = "120000";
+    process.env.OPENAI_MAX_RETRIES = "2";
+
+    createOpenAIClient({ timeoutMs: 480000, maxRetries: 0 });
+
+    expect(OpenAIMock).toHaveBeenCalledWith(expect.objectContaining({
+      timeout: 480000,
+      maxRetries: 0
+    }));
   });
 });

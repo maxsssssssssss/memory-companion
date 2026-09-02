@@ -17,6 +17,7 @@ import { ProductAccountMenu } from "@/components/product-system/product-account-
 import { ProductState } from "@/components/product-system/product-primitives";
 import { ProductSwitcher } from "@/components/product-system/product-switcher";
 import { createDailyReflectionThinkingApi } from "@/lib/client/daily-reflection-thinking-api";
+import type { DailyReflectionAiReviewApi } from "@/lib/client/daily-reflection-ai-review-api";
 import {
   useDailyReflectionSession,
   type DailyReflectionSessionValue
@@ -29,6 +30,10 @@ import {
   ReflectionThinkingQuickPanel,
   useReflectionThinking
 } from "./reflection-thinking-panel";
+import {
+  ReflectionAiReviewProvider,
+  useReflectionAiReview
+} from "./reflection-ai-review-provider";
 import {
   REFLECTION_DESKTOP_NAV,
   REFLECTION_MOBILE_NAV,
@@ -53,6 +58,7 @@ export function useReflectionApp() {
 }
 
 type ReflectionAppShellProps = Readonly<{
+  aiReviewApi?: DailyReflectionAiReviewApi;
   browserRecordingEnabled: boolean;
   children: ReactNode;
   toySyncEnabled: boolean;
@@ -68,6 +74,34 @@ function ReflectionThinkingShellActions() {
     >
       头脑风暴
     </button>
+  );
+}
+
+function ReflectionAiReviewNavLabel({ label }: Readonly<{ label: string }>) {
+  const { summary } = useReflectionAiReview();
+  const count = summary?.exposureMode === "on" ? summary.unseenReadyCount : 0;
+  return <>
+    <span>{label}</span>
+    {label === "回看" && count > 0 ? <>
+      <span aria-hidden="true" className={styles.aiReviewUnreadDot} />
+      <span className={styles.visuallyHidden}>{count} 份 AI 深度回看已完成</span>
+    </> : null}
+  </>;
+}
+
+function ReflectionAiReviewCompletionNotice() {
+  const { completionNotice, dismissCompletionNotice } = useReflectionAiReview();
+  if (!completionNotice) return null;
+  const scopeLabel = completionNotice.scope === "weekly" ? "本周" : "今天";
+  return (
+    <aside aria-live="polite" className={styles.aiReviewCompletionNotice} role="status">
+      <div>
+        <strong>{scopeLabel}的 AI 深度回看已完成</strong>
+        <span>规则回看仍然保留，你可以随时核对来源。</span>
+      </div>
+      <Link href="/reflection/reflect" onClick={dismissCompletionNotice}>去看看</Link>
+      <button aria-label="关闭 AI 深度回看完成提示" onClick={dismissCompletionNotice} type="button">×</button>
+    </aside>
   );
 }
 
@@ -91,6 +125,7 @@ function focusedRoute(pathname: string) {
 }
 
 export function ReflectionAppShell({
+  aiReviewApi,
   browserRecordingEnabled,
   children,
   toySyncEnabled
@@ -154,7 +189,8 @@ export function ReflectionAppShell({
 
   return (
     <ReflectionAppContext.Provider value={context}>
-      <ReflectionThinkingProvider api={THINKING_API} key={session.auth.user.id}>
+      <ReflectionAiReviewProvider accountId={session.auth.user.id} api={aiReviewApi} key={session.auth.user.id}>
+        <ReflectionThinkingProvider api={THINKING_API}>
         <div className={`${styles.reflectionApp} ${focused ? styles.reflectionFocusedFlow : styles.reflectionRootFlow}`}>
         <header className={styles.reflectionHeader}>
           <Link className={styles.reflectionBrand} href={REFLECTION_ROUTES.home} aria-label="回到日常复盘首页">
@@ -166,7 +202,7 @@ export function ReflectionAppShell({
               const active = reflectionRouteIsActive(pathname, item);
               return (
                 <Link aria-current={active ? "page" : undefined} className={active ? styles.reflectionNavActive : undefined} href={item.href} key={item.href}>
-                  {item.label}
+                  <ReflectionAiReviewNavLabel label={item.label} />
                 </Link>
               );
             })}
@@ -191,6 +227,7 @@ export function ReflectionAppShell({
           </div>
         </header>
         <ReflectionThinkingQuickPanel />
+        <ReflectionAiReviewCompletionNotice />
 
         {focused ? (
           <div aria-label="当前页面导航" className={styles.reflectionFocusedHeader} role="navigation">
@@ -220,13 +257,14 @@ export function ReflectionAppShell({
                 onClick={primary ? () => armVoiceAutostartIntent() : undefined}
               >
                 <span aria-hidden="true">{item.icon}</span>
-                <small>{item.label}</small>
+                <small><ReflectionAiReviewNavLabel label={item.label} /></small>
               </Link>
             );
           })}
         </nav> : null}
         </div>
-      </ReflectionThinkingProvider>
+        </ReflectionThinkingProvider>
+      </ReflectionAiReviewProvider>
     </ReflectionAppContext.Provider>
   );
 }

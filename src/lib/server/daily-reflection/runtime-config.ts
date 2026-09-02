@@ -4,6 +4,20 @@ export function isDailyReflectionUploadEnabled(
   return env.DAILY_REFLECTION_UPLOAD_ENABLED?.trim().toLowerCase() === "true";
 }
 
+export type DailyReflectionAiReviewMode = "off" | "shadow" | "on";
+
+/**
+ * AI review is deliberately independent from the core Daily Reflection gate.
+ * `shadow` runs and persists validated results without exposing generated copy
+ * to the client; `on` enables the user-facing async upgrade.
+ */
+export function getDailyReflectionAiReviewMode(
+  env: Readonly<Record<string, string | undefined>> = process.env
+): DailyReflectionAiReviewMode {
+  const value = env.DAILY_REFLECTION_AI_REVIEW_MODE?.trim().toLowerCase();
+  return value === "shadow" || value === "on" ? value : "off";
+}
+
 /**
  * Browser recordings are a separately staged server capability. Keeping this
  * switch independent from the upload switch prevents enabling the existing

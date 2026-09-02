@@ -3,10 +3,12 @@
 import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import {
+  buildDailyReflectionAiReviewQueueJobId,
   buildDailyReflectionQueueJobId,
   buildEmbeddingIndexQueueJobId,
   buildPipelineJobId,
   DailyReflectionQueuePayloadSchema,
+  DailyReflectionAiReviewQueuePayloadSchema,
   EmbeddingIndexQueuePayloadSchema,
   PipelineJobDataSchema
 } from "./types";
@@ -34,6 +36,26 @@ describe("pipeline queue payload", () => {
     expect(buildPipelineJobId({ version: 1, userRef: "user_1", uploadId: "upload_2" })).not.toBe(
       `pipeline-${expected}`
     );
+  });
+});
+
+describe("daily reflection AI review queue payload", () => {
+  it("contains only opaque account and review references", () => {
+    const payload = DailyReflectionAiReviewQueuePayloadSchema.parse({
+      version: 1,
+      reviewId: "review_1",
+      userRef: "account_1"
+    });
+    const expected = createHash("sha256")
+      .update("account_1\u0000review_1")
+      .digest("hex");
+
+    expect(buildDailyReflectionAiReviewQueueJobId(payload))
+      .toBe(`daily-reflection-ai-review-${expected}`);
+    expect(() => DailyReflectionAiReviewQueuePayloadSchema.parse({
+      ...payload,
+      evidence: "must-not-enter-redis"
+    })).toThrow();
   });
 });
 

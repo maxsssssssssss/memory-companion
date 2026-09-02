@@ -21,6 +21,8 @@ export type OpenAIClientRuntimeConfig = {
   openRouterBaseUrl?: string;
   openRouterHttpReferer?: string;
   openRouterAppTitle?: string;
+  timeoutMs?: number;
+  maxRetries?: number;
 };
 
 export type OpenAIClientProvider = "openrouter" | "openai-compatible";
@@ -104,8 +106,10 @@ export function createOpenAIClient(runtimeConfig: OpenAIClientRuntimeConfig = {}
     apiKey,
     organization: process.env[OPENAI_ORG_ID_ENV],
     project: process.env[OPENAI_PROJECT_ID_ENV],
-    timeout: readNumberEnv(OPENAI_REQUEST_TIMEOUT_MS_ENV, DEFAULT_OPENAI_REQUEST_TIMEOUT_MS),
-    maxRetries: readNumberEnv(OPENAI_MAX_RETRIES_ENV, DEFAULT_OPENAI_MAX_RETRIES)
+    timeout: runtimeConfig.timeoutMs
+      ?? readNumberEnv(OPENAI_REQUEST_TIMEOUT_MS_ENV, DEFAULT_OPENAI_REQUEST_TIMEOUT_MS),
+    maxRetries: runtimeConfig.maxRetries
+      ?? readNumberEnv(OPENAI_MAX_RETRIES_ENV, DEFAULT_OPENAI_MAX_RETRIES)
   };
 
   if (baseURL) {

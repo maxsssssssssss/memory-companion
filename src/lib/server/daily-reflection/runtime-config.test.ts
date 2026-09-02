@@ -3,6 +3,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  getDailyReflectionAiReviewMode,
   isDailyReflectionBrowserRecordingEnabled,
   isDailyReflectionToySyncEnabled,
   isDailyReflectionUploadEnabled,
@@ -18,6 +19,20 @@ describe("Daily Reflection runtime configuration", () => {
     expect(isDailyReflectionUploadEnabled(env())).toBe(false);
     expect(isDailyReflectionBrowserRecordingEnabled(env())).toBe(false);
     expect(isDailyReflectionToySyncEnabled(env())).toBe(false);
+    expect(getDailyReflectionAiReviewMode(env())).toBe("off");
+  });
+
+  it.each([
+    [undefined, "off"],
+    ["", "off"],
+    ["true", "off"],
+    ["invalid", "off"],
+    [" SHADOW ", "shadow"],
+    ["on", "on"]
+  ] as const)("parses the AI review mode %s as %s", (value, expected) => {
+    expect(getDailyReflectionAiReviewMode(env({
+      DAILY_REFLECTION_AI_REVIEW_MODE: value
+    }))).toBe(expected);
   });
 
   it.each([

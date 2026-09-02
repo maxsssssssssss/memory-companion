@@ -7,6 +7,10 @@ export function getDailyReflectionRepository() {
 
 export * from "./db";
 export * from "./duration-resolver";
+export * from "./ai-review-context";
+export * from "./ai-review-provider";
+export * from "./ai-review-repository";
+export * from "./ai-review-service";
 export * from "./candidate-builder";
 export * from "./candidate-provider";
 export * from "./card-pipeline-policy";

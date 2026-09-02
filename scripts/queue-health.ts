@@ -10,9 +10,11 @@ async function main() {
     { Queue },
     { default: IORedis },
     { getPipelineQueueConfig, sanitizedRedisEndpoint },
+    { dailyReflectionAiReviewQueueName },
     { evaluatePipelineQueueHealth },
     { inspectQueueStorageProbe },
     { getDateCompanionMemoryBridgeRuntimeConfig },
+    { getDailyReflectionAiReviewMode },
     {
       evaluateDateCompanionMemoryBridgeHealth,
       inspectDateCompanionMemoryBridgeDatabaseStats,
@@ -28,9 +30,11 @@ async function main() {
       import("bullmq"),
       import("ioredis"),
       import("@/lib/server/queue/config"),
+      import("@/lib/server/queue/daily-reflection-ai-review-queue"),
       import("@/lib/server/queue/health"),
       import("@/lib/server/queue/storage-probe"),
       import("@/lib/server/date-companion/memory-bridge-runtime-config"),
+      import("@/lib/server/daily-reflection/runtime-config"),
       import("@/lib/server/date-companion/memory-bridge-health"),
       import("@/lib/server/date-companion/memory-bridge-preflight"),
       import("@/lib/server/date-companion/db"),
@@ -40,6 +44,7 @@ async function main() {
     ]);
   const config = getPipelineQueueConfig();
   const memoryBridgeConfig = getDateCompanionMemoryBridgeRuntimeConfig();
+  const aiReviewMode = getDailyReflectionAiReviewMode();
   const redis = new IORedis(config.redisUrl, {
     lazyConnect: true,
     connectTimeout: 5_000,
@@ -48,6 +53,7 @@ async function main() {
     retryStrategy: () => null
   });
   let queue: InstanceType<typeof Queue> | undefined;
+  let aiReviewQueue: InstanceType<typeof Queue> | undefined;
   try {
     await redis.connect();
     const ping = await redis.ping();
@@ -65,6 +71,30 @@ async function main() {
     const recentFailedCount = failedJobs.filter((job) =>
       typeof job.finishedOn === "number" && job.finishedOn >= failedCutoff
     ).length;
+    aiReviewQueue = new Queue(dailyReflectionAiReviewQueueName(config), {
+      connection: redis
+    });
+    await aiReviewQueue.waitUntilReady();
+    const aiCounts = await aiReviewQueue.getJobCounts(
+      "waiting",
+      "active",
+      "failed"
+    );
+    const aiFailedJobs = await aiReviewQueue.getJobs(
+      ["failed"],
+      0,
+      Math.max(0, config.retention.failed.count - 1),
+      false
+    );
+    const aiReview = {
+      mode: aiReviewMode,
+      workerCount: await aiReviewQueue.getWorkersCount(),
+      waitingCount: aiCounts.waiting ?? 0,
+      activeCount: aiCounts.active ?? 0,
+      recentFailedCount: aiFailedJobs.filter((job) =>
+        typeof job.finishedOn === "number" && job.finishedOn >= failedCutoff
+      ).length
+    };
     const storageProbe = await inspectQueueStorageProbe({ config, redis });
     const preflight = memoryBridgeConfig.enabled
       ? inspectDateCompanionMemoryBridgePreflight({
@@ -115,7 +145,8 @@ async function main() {
       workerCount,
       storageProbeStatus: storageProbe.status,
       recentFailedCount,
-      memoryBridge
+      memoryBridge,
+      aiReview
     });
     console.info(
       JSON.stringify(
@@ -131,6 +162,7 @@ async function main() {
           failed: counts.failed ?? 0,
           recentFailed: recentFailedCount,
           failedWindowMs: config.failedHealthWindowMs,
+          aiReview,
           storageProbe,
           memoryBridge: {
             ...memoryBridge,
@@ -165,6 +197,7 @@ async function main() {
     );
     if (!health.ok) process.exitCode = 1;
   } finally {
+    await aiReviewQueue?.close().catch(() => undefined);
     await queue?.close().catch(() => undefined);
     try {
       await redis.quit();

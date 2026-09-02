@@ -130,6 +130,7 @@ Worker must receive the same release flags:
 ```env
 DAILY_REFLECTION_UPLOAD_ENABLED=true
 DAILY_REFLECTION_BROWSER_RECORDING_ENABLED=true
+DAILY_REFLECTION_AI_REVIEW_MODE=on
 ```
 
 `DAILY_REFLECTION_UPLOAD_ENABLED` is the product-wide gate for file upload,
@@ -137,6 +138,24 @@ Cards, Memory recommendations and confirmation, Reflect/Return, and Together
 Think. Browser recording additionally requires
 `DAILY_REFLECTION_BROWSER_RECORDING_ENABLED=true`; the upload route enforces the
 recording-origin gate again on the server.
+
+`DAILY_REFLECTION_AI_REVIEW_MODE=on` makes GPT the user-visible asynchronous
+high-quality review role. Rules-based Daily/Weekly Return remains immediately
+available; the independent AI Review queue upgrades the page only after the
+validated result is ready. The AI Review uses the reviewed GPT alias
+(`gpt-5.5`, or `openai/gpt-5.5` through OpenRouter) and does not inherit a
+mutable per-account QA model choice. It performs one Provider attempt with no
+application fallback; a failure leaves the rules-based review intact.
+
+Web and Worker must receive the same AI Review mode, shared absolute
+`APP_DATA_DIR`, `REDIS_URL`, and Provider credentials. `on` requires
+`PIPELINE_EXECUTION_MODE=queue` and exactly one project Worker, which starts the
+separate AI Review queue at concurrency 1. Before accepting traffic, run
+`npm run queue:health` and confirm the AI Review mode is `on`, its worker count
+is 1, and waiting/active/recent-failed counts are acceptable. Only current-v2
+shadow results may become visible after switching to `on`; pre-safety prompt
+versions become stale because prompt version participates in the source
+fingerprint, and are never exposed as current results.
 
 When `TRANSCRIPTION_PROVIDER=speaker-asr`, both processes must also receive the
 same non-empty `DAILY_REFLECTION_AUDIO_CAPABILITY_SECRET` and the reviewed
@@ -153,11 +172,13 @@ DAILY_BRIEF_TOY_SYNC_ENABLED=false
 DAILY_BRIEF_TOY_INGESTION_MODE=off
 ```
 
-The PM2 configuration in this release pins the two Daily Reflection flags to
-`true` for both processes. Changing `.env.local` alone will not override those
-entries. A rollback must use a reviewed PM2 configuration (or the previous
-release) that sets both flags to `false`, followed by `--update-env`; disabling
-the surface does not delete existing Reflection, Card, Memory, or Evidence data.
+The PM2 configuration in this release pins the two Daily Reflection capability
+flags to `true` and AI Review to `on` for both processes. Changing `.env.local`
+alone will not override those entries. A rollback must use a reviewed PM2
+configuration (or the previous release) that sets the capability flags to
+`false` and AI Review to `shadow` or `off`, followed by `--update-env` on both
+processes. Disabling the surface does not delete existing Reflection, Card,
+Memory, Evidence, or AI Review records.
 
 ## PM2
 
