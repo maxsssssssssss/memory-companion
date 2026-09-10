@@ -384,6 +384,19 @@ export const DailyReflectionFinalizeRequestSchema = z.object({
 
 export const DailyReflectionV2CreateRequestSchema = DailyReflectionV2InputSchema;
 
+// Only accepted permits discarding the local audio. Reupload permission is a
+// snapshot: POST must still claim the existing execution fence for the same key.
+export const DailyReflectionOperationUploadStateSchema = z.enum([
+  "still_persisting",
+  "accepted",
+  "reupload_allowed",
+  "unresolved",
+  "terminated"
+]);
+export type DailyReflectionOperationUploadState = z.infer<
+  typeof DailyReflectionOperationUploadStateSchema
+>;
+
 export const DailyReflectionOperationLookupResponseSchema = z.discriminatedUnion("found", [
   z.object({ found: z.literal(false) }).strict(),
   z.object({
@@ -392,7 +405,8 @@ export const DailyReflectionOperationLookupResponseSchema = z.discriminatedUnion
     uploadId: DailyReflectionIdSchema,
     jobId: DailyReflectionIdSchema,
     contentHash: z.string().regex(/^[a-f0-9]{64}$/u),
-    status: DailyReflectionStatusSchema
+    status: DailyReflectionStatusSchema,
+    uploadState: DailyReflectionOperationUploadStateSchema
   }).strict()
 ]);
 

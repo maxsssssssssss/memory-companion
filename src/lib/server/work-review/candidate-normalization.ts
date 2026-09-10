@@ -4,10 +4,15 @@ import {
   WorkAtomicClaimSchema,
   WorkCanonicalSegmentsSchema,
   WorkExtractorCandidateDraftSchema,
+  WorkMeetingCandidateStructuredDataSchema,
   type WorkAtomicClaim,
-  type WorkExtractorCandidateDraft
+  type WorkExtractorCandidateDraft,
+  type WorkVerifierClaimDraft
 } from "@/lib/domain/work-review";
-import type { WorkMeetingVerifierInput } from "./analysis-provider";
+import type { TranscriptSegment } from "@/lib/domain/types";
+import { buildWorkMeetingVerifierProviderPayload, materializeWorkEvidence, type WorkMeetingVerifierInput } from "./analysis-provider";
+import type { WorkDuplicateCoverageRequest, WorkDuplicateCoverageEvaluation } from "./duplicate-coverage";
+import { evaluateWorkCandidatePublication, requiresWorkClaimGptVerification } from "./publication-policy";
 
 export type WorkWindowCandidateBatch = {
   windowIndex: number;
@@ -17,10 +22,47 @@ export type WorkWindowCandidateBatch = {
 export type AssembledWorkMeetingCandidate = Omit<WorkExtractorCandidateDraft, "claims"> & {
   id: string;
   sourceWindowIndexes: number[];
+  sourceDraftReferences?: Array<{ windowIndex: number; clientCandidateKey: string }>;
   claims: WorkAtomicClaim[];
 };
 
-export const WORK_VERIFIER_MAX_CLAIMS_PER_BATCH = 256;
+export const WORK_MEETING_MAX_PRIMARY_REVIEW_ITEMS = 20;
+export const WORK_VERIFIER_MAX_BATCHES = 3;
+export const WORK_VERIFIER_MAX_CLAIMS_PER_BATCH = 24;
+export const WORK_VERIFIER_MAX_PAYLOAD_CHARACTERS_PER_BATCH = 12_000;
+
+const WORK_REVIEW_FALLBACK_LANE: Record<
+  WorkExtractorCandidateDraft["kind"],
+  number
+> = {
+  decision: 1,
+  commitment: 0,
+  action_item: 2,
+  plan_change: 1,
+  open_question: 2,
+  proposal: 3,
+  discussion_topic: 4
+};
+
+export class WorkMeetingAnalysisLimitError extends Error {
+  constructor(public readonly code: "work_verifier_batch_budget_exceeded") {
+    super(code);
+    this.name = "WorkMeetingAnalysisLimitError";
+  }
+}
+
+const WORK_MAIN_CLAIM_TYPE_BY_CANDIDATE_KIND: Record<
+  WorkExtractorCandidateDraft["kind"],
+  WorkAtomicClaim["claimType"]
+> = {
+  discussion_topic: "topic",
+  proposal: "proposal",
+  decision: "decision_existence",
+  commitment: "commitment_existence",
+  open_question: "open_question",
+  plan_change: "plan_change",
+  action_item: "action_item"
+};
 
 export function deriveCandidateCopyFromAtomicClaims(
   claims: AssembledWorkMeetingCandidate["claims"]
@@ -34,26 +76,273 @@ export function deriveCandidateCopyFromAtomicClaims(
   };
 }
 
-export function partitionWorkCandidatesForVerification(
-  candidates: AssembledWorkMeetingCandidate[]
-) {
+export function deriveCandidateCopyFromPublication(input: {
+  claims: AssembledWorkMeetingCandidate["claims"];
+  displayClaimIds: string[];
+  displayNotes: string[];
+}) {
+  const displayClaimIds = new Set(input.displayClaimIds);
+  const retainedClaims = input.claims.filter((claim) => displayClaimIds.has(claim.id));
+  // Suppressed Candidates remain persisted for audit. They are not user-visible,
+  // but still need deterministic non-empty copy for the existing DB contract.
+  const copy = deriveCandidateCopyFromAtomicClaims(
+    retainedClaims.length > 0 ? retainedClaims : input.claims.slice(0, 1)
+  );
+  const notes = [...new Set(input.displayNotes.map((note) => note.trim()).filter(Boolean))];
+  return {
+    title: copy.title,
+    body: [...new Set([copy.body, ...notes])].join("；")
+  };
+}
+
+/** The same publication projection is used at runtime and when replaying the
+ * audit. Only policy-generated display notes are separate from semantic copy;
+ * text supplied by a model (including uncertainty) remains part of the facts. */
+export function buildWorkCandidatePublicationProjection(input: {
+  candidate: AssembledWorkMeetingCandidate;
+  publicationId: string;
+  segments: unknown[];
+  timestampQualityBySegmentId?: Readonly<Record<string, unknown>>;
+  evaluations: WorkVerifierClaimDraft[];
+  verifierEnabled: boolean;
+}) {
+  const segments = WorkCanonicalSegmentsSchema.parse(input.segments);
+  const evidenceFor = (evidenceIds: string[]) => materializeWorkEvidence({
+    publicationId: input.publicationId, segments, evidenceIds,
+    timestampQualityBySegmentId: input.timestampQualityBySegmentId
+  });
+  const speakerFor = (evidence: ReturnType<typeof evidenceFor>) => {
+    const speakers = new Set(evidence.flatMap(e => e.rawSpeakerLabel ? [e.rawSpeakerLabel] : []));
+    return speakers.size === 1 ? [...speakers][0] : null;
+  };
+  const candidate = input.candidate;
+  const structuredData = WorkMeetingCandidateStructuredDataSchema.parse({
+    ...candidate.structuredData,
+    rawActorLabel: speakerFor(evidenceFor(candidate.evidenceIds)),
+    planStages: candidate.structuredData.planStages.map(stage => {
+      const evidence = evidenceFor(stage.evidenceIds);
+      return {
+        id: stage.clientStageKey,
+        content: evidence.map(item => item.text).join("；").slice(0, 20_000),
+        status: "unclear",
+        rawSpeakerLabel: speakerFor(evidence),
+        evidenceRefs: evidence.map(({ text: _text, ...reference }) => reference)
+      };
+    })
+  });
+  const policy = evaluateWorkCandidatePublication({
+    kind: candidate.kind, structuredData, claims: candidate.claims,
+    evaluations: input.evaluations, verifierEnabled: input.verifierEnabled, canonicalSegments: segments
+  });
+  const copyInput = { claims: candidate.claims, displayClaimIds: policy.displayClaimIds };
+  return {
+    policy,
+    semanticCopy: deriveCandidateCopyFromPublication({ ...copyInput, displayNotes: [] }),
+    renderedCopy: deriveCandidateCopyFromPublication({ ...copyInput, displayNotes: policy.displayNotes })
+  };
+}
+
+export function estimateWorkVerifierEvidencePayloadCharacters(segment: TranscriptSegment) {
+  return JSON.stringify({
+    [segment.id]: {
+      startSeconds: segment.startSeconds,
+      endSeconds: segment.endSeconds,
+      rawSpeakerLabel: segment.speaker?.trim() || null,
+      timestampQuality: "unknown",
+      text: segment.text
+    }
+  }).length;
+}
+
+export function estimateWorkVerifierClaimPayloadCharacters(claim: WorkAtomicClaim) {
+  return JSON.stringify({
+    claimId: claim.id,
+    claimType: claim.claimType,
+    semanticRiskFlags: claim.semanticRiskFlags ?? [],
+    semanticValue: claim.semanticValue ?? null,
+    text: claim.text,
+    evidenceIds: claim.evidenceIds
+  }).length + 1;
+}
+
+function estimateWorkVerifierBatchPayloadCharactersFromCanonical(input: {
+  claims: WorkAtomicClaim[];
+  segmentById: ReadonlyMap<string, TranscriptSegment>;
+}) {
+  const evidenceIds = new Set(input.claims.flatMap((claim) => claim.evidenceIds));
+  // The fixed system prompt and JSON instruction are identical for every
+  // request, so splitting cannot reduce them. The batch budget intentionally
+  // covers the complete dynamic requestInput JSON sent to the Provider.
+  return JSON.stringify({
+    evidenceById: Object.fromEntries([...evidenceIds].map((id) => {
+      const segment = input.segmentById.get(id)!;
+      return [id, {
+        startSeconds: segment.startSeconds,
+        endSeconds: segment.endSeconds,
+        rawSpeakerLabel: segment.speaker?.trim() || null,
+        timestampQuality: "unknown",
+        text: segment.text
+      }];
+    })),
+    items: input.claims.map((claim) => ({
+      claimId: claim.id,
+      claimType: claim.claimType,
+      semanticRiskFlags: claim.semanticRiskFlags ?? [],
+      semanticValue: claim.semanticValue ?? null,
+      text: claim.text,
+      evidenceIds: claim.evidenceIds
+    }))
+  }).length;
+}
+
+export function estimateWorkVerifierBatchPayloadCharacters(input: {
+  claims: WorkAtomicClaim[];
+  segments: unknown[];
+}) {
+  const segments = WorkCanonicalSegmentsSchema.parse(input.segments);
+  const segmentById = new Map(segments.map((segment) => [segment.id, segment]));
+  if (input.claims.some((claim) => claim.evidenceIds.some((id) => !segmentById.has(id)))) {
+    throw new Error("work_verifier_input_evidence_outside_canonical_publication");
+  }
+  return estimateWorkVerifierBatchPayloadCharactersFromCanonical({
+    claims: input.claims,
+    segmentById
+  });
+}
+
+function boundedBatchInteger(input: {
+  value: number | undefined;
+  fallback: number;
+  minimum: number;
+  maximum: number;
+  name: string;
+}) {
+  const value = input.value ?? input.fallback;
+  if (!Number.isSafeInteger(value) || value < input.minimum || value > input.maximum) {
+    throw new Error(`${input.name} must be an integer between ${input.minimum} and ${input.maximum}`);
+  }
+  return value;
+}
+
+function validateWorkVerificationSource(input: {
+  candidates: AssembledWorkMeetingCandidate[];
+  segments: unknown[];
+}) {
+  const segments = WorkCanonicalSegmentsSchema.parse(input.segments);
+  const segmentById = new Map(segments.map((segment) => [segment.id, segment]));
+  const sourceClaims = input.candidates.flatMap((candidate) => candidate.claims);
+  if (new Set(sourceClaims.map((claim) => claim.id)).size !== sourceClaims.length) {
+    throw new Error("work_verifier_claim_id_duplicate");
+  }
+  if (sourceClaims.some((claim) => claim.evidenceIds.some((id) => !segmentById.has(id)))) {
+    throw new Error("work_verifier_input_evidence_outside_canonical_publication");
+  }
+  for (const candidate of input.candidates) {
+    const candidateEvidence = new Set(candidate.evidenceIds);
+    if (candidate.claims.some((claim) =>
+      claim.evidenceIds.some((id) => !candidateEvidence.has(id))
+    )) {
+      throw new Error("work_verifier_input_candidate_evidence_closure_invalid");
+    }
+  }
+  return { segments, segmentById, sourceClaims };
+}
+
+export function selectWorkCandidatesForGptVerification(input: {
+  candidates: AssembledWorkMeetingCandidate[];
+  segments: unknown[];
+}) {
+  validateWorkVerificationSource(input);
+  return input.candidates.flatMap((candidate) => {
+    const claims = candidate.claims.filter(requiresWorkClaimGptVerification);
+    return claims.length === 0 ? [] : [{ ...candidate, claims }];
+  });
+}
+
+export function partitionWorkCandidatesForVerification(input: {
+  candidates: AssembledWorkMeetingCandidate[];
+  segments: unknown[];
+  maxClaimsPerBatch?: number;
+  maxPayloadCharactersPerBatch?: number;
+  maxBatches?: number;
+}) {
+  const maxClaimsPerBatch = boundedBatchInteger({
+    value: input.maxClaimsPerBatch,
+    fallback: WORK_VERIFIER_MAX_CLAIMS_PER_BATCH,
+    minimum: 1,
+    maximum: 256,
+    name: "maxClaimsPerBatch"
+  });
+  const maxPayloadCharactersPerBatch = boundedBatchInteger({
+    value: input.maxPayloadCharactersPerBatch,
+    fallback: WORK_VERIFIER_MAX_PAYLOAD_CHARACTERS_PER_BATCH,
+    minimum: 256,
+    maximum: 1_000_000,
+    name: "maxPayloadCharactersPerBatch"
+  });
+  const maxBatches = boundedBatchInteger({
+    value: input.maxBatches,
+    fallback: WORK_VERIFIER_MAX_BATCHES,
+    minimum: 1,
+    maximum: 256,
+    name: "maxBatches"
+  });
+  const { segmentById, sourceClaims } = validateWorkVerificationSource(input);
+
   const batches: AssembledWorkMeetingCandidate[][] = [];
   let current: AssembledWorkMeetingCandidate[] = [];
-  let claimCount = 0;
-  for (const candidate of candidates) {
-    if (candidate.claims.length > WORK_VERIFIER_MAX_CLAIMS_PER_BATCH) {
-      throw new Error("work_verifier_candidate_claim_limit_exceeded");
+  let currentClaims: WorkAtomicClaim[] = [];
+  const flush = () => {
+    if (current.length === 0) return;
+    batches.push(current);
+    current = [];
+    currentClaims = [];
+  };
+
+  for (const candidate of input.candidates) {
+    for (const claim of candidate.claims) {
+      const trialClaims = [...currentClaims, claim];
+      if (
+        currentClaims.length > 0
+        && (
+          trialClaims.length > maxClaimsPerBatch
+          || estimateWorkVerifierBatchPayloadCharactersFromCanonical({
+            claims: trialClaims,
+            segmentById
+          }) > maxPayloadCharactersPerBatch
+        )
+      ) {
+        flush();
+      }
+
+      const lastCandidate = current.at(-1);
+      if (lastCandidate?.id === candidate.id) {
+        current[current.length - 1] = {
+          ...lastCandidate,
+          claims: [...lastCandidate.claims, claim]
+        };
+      } else {
+        current.push({ ...candidate, claims: [claim] });
+      }
+      currentClaims.push(claim);
     }
-    if (current.length > 0
-      && claimCount + candidate.claims.length > WORK_VERIFIER_MAX_CLAIMS_PER_BATCH) {
-      batches.push(current);
-      current = [];
-      claimCount = 0;
-    }
-    current.push(candidate);
-    claimCount += candidate.claims.length;
   }
-  if (current.length > 0) batches.push(current);
+  flush();
+
+  if (batches.length > maxBatches) {
+    throw new WorkMeetingAnalysisLimitError("work_verifier_batch_budget_exceeded");
+  }
+
+  const partitionedClaimIds = batches.flatMap((batch) =>
+    batch.flatMap((candidate) => candidate.claims.map((claim) => claim.id))
+  );
+  const sourceClaimIds = sourceClaims.map((claim) => claim.id);
+  if (
+    partitionedClaimIds.length !== sourceClaimIds.length
+    || partitionedClaimIds.some((id, index) => id !== sourceClaimIds[index])
+  ) {
+    throw new Error("work_verifier_partition_claim_closure_invalid");
+  }
   return batches;
 }
 
@@ -77,7 +366,16 @@ function shingles(value: string) {
   ));
 }
 
-function similarity(left: string, right: string) {
+function similarity(left: string, right: string, allowContainment = true) {
+  const normalizedLeft = normalizedText(left);
+  const normalizedRight = normalizedText(right);
+  if (normalizedLeft === normalizedRight) return normalizedLeft ? 1 : 0;
+  if (
+    allowContainment && Math.min(normalizedLeft.length, normalizedRight.length) >= 4
+    && (normalizedLeft.includes(normalizedRight) || normalizedRight.includes(normalizedLeft))
+  ) {
+    return 0.92;
+  }
   const leftSet = shingles(left);
   const rightSet = shingles(right);
   if (leftSet.size === 0 || rightSet.size === 0) return 0;
@@ -93,27 +391,91 @@ function evidenceOverlap(left: string[], right: string[]) {
   return left.some((id) => rightSet.has(id));
 }
 
-function attributionKey(candidate: WorkExtractorCandidateDraft) {
-  const data = candidate.structuredData;
-  return [
-    data.rawActorLabel ?? "",
-    data.candidateOwner ?? "",
-    data.dueAt ?? "",
-    data.originalDueExpression ?? "",
-    data.actionBasis ?? "",
-    data.decisionFinality ?? ""
-  ].map(normalizedText).join("\u0000");
+function coreTexts(candidate: WorkExtractorCandidateDraft | AssembledWorkMeetingCandidate) {
+  const mainClaimType = WORK_MAIN_CLAIM_TYPE_BY_CANDIDATE_KIND[candidate.kind];
+  const claimTexts = candidate.claims
+    .filter((claim) => claim.claimType === mainClaimType)
+    .map((claim) => claim.text);
+  const sourceTexts = claimTexts.length > 0 ? claimTexts : [candidate.title];
+  return [...new Set(sourceTexts.map(normalizedText).filter(Boolean))].sort();
+}
+
+function coreSimilarity(
+  left: WorkExtractorCandidateDraft | AssembledWorkMeetingCandidate,
+  right: WorkExtractorCandidateDraft | AssembledWorkMeetingCandidate
+) {
+  return Math.max(...coreTexts(left).flatMap((leftText) =>
+    coreTexts(right).map((rightText) => similarity(leftText, rightText,
+      left.kind !== "commitment" && left.kind !== "action_item"))
+  ));
+}
+
+function evidenceDistance(
+  left: string[],
+  right: string[],
+  evidenceOrder: ReadonlyMap<string, number>
+) {
+  let distance = Number.POSITIVE_INFINITY;
+  for (const leftId of left) {
+    for (const rightId of right) {
+      const leftIndex = evidenceOrder.get(leftId);
+      const rightIndex = evidenceOrder.get(rightId);
+      if (leftIndex === undefined || rightIndex === undefined) continue;
+      distance = Math.min(distance, Math.abs(leftIndex - rightIndex));
+    }
+  }
+  return distance;
 }
 
 function canMerge(
   left: WorkExtractorCandidateDraft,
-  right: WorkExtractorCandidateDraft
+  right: WorkExtractorCandidateDraft,
+  evidenceOrder: ReadonlyMap<string, number>
 ) {
-  if (left.kind !== right.kind || attributionKey(left) !== attributionKey(right)) return false;
-  if (!evidenceOverlap(left.evidenceIds, right.evidenceIds)) return false;
-  const titleSimilarity = similarity(left.title, right.title);
-  const bodySimilarity = similarity(left.body, right.body);
-  return titleSimilarity >= 0.82 || bodySimilarity >= 0.82;
+  if (left.kind !== right.kind) return false;
+  const bestSimilarity = coreSimilarity(left, right);
+  if (evidenceOverlap(left.evidenceIds, right.evidenceIds)) {
+    return bestSimilarity >= 0.62;
+  }
+  const distance = evidenceDistance(left.evidenceIds, right.evidenceIds, evidenceOrder);
+  if (left.kind === "discussion_topic") {
+    return distance <= 12 && bestSimilarity >= 0.65;
+  }
+  if (left.kind === "proposal" || left.kind === "open_question") {
+    return distance <= 12 && bestSimilarity >= 0.68;
+  }
+  return distance <= 8 && bestSimilarity >= 0.9;
+}
+
+function mergeOptionalValue<Value extends string>(left: Value | null, right: Value | null) {
+  if (left === null) return right;
+  if (right === null) return left;
+  return normalizedText(left) === normalizedText(right) ? left : null;
+}
+
+function mergeDecisionFinality(
+  left: WorkExtractorCandidateDraft["structuredData"]["decisionFinality"],
+  right: WorkExtractorCandidateDraft["structuredData"]["decisionFinality"]
+) {
+  if (left === null) return right;
+  if (right === null) return left;
+  return left === right ? left : "unclear";
+}
+
+function mergeDeadline(input: {
+  leftDueAt: string | null;
+  rightDueAt: string | null;
+  leftExpression: string | null;
+  rightExpression: string | null;
+}) {
+  const dueAt = mergeOptionalValue(input.leftDueAt, input.rightDueAt);
+  if (input.leftDueAt !== null && input.rightDueAt !== null && dueAt === null) {
+    return { dueAt: null, originalDueExpression: null };
+  }
+  return {
+    dueAt,
+    originalDueExpression: mergeOptionalValue(input.leftExpression, input.rightExpression)
+  };
 }
 
 function preferredText(left: string, right: string) {
@@ -215,7 +577,9 @@ export function assembleWorkMeetingCandidates(input: {
             clientCandidateKey: candidate.structuredData.relatedCommitmentCandidateId
           }]
         : [];
-      const duplicate = accumulators.find((item) => canMerge(item.candidate, candidate));
+      const duplicate = accumulators.find((item) =>
+        canMerge(item.candidate, candidate, evidenceOrder)
+      );
       if (!duplicate) {
         accumulators.push({
           candidate,
@@ -234,6 +598,12 @@ export function assembleWorkMeetingCandidates(input: {
         clientCandidateKey: candidate.clientCandidateKey
       });
       duplicate.relatedCommitmentReferences.push(...relatedCommitmentReference);
+      const mergedDeadline = mergeDeadline({
+        leftDueAt: duplicate.candidate.structuredData.dueAt,
+        rightDueAt: candidate.structuredData.dueAt,
+        leftExpression: duplicate.candidate.structuredData.originalDueExpression,
+        rightExpression: candidate.structuredData.originalDueExpression
+      });
       duplicate.candidate = {
         ...duplicate.candidate,
         title: preferredText(duplicate.candidate.title, candidate.title),
@@ -245,6 +615,24 @@ export function assembleWorkMeetingCandidates(input: {
         claims: [...duplicate.candidate.claims, ...candidate.claims],
         structuredData: {
           ...duplicate.candidate.structuredData,
+          decisionFinality: mergeDecisionFinality(
+            duplicate.candidate.structuredData.decisionFinality,
+            candidate.structuredData.decisionFinality
+          ),
+          rawActorLabel: mergeOptionalValue(
+            duplicate.candidate.structuredData.rawActorLabel,
+            candidate.structuredData.rawActorLabel
+          ),
+          candidateOwner: mergeOptionalValue(
+            duplicate.candidate.structuredData.candidateOwner,
+            candidate.structuredData.candidateOwner
+          ),
+          dueAt: mergedDeadline.dueAt,
+          originalDueExpression: mergedDeadline.originalDueExpression,
+          actionBasis: mergeOptionalValue(
+            duplicate.candidate.structuredData.actionBasis,
+            candidate.structuredData.actionBasis
+          ),
           planStages: [
             ...duplicate.candidate.structuredData.planStages,
             ...candidate.structuredData.planStages
@@ -260,9 +648,7 @@ export function assembleWorkMeetingCandidates(input: {
     publicationId: input.publicationId,
     canonicalDigest: input.canonicalDigest,
     kind: item.candidate.kind,
-    title: normalizedText(item.candidate.title),
-    body: normalizedText(item.candidate.body),
-    attribution: attributionKey(item.candidate),
+    coreTexts: coreTexts(item.candidate),
     evidenceIds: sortedUnique(item.candidate.evidenceIds, evidenceOrder)
   }));
   const stableCandidateByWindowKey = new Map<string, {
@@ -281,13 +667,16 @@ export function assembleWorkMeetingCandidates(input: {
   return accumulators.map((item, index) => {
     const candidateId = stableCandidateIds[index];
     const evidenceIds = sortedUnique(item.candidate.evidenceIds, evidenceOrder);
+    const mainClaimType = WORK_MAIN_CLAIM_TYPE_BY_CANDIDATE_KIND[item.candidate.kind];
     const claimGroups = new Map<string, typeof item.candidate.claims>();
     for (const claim of item.candidate.claims) {
-      const key = [
-        claim.claimType,
-        normalizedText(claim.text),
-        sortedUnique(claim.evidenceIds, evidenceOrder).join("\u0000")
-      ].join("\u0000");
+      const key = claim.claimType === mainClaimType
+        ? ["core", claim.claimType].join("\u0000")
+        : [
+            claim.claimType,
+            JSON.stringify(claim.semanticValue ?? null),
+            normalizedText(claim.text)
+          ].join("\u0000");
       const group = claimGroups.get(key) ?? [];
       group.push(claim);
       claimGroups.set(key, group);
@@ -298,21 +687,37 @@ export function assembleWorkMeetingCandidates(input: {
         group.flatMap((claim) => claim.evidenceIds),
         evidenceOrder
       );
+      const semanticRiskFlags = [...new Set(
+        group.flatMap((claim) => claim.semanticRiskFlags ?? [])
+      )].sort();
+      // Similarity is only a grouping hint. A longer paraphrase can omit a
+      // shorter condition/state, so preserve every distinct core for Verifier.
+      const text = first.claimType === mainClaimType
+        ? [...new Set(group.map(claim => claim.text.trim()))].join("；")
+        : group.map(claim => claim.text).reduce(preferredText);
       return WorkAtomicClaimSchema.parse({
         id: stableId("work_claim", {
           meetingId: input.meetingId,
           candidateId,
           claimType: first.claimType,
-          text: normalizedText(first.text),
+          ...(semanticRiskFlags.length > 0 ? { semanticRiskFlags } : {}),
+          ...(first.semanticValue ? { semanticValue: first.semanticValue } : {}),
+          text: normalizedText(text),
           evidenceIds: claimEvidenceIds
         }),
         candidateId,
         claimType: first.claimType,
-        text: group.map((claim) => claim.text).reduce(preferredText),
+        semanticRiskFlags,
+        ...(first.semanticValue ? { semanticValue: first.semanticValue } : {}),
+        text,
         evidenceIds: claimEvidenceIds,
         createdAt: null
       });
-    }).sort((left, right) => left.id.localeCompare(right.id));
+    }).sort((left, right) =>
+      Number(right.claimType === mainClaimType) - Number(left.claimType === mainClaimType)
+      || left.claimType.localeCompare(right.claimType)
+      || left.id.localeCompare(right.id)
+    );
     const relatedCommitmentIds = new Set(item.relatedCommitmentReferences.flatMap((reference) => {
       const related = stableCandidateByWindowKey.get(
         windowCandidateKey(reference.windowIndex, reference.clientCandidateKey)
@@ -325,6 +730,7 @@ export function assembleWorkMeetingCandidates(input: {
     return {
       ...item.candidate,
       id: candidateId,
+      sourceDraftReferences: item.sourceReferences,
       evidenceIds,
       structuredData: {
         ...item.candidate.structuredData,
@@ -345,6 +751,107 @@ export function assembleWorkMeetingCandidates(input: {
   );
 }
 
+/** Retrieve possible resolutions, never decide resolution by lexical overlap.
+ * The existing Verifier must judge the hypothesis against both Canonical sides.
+ */
+export function attachWorkQuestionResolutionClaims(input: {
+  candidates: AssembledWorkMeetingCandidate[];
+  segments: unknown[];
+}): AssembledWorkMeetingCandidate[] {
+  const { segments } = validateWorkVerificationSource(input);
+  const evidenceOrder = new Map(segments.map((segment, index) => [segment.id, index]));
+  const lastEvidenceIndex = (candidate: AssembledWorkMeetingCandidate) =>
+    Math.max(...candidate.evidenceIds.map((id) => evidenceOrder.get(id)!));
+  return input.candidates.map((question) => {
+    if (question.kind !== "open_question"
+      || question.claims.some((claim) => claim.claimType === "question_resolution")) return question;
+    const questionIndex = lastEvidenceIndex(question);
+    const relatedLater = input.candidates.filter((candidate) =>
+      candidate.id !== question.id
+      && lastEvidenceIndex(candidate) > questionIndex
+      && coreSimilarity(question, candidate) >= 0.12
+    );
+    if (!relatedLater.some((candidate) => candidate.kind === "decision")) return question;
+    const evidenceIds = sortedUnique([
+      ...question.evidenceIds,
+      ...relatedLater.flatMap((candidate) => candidate.evidenceIds)
+    ], evidenceOrder);
+    // Do not truncate a potentially contradictory later result to fit a Claim.
+    if (evidenceIds.length > 64) return question;
+    const text = `会议后续已明确解决以下问题：${question.claims
+      .filter((claim) => claim.claimType === "open_question")
+      .map((claim) => claim.text).join("；")}`;
+    const resolution = WorkAtomicClaimSchema.parse({
+      id: stableId("work_claim", { candidateId: question.id,
+        claimType: "question_resolution", text, evidenceIds }),
+      candidateId: question.id,
+      claimType: "question_resolution",
+      semanticRiskFlags: [],
+      semanticValue: null,
+      text,
+      evidenceIds,
+      createdAt: null
+    });
+    return { ...question, evidenceIds, claims: [...question.claims, resolution] };
+  });
+}
+
+export function partitionWorkMeetingCandidateReviewCapacity<
+  Candidate extends Pick<AssembledWorkMeetingCandidate, "id" | "kind">
+>(
+  candidates: Candidate[],
+  maximum = WORK_MEETING_MAX_PRIMARY_REVIEW_ITEMS,
+  priorityIds: readonly string[] = []
+) {
+  const boundedMaximum = boundedBatchInteger({
+    value: maximum,
+    fallback: WORK_MEETING_MAX_PRIMARY_REVIEW_ITEMS,
+    minimum: 1,
+    maximum: 256,
+    name: "maximumCandidates"
+  });
+  // Fallback alternates deliveries, decisions and unresolved follow-ups; no
+  // kind can exhaust all slots merely by appearing first in the transcript.
+  const lanes = Array.from({ length: 5 }, (_, lane) => candidates.filter(candidate =>
+    WORK_REVIEW_FALLBACK_LANE[candidate.kind] === lane));
+  const hasDeliveryDate = (candidate: Candidate) => {
+    const value = candidate as Candidate & { structuredData?: { originalDueExpression?: string | null }; claims?: Array<{ claimType: string }> };
+    return Boolean(value.structuredData?.originalDueExpression || value.claims?.some(claim => claim.claimType === "deadline"));
+  };
+  lanes[0].sort((left, right) => Number(hasDeliveryDate(right)) - Number(hasDeliveryDate(left)));
+  const fallback: Candidate[] = [];
+  while (lanes.slice(0, 3).some(lane => lane.length)) {
+    for (const lane of lanes.slice(0, 3)) if (lane.length) fallback.push(lane.shift()!);
+  }
+  fallback.push(...lanes[3], ...lanes[4]);
+  const byId = new Map(candidates.map(candidate => [candidate.id, candidate]));
+  const promoted = [...new Set(priorityIds)].flatMap(id => byId.has(id) ? [byId.get(id)!] : []);
+  const promotedIds = new Set(promoted.map(candidate => candidate.id));
+  // A rejected deletion can restore an item omitted from the AI's ranking.
+  // Mixing a prefix with omissions would silently force those items to the end.
+  const missingPriorityIds = candidates.filter(c => !promotedIds.has(c.id)).map(c => c.id);
+  const completePriority = missingPriorityIds.length === 0 && promoted.length === candidates.length;
+  const prioritized = completePriority ? promoted : fallback;
+  return {
+    primaryCandidates: prioritized.slice(0, boundedMaximum),
+    overflowCandidates: prioritized.slice(boundedMaximum),
+    priorityIds: prioritized.map(c => c.id),
+    ranking: { strategy: completePriority ? "ai_complete" as const : "full_fallback" as const, missingPriorityIds }
+  };
+}
+
+/**
+ * Compatibility wrapper for callers that only persist the primary review set.
+ * Capacity overflow is intentionally non-fatal; callers that need audit counts
+ * should use partitionWorkMeetingCandidateReviewCapacity directly.
+ */
+export function assertWorkMeetingCandidateReviewBudget(
+  candidates: AssembledWorkMeetingCandidate[],
+  maximum = WORK_MEETING_MAX_PRIMARY_REVIEW_ITEMS
+) {
+  return partitionWorkMeetingCandidateReviewCapacity(candidates, maximum).primaryCandidates;
+}
+
 export function buildWorkMeetingVerifierInput(input: {
   accountId: string;
   meetingId: string;
@@ -358,17 +865,58 @@ export function buildWorkMeetingVerifierInput(input: {
   const segments = WorkCanonicalSegmentsSchema.parse(input.segments);
   const allowedEvidence = new Set(segments.map((segment) => segment.id));
   const claims = input.candidates.flatMap((candidate) => candidate.claims);
+  if (new Set(claims.map((claim) => claim.id)).size !== claims.length) {
+    throw new Error("work_verifier_claim_id_duplicate");
+  }
   if (claims.some((claim) => claim.evidenceIds.some((id) => !allowedEvidence.has(id)))) {
     throw new Error("work_verifier_input_evidence_outside_canonical_publication");
   }
+  const selectedEvidenceIds = new Set(claims.flatMap((claim) => claim.evidenceIds));
+  const selectedSegments = segments.filter((segment) => selectedEvidenceIds.has(segment.id));
+  const timestampQualityBySegmentId = input.timestampQualityBySegmentId
+    ? Object.fromEntries(selectedSegments.flatMap((segment) =>
+        Object.hasOwn(input.timestampQualityBySegmentId!, segment.id)
+          ? [[segment.id, input.timestampQualityBySegmentId![segment.id]]]
+          : []
+      ))
+    : undefined;
   return {
     accountId: input.accountId,
     meetingId: input.meetingId,
     publicationId: input.publicationId,
     canonicalDigest: input.canonicalDigest,
-    segments,
+    segments: selectedSegments,
     claims,
-    timestampQualityBySegmentId: input.timestampQualityBySegmentId,
+    timestampQualityBySegmentId,
     signal: input.signal
   };
+}
+
+/** Fit optional coverage behind required Claims inside the existing 3-batch
+ * and 24-result/12k-character limits. Unaffordable relations retain originals. */
+export function packWorkDuplicateCoverageForVerification(input: {
+  base: Omit<WorkMeetingVerifierInput, "claims" | "duplicateCoverage">;
+  batches: AssembledWorkMeetingCandidate[][];
+  requests: WorkDuplicateCoverageRequest[];
+  maxBatches?: number;
+}) {
+  const inputs = input.batches.map(candidates => buildWorkMeetingVerifierInput({ ...input.base, candidates }));
+  const canonical = WorkCanonicalSegmentsSchema.parse(input.base.segments);
+  const unchecked: WorkDuplicateCoverageEvaluation[] = [];
+  const maxBatches = Math.min(WORK_VERIFIER_MAX_BATCHES, input.maxBatches ?? WORK_VERIFIER_MAX_BATCHES);
+  for (const relation of input.requests) {
+    let placed = false;
+    for (let i = 0; i < inputs.length + Number(inputs.length < maxBatches); i++) {
+      const current = inputs[i] ?? buildWorkMeetingVerifierInput({ ...input.base, candidates: [] });
+      const duplicateCoverage = [...(current.duplicateCoverage ?? []), relation];
+      if (current.claims.length + duplicateCoverage.length > WORK_VERIFIER_MAX_CLAIMS_PER_BATCH) continue;
+      const evidenceIds = new Set([...current.claims.flatMap(c => c.evidenceIds),
+        ...duplicateCoverage.flatMap(r => [r.original, ...r.coveredBy].flatMap(s => s.evidenceIds))]);
+      const trial = { ...current, duplicateCoverage, segments: canonical.filter(s => evidenceIds.has(s.id)) };
+      if (JSON.stringify(buildWorkMeetingVerifierProviderPayload(trial)).length > WORK_VERIFIER_MAX_PAYLOAD_CHARACTERS_PER_BATCH) continue;
+      inputs[i] = trial; placed = true; break;
+    }
+    if (!placed) unchecked.push({ relationId: relation.relationId, verdict: "uncertain", reason: "capacity", supportedEvidenceIds: [] });
+  }
+  return { inputs, unchecked };
 }

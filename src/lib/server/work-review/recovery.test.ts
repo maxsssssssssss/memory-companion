@@ -15,6 +15,10 @@ import {
   type WorkProcessingFence,
   type WorkTranscriptSegment
 } from "./repository";
+import {
+  WORK_MEETING_EXTRACTOR_PROMPT_VERSION,
+  WORK_MEETING_EXTRACTOR_SCHEMA_VERSION
+} from "./runtime-config";
 
 const INITIAL_NOW = "2026-09-01T10:00:00.000Z";
 const RECOVERY_NOW = "2026-09-01T10:30:00.000Z";
@@ -136,8 +140,8 @@ function emptyExtractor(): WorkMeetingExtractor {
       reasoningEffort: "provider_default",
       timeoutMs: 1_000,
       maxOutputTokens: 1_024,
-      promptVersion: "work_meeting_extractor_v1",
-      schemaVersion: "work_meeting_candidates_v1"
+      promptVersion: WORK_MEETING_EXTRACTOR_PROMPT_VERSION,
+      schemaVersion: WORK_MEETING_EXTRACTOR_SCHEMA_VERSION
     },
     extract: vi.fn(async () => [])
   };

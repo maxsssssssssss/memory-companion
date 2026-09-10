@@ -1,4 +1,3 @@
-import { NextResponse } from "next/server";
 
 import {
   UpdateWorkTodoRequestSchema,
@@ -14,6 +13,8 @@ import {
 } from "@/lib/server/work-review/route-utils";
 import { isWorkReviewTodoEnabled } from "@/lib/server/work-review/runtime-config";
 import { WorkTodoRepository } from "@/lib/server/work-review/todo-repository";
+import { WorkProjectService } from "@/lib/server/work-review/project-service";
+import { isWorkReviewProjectsEnabled } from "@/lib/server/work-review/runtime-config";
 
 function todoIdFrom(raw: string) {
   const parsed = WorkReviewIdSchema.safeParse(raw);
@@ -25,12 +26,20 @@ type TodoRouteContext = { params: Promise<{ todoId: string }> };
 export async function GET(request: Request, { params }: TodoRouteContext) {
   if (!isWorkReviewTodoEnabled()) return workReviewFeatureDisabled("todo_disabled");
   const todoId = todoIdFrom((await params).todoId);
-  if (!todoId) return NextResponse.json({ error: "invalid_todo_id" }, { status: 400 });
+  if (!todoId) return workReviewPrivateJson({ error: "invalid_todo_id" }, 400);
   try {
     const auth = await requireAuthContext(request);
     const detail = new WorkTodoRepository(getWorkReviewDatabase())
       .getTodoDetail(auth.user.id, todoId);
-    return workReviewPrivateJson(detail);
+    return workReviewPrivateJson({
+      ...detail,
+      todo: {
+        ...detail.todo,
+        projects: isWorkReviewProjectsEnabled()
+          ? new WorkProjectService(getWorkReviewDatabase()).listTodoProjects(auth.user.id, todoId)
+          : []
+      }
+    });
   } catch (error) {
     return workReviewRouteError(error);
   }
@@ -39,7 +48,7 @@ export async function GET(request: Request, { params }: TodoRouteContext) {
 export async function PATCH(request: Request, { params }: TodoRouteContext) {
   if (!isWorkReviewTodoEnabled()) return workReviewFeatureDisabled("todo_disabled");
   const todoId = todoIdFrom((await params).todoId);
-  if (!todoId) return NextResponse.json({ error: "invalid_todo_id" }, { status: 400 });
+  if (!todoId) return workReviewPrivateJson({ error: "invalid_todo_id" }, 400);
   try {
     const auth = await requireAuthContext(request);
     const body = UpdateWorkTodoRequestSchema.parse(await request.json());
@@ -57,7 +66,7 @@ export async function PATCH(request: Request, { params }: TodoRouteContext) {
 export async function DELETE(request: Request, { params }: TodoRouteContext) {
   if (!isWorkReviewTodoEnabled()) return workReviewFeatureDisabled("todo_disabled");
   const todoId = todoIdFrom((await params).todoId);
-  if (!todoId) return NextResponse.json({ error: "invalid_todo_id" }, { status: 400 });
+  if (!todoId) return workReviewPrivateJson({ error: "invalid_todo_id" }, 400);
   try {
     const auth = await requireAuthContext(request);
     const body = WorkTodoVersionedOperationRequestSchema.parse(await request.json());

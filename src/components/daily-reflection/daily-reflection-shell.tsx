@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { useRouter } from "next/navigation";
+import { ReflectionRecordingRecovery } from "./reflection-recording-recovery";
 import {
   type FormEvent,
   type KeyboardEvent as ReactKeyboardEvent,
@@ -1372,6 +1373,19 @@ export function DailyReflectionShellContent({
   const pendingMemoryAdmissions = useRef(new Map<string, ReflectionPendingAdmission>());
 
   useEffect(() => {
+    const recording = recorderSnapshot.recording;
+    if (!recording || recorderSnapshot.state !== "ready") return;
+    browserReadyOperationKey.current ??= createOperationKey("browser_recorder");
+    void session.preserveRecording({
+      file: browserRecordingFile(recording, recordingDate),
+      clientReportedDurationMs: recording.clientReportedDurationMs || undefined,
+      recordingDate,
+      sourceOrigin: browserSourceOrigin,
+      operationKey: browserReadyOperationKey.current
+    });
+  }, [recorderSnapshot.recording, recorderSnapshot.state, recordingDate, browserSourceOrigin, createOperationKey, session.preserveRecording]);
+
+  useEffect(() => {
     if (!browserRecordingEnabled) return;
     let active = true;
     const recorder = createBrowserRecorder((snapshot) => {
@@ -2339,7 +2353,7 @@ export function DailyReflectionShellContent({
                   </div>
                 ) : recorderSnapshot.state === "stopping" ? (
                   <div className={styles.recorderState} role="status">
-                    <b>正在整理这次复盘……</b>
+                    <b>正在准备本地录音…</b>
                     <p>正在准备可由你确认的本地录音。</p>
                   </div>
                 ) : recorderSnapshot.state === "ready" && recorderSnapshot.recording ? (
@@ -2462,14 +2476,16 @@ export function DailyReflectionShellContent({
         ) : showRecord ? (
           <div className={styles.statusColumn}>
             <div className={styles.detailToolbar}>
-              <button className={`${styles.secondaryButton} ${styles.sessionBackButton}`} disabled={busy} onClick={() => {
-                session.startNew();
+              <button className={`${styles.secondaryButton} ${styles.sessionBackButton}`} onClick={() => {
                 if (embedded) router.push(REFLECTION_ROUTES.home);
+                else session.startNew();
               }} type="button">
                 返回今天
               </button>
-              <span>这条记录会一直保留在最近复盘中，直到你明确删除。</span>
+              <Link href="/reflection/sessions">最近复盘</Link>
             </div>
+            {session.recordingRecovery && (!session.reflectionId || session.recordingRecovery.reflectionId === session.reflectionId)
+              ? <ReflectionRecordingRecovery session={session} /> : null}
             <section
               aria-live="polite"
               className={styles.statusCard}
@@ -2478,8 +2494,8 @@ export function DailyReflectionShellContent({
               <div className={styles.statusTop}>
                 <div>
                   <p className={styles.eyebrow}>这次记录</p>
-                  <h2>{browserSubmitting
-                    ? "正在整理这次复盘……"
+                  <h2>{browserSubmitting && !session.reflectionId
+                    ? "正在上传这次录音……"
                     : status === "review_pending"
                       ? "这次复盘"
                       : processingCopy(detail, session.state)}</h2>
@@ -2529,8 +2545,10 @@ export function DailyReflectionShellContent({
                   {safeErrorMessage(detail?.reflection.errorCode ?? session.errorMessage)}
                 </p>
               ) : null}
-              {processing ? (
-                <p className={styles.backgroundNote}>提交已经完成。你可以稍后从“最近复盘”回来查看；关闭本页不会替你自动确认内容。</p>
+              {processing && !session.recordingRecovery ? (
+                <p className={styles.backgroundNote}>{isIndeterminateUpload
+                  ? "尚未确认录音保存成功，请保持页面打开。"
+                  : "录音已接收，正在整理。可以稍后从最近复盘回来查看，内容仍由你确认。"}</p>
               ) : null}
               {session.errorMessage && session.state !== "error" && status !== "failed" ? (
                 <p className={styles.inlineError} role="alert">{safeErrorMessage(session.errorMessage)}</p>
@@ -2803,9 +2821,7 @@ export function DailyReflectionShellContent({
                       : pendingCandidateCount > 0
                         ? `还有 ${pendingCandidateCount} 条可以以后再看；没有要保存的内容，也可以直接完成。`
                         : "没有要保存的内容，也可以直接完成。"}
-                    title={hasCompletionSelection
-                      ? `已保存 ${savedCardCount} 张卡片 · 已选择长期记住 ${retainedCandidateCount} 条`
-                      : "看完后，完成这次复盘"}
+                    title={`${savedCardCount} 张卡片 · ${retainedCandidateCount} 条长期记忆（已选择，待处理）`}
                   />
                   {keptWithoutEvidenceCount > 0 ? (
                     <p className={styles.completionNotice}>有 {keptWithoutEvidenceCount} 条手写内容没有原话，只能随本次复盘保存。</p>

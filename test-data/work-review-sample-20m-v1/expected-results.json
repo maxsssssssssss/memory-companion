@@ -1,0 +1,77 @@
+{
+  "datasetVersion": "work-review-sample-20m-v1",
+  "must": [
+    {
+      "id": "decision_no_weekly_export",
+      "sourceUtteranceIds": ["u_024"],
+      "expectation": "首轮不提供周报导出，试点期间仅由陈诺临时手工整理两次。"
+    },
+    {
+      "id": "decision_scope_option_b",
+      "sourceUtteranceIds": ["u_025"],
+      "expectation": "首轮采用方案乙，包含来源链接、分类确认和基础数量仪表盘。"
+    },
+    {
+      "id": "decision_daily_digest_only",
+      "sourceUtteranceIds": ["u_030"],
+      "expectation": "首轮只发送每日摘要，实时提醒与个人切换开关不交付。"
+    },
+    {
+      "id": "decision_launch_date_changed",
+      "sourceUtteranceIds": ["u_031", "u_032", "u_033"],
+      "expectation": "开放日由九月十八日调整并最终确定为九月二十二日。"
+    },
+    {
+      "id": "zhou_backend_commitment",
+      "sourceUtteranceIds": ["u_034", "u_036"],
+      "expectation": "周启明确认领后端工作，九月八日提供联调接口，九月九日补齐测试。"
+    },
+    {
+      "id": "chen_training_commitment",
+      "sourceUtteranceIds": ["u_037"],
+      "expectation": "陈诺明确认领引导与培训材料，并给出初稿、终稿和培训日期。"
+    },
+    {
+      "id": "unowned_retention_rule",
+      "sourceUtteranceIds": ["u_039", "u_040", "u_041", "u_042"],
+      "expectation": "数据保留规则明确未被陈诺或周启接受，保持未认领。"
+    },
+    {
+      "id": "unresolved_mobile_release_condition",
+      "sourceUtteranceIds": ["u_051", "u_052", "u_053"],
+      "expectation": "移动端是否属于发布条件仍未决定，且没有负责人承诺。"
+    },
+    {
+      "id": "unowned_support_rotation",
+      "sourceUtteranceIds": ["u_057", "u_058", "u_059"],
+      "expectation": "支持轮值只是建议，周启明确未接受，最终仍未认领。"
+    }
+  ],
+  "mustNot": [
+    {
+      "id": "proposal_is_not_decision",
+      "sourceUtteranceIds": ["u_021", "u_026", "u_028", "u_052", "u_057"],
+      "forbiddenInterpretation": "把方案探索或建议直接发布为最终决定。"
+    },
+    {
+      "id": "assignment_without_acceptance_is_not_commitment",
+      "sourceUtteranceIds": ["u_039", "u_040", "u_041", "u_042", "u_052", "u_053", "u_057", "u_058", "u_059"],
+      "forbiddenInterpretation": "把被点名、被询问或给出估算的人自动写成负责人或承诺人。"
+    },
+    {
+      "id": "old_date_is_not_current_plan",
+      "sourceUtteranceIds": ["u_013", "u_014", "u_031", "u_033"],
+      "forbiddenInterpretation": "把原计划九月十八日当作当前最终开放日。"
+    },
+    {
+      "id": "efficiency_is_not_verified",
+      "sourceUtteranceIds": ["u_006", "u_007", "u_008", "u_025"],
+      "forbiddenInterpretation": "声称星桥已经证明协作效率提升。"
+    },
+    {
+      "id": "todo_completion_is_not_real_world_completion",
+      "sourceUtteranceIds": ["u_034", "u_036", "u_037", "u_038", "u_044", "u_045", "u_050", "u_054", "u_056"],
+      "forbiddenInterpretation": "把会议中的认领或截止时间写成现实工作已经完成。"
+    }
+  ]
+}

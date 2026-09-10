@@ -14,6 +14,7 @@ import type {
   ToySyncPermissionState
 } from "@/lib/client/daily-reflection-toy-sync-storage";
 import type { DateCompanionUploadOptions } from "@/lib/client/date-companion-session";
+import type { DateCompanionHomeContentState } from "@/lib/client/date-companion-proactive-value";
 
 import { CompanionHome, type CompanionUploadPresentation } from "./companion-home";
 
@@ -84,6 +85,26 @@ const recentItem: RecapItemVM = {
   }]
 };
 
+const generatedHomeContent: DateCompanionHomeContentState = {
+  status: "ready",
+  content: {
+    fingerprint: "b".repeat(64),
+    about: [{
+      kind: "recent_update",
+      text: "小林最近在准备重要考试。",
+      evidenceIds: ["source-1"],
+      sources: [{ ...recentItem.sources[0], canOpenTranscript: true }]
+    }],
+    beforeMeeting: [{
+      kind: "follow_up",
+      text: "可以问问考试准备得怎么样了。",
+      reason: "Ta 上次提到刷题时遇到了一些难题。",
+      evidenceIds: ["source-2"],
+      sources: [{ ...recentItem.sources[0], id: "source-2", segmentIds: ["segment-2"], quote: "这周刷题遇到了些难题。", canOpenTranscript: true }]
+    }]
+  }
+};
+
 function renderHome(uploadState: CompanionUploadPresentation) {
   return render(
     <CompanionHome
@@ -103,16 +124,18 @@ describe("CompanionHome", () => {
       /^(早上好|上午好|中午好|下午好|晚上好)$/u
     ));
     expect(screen.getByRole("heading", { name: "关于 Ta" })).toBeInTheDocument();
-    expect(screen.getByText("还没有留下关于 Ta 的近况")).toBeInTheDocument();
+    expect(screen.getByText("还没有适合放在这里的近况。")).toBeInTheDocument();
   });
 
-  it("presents only the real relationship name and confirmed recent item", () => {
+  it("shows distinct generated content with each item's own original sources and safe source action", () => {
+    const onOpenSource = vi.fn();
     render(
       <CompanionHome
         currentInteraction={null}
         onRetryRead={vi.fn()}
         onUpload={vi.fn(async () => true)}
-        recentItem={recentItem}
+        homeContent={generatedHomeContent}
+        onOpenSource={onOpenSource}
         relationshipName="小林"
         uploadState={{ status: "idle" }}
       />
@@ -120,8 +143,34 @@ describe("CompanionHome", () => {
 
     expect(screen.getByRole("heading", { name: "你和 小林" })).toBeInTheDocument();
     expect(screen.getByRole("link", { name: "打开关于 小林" })).toHaveAttribute("href", "/date-companion/a/person");
-    expect(screen.getByText("Ta 最近在准备一场重要考试")).toBeInTheDocument();
+    const about = screen.getByRole("region", { name: "关于 小林 的首页摘要" });
+    const beforeMeeting = screen.getByRole("region", { name: "下次见面前的首页建议" });
+    expect(within(about).getByText("小林最近在准备重要考试。")).toBeInTheDocument();
+    expect(within(about).queryByText("可以问问考试准备得怎么样了。")).not.toBeInTheDocument();
+    expect(within(beforeMeeting).getByText("可以问问考试准备得怎么样了。")).toBeInTheDocument();
+    expect(within(beforeMeeting).queryByText("小林最近在准备重要考试。")).not.toBeInTheDocument();
+    expect(within(about).getByText("最近都在准备考试。").closest("details")).not.toHaveAttribute("open");
+    expect(within(about).queryByText("这周刷题遇到了些难题。")).not.toBeInTheDocument();
+    fireEvent.click(within(beforeMeeting).getByText("查看原话"));
+    fireEvent.click(within(beforeMeeting).getByRole("button", { name: "在完整文字稿中查看" }));
+    expect(onOpenSource).toHaveBeenCalledWith(expect.objectContaining({ id: "source-2", quote: "这周刷题遇到了些难题。" }), "segment-2");
+    expect(screen.getByRole("link", { name: /打开准备卡/u })).toHaveAttribute("href", "/date-companion/a/prepare");
     expect(screen.queryByText(/认识.*天|河边|周六/u)).not.toBeInTheDocument();
+  });
+
+  it.each([
+    ["empty", "还没有适合放在这里的近况。", "暂时没有需要跟进的事。"],
+    ["loading", "正在整理值得记住的近况…", "正在整理见面前值得留意的事…"],
+    ["unavailable", "近况暂时未能整理，请稍后再看。", "见面前的建议暂时未能整理，请稍后再看。"]
+  ] as const)("keeps %s truthful without retaining generated content", (status, aboutCopy, beforeCopy) => {
+    const props = { currentInteraction: null, onRetryRead: vi.fn(), onUpload: vi.fn(async () => true), uploadState: { status: "idle" as const } };
+    const { rerender } = render(<CompanionHome {...props} homeContent={generatedHomeContent} />);
+    rerender(<CompanionHome {...props} homeContent={{ status }} />);
+    expect(screen.getByText(aboutCopy)).toBeInTheDocument();
+    expect(screen.getByText(beforeCopy)).toBeInTheDocument();
+    expect(screen.queryByText("小林最近在准备重要考试。")).not.toBeInTheDocument();
+    expect(screen.queryByText("可以问问考试准备得怎么样了。")).not.toBeInTheDocument();
+    expect(screen.queryByText("最近都在准备考试。")).not.toBeInTheDocument();
   });
 
   it("uses an indeterminate uploading state instead of displaying a fabricated percentage", () => {

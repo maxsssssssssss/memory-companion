@@ -27,6 +27,7 @@ import {
   WorkReviewIdSchema,
   type WorkMeetingActionBasis
 } from "@/lib/domain/work-review";
+import type { WorkProjectScopeFilter } from "@/lib/domain/work-project";
 
 import {
   WorkReviewConflictError,
@@ -37,6 +38,10 @@ import {
   detachLinkedMeetingTodosWithinTransaction,
   listActiveMeetingTodoIdsWithinTransaction
 } from "./todo-meeting-deletion";
+import {
+  invalidateWorkWeeklySourcesWithinTransaction,
+  markWorkWeeklySourceChangedWithinTransaction
+} from "./weekly-invalidation";
 
 export class WorkTodoNotFoundError extends Error {
   readonly code = "todo_not_found";
@@ -212,14 +217,21 @@ function eventPayload(input: {
   oldVersion: number | null;
   newVersion: number;
   occurredAt: string;
+  stateAfter: Pick<
+    WorkTodo,
+    "title" | "kind" | "status" | "ownerLabel" | "currentDueDate"
+      | "completedAt" | "deletedAt" | "version"
+  >;
 }) {
   return {
+    schemaVersion: 2,
     todoId: input.todoId,
     changedFields: input.changedFields,
     sourceFindingId: input.sourceFindingId ?? null,
     oldVersion: input.oldVersion,
     newVersion: input.newVersion,
-    occurredAt: input.occurredAt
+    occurredAt: input.occurredAt,
+    stateAfter: input.stateAfter
   };
 }
 
@@ -261,6 +273,27 @@ function activeMeetingTodoRows(
       AND origin = 'meeting_finding' AND deleted_at IS NULL
     ORDER BY created_at, id
   `).all(accountId, meetingId) as TodoRow[];
+}
+
+function insertTodoProjectLinks(
+  database: Database.Database,
+  input: { accountId: string; todoId: string; projectIds?: string[]; now: string }
+) {
+  const projectIds = [...(input.projectIds ?? [])].sort();
+  if (projectIds.length === 0) return;
+  const found = database.prepare(`
+    SELECT count(*) AS count FROM wr_projects
+    WHERE account_id = ? AND id IN (${projectIds.map(() => "?").join(",")})
+  `).get(input.accountId, ...projectIds) as { count: number };
+  if (found.count !== projectIds.length) {
+    throw new WorkReviewConflictError("work_project_not_found");
+  }
+  for (const projectId of projectIds) {
+    database.prepare(`
+      INSERT INTO wr_todo_projects(account_id, todo_id, project_id, created_at)
+      VALUES (?, ?, ?, ?)
+    `).run(input.accountId, input.todoId, projectId, input.now);
+  }
 }
 
 export class WorkTodoRepository {
@@ -355,10 +388,27 @@ export class WorkTodoRepository {
         sourceFindingId: input.sourceFindingId,
         oldVersion: input.oldVersion,
         newVersion: input.todo.version,
-        occurredAt: input.now
+        occurredAt: input.now,
+        stateAfter: {
+          title: input.todo.title,
+          kind: input.todo.kind,
+          status: input.todo.status,
+          ownerLabel: input.todo.ownerLabel,
+          currentDueDate: input.todo.currentDueDate,
+          completedAt: input.todo.completedAt,
+          deletedAt: input.todo.deletedAt,
+          version: input.todo.version
+        }
       }),
       now: input.now
     });
+    if (input.eventType !== "todo.deleted") {
+      markWorkWeeklySourceChangedWithinTransaction(this.database, {
+        accountId: input.accountId,
+        todoId: input.todo.id,
+        now: input.now
+      });
+    }
   }
 
   createManualTodo(input: CreateManualWorkTodoInput): WorkTodoMutationResult {
@@ -371,9 +421,15 @@ export class WorkTodoRepository {
       ownerLabel: input.ownerLabel,
       currentDueDate: input.currentDueDate,
       isImportant: input.isImportant,
-      myDayDate: input.myDayDate
+      myDayDate: input.myDayDate,
+      projectIds: input.projectIds
     }));
-    const requestFingerprint = fingerprint({ type: "create_manual", ...parsed });
+    const { projectIds, ...legacyRequest } = parsed;
+    const requestFingerprint = fingerprint({
+      type: "create_manual",
+      ...legacyRequest,
+      ...(projectIds?.length ? { projectIds: [...projectIds].sort() } : {})
+    });
     const run = this.database.transaction(() => {
       const replay = this.replayOperation(accountId, parsed.operationKey, requestFingerprint);
       if (replay) return replay;
@@ -397,6 +453,12 @@ export class WorkTodoRepository {
         now,
         now
       );
+      insertTodoProjectLinks(this.database, {
+        accountId,
+        todoId,
+        projectIds,
+        now
+      });
       const todo = toTodo(this.requireTodoRow(accountId, todoId));
       this.recordEvent({
         accountId,
@@ -433,13 +495,16 @@ export class WorkTodoRepository {
       currentDueDate: input.currentDueDate,
       isImportant: input.isImportant,
       myDayDate: input.myDayDate,
+      projectIds: input.projectIds,
       ownershipOverrideConfirmed: input.ownershipOverrideConfirmed
     }));
+    const { projectIds, ...legacyRequest } = parsed;
     const requestFingerprint = fingerprint({
       type: "create_from_finding",
       meetingId,
       findingId,
-      ...parsed
+      ...legacyRequest,
+      ...(projectIds?.length ? { projectIds: [...projectIds].sort() } : {})
     });
     const run = this.database.transaction(() => {
       const replay = this.replayOperation(accountId, parsed.operationKey, requestFingerprint);
@@ -511,6 +576,12 @@ export class WorkTodoRepository {
         now,
         now
       );
+      insertTodoProjectLinks(this.database, {
+        accountId,
+        todoId,
+        projectIds,
+        now
+      });
       const todo = toTodo(this.requireTodoRow(accountId, todoId));
       this.recordEvent({
         accountId,
@@ -545,57 +616,61 @@ export class WorkTodoRepository {
     ));
   }
 
-  listTodos(input: { accountId: string; view: WorkTodoView; day?: string | null }) {
+  listTodos(input: {
+    accountId: string;
+    view: WorkTodoView;
+    day?: string | null;
+    projectScope?: WorkProjectScopeFilter;
+  }) {
     const accountId = requireId(input.accountId, "work_todo_invalid_account");
     const view = parseOrConflict(WorkTodoViewSchema.safeParse(input.view), "work_todo_invalid_view");
-    let sql: string;
-    let parameters: unknown[] = [accountId];
+    const conditions = ["account_id = ?", "deleted_at IS NULL"];
+    const parameters: unknown[] = [accountId];
+    let orderBy: string;
     switch (view) {
       case "today": {
         const day = parseOrConflict(WorkTodoDateSchema.safeParse(input.day), "work_todo_invalid_day");
-        sql = `
-          SELECT * FROM wr_todos
-          WHERE account_id = ? AND my_day_date = ? AND status = 'open' AND deleted_at IS NULL
-          ORDER BY is_important DESC,
-            CASE WHEN current_due_date IS NULL THEN 1 ELSE 0 END,
-            current_due_date, updated_at DESC, id
-        `;
-        parameters = [accountId, day];
+        conditions.push("my_day_date = ?", "status = 'open'");
+        parameters.push(day);
+        orderBy = `is_important DESC,
+          CASE WHEN current_due_date IS NULL THEN 1 ELSE 0 END,
+          current_due_date, updated_at DESC, id`;
         break;
       }
       case "all":
-        sql = `
-          SELECT * FROM wr_todos
-          WHERE account_id = ? AND kind = 'self' AND status = 'open' AND deleted_at IS NULL
-          ORDER BY is_important DESC, updated_at DESC, id
-        `;
+        conditions.push("kind = 'self'", "status = 'open'");
+        orderBy = "is_important DESC, updated_at DESC, id";
         break;
       case "planned":
-        sql = `
-          SELECT * FROM wr_todos
-          WHERE account_id = ? AND current_due_date IS NOT NULL
-            AND status = 'open' AND deleted_at IS NULL
-          ORDER BY current_due_date, is_important DESC, updated_at DESC, id
-        `;
+        conditions.push("current_due_date IS NOT NULL", "status = 'open'");
+        orderBy = "current_due_date, is_important DESC, updated_at DESC, id";
         break;
       case "waiting":
-        sql = `
-          SELECT * FROM wr_todos
-          WHERE account_id = ? AND kind = 'waiting_for_other'
-            AND status = 'open' AND deleted_at IS NULL
-          ORDER BY is_important DESC,
-            CASE WHEN current_due_date IS NULL THEN 1 ELSE 0 END,
-            current_due_date, updated_at DESC, id
-        `;
+        conditions.push("kind = 'waiting_for_other'", "status = 'open'");
+        orderBy = `is_important DESC,
+          CASE WHEN current_due_date IS NULL THEN 1 ELSE 0 END,
+          current_due_date, updated_at DESC, id`;
         break;
       case "completed":
-        sql = `
-          SELECT * FROM wr_todos
-          WHERE account_id = ? AND status = 'completed' AND deleted_at IS NULL
-          ORDER BY completed_at DESC, updated_at DESC, id
-        `;
+        conditions.push("status = 'completed'");
+        orderBy = "completed_at DESC, updated_at DESC, id";
         break;
     }
+    const projectScope = input.projectScope ?? { kind: "all" as const };
+    if (projectScope.kind === "project") {
+      conditions.push(`EXISTS (
+        SELECT 1 FROM wr_todo_projects tp
+        WHERE tp.account_id = wr_todos.account_id
+          AND tp.todo_id = wr_todos.id AND tp.project_id = ?
+      )`);
+      parameters.push(projectScope.projectId);
+    } else if (projectScope.kind === "unassigned") {
+      conditions.push(`NOT EXISTS (
+        SELECT 1 FROM wr_todo_projects tp
+        WHERE tp.account_id = wr_todos.account_id AND tp.todo_id = wr_todos.id
+      )`);
+    }
+    const sql = `SELECT * FROM wr_todos WHERE ${conditions.join(" AND ")} ORDER BY ${orderBy}`;
     return (this.database.prepare(sql).all(...parameters) as TodoRow[]).map(toTodo);
   }
 
@@ -992,10 +1067,22 @@ export class WorkTodoRepository {
       const now = this.now();
       if (!row.deleted_at) {
         if (row.version !== parsed.expectedVersion) throw new WorkReviewVersionConflictError(row.version);
+        invalidateWorkWeeklySourcesWithinTransaction(this.database, {
+          accountId,
+          todoId,
+          now
+        });
         this.database.prepare(`
           UPDATE wr_todos SET deleted_at = ?, version = version + 1, updated_at = ?
           WHERE id = ? AND account_id = ? AND version = ? AND deleted_at IS NULL
         `).run(now, now, todoId, accountId, row.version);
+        this.database.prepare(`
+          DELETE FROM wr_todo_projects WHERE account_id = ? AND todo_id = ?
+        `).run(accountId, todoId);
+        this.database.prepare(`
+          DELETE FROM wr_project_operations
+          WHERE account_id = ? AND target_kind = 'todo_projects' AND target_id = ?
+        `).run(accountId, todoId);
       }
       const todo = toTodo(this.requireTodoRow(accountId, todoId, true));
       if (!row.deleted_at) {

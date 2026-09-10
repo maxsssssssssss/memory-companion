@@ -4,9 +4,10 @@ import type Database from "better-sqlite3";
 import {
   DATE_COMPANION_PROACTIVE_VALUE_CONTRACT_VERSION,
   DATE_COMPANION_PROACTIVE_VALUE_RESPONSE_VERSION,
+  DATE_COMPANION_HOME_CONTENT_VERSION,
   DateCompanionProactiveValueResponseSchema,
+  type DateCompanionGeneratedValue,
   type DateCompanionProactiveEvidence,
-  type DateCompanionProactiveValue,
   type DateCompanionProactiveValueContext,
   type DateCompanionProactiveValueResponse
 } from "@/lib/domain/date-companion-proactive-value";
@@ -24,8 +25,10 @@ import {
 import { getDateCompanionDatabase } from "./db";
 import {
   buildCurrentInteractionProactiveValueContext,
-  buildPersonRelationshipProactiveValueContext
+  buildPersonRelationshipProactiveValueContext,
+  withDateCompanionHomeContext
 } from "./proactive-value-context";
+import { validateDateCompanionHomeContent } from "./home-content";
 
 type CacheRow = {
   source_fingerprint: string;
@@ -71,6 +74,7 @@ export function dateCompanionProactiveValueFingerprint(input: {
   return createHash("sha256").update(JSON.stringify({
     contractVersion: DATE_COMPANION_PROACTIVE_VALUE_CONTRACT_VERSION,
     sourceAttributionVersion: DATE_COMPANION_PROACTIVE_SOURCE_ATTRIBUTION_VERSION,
+    homeContentVersion: DATE_COMPANION_HOME_CONTENT_VERSION,
     accountId: input.accountId,
     provider: input.provider,
     model: input.model,
@@ -81,6 +85,8 @@ export function dateCompanionProactiveValueFingerprint(input: {
     mappingVersion: input.context.mappingVersion,
     interactionVersion: input.context.interactionVersion ?? null,
     confirmationFingerprint: input.context.confirmationFingerprint ?? null,
+    referenceDate: input.context.referenceDate ?? null,
+    promises: input.context.promises ?? [],
     evidence: input.context.evidence.map((evidence) => ({
       evidenceId: evidence.evidenceId,
       uploadId: evidence.uploadId,
@@ -94,7 +100,10 @@ export function dateCompanionProactiveValueFingerprint(input: {
   })).digest("hex");
 }
 
-function ruleFallback(context: DateCompanionProactiveValueContext): DateCompanionProactiveValue | null {
+function ruleFallback(context: DateCompanionProactiveValueContext): DateCompanionGeneratedValue | null {
+  if (context.scope === "person_relationship") {
+    return { home: { about: [], beforeMeeting: [] }, evidenceIds: [] };
+  }
   const selectedEvidence = context.evidence.slice(0, 4);
   if (selectedEvidence.length === 0) return null;
   const selectedContext = { ...context, evidence: selectedEvidence };
@@ -132,10 +141,16 @@ function parseCachedValue(row: CacheRow, context: DateCompanionProactiveValueCon
   if (!row.payload_json) return null;
   try {
     const parsed = JSON.parse(row.payload_json) as unknown;
-    return validateCanonicalDateCompanionProactiveValue({ context, value: parsed }).value;
+    return validateGeneratedValue(context, parsed);
   } catch {
     return null;
   }
+}
+
+function validateGeneratedValue(context: DateCompanionProactiveValueContext, value: unknown) {
+  return value && typeof value === "object" && "home" in value
+    ? validateDateCompanionHomeContent({ context, value }).value
+    : validateCanonicalDateCompanionProactiveValue({ context, value }).value;
 }
 
 function cacheClaim(input: {
@@ -219,7 +234,7 @@ function completeCache(input: {
   accountId: string;
   fingerprint: string;
   status: "generated" | "fallback";
-  value: DateCompanionProactiveValue;
+  value: DateCompanionGeneratedValue;
   failureCode?: string;
   now: string;
   claimToken: string;
@@ -246,7 +261,7 @@ function repairInvalidCache(input: {
   database: Database.Database;
   accountId: string;
   fingerprint: string;
-  value: DateCompanionProactiveValue;
+  value: DateCompanionGeneratedValue;
   failureCode: string;
   now: string;
 }) {
@@ -282,7 +297,7 @@ function response(input: {
   status: "ready" | "fallback";
   fingerprint: string;
   cacheHit: boolean;
-  value: DateCompanionProactiveValue;
+  value: DateCompanionGeneratedValue;
   failureCode?: string;
 }): DateCompanionProactiveValueResponse {
   return DateCompanionProactiveValueResponseSchema.parse({
@@ -422,8 +437,15 @@ export function createDateCompanionProactiveValueService(input: {
 
     if (!claim.claimToken) throw new Error("proactive_value_claim_token_missing");
 
-    const run = await provider.generate({ context, sourceFingerprint: fingerprint });
-    const value = run.value ?? ruleFallback(context);
+    const run = await provider.generate({ context, sourceFingerprint: fingerprint }).catch(() => ({
+      status: "fallback" as const, value: null, sourceFingerprint: fingerprint,
+      failureCode: "provider_error"
+    }));
+    const accepted = run.status === "generated" && run.sourceFingerprint === fingerprint
+      ? validateGeneratedValue(context, run.value)
+      : null;
+    const value = accepted ?? ruleFallback(context);
+    const failureCode = run.failureCode ?? (accepted ? undefined : "invalid_provider_result");
     if (!value) {
       const cleared = clearProcessingCache({
         database: input.dateCompanionDatabase,
@@ -455,14 +477,14 @@ export function createDateCompanionProactiveValueService(input: {
         failureCode: "fallback_invalid"
       });
     }
-    const status = run.value ? "generated" as const : "fallback" as const;
+    const status = accepted ? "generated" as const : "fallback" as const;
     const completed = completeCache({
       database: input.dateCompanionDatabase,
       accountId,
       fingerprint,
       status,
       value,
-      ...(run.failureCode ? { failureCode: run.failureCode } : {}),
+      ...(failureCode ? { failureCode } : {}),
       now: now(),
       claimToken: claim.claimToken
     });
@@ -491,12 +513,19 @@ export function createDateCompanionProactiveValueService(input: {
     }
     return response({
       context,
-      status: run.value ? "ready" : "fallback",
+      status: accepted ? "ready" : "fallback",
       fingerprint,
       cacheHit: false,
       value,
-      ...(run.failureCode ? { failureCode: run.failureCode } : {})
+      ...(failureCode ? { failureCode } : {})
     });
+  }
+
+  function discardChangedResult(accountId: string, result: DateCompanionProactiveValueResponse) {
+    if (!result.sourceFingerprint) return;
+    input.dateCompanionDatabase.prepare(`
+      DELETE FROM dc_proactive_value_cache WHERE user_id = ? AND source_fingerprint = ?
+    `).run(accountId, result.sourceFingerprint);
   }
 
   async function getCurrentInteraction(inputValue: { accountId: string; interactionId: string }) {
@@ -533,6 +562,7 @@ export function createDateCompanionProactiveValueService(input: {
           })
         : null;
       if (!latest.context || latestFingerprint !== generated.sourceFingerprint) {
+        discardChangedResult(inputValue.accountId, generated);
         return unavailableResponse({
           scope: "current_interaction",
           relationshipId: owned!.relationship_id,
@@ -541,6 +571,7 @@ export function createDateCompanionProactiveValueService(input: {
         });
       }
     } catch {
+      discardChangedResult(inputValue.accountId, generated);
       return unavailableResponse({
         scope: "current_interaction",
         relationshipId: owned!.relationship_id,
@@ -552,6 +583,13 @@ export function createDateCompanionProactiveValueService(input: {
   }
 
   async function getPersonRelationship(inputValue: { accountId: string; relationshipId: string }) {
+    const homeContext = (context: DateCompanionProactiveValueContext) => withDateCompanionHomeContext({
+      dateCompanionDatabase: input.dateCompanionDatabase,
+      memoryDatabase: input.memoryDatabase,
+      accountId: inputValue.accountId,
+      context,
+      referenceDate: new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Shanghai" }).format(new Date(now()))
+    });
     const resolution = relationshipContextBuilder({
       dateCompanionDatabase: input.dateCompanionDatabase,
       memoryDatabase: input.memoryDatabase,
@@ -564,7 +602,12 @@ export function createDateCompanionProactiveValueService(input: {
         failureCode: resolution.status
       });
     }
-    const generated = await generate(inputValue.accountId, resolution.context);
+    const selectedContext = homeContext(resolution.context);
+    if (!selectedContext) {
+      return unavailableResponse({ scope: "person_relationship", relationshipId: inputValue.relationshipId,
+        failureCode: "source_unavailable" });
+    }
+    const generated = await generate(inputValue.accountId, selectedContext);
     if (generated.status === "processing" || generated.status === "unavailable") return generated;
     try {
       const latest = relationshipContextBuilder({
@@ -572,15 +615,17 @@ export function createDateCompanionProactiveValueService(input: {
         memoryDatabase: input.memoryDatabase,
         ...inputValue
       });
-      const latestFingerprint = latest.context
+      const latestContext = latest.context ? homeContext(latest.context) : null;
+      const latestFingerprint = latestContext
         ? dateCompanionProactiveValueFingerprint({
             accountId: inputValue.accountId,
-            context: latest.context,
+            context: latestContext,
             provider: provider.provider,
             model: provider.model
           })
         : null;
       if (!latest.context || latestFingerprint !== generated.sourceFingerprint) {
+        discardChangedResult(inputValue.accountId, generated);
         return unavailableResponse({
           scope: "person_relationship",
           relationshipId: inputValue.relationshipId,
@@ -588,6 +633,7 @@ export function createDateCompanionProactiveValueService(input: {
         });
       }
     } catch {
+      discardChangedResult(inputValue.accountId, generated);
       return unavailableResponse({
         scope: "person_relationship",
         relationshipId: inputValue.relationshipId,

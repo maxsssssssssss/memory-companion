@@ -1,4 +1,3 @@
-import { NextResponse } from "next/server";
 
 import { CreateWorkTodoFromFindingRequestSchema } from "@/lib/domain/work-todo";
 import { WorkReviewIdSchema } from "@/lib/domain/work-review";
@@ -10,6 +9,7 @@ import {
   workReviewRouteError
 } from "@/lib/server/work-review/route-utils";
 import {
+  isWorkReviewProjectsEnabled,
   isWorkReviewTodoMeetingProjectionEnabled
 } from "@/lib/server/work-review/runtime-config";
 import { WorkTodoRepository } from "@/lib/server/work-review/todo-repository";
@@ -25,11 +25,14 @@ export async function POST(
   const meetingId = WorkReviewIdSchema.safeParse(resolved.meetingId);
   const findingId = WorkReviewIdSchema.safeParse(resolved.findingId);
   if (!meetingId.success || !findingId.success) {
-    return NextResponse.json({ error: "invalid_finding_path" }, { status: 400 });
+    return workReviewPrivateJson({ error: "invalid_finding_path" }, 400);
   }
   try {
     const auth = await requireAuthContext(request);
     const body = CreateWorkTodoFromFindingRequestSchema.parse(await request.json());
+    if ((body.projectIds?.length ?? 0) > 0 && !isWorkReviewProjectsEnabled()) {
+      return workReviewFeatureDisabled("projects_disabled");
+    }
     const result = new WorkTodoRepository(getWorkReviewDatabase()).createTodoFromFinding({
       accountId: auth.user.id,
       meetingId: meetingId.data,

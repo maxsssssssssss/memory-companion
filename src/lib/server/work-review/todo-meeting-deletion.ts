@@ -1,6 +1,8 @@
 import type Database from "better-sqlite3";
 import { randomUUID } from "node:crypto";
 
+import { invalidateWorkWeeklySourcesWithinTransaction } from "./weekly-invalidation";
+
 type ActiveLinkedTodoRow = {
   id: string;
   version: number;
@@ -32,6 +34,16 @@ function insertMeetingDeletionTodoEvent(
     oldVersion: number;
     newVersion: number;
     now: string;
+    stateAfter: {
+      title: string;
+      kind: "self" | "waiting_for_other";
+      status: "open" | "completed";
+      ownerLabel: string | null;
+      currentDueDate: string | null;
+      completedAt: string | null;
+      deletedAt: string | null;
+      version: number;
+    };
   }
 ) {
   database.prepare(`
@@ -44,15 +56,49 @@ function insertMeetingDeletionTodoEvent(
     input.todoId,
     input.eventType,
     JSON.stringify({
+      schemaVersion: 2,
       todoId: input.todoId,
       changedFields: input.changedFields,
       sourceFindingId: input.sourceFindingId,
       oldVersion: input.oldVersion,
       newVersion: input.newVersion,
-      occurredAt: input.now
+      occurredAt: input.now,
+      stateAfter: input.stateAfter
     }),
     input.now
   );
+}
+
+function readTodoEventState(
+  database: Database.Database,
+  accountId: string,
+  todoId: string
+) {
+  const row = database.prepare(`
+    SELECT title, kind, status, owner_label, current_due_date,
+      completed_at, deleted_at, version
+    FROM wr_todos WHERE account_id = ? AND id = ?
+  `).get(accountId, todoId) as {
+    title: string;
+    kind: "self" | "waiting_for_other";
+    status: "open" | "completed";
+    owner_label: string | null;
+    current_due_date: string | null;
+    completed_at: string | null;
+    deleted_at: string | null;
+    version: number;
+  } | undefined;
+  if (!row) throw new Error("work_todo_linked_state_missing");
+  return {
+    title: row.title,
+    kind: row.kind,
+    status: row.status,
+    ownerLabel: row.owner_label,
+    currentDueDate: row.current_due_date,
+    completedAt: row.completed_at,
+    deletedAt: row.deleted_at,
+    version: row.version
+  };
 }
 
 /** These helpers never open a transaction; the caller must use the meeting deletion transaction. */
@@ -73,12 +119,24 @@ export function deleteLinkedMeetingTodosWithinTransaction(
   const rows = activeLinkedTodos(database, input.accountId, input.meetingId);
   for (const row of rows) {
     const nextVersion = row.version + 1;
+    invalidateWorkWeeklySourcesWithinTransaction(database, {
+      accountId: input.accountId,
+      todoId: row.id,
+      now: input.now
+    });
     const result = database.prepare(`
       UPDATE wr_todos
       SET deleted_at = ?, updated_at = ?, version = ?
       WHERE id = ? AND account_id = ? AND version = ? AND deleted_at IS NULL
     `).run(input.now, input.now, nextVersion, row.id, input.accountId, row.version);
     if (result.changes !== 1) throw new Error("work_todo_linked_delete_conflict");
+    database.prepare(`
+      DELETE FROM wr_todo_projects WHERE account_id = ? AND todo_id = ?
+    `).run(input.accountId, row.id);
+    database.prepare(`
+      DELETE FROM wr_project_operations
+      WHERE account_id = ? AND target_kind = 'todo_projects' AND target_id = ?
+    `).run(input.accountId, row.id);
     insertMeetingDeletionTodoEvent(database, {
       eventId: `wrte_${idFactory()}`,
       accountId: input.accountId,
@@ -88,7 +146,8 @@ export function deleteLinkedMeetingTodosWithinTransaction(
       sourceFindingId: row.source_finding_id,
       oldVersion: row.version,
       newVersion: nextVersion,
-      now: input.now
+      now: input.now,
+      stateAfter: readTodoEventState(database, input.accountId, row.id)
     });
   }
   return rows.map((row) => row.id);
@@ -132,7 +191,8 @@ export function detachLinkedMeetingTodosWithinTransaction(
       sourceFindingId: row.source_finding_id,
       oldVersion: row.version,
       newVersion: nextVersion,
-      now: input.now
+      now: input.now,
+      stateAfter: readTodoEventState(database, input.accountId, row.id)
     });
   }
   return rows.map((row) => row.id);

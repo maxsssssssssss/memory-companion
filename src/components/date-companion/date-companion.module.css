@@ -388,6 +388,15 @@
 .preparePreview b { margin-top: 10px; font-family: "Noto Serif SC", "Songti SC", Georgia, serif; font-size: 23px; font-weight: 550; line-height: 1.45; }
 .preparePreview p { margin-top: 9px; color: var(--dc-muted); font-size: 11px; line-height: 1.6; }
 .preparePreview .sideLink { margin-top: 24px; }
+.homeContentList { display: grid; margin: 20px 0; padding: 0; gap: 22px; list-style: none; }
+.homeContentItem { min-width: 0; }
+.homeContentItem + .homeContentItem { padding-top: 18px; border-top: 1px solid var(--dc-border-subtle); }
+.homeContentItem > small { color: var(--dc-muted); font-size: 11px; }
+.homeContentItem > .homeContentText { margin: 8px 0; color: var(--dc-text-primary); font-size: 18px; line-height: 1.65; }
+.homeContentDate { color: var(--dc-muted); font-size: 11px; }
+.homeContentItem .sourceDetails { padding-top: 10px; }
+.homeContentStatus { margin: 26px 0; color: var(--dc-muted); font-size: 14px; line-height: 1.75; }
+.homeContentStatus > span { display: block; margin-top: 8px; font-size: 12px; }
 .remembered { display: grid; grid-column: 1 / 13; grid-row: 3; grid-template-columns: 150px 1fr 150px; align-items: center; margin: 4px 0 0; padding: 38px 50px; gap: 22px; border-radius: 32px; background: #efe2de; }
 .remembered > p { color: var(--dc-muted); font-size: 10px; font-weight: 750; }
 .remembered blockquote { font-family: "Noto Serif SC", "Songti SC", Georgia, serif; font-size: 27px; line-height: 1.55; }

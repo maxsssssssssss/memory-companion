@@ -5,8 +5,9 @@ import { useRouter } from "next/navigation";
 
 import styles from "./daily-reflection.module.css";
 import { armVoiceAutostartIntent } from "./reflection-capture-intent";
-import { REFLECTION_ROUTES } from "./reflection-product";
+import { REFLECTION_ROUTES, reflectionSessionPath } from "./reflection-product";
 import { useReflectionApp } from "./reflection-app-shell";
+import { ReflectionRecordingRecovery } from "./reflection-recording-recovery";
 
 type ReflectionHomeProps = Readonly<{
   dateKey: string;
@@ -43,7 +44,7 @@ function UploadIcon() {
 
 export function ReflectionHome({ dateKey, dateLabel, weekdayLabel }: ReflectionHomeProps) {
   const router = useRouter();
-  const { browserRecordingEnabled, toySyncEnabled } = useReflectionApp();
+  const { browserRecordingEnabled, toySyncEnabled, session } = useReflectionApp();
 
   const startVoiceCapture = () => {
     if (!browserRecordingEnabled) return;
@@ -53,6 +54,11 @@ export function ReflectionHome({ dateKey, dateLabel, weekdayLabel }: ReflectionH
 
   return (
     <main className={`${styles.productPage} ${styles.homePage}`}>
+      <ReflectionRecordingRecovery session={session} compact />
+      <nav className={styles.recordingRecoveryActions} aria-label="复盘记录">
+        {!session.recordingRecovery && session.reflectionId ? <Link href={reflectionSessionPath(session.reflectionId)}>继续这次复盘</Link> : null}
+        <Link href="/reflection/sessions">最近复盘</Link>
+      </nav>
       <section className={styles.homeCaptureLanding} aria-labelledby="reflection-home-action">
         <time className={styles.homeDate} dateTime={dateKey}>
           <strong>{dateLabel}</strong>

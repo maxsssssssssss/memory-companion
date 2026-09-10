@@ -8,6 +8,7 @@ import { WorkMeetingCandidateStructuredDataSchema } from "@/lib/domain/work-revi
 
 import { openWorkReviewDatabase } from "./db";
 import {
+  WorkReviewAnalysisDeadlineExceededError,
   WorkReviewConflictError,
   WorkReviewLeaseLostError,
   WorkReviewNotFoundError,
@@ -182,6 +183,12 @@ describe("WorkReviewRepository", () => {
       expect(fileDatabase.pragma("synchronous", { simple: true })).toBe(1);
       expect(fileDatabase.pragma("user_version", { simple: true }))
         .toBe(WORK_REVIEW_SCHEMA_VERSION);
+      expect((fileDatabase.prepare("PRAGMA table_info(wr_processing_attempts)").all() as
+        Array<{ name: string }>).map((column) => column.name)).toContain("deadline_at");
+      expect(fileDatabase.prepare(`
+        SELECT name FROM sqlite_master
+        WHERE type = 'table' AND name = 'wr_analysis_checkpoints'
+      `).get()).toEqual({ name: "wr_analysis_checkpoints" });
     } finally {
       fileDatabase.close();
       rmSync(root, { recursive: true, force: true });
@@ -358,6 +365,334 @@ describe("WorkReviewRepository", () => {
       accountId: "account_a", meetingId: transcript.created.meeting.id,
       fence: oldFence, now: "2026-09-01T00:00:02.000Z"
     })).toThrow(WorkReviewLeaseLostError);
+  });
+
+  it("stores immutable analysis checkpoints and reuses them only under an exact current context", () => {
+    const transcript = publishTranscript();
+    const meetingId = transcript.created.meeting.id;
+    repository.queueStage({ accountId: "account_a", meetingId, stage: "meeting_analysis" });
+    const firstFence = repository.claimProcessingAttempt({
+      accountId: "account_a",
+      meetingId,
+      stage: "meeting_analysis",
+      leaseOwner: "checkpoint_analysis_1",
+      leaseDurationMs: 60_000,
+      pipelineVersion: "v1",
+      providerProfile: "extractor_test",
+      promptVersion: "prompt_v1",
+      deadlineAt: "2026-09-01T00:00:30.000Z",
+      now: initialNow
+    })!;
+    const checkpointInput = {
+      accountId: "account_a",
+      meetingId,
+      fence: firstFence,
+      publicationId: transcript.published.publication.publicationId,
+      canonicalContentDigest: transcript.published.publication.contentDigest,
+      checkpointKind: "extractor_block" as const,
+      logicalInputDigest: hashA,
+      providerContractDigest: hashB,
+      outputSchemaVersion: "work_meeting_candidates_v1",
+      now: "2026-09-01T00:00:01.000Z"
+    };
+    const first = repository.saveAnalysisCheckpoint({
+      ...checkpointInput,
+      payload: { items: [], metadata: { count: 0, complete: true } }
+    });
+    const replay = repository.saveAnalysisCheckpoint({
+      ...checkpointInput,
+      payload: { metadata: { complete: true, count: 0 }, items: [] }
+    });
+
+    expect(first).toMatchObject({
+      reused: false,
+      checkpoint: { originAttemptVersion: firstFence.attemptVersion, payloadDigest: expect.stringMatching(/^[a-f0-9]{64}$/u) }
+    });
+    expect(replay).toMatchObject({ reused: true, checkpoint: { payload: first.checkpoint.payload } });
+    expect(repository.readAnalysisCheckpoint(checkpointInput)).toEqual(first.checkpoint);
+    expect(repository.readAnalysisCheckpoint({
+      ...checkpointInput,
+      providerContractDigest: "c".repeat(64)
+    })).toBeNull();
+    expect(() => repository.saveAnalysisCheckpoint({
+      ...checkpointInput,
+      payload: { items: [{ unsafe: "different" }] }
+    })).toThrowError(expect.objectContaining({ code: "work_review_analysis_checkpoint_conflict" }));
+    expect(() => repository.readAnalysisCheckpoint({
+      ...checkpointInput,
+      accountId: "account_b"
+    })).toThrow(WorkReviewNotFoundError);
+
+    repository.markStageFailed({
+      accountId: "account_a",
+      meetingId,
+      fence: firstFence,
+      errorCode: "provider_failed",
+      now: "2026-09-01T00:00:02.000Z"
+    });
+    repository.queueStage({ accountId: "account_a", meetingId, stage: "meeting_analysis" });
+    const replacementFence = repository.claimProcessingAttempt({
+      accountId: "account_a",
+      meetingId,
+      stage: "meeting_analysis",
+      leaseOwner: "checkpoint_analysis_2",
+      leaseDurationMs: 60_000,
+      pipelineVersion: "v1",
+      providerProfile: "extractor_test",
+      promptVersion: "prompt_v1",
+      deadlineAt: "2026-09-01T00:00:30.000Z",
+      now: "2026-09-01T00:00:03.000Z"
+    })!;
+    const replacementInput = {
+      ...checkpointInput,
+      fence: replacementFence,
+      now: "2026-09-01T00:00:04.000Z"
+    };
+    expect(repository.readAnalysisCheckpoint(replacementInput)).toMatchObject({
+      originAttemptVersion: firstFence.attemptVersion,
+      payload: first.checkpoint.payload
+    });
+    expect(repository.saveAnalysisCheckpoint({
+      ...replacementInput,
+      payload: first.checkpoint.payload
+    })).toMatchObject({ reused: true, checkpoint: { originAttemptVersion: firstFence.attemptVersion } });
+    expect(() => repository.saveAnalysisCheckpoint({
+      ...checkpointInput,
+      now: "2026-09-01T00:00:04.000Z",
+      payload: first.checkpoint.payload
+    })).toThrow(WorkReviewLeaseLostError);
+
+    database.prepare(`
+      UPDATE wr_analysis_checkpoints SET payload_digest = ?
+      WHERE account_id = ? AND meeting_id = ?
+    `).run("d".repeat(64), "account_a", meetingId);
+    expect(() => repository.readAnalysisCheckpoint(replacementInput))
+      .toThrowError(expect.objectContaining({ code: "work_review_analysis_checkpoint_invalid" }));
+  });
+
+  it("enforces an immutable attempt deadline but still records terminal failure after expiry", () => {
+    const transcript = publishTranscript();
+    const meetingId = transcript.created.meeting.id;
+    repository.queueStage({ accountId: "account_a", meetingId, stage: "meeting_analysis" });
+    const fence = repository.claimProcessingAttempt({
+      accountId: "account_a",
+      meetingId,
+      stage: "meeting_analysis",
+      leaseOwner: "deadline_analysis",
+      leaseDurationMs: 60_000,
+      pipelineVersion: "v1",
+      providerProfile: "extractor_test",
+      promptVersion: "prompt_v1",
+      deadlineAt: "2026-09-01T00:00:10+00:00",
+      now: initialNow
+    })!;
+    const expiredNow = "2026-09-01T00:00:10.000Z";
+
+    expect(fence.deadlineAt).toBe(expiredNow);
+    expect(() => repository.saveAnalysisCheckpoint({
+      accountId: "account_a",
+      meetingId,
+      fence,
+      publicationId: transcript.published.publication.publicationId,
+      canonicalContentDigest: transcript.published.publication.contentDigest,
+      checkpointKind: "extractor_block",
+      logicalInputDigest: hashA,
+      providerContractDigest: hashB,
+      outputSchemaVersion: "work_meeting_candidates_v1",
+      payload: { items: [] },
+      now: expiredNow
+    })).toThrow(WorkReviewAnalysisDeadlineExceededError);
+    expect(() => repository.markAnalysisVerifying({
+      accountId: "account_a", meetingId, fence, now: expiredNow
+    })).toThrow(WorkReviewAnalysisDeadlineExceededError);
+
+    expect(repository.markStageFailed({
+      accountId: "account_a",
+      meetingId,
+      fence,
+      errorCode: "work_analysis_deadline_exceeded",
+      now: expiredNow
+    }).analysisStatus).toBe("failed");
+    expect(() => database.prepare(`
+      UPDATE wr_processing_attempts SET deadline_at = ?
+      WHERE account_id = ? AND meeting_id = ? AND stage = 'meeting_analysis'
+    `).run("2026-09-01T00:01:00.000Z", "account_a", meetingId))
+      .toThrow(/work_review_processing_deadline_immutable/u);
+  });
+
+  it("samples implicit checkpoint and publication time only after the IMMEDIATE transaction begins", () => {
+    const transcript = publishTranscript();
+    const meetingId = transcript.created.meeting.id;
+    repository.queueStage({ accountId: "account_a", meetingId, stage: "meeting_analysis" });
+    const fence = repository.claimProcessingAttempt({
+      accountId: "account_a",
+      meetingId,
+      stage: "meeting_analysis",
+      leaseOwner: "deadline_lock_analysis",
+      leaseDurationMs: 60_000,
+      pipelineVersion: "v1",
+      providerProfile: "extractor_test",
+      promptVersion: "prompt_v1",
+      deadlineAt: "2026-09-01T00:00:10.000Z",
+      now: initialNow
+    })!;
+    const sampledTransactionStates: boolean[] = [];
+    repository = new WorkReviewRepository(database, {
+      now: () => {
+        sampledTransactionStates.push(database.inTransaction);
+        return "2026-09-01T00:00:10.000Z";
+      },
+      idFactory: () => `generated_${++generatedId}`
+    });
+    const checkpointInput = {
+      accountId: "account_a",
+      meetingId,
+      fence,
+      publicationId: transcript.published.publication.publicationId,
+      canonicalContentDigest: transcript.published.publication.contentDigest,
+      checkpointKind: "extractor_block" as const,
+      logicalInputDigest: hashA,
+      providerContractDigest: hashB,
+      outputSchemaVersion: "work_meeting_candidates_v1"
+    };
+
+    expect(() => repository.readAnalysisCheckpoint(checkpointInput))
+      .toThrow(WorkReviewAnalysisDeadlineExceededError);
+    expect(() => repository.saveAnalysisCheckpoint({
+      ...checkpointInput,
+      payload: { items: [] }
+    })).toThrow(WorkReviewAnalysisDeadlineExceededError);
+    expect(() => repository.markAnalysisVerifying({
+      accountId: "account_a", meetingId, fence
+    })).toThrow(WorkReviewAnalysisDeadlineExceededError);
+
+    repository.markAnalysisVerifying({
+      accountId: "account_a",
+      meetingId,
+      fence,
+      now: "2026-09-01T00:00:09.000Z"
+    });
+    const implicitCallsBeforePublish = sampledTransactionStates.length;
+    expect(() => repository.publishAnalysisResult({
+      accountId: "account_a",
+      meetingId,
+      fence,
+      canonicalContentDigest: transcript.published.publication.contentDigest,
+      candidates: []
+    })).toThrow(WorkReviewAnalysisDeadlineExceededError);
+
+    expect(sampledTransactionStates).toEqual([true, true, true, true]);
+    expect(sampledTransactionStates).toHaveLength(implicitCallsBeforePublish + 1);
+    expect(repository.getMeeting("account_a", meetingId)).toMatchObject({
+      analysisStatus: "verifying",
+      reviewStatus: "not_started"
+    });
+    expect(repository.listCandidates("account_a", meetingId)).toEqual([]);
+  });
+
+  it("keeps checkpoints on failed publication and clears them in the successful publication transaction", () => {
+    const transcript = publishTranscript();
+    const meetingId = transcript.created.meeting.id;
+    repository.queueStage({ accountId: "account_a", meetingId, stage: "meeting_analysis" });
+    const fence = repository.claimProcessingAttempt({
+      accountId: "account_a",
+      meetingId,
+      stage: "meeting_analysis",
+      leaseOwner: "publish_checkpoint_analysis",
+      leaseDurationMs: 60_000,
+      pipelineVersion: "v1",
+      providerProfile: "extractor_test",
+      promptVersion: "prompt_v1"
+    })!;
+    repository.saveAnalysisCheckpoint({
+      accountId: "account_a",
+      meetingId,
+      fence,
+      publicationId: transcript.published.publication.publicationId,
+      canonicalContentDigest: transcript.published.publication.contentDigest,
+      checkpointKind: "verifier_batch",
+      logicalInputDigest: hashA,
+      providerContractDigest: hashB,
+      outputSchemaVersion: "work_meeting_claim_evaluations_v1",
+      payload: { items: [] }
+    });
+    repository.markAnalysisVerifying({ accountId: "account_a", meetingId, fence });
+
+    expect(() => repository.publishAnalysisResult({
+      accountId: "account_a",
+      meetingId,
+      fence,
+      canonicalContentDigest: "f".repeat(64),
+      candidates: []
+    })).toThrowError(expect.objectContaining({ code: "work_review_canonical_digest_mismatch" }));
+    expect((database.prepare(`
+      SELECT count(*) AS count FROM wr_analysis_checkpoints
+      WHERE account_id = ? AND meeting_id = ?
+    `).get("account_a", meetingId) as { count: number }).count).toBe(1);
+
+    repository.publishAnalysisResult({
+      accountId: "account_a",
+      meetingId,
+      fence,
+      canonicalContentDigest: transcript.published.publication.contentDigest,
+      candidates: []
+    });
+    expect((database.prepare(`
+      SELECT count(*) AS count FROM wr_analysis_checkpoints
+      WHERE account_id = ? AND meeting_id = ?
+    `).get("account_a", meetingId) as { count: number }).count).toBe(0);
+  });
+
+  it("rejects a stale analysis fence at the final atomic publication boundary", () => {
+    const transcript = publishTranscript();
+    repository.queueStage({
+      accountId: "account_a",
+      meetingId: transcript.created.meeting.id,
+      stage: "meeting_analysis"
+    });
+    const staleFence = repository.claimProcessingAttempt({
+      accountId: "account_a",
+      meetingId: transcript.created.meeting.id,
+      stage: "meeting_analysis",
+      leaseOwner: "stale_analysis",
+      leaseDurationMs: 1_000,
+      pipelineVersion: "v1",
+      providerProfile: "extractor_test",
+      promptVersion: "prompt_v1",
+      now: "2026-09-01T00:00:00.000Z"
+    })!;
+    repository.markAnalysisVerifying({
+      accountId: "account_a",
+      meetingId: transcript.created.meeting.id,
+      fence: staleFence,
+      now: "2026-09-01T00:00:00.500Z"
+    });
+    expect(repository.claimProcessingAttempt({
+      accountId: "account_a",
+      meetingId: transcript.created.meeting.id,
+      stage: "meeting_analysis",
+      leaseOwner: "replacement_analysis",
+      leaseDurationMs: 60_000,
+      pipelineVersion: "v1",
+      providerProfile: "extractor_test",
+      promptVersion: "prompt_v1",
+      now: "2026-09-01T00:00:02.000Z"
+    })).not.toBeNull();
+    expect(() => repository.publishAnalysisResult({
+      accountId: "account_a",
+      meetingId: transcript.created.meeting.id,
+      fence: staleFence,
+      canonicalContentDigest: transcript.published.publication.contentDigest,
+      candidates: [],
+      now: "2026-09-01T00:00:02.000Z"
+    })).toThrow(WorkReviewLeaseLostError);
+    expect((database.prepare(`
+      SELECT
+        (SELECT COUNT(*) FROM wr_meeting_candidates) AS candidates,
+        (SELECT COUNT(*) FROM wr_atomic_claims) AS claims,
+        (SELECT COUNT(*) FROM wr_claim_evaluations) AS evaluations
+    `).get() as { candidates: number; claims: number; evaluations: number }))
+      .toEqual({ candidates: 0, claims: 0, evaluations: 0 });
   });
 
   it("rejects empty, duplicate, cross-upload, and invalid canonical segments", () => {
@@ -556,6 +891,38 @@ describe("WorkReviewRepository", () => {
 
   it("writes a tombstone before deleting derived authority and blocks late publication", () => {
     const transcript = publishTranscript();
+    repository.queueStage({
+      accountId: "account_a",
+      meetingId: transcript.created.meeting.id,
+      stage: "meeting_analysis"
+    });
+    const analysisFence = repository.claimProcessingAttempt({
+      accountId: "account_a",
+      meetingId: transcript.created.meeting.id,
+      stage: "meeting_analysis",
+      leaseOwner: "late_analysis",
+      leaseDurationMs: 60_000,
+      pipelineVersion: "v1",
+      providerProfile: "extractor_test",
+      promptVersion: "prompt_v1"
+    })!;
+    const checkpointInput = {
+      accountId: "account_a",
+      meetingId: transcript.created.meeting.id,
+      fence: analysisFence,
+      publicationId: transcript.published.publication.publicationId,
+      canonicalContentDigest: transcript.published.publication.contentDigest,
+      checkpointKind: "extractor_block" as const,
+      logicalInputDigest: hashA,
+      providerContractDigest: hashB,
+      outputSchemaVersion: "work_meeting_candidates_v1"
+    };
+    repository.saveAnalysisCheckpoint({ ...checkpointInput, payload: { items: [] } });
+    repository.markAnalysisVerifying({
+      accountId: "account_a",
+      meetingId: transcript.created.meeting.id,
+      fence: analysisFence
+    });
     const deletion = repository.deleteMeeting({
       accountId: "account_a", meetingId: transcript.created.meeting.id
     });
@@ -572,6 +939,20 @@ describe("WorkReviewRepository", () => {
       fence: transcript.fence,
       segments: [segment(transcript.created.meeting.sourceUploadId)]
     })).toThrowError(expect.objectContaining({ code: "work_review_tombstoned" }));
+    expect(() => repository.publishAnalysisResult({
+      accountId: "account_a",
+      meetingId: transcript.created.meeting.id,
+      fence: analysisFence,
+      canonicalContentDigest: transcript.published.publication.contentDigest,
+      candidates: []
+    })).toThrowError(expect.objectContaining({ code: "work_review_tombstoned" }));
+    expect((database.prepare(`
+      SELECT count(*) AS count FROM wr_analysis_checkpoints
+      WHERE account_id = ? AND meeting_id = ?
+    `).get("account_a", transcript.created.meeting.id) as { count: number }).count).toBe(0);
+    expect(() => repository.readAnalysisCheckpoint(checkpointInput))
+      .toThrowError(expect.objectContaining({ code: "work_review_tombstoned" }));
+    expect(database.pragma("foreign_key_check")).toEqual([]);
     repository.markDeletionCleanup({
       accountId: "account_a", meetingId: transcript.created.meeting.id, status: "completed"
     });

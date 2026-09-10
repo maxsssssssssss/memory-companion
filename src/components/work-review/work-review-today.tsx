@@ -7,6 +7,8 @@ import { ProductState } from "@/components/product-system/product-primitives";
 import { WorkReviewApiError, type WorkReviewApi, type WorkTodo } from "@/lib/client/work-review-api";
 
 import { WorkReviewContext } from "./work-review-shell";
+import { asWorkReviewV2Api, DISABLED_WORK_REVIEW_CAPABILITIES } from "./work-review-v2";
+import { WorkProjectBadges } from "./work-project-picker";
 import { WorkTodoDetail } from "./work-todo-detail";
 import { WorkTodoDialog, type WorkTodoDialogSubmission } from "./work-todo-dialog";
 import { WorkTodoRows, type WorkTodoRowAction } from "./work-todo-list";
@@ -36,7 +38,7 @@ function DueSuggestionList({
     <ul className={styles.suggestionList}>
       {todos.map((todo) => (
         <li key={todo.id}>
-          <div><b>{todo.title}</b><span>{todo.kind === "self" ? "我的待办" : `等待：${todo.ownerLabel ?? "负责人尚未确认"}`}</span></div>
+          <div><b>{todo.title}</b><span>{todo.kind === "self" ? "我的待办" : `等待：${todo.ownerLabel ?? "负责人尚未确认"}`}</span><WorkProjectBadges projects={todo.projects ?? []} /></div>
           <time dateTime={todo.currentDueDate ?? undefined}>{todo.currentDueDate ? formatWorkTodoDate(todo.currentDueDate) : ""}</time>
           <button className={workStyles.secondaryButton} disabled={busyTodoId === todo.id} onClick={() => void onAdd(todo)} type="button">加入今天</button>
         </li>
@@ -49,6 +51,8 @@ export function WorkReviewToday({ api: apiOverride }: Readonly<{ api?: WorkRevie
   const context = useContext(WorkReviewContext);
   const api = apiOverride ?? context?.api;
   if (!api) throw new Error("WorkReviewToday requires an API");
+  const capabilities = context?.capabilities ?? DISABLED_WORK_REVIEW_CAPABILITIES;
+  const projectsEnabled = capabilities.projects && Boolean(asWorkReviewV2Api(api));
   const today = useMemo(() => workReviewLocalDay(), []);
   const [records, setRecords] = useState<{ today: WorkTodo[]; dueToday: WorkTodo[]; overdue: WorkTodo[] } | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -154,6 +158,7 @@ export function WorkReviewToday({ api: apiOverride }: Readonly<{ api?: WorkRevie
         </section>
       ) : null}
       <WorkTodoDialog
+        api={api}
         addToTodayDefault
         error={dialogError}
         mode={dialog?.mode ?? "create"}
@@ -170,6 +175,7 @@ export function WorkReviewToday({ api: apiOverride }: Readonly<{ api?: WorkRevie
                 notes: input.notes,
                 isImportant: input.isImportant,
                 myDayDate: input.myDayDate,
+                projectIds: input.projectIds,
                 expectedVersion: dialog.todo.version,
                 operationKey: input.operationKey
               });
@@ -182,6 +188,7 @@ export function WorkReviewToday({ api: apiOverride }: Readonly<{ api?: WorkRevie
                 notes: input.notes,
                 isImportant: input.isImportant,
                 myDayDate: input.myDayDate,
+                projectIds: input.projectIds,
                 operationKey: input.operationKey
               });
             }
@@ -193,6 +200,7 @@ export function WorkReviewToday({ api: apiOverride }: Readonly<{ api?: WorkRevie
           }
         }}
         open={Boolean(dialog)}
+        projectsEnabled={projectsEnabled}
         today={today}
         todo={dialog?.mode === "edit" ? dialog.todo : null}
       />

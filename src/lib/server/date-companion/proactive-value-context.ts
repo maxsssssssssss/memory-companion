@@ -8,6 +8,7 @@ import {
 } from "@/lib/domain/date-companion-proactive-value";
 import { resolveMemoryRetrievalSource } from "@/lib/server/retrieval/source-awareness";
 import { createPersonMemoryRepository } from "@/lib/server/person/memory-repository";
+import { resolveTrustedPersonQaEvidence } from "@/lib/server/person/person-relationship-qa-evidence-resolver";
 import type { MemoryItem } from "@/lib/server/memory/types";
 
 import {
@@ -18,6 +19,7 @@ import {
 } from "./memory-bridge-digest";
 import {
   resolveDateCompanionPersonSourceCatalog,
+  candidateEvidenceRows,
   type resolveProductionDateCompanionPersonSourceCatalog
 } from "./person-source-catalog";
 import { DcNotFoundError } from "./errors";
@@ -25,6 +27,112 @@ import { DcNotFoundError } from "./errors";
 type ContextResolution =
   | { status: "ready"; context: DateCompanionProactiveValueContext }
   | { status: "needs_review" | "unavailable"; context: null };
+
+/** Read only promises whose complete retained source is already in this context. */
+export function withDateCompanionHomeContext(input: {
+  dateCompanionDatabase: Database.Database;
+  memoryDatabase: Database.Database;
+  accountId: string;
+  context: DateCompanionProactiveValueContext;
+  referenceDate?: string;
+}): DateCompanionProactiveValueContext | null {
+  if (input.context.scope !== "person_relationship") return input.context;
+  const sources = new Map(input.context.evidence
+    .filter((evidence) => evidence.origin === "direct_conversation")
+    .map((evidence) => [sourceKey(evidence.uploadId, evidence.sourceSegmentId), evidence]));
+  const originalSourceKeys = new Set(input.context.evidence.map((item) => sourceKey(item.uploadId, item.sourceSegmentId)));
+  const rows = input.dateCompanionDatabase.prepare(`
+    SELECT promise.id, promise.text, promise.status, promise.version,
+           evidence.upload_id, evidence.source_segment_id, evidence.content_digest,
+           evidence.id AS evidence_snapshot_id, evidence.start_seconds, evidence.end_seconds,
+           evidence.speaker_id, evidence.quote, interaction.recording_date, selection.subject
+    FROM dc_promises promise
+    INNER JOIN dc_recap_items recap
+      ON recap.id = promise.originating_recap_item_id AND recap.user_id = promise.user_id
+    INNER JOIN dc_interactions interaction
+      ON interaction.id = recap.interaction_id AND interaction.user_id = recap.user_id
+    INNER JOIN dc_evidence_snapshots evidence
+      ON evidence.recap_item_id = recap.id AND evidence.user_id = recap.user_id
+    LEFT JOIN dc_memory_subject_selections selection
+      ON selection.evidence_snapshot_id = evidence.id AND selection.user_id = evidence.user_id
+      AND selection.interaction_id = recap.interaction_id
+    WHERE promise.user_id = ? AND promise.relationship_id = ?
+      AND recap.disposition = 'kept' AND interaction.status = 'confirmed'
+      AND interaction.source_state != 'explicitly_deleted'
+    ORDER BY promise.updated_at DESC, promise.id, evidence.id
+  `).all(input.accountId, input.context.relationshipId) as Array<{
+    id: string; text: string; status: "open" | "done"; version: number;
+    upload_id: string; source_segment_id: string; content_digest: string | null;
+    evidence_snapshot_id: string; start_seconds: number; end_seconds: number;
+    speaker_id: string | null; quote: string; recording_date: string; subject: string | null;
+  }>;
+  // A promise made by the user belongs to Self, not to the companion's Person.
+  // Resolve it through the same canonical admission checks without widening that
+  // Person's catalog or its question-answering source allowlist.
+  const mapping = mappingState({ ...input, relationshipId: input.context.relationshipId });
+  const promiseKeys = new Set(rows.map((row) => sourceKey(row.upload_id, row.source_segment_id)));
+  if (mappingIsTrusted(mapping)) {
+    const selfEvidence = resolveTrustedPersonQaEvidence({
+      memoryDatabase: input.memoryDatabase,
+      dateCompanionDatabase: input.dateCompanionDatabase,
+      accountId: input.accountId,
+      personId: mapping!.self_person_id,
+      evidence: candidateEvidenceRows({ ...input, relationshipId: input.context.relationshipId })
+        .filter((evidence) => promiseKeys.has(sourceKey(evidence.uploadId, evidence.sourceSegmentId)))
+    });
+    const canonical = new Map(selfEvidence.segments.map((segment) => [sourceKey(segment.uploadId, segment.id), segment]));
+    for (const row of rows) {
+      const key = sourceKey(row.upload_id, row.source_segment_id);
+      const source = canonical.get(key);
+      if (originalSourceKeys.has(key) || sources.has(key) || !source || row.subject !== "self") continue;
+      const digest = dateCompanionEvidenceDigest({
+        userId: input.accountId, uploadId: row.upload_id, sourceSegmentId: row.source_segment_id,
+        startSeconds: row.start_seconds, endSeconds: row.end_seconds,
+        speakerId: row.speaker_id, quote: row.quote
+      });
+      if (row.content_digest !== digest || normalizedText(source.text) !== normalizedText(row.quote)
+        || source.startSeconds !== row.start_seconds || source.endSeconds !== row.end_seconds
+        || (source.speaker ?? null) !== row.speaker_id) continue;
+      sources.set(key, {
+        evidenceId: `dc_snapshot:${row.evidence_snapshot_id}`,
+        uploadId: row.upload_id, sourceSegmentId: row.source_segment_id,
+        recordingDate: row.recording_date, startSeconds: row.start_seconds, endSeconds: row.end_seconds,
+        ...(row.speaker_id ? { speakerId: row.speaker_id } : {}),
+        quote: row.quote, contentDigest: digest, origin: "direct_conversation", subject: "self"
+      });
+    }
+  }
+  const allEvidence = [...sources.values(), ...input.context.evidence.filter((item) => item.origin !== "direct_conversation")];
+  const promiseSourceOrder = [...new Set(rows.filter((row) => row.status === "open")
+    .map((row) => sourceKey(row.upload_id, row.source_segment_id)))];
+  const selectedEvidence = allEvidence.sort((left, right) => {
+    const priority = (item: DateCompanionProactiveEvidence) => {
+      const index = promiseSourceOrder.indexOf(sourceKey(item.uploadId, item.sourceSegmentId));
+      return index < 0 ? Number.MAX_SAFE_INTEGER : index;
+    };
+    return priority(left) - priority(right) || -evidenceSort(left, right);
+  }).slice(0, 24).sort(evidenceSort);
+  const selectedSources = new Map(selectedEvidence.filter((item) => item.origin === "direct_conversation")
+    .map((item) => [sourceKey(item.uploadId, item.sourceSegmentId), item]));
+  const grouped = new Map<string, typeof rows>();
+  for (const row of rows) grouped.set(row.id, [...(grouped.get(row.id) ?? []), row]);
+  const promises = [...grouped.values()].flatMap((group) => {
+    const matched = group.map((row) => selectedSources.get(sourceKey(row.upload_id, row.source_segment_id)));
+    if (matched.some((source, index) => !source || source.contentDigest !== group[index].content_digest)
+      || group[0].text.length > 4_000) return [];
+    return [{
+      id: group[0].id, text: group[0].text, status: group[0].status, version: group[0].version,
+      evidenceIds: [...new Set(matched.map((source) => source!.evidenceId))]
+    }];
+  }).slice(0, 100);
+  if (selectedEvidence.length === 0) return null;
+  return DateCompanionProactiveValueContextSchema.parse({
+    ...input.context,
+    evidence: selectedEvidence,
+    referenceDate: input.referenceDate,
+    promises
+  });
+}
 
 type InteractionRow = {
   relationship_id: string;
@@ -575,16 +683,16 @@ export function buildPersonRelationshipProactiveValueContext(input: {
     || currentMapping!.version !== mapping!.version
     || currentMapping!.companion_person_id !== mapping!.companion_person_id
   ) return { status: "needs_review", context: null };
-  if (evidence.size === 0) return { status: "unavailable", context: null };
-  return {
-    status: "ready",
-    context: DateCompanionProactiveValueContextSchema.parse({
-      schemaVersion: 1,
-      scope: "person_relationship",
-      relationshipId: input.relationshipId,
-      personId: catalog.companionPersonId,
-      mappingVersion: mapping!.version,
-      evidence: [...evidence.values()].sort(evidenceSort).slice(-24)
-    })
+  const context = {
+    schemaVersion: 1 as const,
+    scope: "person_relationship" as const,
+    relationshipId: input.relationshipId,
+    personId: catalog.companionPersonId,
+    mappingVersion: mapping!.version,
+    evidence: [...evidence.values()].sort(evidenceSort).slice(-24)
   };
+  const resolved = evidence.size > 0
+    ? DateCompanionProactiveValueContextSchema.parse(context)
+    : withDateCompanionHomeContext({ ...input, context });
+  return resolved ? { status: "ready", context: resolved } : { status: "unavailable", context: null };
 }

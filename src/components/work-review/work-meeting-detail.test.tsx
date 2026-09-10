@@ -11,6 +11,7 @@ import {
   type WorkReviewApi,
   type WorkTodo
 } from "@/lib/client/work-review-api";
+import type { WorkProject } from "@/lib/domain/work-project";
 
 import { WorkMeetingDetail as WorkMeetingDetailController, WorkMeetingDetailView } from "./work-meeting-detail";
 
@@ -186,6 +187,21 @@ const flags = {
   verifierEnabled: true
 } as const;
 
+function project(id: string, name: string): WorkProject {
+  return {
+    contractVersion: 1,
+    id,
+    accountId: "account_1",
+    name,
+    description: null,
+    status: "active",
+    version: 0,
+    createdAt: "2026-09-01T08:00:00.000Z",
+    updatedAt: "2026-09-01T08:00:00.000Z",
+    archivedAt: null
+  };
+}
+
 function api(current: WorkMeetingDetail, overrides: Partial<WorkReviewApi> = {}): WorkReviewApi {
   return {
     getCurrentUser: vi.fn(),
@@ -224,11 +240,61 @@ function api(current: WorkMeetingDetail, overrides: Partial<WorkReviewApi> = {})
     removeTodoMyDay: vi.fn(),
     deleteTodo: vi.fn(),
     getTodoSource: vi.fn(),
+    getCapabilities: vi.fn(),
+    listMeetingsByProject: vi.fn(),
+    setMeetingProjects: vi.fn(),
+    listTodosByProject: vi.fn(),
+    setTodoProjects: vi.fn(),
+    listProjects: vi.fn().mockResolvedValue([]),
+    getProject: vi.fn(),
+    createProject: vi.fn(),
+    updateProject: vi.fn(),
+    getWeeklyReview: vi.fn(),
+    generateWeeklyReview: vi.fn(),
+    getWeeklyReviewDetail: vi.fn(),
+    regenerateWeeklyReview: vi.fn(),
+    updateWeeklyItem: vi.fn(),
+    createWeeklyUserNote: vi.fn(),
+    deleteWeeklyUserNote: vi.fn(),
+    resetWeeklyReview: vi.fn(),
+    deleteWeeklyReview: vi.fn(),
+    getWeeklyQa: vi.fn(),
+    askWeeklyQa: vi.fn(),
+    clearWeeklyQa: vi.fn(),
+    getWeeklySource: vi.fn(),
     ...overrides
   };
 }
 
 describe("WorkMeetingDetailView", () => {
+  it("keeps folded groups mounted and leaves review state unchanged", () => {
+    render(<WorkMeetingDetailView {...handlers} detail={detail()} featureFlags={flags} />);
+    const toggle = screen.getByRole("button", { name: /^明确承诺.*展开$/u });
+    expect(toggle).toHaveAttribute("aria-expanded", "false");
+    expect(screen.queryByRole("heading", { name: "整理测试录音" })).not.toBeInTheDocument();
+    fireEvent.click(toggle);
+    const card = screen.getByRole("heading", { name: "整理测试录音" }).closest("article");
+    fireEvent.click(toggle);
+    expect(card).toBeInTheDocument();
+    expect(card).not.toBeVisible();
+    fireEvent.click(toggle);
+    expect(screen.getByRole("heading", { name: "整理测试录音" }).closest("article")).toBe(card);
+    expect(handlers.onReview).not.toHaveBeenCalled();
+    expect(screen.getByRole("button", { name: "完成本次会议整理" })).toBeDisabled();
+  });
+
+  it("hides raw speaker metadata while keeping transcript text and saved aliases", () => {
+    const current = detail();
+    current.transcriptSegments.push({ ...current.transcriptSegments[0]!, id: "segment_unaliased", speaker: "speaker123", text: "保留原文 speaker123 内容。" });
+    render(<WorkMeetingDetailView {...handlers} detail={current} featureFlags={flags} />);
+    fireEvent.click(screen.getByRole("tab", { name: "完整原文" }));
+    const transcript = screen.getByRole("region", { name: "完整会议原文" });
+    expect(within(transcript).getByText("Alex")).toBeVisible();
+    expect(within(transcript).queryByText("Speaker 2")).not.toBeInTheDocument();
+    expect(within(transcript).queryByText("speaker123", { exact: true })).not.toBeInTheDocument();
+    expect(within(transcript).getByText("保留原文 speaker123 内容。")).toBeVisible();
+    expect(screen.getByRole("button", { name: "发言人显示名称 设置" })).toHaveAttribute("aria-expanded", "false");
+  });
   it("requires an explicit ownership override before projecting an assignment to My Todo", async () => {
     const current = detail({ pendingCandidateCount: 0 });
     current.candidates = [];
@@ -248,6 +314,7 @@ describe("WorkMeetingDetailView", () => {
       />
     );
 
+    fireEvent.click(screen.getByRole("button", { name: /^行动事项.*展开$/u }));
     fireEvent.click(screen.getByRole("button", { name: "加入我的待办" }));
     const dialog = screen.getByRole("dialog", { name: "从会议结果创建待办" });
     fireEvent.click(within(dialog).getByRole("button", { name: "创建待办" }));
@@ -261,6 +328,109 @@ describe("WorkMeetingDetailView", () => {
       "finding_action",
       expect.objectContaining({ kind: "self", ownershipOverrideConfirmed: true })
     ));
+  });
+
+  it("uses the current meeting projects as the Finding to Todo defaults", async () => {
+    const alpha = project("wrp_alpha", "Alpha 发布");
+    const beta = project("wrp_beta", "Beta 研究");
+    const current = detail({
+      pendingCandidateCount: 0,
+      projects: [
+        { id: alpha.id, name: alpha.name, status: alpha.status, version: alpha.version },
+        { id: beta.id, name: beta.name, status: beta.status, version: beta.version }
+      ]
+    });
+    current.candidates = [];
+    current.findings = [finding()];
+    const createTodoFromFinding = vi.fn<WorkReviewApi["createTodoFromFinding"]>()
+      .mockResolvedValue(workTodo({
+        projects: [
+          { id: alpha.id, name: alpha.name, status: alpha.status, version: alpha.version },
+          { id: beta.id, name: beta.name, status: beta.status, version: beta.version }
+        ]
+      }));
+    const client = api(current, {
+      createTodoFromFinding,
+      listProjects: vi.fn().mockResolvedValue([alpha, beta])
+    });
+
+    render(
+      <WorkMeetingDetailView
+        {...handlers}
+        api={client}
+        detail={current}
+        featureFlags={{ ...flags, todoEnabled: true, todoMeetingProjectionEnabled: true }}
+        projectsEnabled
+      />
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: /^行动事项.*展开$/u }));
+    fireEvent.click(screen.getByRole("button", { name: "加入我的待办" }));
+    const dialog = screen.getByRole("dialog", { name: "从会议结果创建待办" });
+    fireEvent.click(within(dialog).getByRole("button", { name: /^关联项目：/u }));
+    expect(await within(dialog).findByRole("checkbox", { name: "Alpha 发布" })).toBeChecked();
+    expect(within(dialog).getByRole("checkbox", { name: "Beta 研究" })).toBeChecked();
+    fireEvent.click(within(dialog).getByRole("button", { name: "创建待办" }));
+
+    await waitFor(() => expect(createTodoFromFinding).toHaveBeenCalledWith(
+      "wrm_1",
+      "finding_action",
+      expect.objectContaining({
+        projectIds: ["wrp_alpha", "wrp_beta"]
+      })
+    ));
+  });
+
+  it("saves Meeting projects with the latest resource version returned by Core", async () => {
+    const alpha = project("wrp_alpha", "Alpha 发布");
+    const beta = project("wrp_beta", "Beta 研究");
+    const alphaRef = { id: alpha.id, name: alpha.name, status: alpha.status, version: alpha.version };
+    const betaRef = { id: beta.id, name: beta.name, status: beta.status, version: beta.version };
+    const current = detail({ version: 4, projects: [alphaRef] });
+    const setMeetingProjects = vi.fn<NonNullable<WorkReviewApi["setMeetingProjects"]>>()
+      .mockResolvedValueOnce({ resourceVersion: 7, projects: [alphaRef, betaRef] })
+      .mockResolvedValueOnce({ resourceVersion: 8, projects: [betaRef] });
+    const onProjectsChanged = vi.fn();
+    const client = api(current, {
+      listProjects: vi.fn().mockResolvedValue([alpha, beta]),
+      setMeetingProjects
+    });
+
+    render(
+      <WorkMeetingDetailView
+        {...handlers}
+        api={client}
+        detail={current}
+        featureFlags={flags}
+        onProjectsChanged={onProjectsChanged}
+        projectsEnabled
+      />
+    );
+
+    fireEvent.click(await screen.findByRole("button", { name: /^选择项目：/u }));
+    fireEvent.click(await screen.findByRole("checkbox", { name: "Beta 研究" }));
+    fireEvent.click(screen.getByRole("button", { name: "保存项目" }));
+    await waitFor(() => expect(setMeetingProjects).toHaveBeenNthCalledWith(
+      1,
+      "wrm_1",
+      expect.objectContaining({
+        expectedVersion: 4,
+        projectIds: ["wrp_alpha", "wrp_beta"]
+      })
+    ));
+    expect(await screen.findByText("会议所属项目已保存。")).toBeVisible();
+
+    fireEvent.click(screen.getByRole("checkbox", { name: "Alpha 发布" }));
+    fireEvent.click(screen.getByRole("button", { name: "保存项目" }));
+    await waitFor(() => expect(setMeetingProjects).toHaveBeenNthCalledWith(
+      2,
+      "wrm_1",
+      expect.objectContaining({
+        expectedVersion: 7,
+        projectIds: ["wrp_beta"]
+      })
+    ));
+    expect(onProjectsChanged).toHaveBeenCalledTimes(2);
   });
 
   it("labels suggestions, hides projection on unrelated Findings, and replaces buttons with linked state", () => {
@@ -292,6 +462,7 @@ describe("WorkMeetingDetailView", () => {
       />
     );
 
+    fireEvent.click(screen.getByRole("button", { name: /^行动事项.*展开$/u }));
     const suggestionCard = screen.getByRole("heading", { name: "可以准备回滚说明" }).closest("article");
     const linkedCard = screen.getByRole("heading", { name: "整理最终清单" }).closest("article");
     const decisionCard = screen.getByRole("heading", { name: "不接入 Slack" }).closest("article");
@@ -323,7 +494,7 @@ describe("WorkMeetingDetailView", () => {
   it("orders only real review sections and exposes type-specific actions", () => {
     render(<WorkMeetingDetailView {...handlers} detail={detail()} featureFlags={flags} />);
 
-    const headings = screen.getAllByRole("heading", { level: 2 }).map((heading) => heading.textContent);
+    const headings = screen.getAllByRole("heading", { level: 2 }).map((heading) => heading.querySelector("button > span")?.textContent ?? heading.textContent);
     expect(headings).toEqual([
       "最终决定 / 暂定方向",
       "明确承诺",
@@ -332,6 +503,7 @@ describe("WorkMeetingDetailView", () => {
       "完成本次会议整理"
     ]);
     expect(screen.getByRole("button", { name: "确认是最终决定" })).toBeVisible();
+    for (const name of [/^明确承诺.*展开$/u, /^未解决问题.*展开$/u, /^方案变化.*展开$/u]) fireEvent.click(screen.getByRole("button", { name }));
     expect(screen.getByRole("button", { name: "只是任务分配" })).toBeVisible();
     expect(screen.getByRole("button", { name: "确认仍未解决" })).toBeVisible();
     expect(screen.getByRole("button", { name: "确认变化过程" })).toBeVisible();
@@ -347,7 +519,8 @@ describe("WorkMeetingDetailView", () => {
 
     const dialog = screen.getByRole("dialog", { name: "来源核对" });
     expect(within(dialog).getByText("第一版发布范围确认")).toBeVisible();
-    expect(within(dialog).getByText("Speaker 2")).toBeVisible();
+    expect(within(dialog).queryByText("Speaker 2")).not.toBeInTheDocument();
+    expect(within(dialog).getByText("Alex")).toBeVisible();
     expect(within(dialog).getByText(evidence.text)).toBeVisible();
     expect(within(dialog).getByText(/已发布的会议原文/u)).toBeVisible();
     fireEvent.keyDown(document, { key: "Escape" });
@@ -368,6 +541,7 @@ describe("WorkMeetingDetailView", () => {
       })
     );
 
+    fireEvent.click(screen.getByRole("button", { name: /^明确承诺.*展开$/u }));
     const commitmentCard = screen.getByRole("heading", { name: "整理测试录音" }).closest("article");
     expect(commitmentCard).not.toBeNull();
     fireEvent.click(within(commitmentCard!).getByRole("button", { name: "编辑或改类型" }));
@@ -485,6 +659,7 @@ describe("WorkMeetingDetailView", () => {
     });
 
     fireEvent.click(screen.getByRole("tab", { name: /完整原文/u }));
+    fireEvent.click(screen.getByRole("button", { name: "发言人显示名称 设置" }));
     fireEvent.change(screen.getByLabelText("Speaker 2 的显示名称"), { target: { value: "Taylor" } });
     fireEvent.submit(screen.getByLabelText("Speaker 2 的显示名称").closest("form")!);
     await waitFor(() => {
@@ -512,6 +687,7 @@ describe("WorkMeetingDetailView", () => {
       />
     );
 
+    fireEvent.click(await screen.findByRole("button", { name: /^讨论内容.*展开$/u }));
     const reviewButton = await screen.findByRole("button", { name: "确认讨论内容" });
     fireEvent.click(reviewButton);
     await waitFor(() => expect(reviewCandidate).toHaveBeenCalledTimes(1));
@@ -541,6 +717,7 @@ describe("WorkMeetingDetailView", () => {
       />
     );
 
+    fireEvent.click(await screen.findByRole("button", { name: /^讨论内容.*展开$/u }));
     const reviewButton = await screen.findByRole("button", { name: "确认讨论内容" });
     fireEvent.click(reviewButton);
     await waitFor(() => expect(reviewCandidate).toHaveBeenCalledTimes(1));
@@ -606,6 +783,7 @@ describe("WorkMeetingDetailView", () => {
       />
     );
     fireEvent.click(await screen.findByRole("tab", { name: /完整原文/u }));
+    fireEvent.click(screen.getByRole("button", { name: "发言人显示名称 设置" }));
     const alias = screen.getByLabelText("Speaker 2 的显示名称");
     fireEvent.change(alias, { target: { value: "Taylor" } });
     const aliasForm = alias.closest("form")!;
@@ -696,6 +874,7 @@ describe("WorkMeetingDetailView", () => {
     expect(screen.getByText("本次会议已经整理完成")).toBeVisible();
     expect(screen.getByText(/不会自动创建待办、Memory 或跨会议资产/u)).toBeVisible();
     expect(screen.getByText("最终决定", { selector: "dd" })).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: /^方案变化.*展开$/u }));
     expect(screen.getByRole("list", { name: "已确认的方案变化过程" })).toHaveTextContent("下周一上线");
     expect(screen.queryByRole("button", { name: "完成本次会议整理" })).not.toBeInTheDocument();
   });

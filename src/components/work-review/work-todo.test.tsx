@@ -7,7 +7,9 @@ import type {
   WorkTodoDetailResponse,
   WorkTodoSourceResponse
 } from "@/lib/client/work-review-api";
+import type { WorkProject } from "@/lib/domain/work-project";
 
+import { WorkReviewContext } from "./work-review-shell";
 import { WorkReviewToday } from "./work-review-today";
 import { WorkTodoDetail } from "./work-todo-detail";
 import { WorkTodoListPage } from "./work-todo-list";
@@ -96,6 +98,82 @@ function api(overrides: Partial<WorkReviewApi> = {}): WorkReviewApi {
   };
 }
 
+const projectsEnabled = {
+  projects: true,
+  weekly: false,
+  weeklyAi: false,
+  weeklyVerifier: false,
+  weeklyQa: false,
+  weeklyQaVerifier: false
+} as const;
+
+const featureFlags = {
+  analysisEnabled: true,
+  followUpEnabled: true,
+  todoEnabled: true,
+  todoMeetingProjectionEnabled: true,
+  uploadEnabled: true,
+  verifierEnabled: true
+} as const;
+
+function project(id: string, name: string): WorkProject {
+  return {
+    contractVersion: 1,
+    id,
+    accountId: "account_1",
+    name,
+    description: null,
+    status: "active",
+    version: 0,
+    createdAt: "2026-09-01T08:00:00.000Z",
+    updatedAt: "2026-09-01T08:00:00.000Z",
+    archivedAt: null
+  };
+}
+
+function v2Methods(overrides: Partial<WorkReviewApi> = {}): Partial<WorkReviewApi> {
+  return {
+    getCapabilities: vi.fn().mockResolvedValue(projectsEnabled),
+    listMeetingsByProject: vi.fn().mockResolvedValue([]),
+    setMeetingProjects: vi.fn(),
+    listTodosByProject: vi.fn().mockResolvedValue([]),
+    setTodoProjects: vi.fn(),
+    listProjects: vi.fn().mockResolvedValue([]),
+    getProject: vi.fn(),
+    createProject: vi.fn(),
+    updateProject: vi.fn(),
+    getWeeklyReview: vi.fn(),
+    generateWeeklyReview: vi.fn(),
+    getWeeklyReviewDetail: vi.fn(),
+    regenerateWeeklyReview: vi.fn(),
+    updateWeeklyItem: vi.fn(),
+    createWeeklyUserNote: vi.fn(),
+    deleteWeeklyUserNote: vi.fn(),
+    resetWeeklyReview: vi.fn(),
+    deleteWeeklyReview: vi.fn(),
+    getWeeklyQa: vi.fn(),
+    askWeeklyQa: vi.fn(),
+    clearWeeklyQa: vi.fn(),
+    getWeeklySource: vi.fn(),
+    ...overrides
+  };
+}
+
+function renderTodoListWithProjects(client: WorkReviewApi) {
+  return render(
+    <WorkReviewContext.Provider value={{
+      api: client,
+      capabilities: projectsEnabled,
+      capabilitiesStatus: "ready",
+      featureFlags,
+      refreshCapabilities: vi.fn(),
+      user: { id: "account_1", email: "person@example.com", name: "Person" }
+    }}>
+      <WorkTodoListPage />
+    </WorkReviewContext.Provider>
+  );
+}
+
 describe("Work Review Todo UI", () => {
   it("keeps Today explicit and offers due or overdue work without auto-adding it", async () => {
     const today = workReviewLocalDay();
@@ -159,6 +237,68 @@ describe("Work Review Todo UI", () => {
     });
     expect(payload).not.toHaveProperty("accountId");
     expect(payload).not.toHaveProperty("ownershipOverrideConfirmed");
+  });
+
+  it("filters Todos by project and carries project IDs through create and edit", async () => {
+    const alpha = project("wrp_alpha", "Alpha 发布");
+    const beta = project("wrp_beta", "Beta 研究");
+    const current = todo({
+      projects: [{ id: alpha.id, name: alpha.name, status: alpha.status, version: alpha.version }]
+    });
+    const listTodosByProject = vi.fn().mockResolvedValue([current]);
+    const listProjects = vi.fn().mockResolvedValue([alpha, beta]);
+    const createTodo = vi.fn<WorkReviewApi["createTodo"]>().mockResolvedValue(todo({ id: "wrt_created" }));
+    const updateTodo = vi.fn<WorkReviewApi["updateTodo"]>().mockResolvedValue(current);
+    const client = api(v2Methods({
+      createTodo,
+      getTodo: vi.fn().mockResolvedValue(detail(current)),
+      listProjects,
+      listTodosByProject,
+      updateTodo
+    }));
+
+    renderTodoListWithProjects(client);
+    expect(await screen.findByText("核对发布清单")).toBeVisible();
+
+    fireEvent.change(screen.getByLabelText("项目范围"), {
+      target: { value: "project:wrp_alpha" }
+    });
+    await waitFor(() => expect(listTodosByProject).toHaveBeenCalledWith(
+      "all",
+      { kind: "project", projectId: "wrp_alpha" },
+      expect.any(String),
+      expect.any(AbortSignal)
+    ));
+
+    fireEvent.click(screen.getByRole("button", { name: "新建待办" }));
+    const createDialog = screen.getByRole("dialog", { name: "新建待办" });
+    fireEvent.click(within(createDialog).getByRole("button", { name: /^关联项目：/u }));
+    fireEvent.click(await within(createDialog).findByRole("checkbox", { name: "Beta 研究" }));
+    fireEvent.change(within(createDialog).getByLabelText("标题"), {
+      target: { value: "准备研究结论" }
+    });
+    fireEvent.click(within(createDialog).getByRole("button", { name: "创建待办" }));
+    await waitFor(() => expect(createTodo).toHaveBeenCalledWith(expect.objectContaining({
+      projectIds: ["wrp_beta"],
+      title: "准备研究结论"
+    })));
+
+    fireEvent.click(await screen.findByRole("button", { name: "核对发布清单" }));
+    const detailDialog = await screen.findByRole("dialog", { name: "待办详情" });
+    fireEvent.click(within(detailDialog).getByRole("button", { name: "编辑" }));
+    const editDialog = await screen.findByRole("dialog", { name: "编辑待办" });
+    fireEvent.click(within(editDialog).getByRole("button", { name: /^关联项目：/u }));
+    expect(await within(editDialog).findByRole("checkbox", { name: "Alpha 发布" })).toBeChecked();
+    fireEvent.click(within(editDialog).getByRole("checkbox", { name: "Beta 研究" }));
+    fireEvent.click(within(editDialog).getByRole("button", { name: "保存修改" }));
+
+    await waitFor(() => expect(updateTodo).toHaveBeenCalledWith(
+      "wrt_1",
+      expect.objectContaining({
+        expectedVersion: 0,
+        projectIds: ["wrp_alpha", "wrp_beta"]
+      })
+    ));
   });
 
   it("uses one dialog state machine for changed source and labels direct Evidence separately", async () => {

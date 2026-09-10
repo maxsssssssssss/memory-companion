@@ -7,6 +7,7 @@ import {
   WorkReviewIsoDateTimeSchema,
   WorkReviewVersionSchema
 } from "@/lib/domain/work-review";
+import { WorkProjectIdsSchema } from "@/lib/domain/work-project";
 
 export const WORK_TODO_CONTRACT_VERSION = 1 as const;
 
@@ -77,12 +78,14 @@ function requireWaitingOwner(
 
 export const CreateManualWorkTodoRequestSchema = z.object({
   ...WorkTodoEditableFieldsShape,
-  operationKey: WorkReviewIdSchema
+  operationKey: WorkReviewIdSchema,
+  projectIds: WorkProjectIdsSchema.optional()
 }).strict().superRefine(requireWaitingOwner);
 
 export const CreateWorkTodoFromFindingRequestSchema = z.object({
   ...WorkTodoEditableFieldsShape,
   operationKey: WorkReviewIdSchema,
+  projectIds: WorkProjectIdsSchema.optional(),
   ownershipOverrideConfirmed: z.boolean().default(false)
 }).strict().superRefine(requireWaitingOwner);
 

@@ -10,6 +10,7 @@ import type {
   WorkMeetingRecord,
   WorkReviewRepository
 } from "./repository";
+import { WORK_MEETING_NON_GPT_PROFILE } from "./publication-policy";
 
 const CANDIDATE_KIND_ORDER = [
   "decision",
@@ -58,6 +59,7 @@ export function toWorkMeetingListItem(input: {
   repository: WorkReviewRepository;
   accountId: string;
   meeting: WorkMeetingRecord;
+  projects?: unknown[];
 }) {
   const candidates = input.meeting.analysisStatus === "review_ready"
     ? input.repository.listCandidates(input.accountId, input.meeting.id, false)
@@ -74,6 +76,8 @@ export function toWorkMeetingListItem(input: {
       candidate.status === "pending_review" && candidate.publicationAction !== "suppress"
     ).length,
     canonicalSegmentCount: input.meeting.canonicalSegmentCount,
+    version: input.meeting.version,
+    projects: input.projects ?? [],
     createdAt: input.meeting.createdAt,
     updatedAt: input.meeting.updatedAt
   };
@@ -81,13 +85,19 @@ export function toWorkMeetingListItem(input: {
 
 export function toWorkMeetingDetailView(detail: WorkMeetingDetail) {
   const publication = detail.transcript;
+  const evaluationProfiles = detail.evaluations.map((evaluation) => evaluation.verifierProfile);
+  const allClaimsSkippedAsNonHighRisk = evaluationProfiles.length > 0
+    && evaluationProfiles.every((profile) => profile === WORK_MEETING_NON_GPT_PROFILE);
+  const anyVerifierInvocation = evaluationProfiles.some((profile) =>
+    profile !== "verifier_disabled" && profile !== WORK_MEETING_NON_GPT_PROFILE
+  );
   const verifierMode = detail.meeting.analysisStatus !== "review_ready"
     ? null
-    : detail.evaluations.length === 0
+    : detail.evaluations.length === 0 || allClaimsSkippedAsNonHighRisk
       ? "not_applicable"
-      : detail.evaluations.every((evaluation) => evaluation.verifierProfile === "verifier_disabled")
-        ? "disabled"
-        : "enabled";
+      : anyVerifierInvocation
+        ? "enabled"
+        : "disabled";
   const candidateKindIndex = (kind: string) => {
     const index = CANDIDATE_KIND_ORDER.indexOf(kind as typeof CANDIDATE_KIND_ORDER[number]);
     return index < 0 ? CANDIDATE_KIND_ORDER.length : index;

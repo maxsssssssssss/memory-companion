@@ -8,6 +8,7 @@ import {
 
 export const DATE_COMPANION_PROACTIVE_VALUE_CONTRACT_VERSION = 1 as const;
 export const DATE_COMPANION_PROACTIVE_VALUE_RESPONSE_VERSION = 2 as const;
+export const DATE_COMPANION_HOME_CONTENT_VERSION = 1 as const;
 
 export const DateCompanionProactiveValueScopeSchema = z.enum([
   "current_interaction",
@@ -55,6 +56,14 @@ export const DateCompanionProactiveValueContextSchema = z.object({
   mappingVersion: z.number().int().positive(),
   interactionVersion: z.number().int().nonnegative().optional(),
   confirmationFingerprint: z.string().length(64).regex(/^[a-f0-9]+$/u).optional(),
+  referenceDate: DcRecordingDateSchema.optional(),
+  promises: z.array(z.object({
+    id: DcIdSchema,
+    text: z.string().trim().min(1).max(4_000),
+    status: z.enum(["open", "done"]),
+    version: z.number().int().nonnegative().optional(),
+    evidenceIds: z.array(z.string().trim().min(1).max(512)).min(1).max(24)
+  }).strict()).max(100).optional(),
   evidence: z.array(DateCompanionProactiveEvidenceSchema).min(1).max(24)
 }).strict().superRefine((context, issue) => {
   if (context.scope === "current_interaction") {
@@ -106,6 +115,55 @@ export const DateCompanionProactiveValueSchema = z.object({
   }
 });
 
+const HomeEvidenceIdsSchema = z.array(z.string().trim().min(1).max(512)).min(1).max(4);
+
+export const DateCompanionHomeContentSchema = z.object({
+  home: z.object({
+    about: z.array(z.object({
+      kind: z.enum(["recent_update", "preference", "shared_moment"]),
+      text: z.string().trim().min(1).max(180),
+      evidenceIds: HomeEvidenceIdsSchema
+    }).strict()).max(2),
+    beforeMeeting: z.array(z.object({
+      kind: z.enum(["follow_up", "open_promise"]),
+      text: z.string().trim().min(1).max(180),
+      reason: z.string().trim().min(1).max(240),
+      evidenceIds: HomeEvidenceIdsSchema,
+      promiseId: DcIdSchema.optional()
+    }).strict()).max(2)
+  }).strict(),
+  evidenceIds: z.array(z.string().trim().min(1).max(512)).max(16)
+}).strict().superRefine((value, issue) => {
+  const items = [...value.home.about, ...value.home.beforeMeeting];
+  const selected = new Set(items.flatMap((item) => item.evidenceIds));
+  if (selected.size !== value.evidenceIds.length
+    || value.evidenceIds.some((id) => !selected.has(id))) {
+    issue.addIssue({ code: z.ZodIssueCode.custom, message: "Home Evidence must exactly cover its items" });
+  }
+  const texts = items.map((item) => item.text.normalize("NFKC").replace(/[\s\p{P}\p{S}]/gu, "").toLowerCase());
+  if (new Set(texts).size !== texts.length || texts.some((text) => !text)) {
+    issue.addIssue({ code: z.ZodIssueCode.custom, message: "Home items must be distinct meaningful text" });
+  }
+  for (const item of items) {
+    if (new Set(item.evidenceIds).size !== item.evidenceIds.length) {
+      issue.addIssue({ code: z.ZodIssueCode.custom, message: "Home item Evidence must be unique" });
+    }
+  }
+  for (const item of value.home.beforeMeeting) {
+    if ((item.kind === "open_promise") !== Boolean(item.promiseId)) {
+      issue.addIssue({ code: z.ZodIssueCode.custom, message: "Only open promises require a promise identity" });
+    }
+  }
+});
+
+export const DateCompanionGeneratedValueSchema = z.union([
+  DateCompanionProactiveValueSchema,
+  DateCompanionHomeContentSchema
+]);
+
+export type DateCompanionHomeContent = z.infer<typeof DateCompanionHomeContentSchema>;
+export type DateCompanionGeneratedValue = z.infer<typeof DateCompanionGeneratedValueSchema>;
+
 export const DateCompanionProactiveValueStatusSchema = z.enum([
   "processing",
   "ready",
@@ -123,7 +181,7 @@ export const DateCompanionProactiveValueResponseSchema = z.object({
   status: DateCompanionProactiveValueStatusSchema,
   sourceFingerprint: z.string().length(64).regex(/^[a-f0-9]+$/u).optional(),
   cacheHit: z.boolean(),
-  value: DateCompanionProactiveValueSchema.optional(),
+  value: DateCompanionGeneratedValueSchema.optional(),
   evidenceReferences: z.array(DateCompanionProactiveEvidenceReferenceSchema).max(24),
   failureCode: z.string().trim().min(1).max(80).optional()
 }).strict().superRefine((response, issue) => {

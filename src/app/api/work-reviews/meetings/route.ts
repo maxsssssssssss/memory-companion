@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { after, NextResponse } from "next/server";
+import { after } from "next/server";
 
 import { isSupportedAudioUpload } from "@/lib/audio/compat";
 import {
@@ -7,11 +7,16 @@ import {
   WorkReviewIdSchema
 } from "@/lib/domain/work-review";
 import {
+  WorkProjectIdsSchema,
+  WorkProjectScopeFilterSchema
+} from "@/lib/domain/work-project";
+import {
   requireAuthContext
 } from "@/lib/server/auth/request-context";
 import { getWorkReviewDatabase } from "@/lib/server/work-review/db";
 import { processWorkMeeting } from "@/lib/server/work-review/orchestrator";
 import { WorkReviewRepository } from "@/lib/server/work-review/repository";
+import { WorkProjectService } from "@/lib/server/work-review/project-service";
 import {
   workReviewFeatureDisabled,
   workReviewPrivateJson,
@@ -19,6 +24,7 @@ import {
 } from "@/lib/server/work-review/route-utils";
 import {
   isWorkReviewEnabled,
+  isWorkReviewProjectsEnabled,
   isWorkReviewUploadEnabled,
   resolveWorkReviewCapacityLimits
 } from "@/lib/server/work-review/runtime-config";
@@ -30,6 +36,37 @@ import {
 } from "@/lib/server/uploads/storage";
 
 const MULTIPART_OVERHEAD_ALLOWANCE_BYTES = 1024 * 1024;
+
+function meetingProjectScope(request: Request) {
+  const search = new URL(request.url).searchParams;
+  for (const key of search.keys()) {
+    if (key !== "projectScope" && key !== "projectId") {
+      throw new SyntaxError("unknown_query_parameter");
+    }
+  }
+  const scopeKind = search.get("projectScope") ?? "all";
+  const projectId = search.get("projectId");
+  if (search.getAll("projectScope").length > 1 || search.getAll("projectId").length > 1) {
+    throw new SyntaxError("duplicate_query_parameter");
+  }
+  if ((scopeKind === "project") !== (projectId !== null)) {
+    throw new SyntaxError("invalid_project_scope");
+  }
+  return WorkProjectScopeFilterSchema.parse(scopeKind === "project"
+    ? { kind: scopeKind, projectId }
+    : { kind: scopeKind });
+}
+
+function formProjectIds(formData: FormData) {
+  const raw = formData.get("projectIds");
+  if (raw === null || raw === "") return [];
+  if (typeof raw !== "string") throw new SyntaxError("invalid_project_ids");
+  try {
+    return WorkProjectIdsSchema.parse(JSON.parse(raw));
+  } catch {
+    throw new SyntaxError("invalid_project_ids");
+  }
+}
 
 function formString(formData: FormData, key: string) {
   const value = formData.get(key);
@@ -107,9 +144,21 @@ export async function GET(request: Request) {
   try {
     const auth = await requireAuthContext(request);
     const repository = new WorkReviewRepository(getWorkReviewDatabase());
+    const projectScope = meetingProjectScope(request);
+    if (projectScope.kind !== "all" && !isWorkReviewProjectsEnabled()) {
+      return workReviewFeatureDisabled("projects_disabled");
+    }
     const response = workReviewPrivateJson({
-      meetings: repository.listMeetings(auth.user.id).map((meeting) =>
-        toWorkMeetingListItem({ repository, accountId: auth.user.id, meeting })
+      meetings: repository.listMeetings(auth.user.id, projectScope).map((meeting) =>
+        toWorkMeetingListItem({
+          repository,
+          accountId: auth.user.id,
+          meeting,
+          projects: isWorkReviewProjectsEnabled()
+            ? new WorkProjectService(getWorkReviewDatabase())
+              .listMeetingProjects(auth.user.id, meeting.id)
+            : []
+        })
       )
     });
     after(async () => {
@@ -134,38 +183,42 @@ export async function POST(request: Request) {
     const rawKey = request.headers.get("Idempotency-Key")?.trim();
     const idempotencyKey = WorkReviewIdSchema.safeParse(rawKey);
     if (!idempotencyKey.success) {
-      return NextResponse.json({ error: "idempotency_key_required" }, { status: 400 });
+      return workReviewPrivateJson({ error: "idempotency_key_required" }, 400);
     }
     const { maxUploadBytes } = resolveWorkReviewCapacityLimits();
     if (requestBodyExceedsUploadLimit(request, maxUploadBytes)) {
-      return NextResponse.json({ error: "file_too_large" }, { status: 413 });
+      return workReviewPrivateJson({ error: "file_too_large" }, 413);
     }
     let formData: FormData;
     try {
       formData = await request.formData();
     } catch {
-      return NextResponse.json({ error: "invalid_multipart" }, { status: 400 });
+      return workReviewPrivateJson({ error: "invalid_multipart" }, 400);
     }
     const files = formData.getAll("file");
     const file = files[0];
     if (files.length !== 1 || !(file instanceof File)) {
-      return NextResponse.json({ error: "invalid_upload" }, { status: 400 });
+      return workReviewPrivateJson({ error: "invalid_upload" }, 400);
     }
     if (file.size <= 0) {
-      return NextResponse.json({ error: "empty_file" }, { status: 400 });
+      return workReviewPrivateJson({ error: "empty_file" }, 400);
     }
     if (file.size > maxUploadBytes) {
-      return NextResponse.json({ error: "file_too_large" }, { status: 413 });
+      return workReviewPrivateJson({ error: "file_too_large" }, 413);
     }
     if (!isSupportedAudioUpload(file)) {
-      return NextResponse.json({ error: "unsupported_audio_format" }, { status: 400 });
+      return workReviewPrivateJson({ error: "unsupported_audio_format" }, 400);
     }
     const fields = CreateWorkMeetingFieldsSchema.safeParse({
       title: formString(formData, "title"),
       meetingDate: formString(formData, "meetingDate")
     });
     if (!fields.success) {
-      return NextResponse.json({ error: "invalid_meeting_fields" }, { status: 400 });
+      return workReviewPrivateJson({ error: "invalid_meeting_fields" }, 400);
+    }
+    const projectIds = formProjectIds(formData);
+    if (projectIds.length > 0 && !isWorkReviewProjectsEnabled()) {
+      return workReviewFeatureDisabled("projects_disabled");
     }
     const contentHash = await sha256File(file);
     const repository = new WorkReviewRepository(getWorkReviewDatabase());
@@ -177,7 +230,8 @@ export async function POST(request: Request) {
       meetingId: `wrm_${randomUUID()}`,
       sourceUploadId: `work-meeting-${randomUUID()}`,
       title: fields.data.title,
-      meetingDate: fields.data.meetingDate
+      meetingDate: fields.data.meetingDate,
+      projectIds
     });
     let sourceUpload = repository.readSourceUpload(auth.user.id, reserved.meeting.id);
     if (!sourceUpload) {

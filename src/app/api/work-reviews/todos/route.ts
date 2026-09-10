@@ -5,6 +5,7 @@ import {
   WorkTodoDateSchema,
   WorkTodoViewSchema
 } from "@/lib/domain/work-todo";
+import { WorkProjectScopeFilterSchema } from "@/lib/domain/work-project";
 import { requireAuthContext } from "@/lib/server/auth/request-context";
 import { getWorkReviewDatabase } from "@/lib/server/work-review/db";
 import {
@@ -12,18 +13,31 @@ import {
   workReviewPrivateJson,
   workReviewRouteError
 } from "@/lib/server/work-review/route-utils";
-import { isWorkReviewTodoEnabled } from "@/lib/server/work-review/runtime-config";
+import {
+  isWorkReviewProjectsEnabled,
+  isWorkReviewTodoEnabled
+} from "@/lib/server/work-review/runtime-config";
 import { WorkTodoRepository } from "@/lib/server/work-review/todo-repository";
+import { WorkProjectService } from "@/lib/server/work-review/project-service";
 
 const WorkTodoListQuerySchema = z.object({
   view: WorkTodoViewSchema.default("all"),
-  day: WorkTodoDateSchema.optional()
+  day: WorkTodoDateSchema.optional(),
+  projectScope: z.enum(["all", "project", "unassigned"]).default("all"),
+  projectId: z.string().trim().min(1).optional()
 }).strict().superRefine((value, context) => {
   if (value.view === "today" && !value.day) {
     context.addIssue({
       code: z.ZodIssueCode.custom,
       path: ["day"],
       message: "Today view requires the caller local calendar day"
+    });
+  }
+  if ((value.projectScope === "project") !== Boolean(value.projectId)) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["projectId"],
+      message: "projectId is required only for project scope"
     });
   }
 });
@@ -44,12 +58,27 @@ export async function GET(request: Request) {
   try {
     const auth = await requireAuthContext(request);
     const query = WorkTodoListQuerySchema.parse(queryObject(request));
+    const projectScope = WorkProjectScopeFilterSchema.parse(query.projectScope === "project"
+      ? { kind: query.projectScope, projectId: query.projectId }
+      : { kind: query.projectScope });
+    if (projectScope.kind !== "all" && !isWorkReviewProjectsEnabled()) {
+      return workReviewFeatureDisabled("projects_disabled");
+    }
     const todos = new WorkTodoRepository(getWorkReviewDatabase()).listTodos({
       accountId: auth.user.id,
       view: query.view,
-      day: query.day
+      day: query.day,
+      projectScope
     });
-    return workReviewPrivateJson({ todos });
+    const projectService = isWorkReviewProjectsEnabled()
+      ? new WorkProjectService(getWorkReviewDatabase())
+      : null;
+    return workReviewPrivateJson({
+      todos: todos.map((todo) => ({
+        ...todo,
+        projects: projectService?.listTodoProjects(auth.user.id, todo.id) ?? []
+      }))
+    });
   } catch (error) {
     return workReviewRouteError(error);
   }
@@ -60,6 +89,9 @@ export async function POST(request: Request) {
   try {
     const auth = await requireAuthContext(request);
     const body = CreateManualWorkTodoRequestSchema.parse(await request.json());
+    if ((body.projectIds?.length ?? 0) > 0 && !isWorkReviewProjectsEnabled()) {
+      return workReviewFeatureDisabled("projects_disabled");
+    }
     const result = new WorkTodoRepository(getWorkReviewDatabase()).createManualTodo({
       accountId: auth.user.id,
       ...body

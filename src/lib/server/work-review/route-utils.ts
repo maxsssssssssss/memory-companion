@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { ZodError } from "zod";
 
-import { isUnauthenticatedError, unauthorizedResponse } from "@/lib/server/auth/request-context";
+import { isUnauthenticatedError } from "@/lib/server/auth/request-context";
 
 import {
   WorkReviewConflictError,
@@ -12,9 +12,17 @@ import {
   WorkReviewVersionConflictError
 } from "./repository";
 import { WorkTodoNotFoundError } from "./todo-repository";
+import {
+  WorkWeeklyConflictError,
+  WorkWeeklyLeaseLostError,
+  WorkWeeklyNotFoundError,
+  WorkWeeklyQaNotFoundError,
+  WorkWeeklyVersionConflictError
+} from "./weekly-repository";
+import { WorkWeeklySourceError } from "./weekly-source-builder";
 
 export function workReviewFeatureDisabled(code = "feature_disabled") {
-  return NextResponse.json({ error: code }, { status: 404 });
+  return workReviewPrivateJson({ error: code }, 404);
 }
 
 export function workReviewPrivateJson(value: unknown, status = 200) {
@@ -25,31 +33,50 @@ export function workReviewPrivateJson(value: unknown, status = 200) {
 }
 
 export function workReviewRouteError(error: unknown) {
-  if (isUnauthenticatedError(error)) return unauthorizedResponse();
+  if (isUnauthenticatedError(error)) return workReviewPrivateJson({ error: "unauthenticated" }, 401);
   if (error instanceof WorkReviewFeatureDisabledError) {
     return workReviewFeatureDisabled(error.code);
   }
   if (error instanceof WorkReviewNotFoundError) {
-    return NextResponse.json({ error: "meeting_not_found" }, { status: 404 });
+    return workReviewPrivateJson({ error: "meeting_not_found" }, 404);
   }
   if (error instanceof WorkTodoNotFoundError) {
-    return NextResponse.json({ error: error.code }, { status: 404 });
+    return workReviewPrivateJson({ error: error.code }, 404);
+  }
+  if (error instanceof WorkWeeklyNotFoundError || error instanceof WorkWeeklyQaNotFoundError) {
+    return workReviewPrivateJson({ error: error.code }, 404);
   }
   if (error instanceof WorkReviewLinkedTodosPolicyRequiredError) {
-    return NextResponse.json({
+    return workReviewPrivateJson({
       error: error.code,
       linkedTodoCount: error.linkedTodoCount,
       linkedTodoIds: error.linkedTodoIds
-    }, { status: 409 });
+    }, 409);
   }
   if (error instanceof WorkReviewVersionConflictError) {
-    return NextResponse.json({
+    return workReviewPrivateJson({
       error: "version_conflict",
       currentVersion: error.currentVersion
-    }, { status: 409 });
+    }, 409);
+  }
+  if (error instanceof WorkWeeklyVersionConflictError) {
+    return workReviewPrivateJson({
+      error: error.code,
+      currentVersion: error.currentVersion
+    }, 409);
   }
   if (error instanceof WorkReviewLeaseLostError) {
-    return NextResponse.json({ error: "processing_busy" }, { status: 409 });
+    return workReviewPrivateJson({ error: "processing_busy" }, 409);
+  }
+  if (error instanceof WorkWeeklyLeaseLostError) {
+    return workReviewPrivateJson({ error: "weekly_processing_busy" }, 409);
+  }
+  if (error instanceof WorkWeeklyConflictError) {
+    return workReviewPrivateJson({ error: error.code }, 409);
+  }
+  if (error instanceof WorkWeeklySourceError) {
+    const status = error.code.endsWith("not_found") ? 404 : 400;
+    return workReviewPrivateJson({ error: error.code }, status);
   }
   if (error instanceof WorkReviewConflictError) {
     const status = error.code === "work_review_idempotency_conflict"
@@ -69,16 +96,16 @@ export function workReviewRouteError(error: unknown) {
     const publicCode = error.code
       .replace(/^work_review_/u, "")
       .replace(/^work_/u, "");
-    return NextResponse.json({ error: publicCode }, { status });
+    return workReviewPrivateJson({ error: publicCode }, status);
   }
   if (error instanceof ZodError) {
-    return NextResponse.json({ error: "invalid_request" }, { status: 400 });
+    return workReviewPrivateJson({ error: "invalid_request" }, 400);
   }
   if (error instanceof SyntaxError) {
-    return NextResponse.json({ error: "invalid_request" }, { status: 400 });
+    return workReviewPrivateJson({ error: "invalid_request" }, 400);
   }
   console.error("[work-review] route_failed", {
     errorName: error instanceof Error ? error.name : "unknown"
   });
-  return NextResponse.json({ error: "internal_error" }, { status: 500 });
+  return workReviewPrivateJson({ error: "internal_error" }, 500);
 }

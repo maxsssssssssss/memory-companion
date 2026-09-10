@@ -18,20 +18,24 @@ import { workReviewLocalDay } from "./work-todo-utils";
 
 export function WorkFindingTodoActions({
   api,
+  defaultProjectIds = [],
   finding,
   linkedTodo,
   meetingId,
   onCreated,
   onOpenTodo,
-  projectionEnabled
+  projectionEnabled,
+  projectsEnabled = false
 }: Readonly<{
   api: WorkReviewApi;
+  defaultProjectIds?: readonly string[];
   finding: WorkMeetingFinding;
   linkedTodo: WorkTodoProjection | null;
   meetingId: string;
   onCreated: (todo: WorkTodo) => void;
   onOpenTodo: (todoId: string) => void;
   projectionEnabled: boolean;
+  projectsEnabled?: boolean;
 }>) {
   const [kind, setKind] = useState<WorkTodoKind | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -53,6 +57,8 @@ export function WorkFindingTodoActions({
         <button className={workStyles.secondaryButton} onClick={() => { setError(null); setKind("waiting_for_other"); }} type="button">设为等待他人</button>
       </div>
       <WorkTodoDialog
+        api={api}
+        defaultProjectIds={defaultProjectIds}
         error={error}
         finding={finding}
         initialKind={kind ?? "self"}
@@ -70,6 +76,7 @@ export function WorkFindingTodoActions({
           }
         }}
         open={kind !== null}
+        projectsEnabled={projectsEnabled}
         today={workReviewLocalDay()}
       />
     </div>

@@ -10,6 +10,7 @@ import type {
 import type { WorkMeetingCandidateKind } from "@/lib/domain/work-review";
 import type { AuthContext } from "@/lib/server/auth/request-context";
 import { openWorkReviewDatabase } from "@/lib/server/work-review/db";
+import { WorkProjectRepository } from "@/lib/server/work-review/project-repository";
 import {
   WorkReviewRepository,
   type WorkTranscriptSegment
@@ -582,6 +583,16 @@ describe("Work Todo routes", () => {
       findingId: target.finding.id,
       ...projectionBody("target_todo")
     }).todo;
+    const projectRepository = new WorkProjectRepository(state.database!);
+    const project = projectRepository.createProject({
+      accountId: "account_a", operationKey: "linked_cleanup_project",
+      name: "Linked cleanup", description: null
+    }).project;
+    projectRepository.setTodoProjects({
+      accountId: "account_a", todoId: targetTodo.id,
+      expectedVersion: targetTodo.version, operationKey: "linked_cleanup_assignment",
+      projectIds: [project.id]
+    });
     const otherTodo = todoRepository.createTodoFromFinding({
       accountId: "account_a",
       meetingId: other.meeting.id,
@@ -594,6 +605,13 @@ describe("Work Todo routes", () => {
     );
     expect(response.status).toBe(200);
     expect(() => todoRepository.getTodo("account_a", targetTodo.id)).toThrow();
+    expect(state.database!.prepare(`
+      SELECT count(*) AS count FROM wr_todo_projects WHERE account_id = ? AND todo_id = ?
+    `).get("account_a", targetTodo.id)).toEqual({ count: 0 });
+    expect(state.database!.prepare(`
+      SELECT count(*) AS count FROM wr_project_operations
+      WHERE account_id = ? AND target_kind = 'todo_projects' AND target_id = ?
+    `).get("account_a", targetTodo.id)).toEqual({ count: 0 });
     expect(todoRepository.getTodo("account_a", otherTodo.id).id).toBe(otherTodo.id);
     expect(meetingRepository.getMeeting("account_a", other.meeting.id).deletedAt).toBeNull();
   });

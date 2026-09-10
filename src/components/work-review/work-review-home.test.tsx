@@ -2,6 +2,7 @@ import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/re
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { WorkReviewApi } from "@/lib/client/work-review-api";
+import type { WorkProject } from "@/lib/domain/work-project";
 
 import { WorkReviewHome } from "./work-review-home";
 
@@ -61,6 +62,59 @@ const flags = {
   uploadEnabled: true,
   verifierEnabled: true
 } as const;
+
+const projectsEnabled = {
+  projects: true,
+  weekly: false,
+  weeklyAi: false,
+  weeklyVerifier: false,
+  weeklyQa: false,
+  weeklyQaVerifier: false
+} as const;
+
+function project(overrides: Partial<WorkProject> = {}): WorkProject {
+  return {
+    contractVersion: 1,
+    id: "wrp_alpha",
+    accountId: "account_1",
+    name: "Alpha 发布",
+    description: null,
+    status: "active",
+    version: 0,
+    createdAt: "2026-09-01T08:00:00.000Z",
+    updatedAt: "2026-09-01T08:00:00.000Z",
+    archivedAt: null,
+    ...overrides
+  };
+}
+
+function v2Methods(overrides: Partial<WorkReviewApi> = {}): Partial<WorkReviewApi> {
+  return {
+    getCapabilities: vi.fn().mockResolvedValue(projectsEnabled),
+    listMeetingsByProject: vi.fn().mockResolvedValue([]),
+    setMeetingProjects: vi.fn(),
+    listTodosByProject: vi.fn().mockResolvedValue([]),
+    setTodoProjects: vi.fn(),
+    listProjects: vi.fn().mockResolvedValue([]),
+    getProject: vi.fn(),
+    createProject: vi.fn(),
+    updateProject: vi.fn(),
+    getWeeklyReview: vi.fn(),
+    generateWeeklyReview: vi.fn(),
+    getWeeklyReviewDetail: vi.fn(),
+    regenerateWeeklyReview: vi.fn(),
+    updateWeeklyItem: vi.fn(),
+    createWeeklyUserNote: vi.fn(),
+    deleteWeeklyUserNote: vi.fn(),
+    resetWeeklyReview: vi.fn(),
+    deleteWeeklyReview: vi.fn(),
+    getWeeklyQa: vi.fn(),
+    askWeeklyQa: vi.fn(),
+    clearWeeklyQa: vi.fn(),
+    getWeeklySource: vi.fn(),
+    ...overrides
+  };
+}
 
 describe("WorkReviewHome", () => {
   it("shows a single existing-audio upload with the real format boundary and consent copy", async () => {
@@ -140,6 +194,52 @@ describe("WorkReviewHome", () => {
     });
     expect(uploadMeeting.mock.calls[0][0].idempotencyKey).toBeTruthy();
     expect(pushMock).toHaveBeenCalledWith("/work-review/meetings/wrm_1");
+  });
+
+  it("uploads selected project IDs and filters meetings with the V2 project scope", async () => {
+    const alpha = project();
+    const uploadMeeting = vi.fn<WorkReviewApi["uploadMeeting"]>().mockResolvedValue({
+      meetingId: "wrm_project",
+      receiptId: "wrr_project",
+      ingestionStatus: "queued",
+      analysisStatus: "not_started",
+      reused: false
+    });
+    const listMeetingsByProject = vi.fn().mockResolvedValue([]);
+    const listProjects = vi.fn().mockResolvedValue([alpha]);
+    const client = api(v2Methods({ listMeetingsByProject, listProjects, uploadMeeting }));
+
+    render(
+      <WorkReviewHome
+        api={client}
+        capabilities={projectsEnabled}
+        featureFlags={flags}
+      />
+    );
+
+    fireEvent.click(await screen.findByRole("button", { name: /^所属项目（可选）：/u }));
+    const projectCheckbox = await screen.findByRole("checkbox", { name: "Alpha 发布" });
+    fireEvent.click(projectCheckbox);
+    expect(projectCheckbox).toBeChecked();
+
+    fireEvent.change(screen.getByLabelText("项目范围"), {
+      target: { value: "project:wrp_alpha" }
+    });
+    await waitFor(() => expect(listMeetingsByProject).toHaveBeenCalledWith(
+      { kind: "project", projectId: "wrp_alpha" },
+      expect.any(AbortSignal)
+    ));
+
+    const selected = new File(["fixture"], "project-meeting.mp3", { type: "audio/mpeg" });
+    fireEvent.change(screen.getByLabelText("会议录音"), { target: { files: [selected] } });
+    fireEvent.submit(screen.getByRole("button", { name: "上传并开始整理" }).closest("form")!);
+
+    await waitFor(() => expect(uploadMeeting).toHaveBeenCalledTimes(1));
+    expect(uploadMeeting.mock.calls[0]![0]).toMatchObject({
+      file: selected,
+      projectIds: ["wrp_alpha"]
+    });
+    expect(pushMock).toHaveBeenCalledWith("/work-review/meetings/wrm_project");
   });
 
   it("recovers the same upload operation key after an uncertain failure and remount", async () => {

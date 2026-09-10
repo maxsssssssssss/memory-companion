@@ -202,7 +202,8 @@ describe("Date Companion Memory bridge preflight", () => {
     const report = inspectDateCompanionMemoryBridgePreflight({ dataDirectory: root });
 
     expect(report.dateCompanion).toMatchObject({
-      schemaVersions: [1, 2, 3, 4, 5, 7, 8, 9, 10, 11],
+      schemaVersions: Array.from({ length: DATE_COMPANION_SCHEMA_VERSION }, (_, index) => index + 1)
+        .filter((version) => version !== 6),
       schemaStatus: "incompatible"
     });
     expect(report.errorCodes).toContain("date_companion_schema_incompatible");

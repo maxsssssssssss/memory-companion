@@ -2,6 +2,7 @@ import { cleanup, render, screen, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { productPreferenceKey } from "@/components/product-system/product-preference";
+import { ProductCapabilitiesProvider } from "@/components/product-system/product-capabilities";
 
 import { CompanionModules } from "./companion-modules";
 
@@ -9,22 +10,22 @@ describe("CompanionModules", () => {
   beforeEach(() => window.localStorage.clear());
   afterEach(cleanup);
 
-  it("renders one neutral entry with two products and one honest undeveloped product", () => {
+  it("inherits the enabled Work Review entry from the server capability", () => {
     render(
-      <CompanionModules
-        accountId="account_1"
-        dailyReflectionEnabled
-        onLogout={vi.fn()}
-        userLabel="user@example.com"
-      />
+      <ProductCapabilitiesProvider workReviewEnabled>
+        <CompanionModules
+          accountId="account_1"
+          dailyReflectionEnabled
+          onLogout={vi.fn()}
+          userLabel="user@example.com"
+        />
+      </ProductCapabilitiesProvider>
     );
 
     expect(screen.getByRole("heading", { name: "选择一个空间" })).toBeVisible();
     expect(screen.getByRole("link", { name: /约会陪伴/u })).toHaveAttribute("href", "/date-companion/a");
     expect(screen.getByRole("link", { name: /日常复盘/u })).toHaveAttribute("href", "/reflection");
-    const workReviewEntry = screen.getByRole("heading", { name: "工作复盘" }).closest("article");
-    expect(workReviewEntry).not.toBeNull();
-    expect(within(workReviewEntry!).getByText("暂未开放")).toBeVisible();
+    expect(screen.getByRole("link", { name: /工作复盘/u })).toHaveAttribute("href", "/work-review");
     expect(screen.queryByText(/统计|最近任务|内部开放/u)).not.toBeInTheDocument();
   });
 

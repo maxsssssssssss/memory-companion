@@ -12,6 +12,7 @@ import {
 } from "@/lib/client/work-review-api";
 
 import { formatEvidenceTime } from "./work-review-shared";
+import { WorkProjectBadges } from "./work-project-picker";
 import workStyles from "./work-review.module.css";
 import styles from "./work-todo.module.css";
 import {
@@ -140,7 +141,7 @@ export function WorkTodoDetail({
             <div className={styles.sourceEvidenceList}>
               {source.evidenceContexts.map((evidence, index) => (
                 <ProductEvidence key={`${evidence.publicationId}:${evidence.segmentId}`} label={`${evidence.isDirectEvidence ? "会议原文" : "前后文"} ${index + 1}/${source.evidenceContexts.length}`} meta={formatEvidenceTime(evidence.startSeconds, evidence.endSeconds)}>
-                  <span className={styles.sourceSpeaker}>{evidence.rawSpeakerLabel ?? "未标注发言人"}{evidence.displaySpeakerLabel ? ` · ${evidence.displaySpeakerLabel}` : ""}</span>
+                  {evidence.displaySpeakerLabel ? <span className={styles.sourceSpeaker}>{evidence.displaySpeakerLabel}</span> : null}
                   {evidence.text}
                 </ProductEvidence>
               ))}
@@ -151,6 +152,7 @@ export function WorkTodoDetail({
       ) : detail ? (
         <div className={styles.todoDetail}>
           <header><h3>{detail.todo.title}</h3><span data-status={detail.todo.status}>{detail.todo.status === "completed" ? "已完成" : "进行中"}</span></header>
+          <WorkProjectBadges projects={detail.todo.projects ?? []} />
           <dl className={styles.detailGrid}>
             <div><dt>类型</dt><dd>{detail.todo.kind === "self" ? "我的待办" : "等待他人"}</dd></div>
             <div><dt>负责人</dt><dd>{detail.todo.kind === "self" ? "我" : detail.todo.ownerLabel ?? "负责人尚未确认"}</dd></div>

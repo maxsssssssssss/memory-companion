@@ -416,3 +416,77 @@ export type DailyReflectionMemoryRecommendation = z.infer<
 export type DailyReflectionMemoryRecommendationResponse = z.infer<
   typeof DailyReflectionMemoryRecommendationResponseSchema
 >;
+
+// Wire DTO: PublicSchema projects private repository records; this schema parses that public output.
+export const DailyReflectionMemoryProposalClientViewSchema = z.object({
+  id: DailyReflectionIdSchema,
+  cardId: DailyReflectionIdSchema,
+  reflectionId: DailyReflectionIdSchema,
+  title: z.string().trim().min(1).max(240),
+  cardKind: DailyReflectionWorkingCardKindSchema,
+  actionClaimed: z.boolean(),
+  memoryType: DailyReflectionMemoryProposalTypeSchema,
+  content: z.string().trim().min(1).max(20_000),
+  evidenceIds: z.array(DailyReflectionIdSchema).min(1).max(64),
+  evidenceSnapshots: z.array(
+    DailyReflectionMemoryProposalEvidenceSnapshotSchema
+  ).min(1).max(64),
+  riskFlags: z.array(ReflectionCardRiskFlagSchema).max(8),
+  subjectPersonId: DailyReflectionIdSchema.nullable(),
+  importance: z.number().min(0).max(1),
+  durability: z.number().min(0).max(1),
+  novelty: z.number().min(0).max(1),
+  sensitivity: z.number().min(0).max(1),
+  epistemicStatus: ReflectionCardEpistemicStatusSchema,
+  epistemicCaution: DailyReflectionMemoryProposalEpistemicCautionSchema,
+  status: DailyReflectionMemoryProposalStatusSchema,
+  policyVersion: z.string().trim().min(1).max(128),
+  score: z.number().min(0).max(1),
+  reasons: z.array(DailyReflectionMemoryProposalReasonSchema).max(32),
+  confirmationRequirements: z.array(
+    DailyReflectionMemoryProposalConfirmationRequirementSchema
+  ).max(4),
+  memoryId: DailyReflectionIdSchema.nullable(),
+  sourceOrigin: DailyReflectionV2SourceOriginSchema,
+  recordingDate: z.string().date(),
+  version: DailyReflectionVersionSchema,
+  createdAt: z.string().datetime(),
+  updatedAt: z.string().datetime(),
+  admittedAt: z.string().datetime().nullable()
+}).strict().superRefine((proposal, context) => {
+  if (
+    proposal.evidenceSnapshots.length !== proposal.evidenceIds.length
+    || proposal.evidenceSnapshots.some(
+      (evidence, index) => evidence.sourceSegmentId !== proposal.evidenceIds[index]
+        || evidence.effectiveOrigin !== proposal.sourceOrigin
+    )
+  ) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["evidenceSnapshots"],
+      message: "proposal Evidence must exactly match the public allowlist"
+    });
+  }
+  if (proposal.cardKind !== "action" && proposal.actionClaimed) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["actionClaimed"],
+      message: "only action Cards may be explicitly claimed"
+    });
+  }
+  const admitted = proposal.status === "admitted";
+  if (admitted !== (proposal.memoryId !== null && proposal.admittedAt !== null)) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["memoryId"],
+      message: "admitted proposals require matching durable state"
+    });
+  }
+});
+
+export const DailyReflectionWorkingCardMemoryLookupResponseSchema = z.object({
+  proposal: DailyReflectionMemoryProposalClientViewSchema.nullable(),
+  publicationStatus: z.enum(["unpublished", "published", "deleted"]).nullable(),
+  revoked: z.boolean(),
+  actionClaimed: z.boolean()
+}).strict();

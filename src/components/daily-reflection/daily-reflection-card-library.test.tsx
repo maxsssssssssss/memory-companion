@@ -2,7 +2,7 @@ import { fireEvent, render, screen, waitFor, within } from "@testing-library/rea
 import { StrictMode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { createDailyReflectionApi } from "@/lib/client/daily-reflection-api";
+import { createDailyReflectionApi, type DailyReflectionApi } from "@/lib/client/daily-reflection-api";
 import type {
   DailyReflectionWorkingCardDetailResponse,
   DailyReflectionWorkingCardView
@@ -128,6 +128,24 @@ function memoryProposal(overrides: Record<string, unknown> = {}) {
   };
 }
 
+function testApi(fetcher: typeof fetch, overrides: Partial<DailyReflectionApi> = {}): DailyReflectionApi {
+  return {
+    ...createDailyReflectionApi(fetcher),
+    getWorkingCardMemoryProposal: vi.fn(async () => ({
+      proposal: null, publicationStatus: null, revoked: false, actionClaimed: false
+    })),
+    evaluateMemoryProposal: vi.fn(async () => ({
+      status: "approved", proposal: memoryProposal({ status: "approved" }),
+      memoryId: null, reasons: [], confirmationRequirements: []
+    })) as DailyReflectionApi["evaluateMemoryProposal"],
+    ...overrides
+  };
+}
+
+async function confirmRemember() {
+  fireEvent.click(await screen.findByRole("button", { name: "确认长期记住" }));
+}
+
 function finishClose() {
   const dialog = screen.getByRole("dialog");
   fireEvent.transitionEnd(dialog, { propertyName: "transform" });
@@ -152,7 +170,7 @@ describe("DailyReflectionCardLibrary", () => {
       return jsonResponse({ error: "not_found" }, 404);
     });
 
-    render(<DailyReflectionCardLibrary api={createDailyReflectionApi(fetcher)} initialCardId="card_1" />);
+    render(<DailyReflectionCardLibrary api={testApi(fetcher)} initialCardId="card_1" />);
 
     const dialog = await screen.findByRole("dialog", { name: "散步后的洞察" });
     expect(dialog).toHaveAttribute("aria-modal", "true");
@@ -185,7 +203,7 @@ describe("DailyReflectionCardLibrary", () => {
 
     render(
       <StrictMode>
-        <DailyReflectionCardLibrary api={createDailyReflectionApi(fetcher)} initialCardId="card_1" />
+        <DailyReflectionCardLibrary api={testApi(fetcher)} initialCardId="card_1" />
       </StrictMode>
     );
 
@@ -202,7 +220,7 @@ describe("DailyReflectionCardLibrary", () => {
       if (path === "/api/daily-reflections/cards/card_1" && init?.method === "GET") return jsonResponse(detail());
       return jsonResponse({ error: "not_found" }, 404);
     });
-    render(<DailyReflectionCardLibrary api={createDailyReflectionApi(fetcher)} />);
+    render(<DailyReflectionCardLibrary api={testApi(fetcher)} />);
 
     const trigger = await screen.findByRole("button", { name: "打开卡片：散步后的洞察" });
     trigger.focus();
@@ -235,7 +253,7 @@ describe("DailyReflectionCardLibrary", () => {
       if (path === "/api/daily-reflections/cards/card_2" && init?.method === "GET") return jsonResponse(detail("saved", false, second));
       return jsonResponse({ error: "not_found" }, 404);
     });
-    render(<DailyReflectionCardLibrary api={createDailyReflectionApi(fetcher)} />);
+    render(<DailyReflectionCardLibrary api={testApi(fetcher)} />);
 
     fireEvent.click(await screen.findByRole("button", { name: "打开卡片：散步后的洞察" }));
     expect(await screen.findByRole("dialog", { name: "散步后的洞察" })).toBeVisible();
@@ -258,7 +276,7 @@ describe("DailyReflectionCardLibrary", () => {
       if (path === "/api/daily-reflections/cards/card_1" && init?.method === "GET") return jsonResponse(detail());
       return jsonResponse({ error: "not_found" }, 404);
     });
-    render(<DailyReflectionCardLibrary api={createDailyReflectionApi(fetcher)} />);
+    render(<DailyReflectionCardLibrary api={testApi(fetcher)} />);
     fireEvent.click(await screen.findByRole("button", { name: "打开卡片：散步后的洞察" }));
     expect(await screen.findByRole("dialog", { name: "散步后的洞察" })).toBeVisible();
 
@@ -281,7 +299,7 @@ describe("DailyReflectionCardLibrary", () => {
         ? jsonResponse({ error: "daily_reflection_cards_unavailable" }, 503)
         : jsonResponse(listResponse([card()]));
     });
-    render(<DailyReflectionCardLibrary api={createDailyReflectionApi(fetcher)} />);
+    render(<DailyReflectionCardLibrary api={testApi(fetcher)} />);
 
     expect(await screen.findByRole("alert")).toHaveTextContent("卡片暂时没有加载完成");
     expect(screen.queryByText("这里还没有卡片")).not.toBeInTheDocument();
@@ -304,7 +322,7 @@ describe("DailyReflectionCardLibrary", () => {
       if (String(input).startsWith("/api/daily-reflections/cards?")) return jsonResponse(listResponse([card(), legacyEvent, question]));
       return jsonResponse({ error: "not_found" }, 404);
     });
-    render(<DailyReflectionCardLibrary api={createDailyReflectionApi(fetcher)} now={() => new Date("2026-08-24T00:00:00.000Z")} />);
+    render(<DailyReflectionCardLibrary api={testApi(fetcher)} now={() => new Date("2026-08-24T00:00:00.000Z")} />);
 
     expect(await screen.findByRole("tab", { name: /洞察\s*2/u })).toBeVisible();
     const allTab = screen.getByRole("tab", { name: /全部\s*3/u });
@@ -377,14 +395,15 @@ describe("DailyReflectionCardLibrary", () => {
       }
       return jsonResponse({ error: "not_found" }, 404);
     });
-    render(<DailyReflectionCardLibrary api={createDailyReflectionApi(fetcher)} />);
+    render(<DailyReflectionCardLibrary api={testApi(fetcher)} />);
 
     expect(await screen.findByRole("button", { name: "长期记住：散步后的洞察" })).toBeVisible();
     fireEvent.click(screen.getByRole("button", { name: "打开卡片：散步后的洞察" }));
     const dialog = await screen.findByRole("dialog", { name: "散步后的洞察" });
     const remember = within(dialog).getByRole("button", { name: "长期记住：散步后的洞察" });
     fireEvent.click(remember);
-    fireEvent.click(remember);
+    expect(fetcher.mock.calls.filter(([, init]) => init?.method === "POST")).toHaveLength(0);
+    await confirmRemember();
 
     expect(await within(dialog).findByRole("status")).toHaveTextContent("已长期记住");
     expect(fetcher.mock.calls.filter(([path]) => String(path).endsWith("/cards/card_1/memory-proposals")))
@@ -446,9 +465,10 @@ describe("DailyReflectionCardLibrary", () => {
       }
       return jsonResponse({ error: "not_found" }, 404);
     });
-    render(<DailyReflectionCardLibrary api={createDailyReflectionApi(fetcher)} />);
+    render(<DailyReflectionCardLibrary api={testApi(fetcher)} />);
 
     fireEvent.click(await screen.findByRole("button", { name: "长期记住：散步后的洞察" }));
+    await confirmRemember();
     expect(await screen.findByText("需要确认后才能长期记住")).toBeVisible();
     fireEvent.click(screen.getByRole("button", { name: "打开卡片确认" }));
     const dialog = await screen.findByRole("dialog", { name: "散步后的洞察" });
@@ -496,9 +516,10 @@ describe("DailyReflectionCardLibrary", () => {
       }
       return jsonResponse({ error: "not_found" }, 404);
     });
-    render(<DailyReflectionCardLibrary api={createDailyReflectionApi(fetcher)} />);
+    render(<DailyReflectionCardLibrary api={testApi(fetcher)} />);
 
     fireEvent.click(await screen.findByRole("button", { name: "长期记住：散步后的洞察" }));
+    await confirmRemember();
     expect(await screen.findByText("需要先确认内容归属")).toBeVisible();
     fireEvent.click(screen.getByRole("button", { name: "打开卡片确认" }));
     const dialog = await screen.findByRole("dialog", { name: "散步后的洞察" });
@@ -535,11 +556,12 @@ describe("DailyReflectionCardLibrary", () => {
       }
       return jsonResponse({ error: "not_found" }, 404);
     });
-    render(<DailyReflectionCardLibrary api={createDailyReflectionApi(fetcher)} />);
+    render(<DailyReflectionCardLibrary api={testApi(fetcher)} />);
 
     fireEvent.click(await screen.findByRole("button", { name: "长期记住：散步后的洞察" }));
+    await confirmRemember();
     expect(await screen.findByRole("status")).toHaveTextContent(
-      "这张卡片不符合长期记住的安全条件；卡片本身仍会保留。"
+      "未通过长期记忆审核；卡片本身仍会保留。"
     );
     expect(screen.getByRole("button", { name: "打开卡片：散步后的洞察" })).toBeVisible();
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
@@ -558,11 +580,11 @@ describe("DailyReflectionCardLibrary", () => {
     const fetcher = vi.fn<typeof fetch>(async (input) => String(input).startsWith("/api/daily-reflections/cards?")
       ? jsonResponse(listResponse([action, unavailable]))
       : jsonResponse({ error: "not_found" }, 404));
-    render(<DailyReflectionCardLibrary api={createDailyReflectionApi(fetcher)} />);
+    render(<DailyReflectionCardLibrary api={testApi(fetcher)} />);
 
     const disabled = await screen.findByRole("button", { name: "长期记住" });
     expect(disabled).toBeDisabled();
-    expect(screen.getByText("先在复盘中明确认领这项行动后，才能长期记住")).toBeVisible();
+    expect(screen.getByText("打开卡片核对行动认领状态")).toBeVisible();
     expect(screen.getByText("来源不可用，无法长期记住")).toBeVisible();
     expect(fetcher.mock.calls.filter(([, init]) => init?.method === "POST")).toHaveLength(0);
   });
@@ -609,11 +631,13 @@ describe("DailyReflectionCardLibrary", () => {
       }
       return jsonResponse({ error: "not_found" }, 404);
     });
-    render(<DailyReflectionCardLibrary api={createDailyReflectionApi(fetcher)} />);
+    render(<DailyReflectionCardLibrary api={testApi(fetcher)} />);
 
     fireEvent.click(await screen.findByRole("button", { name: "长期记住：散步后的洞察" }));
+    await confirmRemember();
     expect(await screen.findByRole("alert")).toHaveTextContent("长期记忆还没有完成保存");
     fireEvent.click(screen.getByRole("button", { name: "长期记住：散步后的洞察" }));
+    await confirmRemember();
     expect(await screen.findByRole("status")).toHaveTextContent("已长期记住");
     expect(fetcher.mock.calls.filter(([path]) => String(path).endsWith("/cards/card_1/memory-proposals")))
       .toHaveLength(1);
@@ -635,9 +659,10 @@ describe("DailyReflectionCardLibrary", () => {
       }
       return jsonResponse({ error: "not_found" }, 404);
     });
-    render(<DailyReflectionCardLibrary api={createDailyReflectionApi(fetcher)} />);
+    render(<DailyReflectionCardLibrary api={testApi(fetcher)} />);
 
     fireEvent.click(await screen.findByRole("button", { name: "长期记住：散步后的洞察" }));
+    await confirmRemember();
     expect(await screen.findByRole("alert")).toHaveTextContent(
       "这张卡片已经在其他页面更新，已重新加载最新内容。"
     );
@@ -662,7 +687,7 @@ describe("DailyReflectionCardLibrary", () => {
       }
       return jsonResponse({ error: "not_found" }, 404);
     });
-    render(<DailyReflectionCardLibrary api={createDailyReflectionApi(fetcher)} />);
+    render(<DailyReflectionCardLibrary api={testApi(fetcher)} />);
     fireEvent.click(await screen.findByRole("button", { name: "打开卡片：散步后的洞察" }));
     const dialog = await screen.findByRole("dialog", { name: "散步后的洞察" });
     fireEvent.click(within(dialog).getByRole("button", { name: "编辑卡片" }));
@@ -689,7 +714,7 @@ describe("DailyReflectionCardLibrary", () => {
       if (path === "/api/daily-reflections/cards/card_1" && init?.method === "PATCH") return jsonResponse({ error: "working_card_version_conflict" }, 409);
       return jsonResponse({ error: "not_found" }, 404);
     });
-    render(<DailyReflectionCardLibrary api={createDailyReflectionApi(fetcher)} />);
+    render(<DailyReflectionCardLibrary api={testApi(fetcher)} />);
     fireEvent.click(await screen.findByRole("button", { name: "打开卡片：散步后的洞察" }));
     const dialog = await screen.findByRole("dialog", { name: "散步后的洞察" });
     fireEvent.click(within(dialog).getByRole("button", { name: "编辑卡片" }));
@@ -708,7 +733,7 @@ describe("DailyReflectionCardLibrary", () => {
       if (path === "/api/daily-reflections/cards/card_1" && init?.method === "GET") return jsonResponse(detail());
       return jsonResponse({ error: "not_found" }, 404);
     });
-    render(<DailyReflectionCardLibrary api={createDailyReflectionApi(fetcher)} />);
+    render(<DailyReflectionCardLibrary api={testApi(fetcher)} />);
     fireEvent.click(await screen.findByRole("button", { name: "打开卡片：散步后的洞察" }));
     const dialog = await screen.findByRole("dialog", { name: "散步后的洞察" });
     fireEvent.click(within(dialog).getByRole("button", { name: "编辑卡片" }));
@@ -751,7 +776,7 @@ describe("DailyReflectionCardLibrary", () => {
       if (path === "/api/daily-reflections/cards/card_1" && init?.method === "DELETE") return jsonResponse({ card: { ...current.card, status: "removed", version: 4 } });
       return jsonResponse({ error: "not_found" }, 404);
     });
-    render(<DailyReflectionCardLibrary api={createDailyReflectionApi(fetcher)} initialCardId="card_1" />);
+    render(<DailyReflectionCardLibrary api={testApi(fetcher)} initialCardId="card_1" />);
     const dialog = await screen.findByRole("dialog", { name: "散步后的洞察" });
     fireEvent.click(within(dialog).getByText("查看来源 · 0 段"));
     expect(within(dialog).getByText(/原始来源已不可用/u)).toBeVisible();
@@ -773,11 +798,112 @@ describe("DailyReflectionCardLibrary", () => {
       if (path === "/api/daily-reflections/cards/card_1" && init?.method === "GET") return jsonResponse(detail());
       return jsonResponse({ error: "not_found" }, 404);
     });
-    render(<DailyReflectionCardLibrary api={createDailyReflectionApi(fetcher)} />);
+    render(<DailyReflectionCardLibrary api={testApi(fetcher)} />);
     fireEvent.click(await screen.findByRole("button", { name: "打开卡片：散步后的洞察" }));
     const dialog = await screen.findByRole("dialog", { name: "散步后的洞察" });
     expect(dialog).toHaveAttribute("data-phase", "open");
     fireEvent.click(within(dialog).getByRole("button", { name: "关闭卡片详情" }));
     expect(screen.queryByRole("dialog", { name: "散步后的洞察" })).not.toBeInTheDocument();
   });
+});
+
+describe("Card to Durable Memory explicit entry", () => {
+  const fetchCards = async (input: RequestInfo | URL) => String(input).startsWith("/api/daily-reflections/cards?")
+    ? jsonResponse(listResponse([card()])) : jsonResponse(detail());
+
+  it("cancels the initial confirmation with zero Proposal or Memory writes", async () => {
+    const api = testApi(fetchCards, { createWorkingCardMemoryProposal: vi.fn(), admitMemoryProposal: vi.fn() });
+    render(<DailyReflectionCardLibrary api={api} />);
+    fireEvent.click(await screen.findByRole("button", { name: "长期记住：散步后的洞察" }));
+    expect(screen.getByText(/确认将.*加入长期记忆/)).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "先只保留卡片" }));
+    expect(api.createWorkingCardMemoryProposal).not.toHaveBeenCalled();
+    expect(api.evaluateMemoryProposal).not.toHaveBeenCalled();
+    expect(api.admitMemoryProposal).not.toHaveBeenCalled();
+  });
+
+  it("shows the actual evaluation rejection and never calls Admission", async () => {
+    const api = testApi(fetchCards, {
+      createWorkingCardMemoryProposal: vi.fn(async () => ({ proposal: memoryProposal(), reused: false })) as DailyReflectionApi["createWorkingCardMemoryProposal"],
+      evaluateMemoryProposal: vi.fn(async () => ({ status: "rejected", proposal: memoryProposal({ status: "rejected", reasons: ["canonical_evidence_invalid"], version: 2 }), memoryId: null, reasons: ["canonical_evidence_invalid"], confirmationRequirements: [] })) as DailyReflectionApi["evaluateMemoryProposal"],
+      admitMemoryProposal: vi.fn()
+    });
+    render(<DailyReflectionCardLibrary api={api} />);
+    fireEvent.click(await screen.findByRole("button", { name: "长期记住：散步后的洞察" }));
+    await confirmRemember();
+    expect(await screen.findByText(/原话依据未通过核对/)).toBeVisible();
+    expect(screen.queryByText("已长期记住")).not.toBeInTheDocument();
+    expect(api.admitMemoryProposal).not.toHaveBeenCalled();
+  });
+
+  it.each(["pending", "approved", "rejected", "admitted"] as const)("restores %s state from the server when a Card is reopened, without mutations", async (status) => {
+    const api = testApi(fetchCards, {
+      getWorkingCardMemoryProposal: vi.fn(async () => ({ proposal: memoryProposal({ status, reasons: status === "rejected" ? ["canonical_evidence_invalid"] : [], memoryId: status === "admitted" ? "memory_1" : null, admittedAt: status === "admitted" ? "2026-08-13T08:01:00.000Z" : null }), publicationStatus: "unpublished", revoked: false, actionClaimed: false })) as DailyReflectionApi["getWorkingCardMemoryProposal"],
+      createWorkingCardMemoryProposal: vi.fn(), admitMemoryProposal: vi.fn()
+    });
+    render(<DailyReflectionCardLibrary api={api} initialCardId="card_1" />);
+    const dialog = await screen.findByRole("dialog", { name: "散步后的洞察" });
+    const message = status === "pending" ? "待审核或确认，尚未加入长期记忆。"
+      : status === "approved" ? "已通过审核，尚未加入长期记忆。"
+      : status === "rejected" ? "未通过长期记忆审核；卡片本身仍会保留。"
+      : "已接纳，正在等待完成发布；暂不可作为长期记忆读取。";
+    expect(await within(dialog).findByText(message)).toBeVisible();
+    expect(within(dialog).queryByText("已长期记住")).not.toBeInTheDocument();
+    expect(api.createWorkingCardMemoryProposal).not.toHaveBeenCalled();
+    expect(api.evaluateMemoryProposal).not.toHaveBeenCalled();
+    expect(api.admitMemoryProposal).not.toHaveBeenCalled();
+  });
+
+  it("allows an already claimed action only after reading the stored claim and explicit confirmation", async () => {
+    const action = { ...detail().card, cardKind: "action" as const };
+    const api = testApi(fetchCards, {
+      getWorkingCard: vi.fn(async () => ({ card: action })),
+      getWorkingCardMemoryProposal: vi.fn(async () => ({ proposal: null, publicationStatus: null, revoked: false, actionClaimed: true })),
+      createWorkingCardMemoryProposal: vi.fn(async () => { throw new Error("stop before evaluation"); })
+    });
+    render(<DailyReflectionCardLibrary api={api} initialCardId="card_1" />);
+    const dialog = await screen.findByRole("dialog", { name: "散步后的洞察" });
+    fireEvent.click(await within(dialog).findByRole("button", { name: "长期记住：散步后的洞察" }));
+    fireEvent.click(within(dialog).getByRole("button", { name: "确认长期记住" }));
+    await waitFor(() => expect(api.createWorkingCardMemoryProposal).toHaveBeenCalledWith("card_1", { expectedCardVersion: 1, memoryType: "commitment" }));
+  });
+});
+
+it("uses the real client create/evaluate/admit transport only after confirmation, with the evaluated version", async () => {
+  let active = false;
+  const admitted = memoryProposal({ status: "admitted", memoryId: "memory_1", admittedAt: "2026-08-13T08:01:00.000Z", version: 5 });
+  const fetcher = vi.fn<typeof fetch>(async (input, init) => {
+    const url = String(input);
+    if (url.startsWith("/api/daily-reflections/cards?")) return jsonResponse(listResponse([card("saved", false, { memoryLifecycleStatus: active ? "active" : "not_admitted" })]));
+    if (url.endsWith("/cards/card_1/memory-proposals")) return jsonResponse({ proposal: memoryProposal(), reused: false }, 201);
+    if (url.endsWith("/evaluate")) return jsonResponse({ status: "approved", proposal: memoryProposal({ status: "approved", version: 2 }), memoryId: null, reasons: [], confirmationRequirements: [] });
+    if (url.endsWith("/admit")) {
+      expect(JSON.parse(String(init?.body))).toEqual({ expectedVersion: 2, acknowledgements: [] });
+      active = true;
+      return jsonResponse({ status: "admitted", proposal: admitted, memoryId: "memory_1", reasons: [], confirmationRequirements: [] });
+    }
+    return jsonResponse({ error: "not_found" }, 404);
+  });
+  render(<DailyReflectionCardLibrary api={createDailyReflectionApi(fetcher)} />);
+  fireEvent.click(await screen.findByRole("button", { name: "长期记住：散步后的洞察" }));
+  expect(fetcher.mock.calls.filter(([, init]) => init?.method === "POST")).toHaveLength(0);
+  await confirmRemember();
+  expect(await screen.findByText("已长期记住")).toBeVisible();
+  expect(fetcher.mock.calls.filter(([, init]) => init?.method === "POST").map(([url]) => String(url))).toEqual([
+    "/api/daily-reflections/cards/card_1/memory-proposals",
+    "/api/daily-reflections/memory-proposals/proposal_1/evaluate",
+    "/api/daily-reflections/memory-proposals/proposal_1/admit"
+  ]);
+});
+
+it.each([
+  card("archived"), card("removed"), card("saved", true),
+  card("saved", false, { memoryLifecycleStatus: "revoked" }),
+  card("saved", false, { memoryLifecycleStatus: "revocation_requested" })
+])("offers no promotion for ineligible lifecycle $status / $memoryLifecycleStatus / source=$sourceUnavailable", async (item) => {
+  const fetcher = vi.fn<typeof fetch>(async () => jsonResponse(listResponse([item])));
+  render(<DailyReflectionCardLibrary api={testApi(fetcher)} />);
+  await screen.findByRole("button", { name: "打开卡片：散步后的洞察" });
+  expect(screen.queryByRole("button", { name: "长期记住：散步后的洞察" })).not.toBeInTheDocument();
+  expect(fetcher.mock.calls.filter(([, init]) => init?.method === "POST")).toHaveLength(0);
 });

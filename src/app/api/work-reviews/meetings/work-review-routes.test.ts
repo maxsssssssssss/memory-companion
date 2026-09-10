@@ -753,4 +753,15 @@ describe("Work Review scoped review routes", () => {
     const body = await responseJson(response) as { meetings: Array<{ id: string }> };
     expect(body.meetings.map((meeting) => meeting.id)).toEqual(["meeting_list_a"]);
   });
+
+  it("rejects incoherent or unknown Meeting project filters", async () => {
+    const orphanProjectId = await listMeetings(new Request(
+      "http://localhost/api/work-reviews/meetings?projectId=wrp_alpha"
+    ));
+    const unknown = await listMeetings(new Request(
+      "http://localhost/api/work-reviews/meetings?unexpected=true"
+    ));
+    expect(orphanProjectId.status).toBe(400);
+    expect(unknown.status).toBe(400);
+  });
 });

@@ -847,6 +847,7 @@ describe("createDailyReflectionApi", () => {
   it("looks up only the bounded operation receipt and rejects extra response fields", async () => {
     const safe = vi.fn<typeof fetch>().mockResolvedValue(jsonResponse({
       found: true,
+      uploadState: "accepted",
       reflectionId: "reflection_1",
       uploadId: "upload_1",
       jobId: "job_1",
@@ -865,6 +866,26 @@ describe("createDailyReflectionApi", () => {
       transcript: "must never be returned"
     }));
     await expect(createDailyReflectionApi(unsafe).getOperation("operation_1"))
+      .rejects.toMatchObject({ code: "invalid_response" });
+  });
+
+  it.each(["still_persisting", "accepted", "reupload_allowed", "unresolved", "terminated"])(
+    "parses the formal %s operation upload state", async (uploadState) => {
+      const fetcher = vi.fn<typeof fetch>().mockResolvedValue(jsonResponse({
+        found: true, uploadState, reflectionId: "reflection_1", uploadId: "upload_1", jobId: "job_1",
+        contentHash: "a".repeat(64), status: "uploading"
+      }));
+      await expect(createDailyReflectionApi(fetcher).getOperation("original-key"))
+        .resolves.toMatchObject({ found: true, uploadState });
+    }
+  );
+
+  it.each([undefined, "unknown"])("rejects a legacy or unknown upload state (%s)", async (uploadState) => {
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(jsonResponse({
+      found: true, uploadState, reflectionId: "reflection_1", uploadId: "upload_1", jobId: "job_1",
+      contentHash: "a".repeat(64), status: "review_pending"
+    }));
+    await expect(createDailyReflectionApi(fetcher).getOperation("original-key"))
       .rejects.toMatchObject({ code: "invalid_response" });
   });
 
@@ -1360,5 +1381,29 @@ describe("createDailyReflectionApi", () => {
         code: "network_error",
         message: "网络连接失败，请检查网络后重试。"
       });
+  });
+});
+
+describe("Memory Proposal lookup and evaluation client", () => {
+  it("reads without writes and passes the evaluated version into existing Admission", async () => {
+    const approved = memoryProposalResponse({ status: "approved", version: 4 });
+    const fetcher = vi.fn<typeof fetch>()
+      .mockResolvedValueOnce(jsonResponse({ proposal: null, publicationStatus: null, revoked: false, actionClaimed: false }))
+      .mockResolvedValueOnce(jsonResponse({ status: "approved", proposal: approved, memoryId: null, reasons: [], confirmationRequirements: [] }));
+    const api = createDailyReflectionApi(fetcher);
+    await expect(api.getWorkingCardMemoryProposal("card_1")).resolves.toMatchObject({ proposal: null });
+    await expect(api.evaluateMemoryProposal("proposal_1", { expectedVersion: 3 })).resolves.toMatchObject({ status: "approved", proposal: { version: 4 }, memoryId: null });
+    expect(fetcher.mock.calls.map(([url, init]) => [url, init?.method])).toEqual([
+      ["/api/daily-reflections/cards/card_1/memory-proposals", "GET"],
+      ["/api/daily-reflections/memory-proposals/proposal_1/evaluate", "POST"]
+    ]);
+    expect(JSON.parse(String(fetcher.mock.calls[1][1]?.body))).toEqual({ expectedVersion: 3 });
+    expect(fetcher.mock.calls.every(([, init]) => init?.credentials === "same-origin")).toBe(true);
+  });
+
+  it("rejects invalid evaluation versions without transport", async () => {
+    const fetcher = vi.fn<typeof fetch>();
+    await expect(createDailyReflectionApi(fetcher).evaluateMemoryProposal("proposal_1", { expectedVersion: -1 })).rejects.toMatchObject({ status: 400 });
+    expect(fetcher).not.toHaveBeenCalled();
   });
 });

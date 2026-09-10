@@ -132,7 +132,7 @@ export function ReflectionAppShell({
 }: ReflectionAppShellProps) {
   const pathname = usePathname();
   const router = useRouter();
-  const session = useDailyReflectionSession();
+  const session = useDailyReflectionSession({ retainAcrossNavigation: true });
   const sessionRef = useRef(session);
   sessionRef.current = session;
 

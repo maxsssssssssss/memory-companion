@@ -11,6 +11,7 @@ const allowedSpecs = new Set([
   "date-companion-fixture.spec.ts",
   "date-companion-stage2-fixture.spec.ts",
   "date-companion-memory-ui-fixture.spec.ts",
+  "date-companion-home-content-fixture.spec.ts",
   "date-companion-auth-registration-fixture.spec.ts",
   "date-companion-toy-sync-fixture.spec.ts"
 ]);
@@ -158,6 +159,7 @@ await writeFile(
 );
 const requiresFixtureAudio = ![
   "date-companion-memory-ui-fixture.spec.ts",
+  "date-companion-home-content-fixture.spec.ts",
   "date-companion-auth-registration-fixture.spec.ts"
 ].includes(requestedSpec);
 const toySyncFixture = requestedSpec === "date-companion-toy-sync-fixture.spec.ts";

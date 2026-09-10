@@ -6,6 +6,7 @@ import { DateCompanionApiError } from "@/lib/client/date-companion-api";
 import type { SourceRefVM } from "@/lib/domain/date-companion";
 import {
   DateCompanionProactiveValueResponseSchema,
+  type DateCompanionHomeContent,
   type DateCompanionProactiveValueResponse
 } from "@/lib/domain/date-companion-proactive-value";
 
@@ -41,6 +42,16 @@ export type DateCompanionProactiveValuePresentation = {
   suggestedQuestions: string[];
   sources: SourceRefVM[];
 };
+
+export type DateCompanionHomeContentPresentation = {
+  fingerprint: string;
+  about: Array<DateCompanionHomeContent["home"]["about"][number] & { sources: SourceRefVM[] }>;
+  beforeMeeting: Array<DateCompanionHomeContent["home"]["beforeMeeting"][number] & { sources: SourceRefVM[] }>;
+};
+
+export type DateCompanionHomeContentState =
+  | { status: "ready"; content: DateCompanionHomeContentPresentation }
+  | { status: "empty" | "loading" | "unavailable" };
 
 export type DateCompanionProactiveValueClient = {
   getCurrentInteraction(
@@ -117,7 +128,14 @@ export function createDateCompanionProactiveValueClient(
   };
 }
 
-function targetKey(target: DateCompanionProactiveValueTarget) {
+const SHANGHAI_OFFSET_MS = 8 * 60 * 60 * 1_000;
+const DAY_MS = 24 * 60 * 60 * 1_000;
+
+function shanghaiDate() {
+  return new Date(Date.now() + SHANGHAI_OFFSET_MS).toISOString().slice(0, 10);
+}
+
+function targetKey(target: DateCompanionProactiveValueTarget, currentShanghaiDate: string) {
   return target.scope === "current_interaction"
     ? [
         target.accountId,
@@ -133,7 +151,8 @@ function targetKey(target: DateCompanionProactiveValueTarget) {
         target.relationshipId,
         target.personId,
         target.mappingVersion,
-        target.sourceRevision
+        target.sourceRevision,
+        currentShanghaiDate
       ].join("\u0000");
 }
 
@@ -189,11 +208,36 @@ export function useDateCompanionProactiveValue(
 ): DateCompanionProactiveValueLoadState {
   const [defaultClient] = useState(() => createDateCompanionProactiveValueClient());
   const activeClient = client ?? defaultClient;
-  const key = target ? targetKey(target) : null;
+  const [currentShanghaiDate, setCurrentShanghaiDate] = useState(shanghaiDate);
+  const relationshipScope = target?.scope === "person_relationship";
+  const key = target ? targetKey(target, currentShanghaiDate) : null;
   const [result, setResult] = useState<{
     key: string | null;
     state: DateCompanionProactiveValueLoadState;
   }>({ key: null, state: { status: "idle" } });
+
+  useEffect(() => {
+    if (!relationshipScope) return;
+    let timer: number;
+    const refreshDate = () => {
+      setCurrentShanghaiDate(shanghaiDate());
+      window.clearTimeout(timer);
+      const now = Date.now();
+      const nextMidnight = (Math.floor((now + SHANGHAI_OFFSET_MS) / DAY_MS) + 1) * DAY_MS - SHANGHAI_OFFSET_MS;
+      timer = window.setTimeout(refreshDate, nextMidnight - now + 1);
+    };
+    const onVisibilityChange = () => {
+      if (document.visibilityState === "visible") refreshDate();
+    };
+    refreshDate();
+    window.addEventListener("focus", refreshDate);
+    document.addEventListener("visibilitychange", onVisibilityChange);
+    return () => {
+      window.clearTimeout(timer);
+      window.removeEventListener("focus", refreshDate);
+      document.removeEventListener("visibilitychange", onVisibilityChange);
+    };
+  }, [relationshipScope]);
 
   useEffect(() => {
     if (!target || !key) {
@@ -293,6 +337,58 @@ function sourceMatchesReference(
   return reference.speakerId === undefined || source.speakerId === reference.speakerId;
 }
 
+function canonicalSourceResolver(
+  response: DateCompanionProactiveValueResponse,
+  availableSources: SourceRefVM[],
+  requireSubjectMatch = false
+) {
+  const references = new Map(response.evidenceReferences.map((reference) => [reference.evidenceId, reference]));
+  const sourcesByKey = new Map<string, SourceRefVM[]>();
+  for (const source of availableSources) {
+    for (const segmentId of source.segmentIds) {
+      const key = sourceKey(source.uploadId, segmentId);
+      sourcesByKey.set(key, [...(sourcesByKey.get(key) ?? []), source]);
+    }
+  }
+  return (evidenceIds: string[]): SourceRefVM[] | null => {
+    if (references.size !== response.evidenceReferences.length) return null;
+    const selectedReferences = evidenceIds.map((evidenceId) => references.get(evidenceId));
+    if (selectedReferences.some((reference) => !reference)) return null;
+    const resolved: SourceRefVM[] = [];
+    const seen = new Set<string>();
+    for (const reference of selectedReferences) {
+      const canonicalReference = reference!;
+      const key = sourceKey(canonicalReference.uploadId, canonicalReference.sourceSegmentId);
+      const canonicalCandidates = sourcesByKey.get(key) ?? [];
+      const canonicalSignatures = new Set(canonicalCandidates.map((source) => JSON.stringify([
+        source.recordingDate,
+        source.startSeconds,
+        source.endSeconds,
+        source.speakerId ?? null,
+        normalizedText(source.quote),
+        source.contentDigest ?? null,
+        ...(requireSubjectMatch ? [source.memorySubject ?? null] : [])
+      ])));
+      if (canonicalSignatures.size !== 1) return null;
+      const candidates = canonicalCandidates.filter((source) =>
+        sourceMatchesReference(source, canonicalReference)
+        && (!requireSubjectMatch || source.memorySubject === canonicalReference.subject)
+      );
+      if (candidates.length === 0) return null;
+      if (seen.has(key)) continue;
+      candidates.sort((left, right) =>
+        Number(Boolean(right.canOpenTranscript)) - Number(Boolean(left.canOpenTranscript))
+        || left.id.localeCompare(right.id)
+      );
+      resolved.push(requireSubjectMatch
+        ? { ...candidates[0], segmentIds: [canonicalReference.sourceSegmentId] }
+        : candidates[0]);
+      seen.add(key);
+    }
+    return resolved.length > 0 ? resolved : null;
+  };
+}
+
 export function presentDateCompanionProactiveValue(
   response: DateCompanionProactiveValueResponse,
   availableSources: SourceRefVM[]
@@ -301,47 +397,11 @@ export function presentDateCompanionProactiveValue(
     response.status === "processing"
     || response.status === "unavailable"
     || !response.value
+    || "home" in response.value
     || !response.sourceFingerprint
   ) return null;
-  const references = new Map(response.evidenceReferences.map((reference) => [reference.evidenceId, reference]));
-  const selectedReferences = response.value.evidenceIds.map((evidenceId) => references.get(evidenceId));
-  if (selectedReferences.some((reference) => !reference)) return null;
-
-  const sourcesByKey = new Map<string, SourceRefVM[]>();
-  for (const source of availableSources) {
-    for (const segmentId of source.segmentIds) {
-      const key = sourceKey(source.uploadId, segmentId);
-      sourcesByKey.set(key, [...(sourcesByKey.get(key) ?? []), source]);
-    }
-  }
-  const resolved: SourceRefVM[] = [];
-  const seen = new Set<string>();
-  for (const reference of selectedReferences) {
-    const canonicalReference = reference!;
-    const key = sourceKey(canonicalReference.uploadId, canonicalReference.sourceSegmentId);
-    if (seen.has(key)) continue;
-    const canonicalCandidates = sourcesByKey.get(key) ?? [];
-    const canonicalSignatures = new Set(canonicalCandidates.map((source) => JSON.stringify([
-      source.recordingDate,
-      source.startSeconds,
-      source.endSeconds,
-      source.speakerId ?? null,
-      normalizedText(source.quote),
-      source.contentDigest ?? null
-    ])));
-    if (canonicalSignatures.size !== 1) return null;
-    const candidates = canonicalCandidates.filter((source) =>
-      sourceMatchesReference(source, canonicalReference)
-    );
-    if (candidates.length === 0) return null;
-    candidates.sort((left, right) =>
-      Number(Boolean(right.canOpenTranscript)) - Number(Boolean(left.canOpenTranscript))
-      || left.id.localeCompare(right.id)
-    );
-    resolved.push(candidates[0]);
-    seen.add(key);
-  }
-  if (resolved.length === 0) return null;
+  const resolved = canonicalSourceResolver(response, availableSources)(response.value.evidenceIds);
+  if (!resolved) return null;
   return {
     fingerprint: response.sourceFingerprint,
     status: response.status,
@@ -352,8 +412,54 @@ export function presentDateCompanionProactiveValue(
   };
 }
 
+export function presentDateCompanionHomeContent(
+  response: DateCompanionProactiveValueResponse,
+  canonicalSources: SourceRefVM[]
+): DateCompanionHomeContentPresentation | null {
+  const parsed = DateCompanionProactiveValueResponseSchema.safeParse(response);
+  if (!parsed.success) return null;
+  const current = parsed.data;
+  if (current.status !== "ready" || current.scope !== "person_relationship"
+    || !current.value || !("home" in current.value) || !current.sourceFingerprint) return null;
+  const resolve = canonicalSourceResolver(current, canonicalSources, true);
+  const about: DateCompanionHomeContentPresentation["about"] = [];
+  const beforeMeeting: DateCompanionHomeContentPresentation["beforeMeeting"] = [];
+  for (const item of current.value.home.about) {
+    const sources = resolve(item.evidenceIds);
+    if (!sources || (item.kind === "shared_moment"
+      ? !sources.some((source) => source.memorySubject === "both")
+      : sources.some((source) => source.memorySubject !== "companion" && source.memorySubject !== "both"))) return null;
+    about.push({ ...item, sources });
+  }
+  for (const item of current.value.home.beforeMeeting) {
+    const sources = resolve(item.evidenceIds);
+    if (!sources) return null;
+    beforeMeeting.push({ ...item, sources });
+  }
+  return { fingerprint: current.sourceFingerprint, about, beforeMeeting };
+}
+
 export function proactiveSuggestedQuestions(
   presentation: DateCompanionProactiveValuePresentation | null
 ) {
   return presentation?.suggestedQuestions.slice(0, 2) ?? [];
+}
+
+export function homeAboutSuggestedQuestions(
+  response: DateCompanionProactiveValueResponse,
+  personQaSources: SourceRefVM[]
+) {
+  const parsed = DateCompanionProactiveValueResponseSchema.safeParse(response);
+  if (!parsed.success || !parsed.data.value || !("home" in parsed.data.value)) return [];
+  const about = parsed.data.value.home.about;
+  // Recheck only the selected about items against Person QA's own allowlist.
+  // Self promises may support the home page but never authorize a QA suggestion.
+  const presentation = presentDateCompanionHomeContent({
+    ...parsed.data,
+    value: {
+      home: { about, beforeMeeting: [] },
+      evidenceIds: [...new Set(about.flatMap((item) => item.evidenceIds))]
+    }
+  }, personQaSources);
+  return presentation?.about.slice(0, 2).map((item) => `关于「${item.text}」，当时具体说了什么？`) ?? [];
 }

@@ -118,7 +118,7 @@ function mappingIsCurrent(input: {
     && expectedEndpoints[1] === actualEndpoints[1];
 }
 
-function candidateEvidenceRows(input: {
+export function candidateEvidenceRows(input: {
   memoryDatabase: Database.Database;
   accountId: string;
   relationshipId: string;

@@ -16,7 +16,7 @@ import { GET } from "./route";
 
 beforeEach(() => {
   state.authenticated = true;
-  process.env.WORK_REVIEW_ENABLED = "true";
+  delete process.env.WORK_REVIEW_ENABLED;
   process.env.WORK_REVIEW_MAX_UPLOAD_BYTES = "1048576";
   process.env.WORK_REVIEW_MAX_AUDIO_DURATION_SECONDS = "3600";
 });
@@ -28,12 +28,20 @@ afterEach(() => {
 });
 
 describe("GET /api/work-reviews/config", () => {
-  it("returns only authenticated Work-owned capacity limits", async () => {
+  it("returns authenticated Work-owned limits and enabled capabilities by default", async () => {
     const response = await GET(new Request("http://localhost/api/work-reviews/config"));
     expect(response.status).toBe(200);
     expect(response.headers.get("Cache-Control")).toBe("private, no-store");
     expect(await response.json()).toEqual({
-      limits: { maxUploadBytes: 1_048_576, maxAudioDurationSeconds: 3_600 }
+      limits: { maxUploadBytes: 1_048_576, maxAudioDurationSeconds: 3_600 },
+      capabilities: {
+        projects: true,
+        weekly: true,
+        weeklyAi: true,
+        weeklyVerifier: true,
+        weeklyQa: true,
+        weeklyQaVerifier: true
+      }
     });
   });
 
@@ -41,6 +49,14 @@ describe("GET /api/work-reviews/config", () => {
     state.authenticated = false;
     const response = await GET(new Request("http://localhost/api/work-reviews/config"));
     expect(response.status).toBe(401);
+    expect(response.headers.get("Cache-Control")).toBe("private, no-store");
     expect(await response.json()).toEqual({ error: "unauthenticated" });
+  });
+
+  it("closes the capability endpoint when Work Review is explicitly disabled", async () => {
+    process.env.WORK_REVIEW_ENABLED = "false";
+    const response = await GET(new Request("http://localhost/api/work-reviews/config"));
+    expect(response.status).toBe(404);
+    expect(await response.json()).toEqual({ error: "feature_disabled" });
   });
 });

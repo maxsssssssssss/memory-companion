@@ -31,11 +31,11 @@ describe("global product entry", () => {
     delete process.env.WORK_REVIEW_ENABLED;
 
     const page = GlobalProductEntryPage();
-    expect(page.props).toEqual({ dailyReflectionEnabled: expected, workReviewEnabled: false });
+    expect(page.props).toEqual({ dailyReflectionEnabled: expected, workReviewEnabled: true });
   });
 
   it.each([
-    [undefined, false],
+    [undefined, true],
     ["false", false],
     ["true", true]
   ] as const)("keeps the Work Review feature boundary for flag %s", (flag, expected) => {

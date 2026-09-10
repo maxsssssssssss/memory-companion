@@ -25,7 +25,6 @@ import {
   DailyReflectionVersionConflictError,
   getDailyReflectionRepository,
   isDailyReflectionUploadRecord,
-  isDailyReflectionTombstone,
   isDailyReflectionBrowserRecordingEnabled,
   isDailyReflectionToySyncEnabled,
   isDailyReflectionUploadEnabled,
@@ -295,6 +294,25 @@ export async function POST(request: Request) {
   const operationReceipt = created.receipt;
   const uploadId = operationReceipt.uploadId;
 
+  const pendingOrTerminatedResponse = () => {
+    const lookup = repository.getOperationLookupV2(authContext.user.id, operationReceipt.operationKey);
+    if (!lookup.found) throw new Error("daily_reflection_v2_receipt_missing");
+    if (lookup.uploadState === "terminated") {
+      return NextResponse.json({ error: "daily_reflection_recovery_terminated" }, { status: 409 });
+    }
+    if (lookup.uploadState === "still_persisting" || lookup.uploadState === "unresolved") {
+      return NextResponse.json({
+        ...receipt({ operation: operationReceipt, status: lookup.status, executionMode, reused: true }),
+        persistencePending: true,
+        ...(lookup.uploadState === "unresolved"
+          ? { error: "daily_reflection_upload_outcome_unresolved" } : {})
+      }, { status: lookup.uploadState === "still_persisting" ? 202 : 409 });
+    }
+    return null;
+  };
+  const initialPending = pendingOrTerminatedResponse();
+  if (initialPending) return initialPending;
+
   const persistenceKey = `${authContext.user.id}\u0000${created.reflection.id}`;
   const persistedFingerprint = repository.getUploadFingerprint(
     authContext.user.id,
@@ -306,12 +324,11 @@ export async function POST(request: Request) {
     }, { status: 409 });
   }
 
-  const readPublishedUpload = () => readDailyReflectionPublishedAsset<unknown>({
-    repository,
-    store: authContext.store,
+  // V2 operations have a fenced publication authority. A leftover compatibility
+  // projection cannot establish persistence or bypass a new attempt's fence.
+  const readPublishedUpload = () => repository.readPublishedAsset<unknown>({
     accountId: authContext.user.id,
     reflectionId: created.reflection.id,
-    uploadId,
     assetKind: "upload"
   });
   let rawStoredUpload = await readPublishedUpload();
@@ -541,12 +558,20 @@ export async function POST(request: Request) {
           if (uploadPersistenceExecutions.get(persistenceKey) === execution) {
             uploadPersistenceExecutions.delete(persistenceKey);
           }
-          repository.releaseExecutionLease({
-            accountId: authContext.user.id,
-            reflectionId: created.reflection.id,
-            leaseOwner: fence.leaseOwner,
-            attemptVersion: fence.attemptVersion
-          });
+          try {
+            // An expired writer may have compensated its raw audio after
+            // publication. Keep that fence as unresolved persistence evidence;
+            // clearing it would make the remaining metadata look accepted.
+            assertPersistenceFence();
+            repository.releaseExecutionLease({
+              accountId: authContext.user.id,
+              reflectionId: created.reflection.id,
+              leaseOwner: fence.leaseOwner,
+              attemptVersion: fence.attemptVersion
+            });
+          } catch (error) {
+            if (!(error instanceof DailyReflectionLeaseLostError)) throw error;
+          }
         }
       } else {
         repository.releaseExecutionLease({
@@ -570,6 +595,10 @@ export async function POST(request: Request) {
   rawStoredUpload = await readPublishedUpload();
   uploadAvailable = rawStoredUpload !== null;
   view = service.get(authContext.user.id, created.reflection.id);
+  // A competing writer may have published while this request awaited storage.
+  // Publication alone must not turn its live persistence attempt into success.
+  const pending = pendingOrTerminatedResponse();
+  if (pending) return pending;
   if (!uploadAvailable) {
     return NextResponse.json({
       ...receipt({
@@ -591,9 +620,16 @@ export async function POST(request: Request) {
   }
 
   let job = await readDailyReflectionJob(authContext.store, created.reflection.id);
-  const active = !isDailyReflectionTombstone(view.reflection.status)
-    && view.reflection.status !== "review_pending"
-    && view.reflection.status !== "failed";
+  const latePending = pendingOrTerminatedResponse();
+  if (latePending) return latePending;
+  view = service.get(authContext.user.id, created.reflection.id);
+  const active = ["created", "uploading", "transcribing", "extracting"]
+    .includes(view.reflection.status);
+  if (!active) {
+    return NextResponse.json(receipt({
+      operation: operationReceipt, status: view.reflection.status, executionMode, reused: true
+    }));
+  }
   const shouldDispatch = uploadAvailable
     && active
     && job?.status !== "processing"
@@ -615,11 +651,15 @@ export async function POST(request: Request) {
     executionMode,
     ...(queueJobId ? { queueJobId, queuedAt } : {})
   });
+  const beforeDispatch = pendingOrTerminatedResponse();
+  if (beforeDispatch) return beforeDispatch;
 
   if (shouldDispatch && executionMode === "queue") {
     try {
       await enqueueDailyReflectionJob(payload);
     } catch (error) {
+      const afterEnqueueFailure = pendingOrTerminatedResponse();
+      if (afterEnqueueFailure) return afterEnqueueFailure;
       console.error(
         `[daily-reflection-queue] enqueue failed reflection_id=${created.reflection.id} ` +
         `error_name=${error instanceof Error ? error.name : "unknown"}`
@@ -652,6 +692,8 @@ export async function POST(request: Request) {
     });
   }
 
+  const beforeReceipt = pendingOrTerminatedResponse();
+  if (beforeReceipt) return beforeReceipt;
   return NextResponse.json(receipt({
     operation: operationReceipt,
     status: view.reflection.status,

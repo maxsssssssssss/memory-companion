@@ -11,12 +11,16 @@ import {
   WorkReviewApiError,
   type WorkMeetingListItem,
   type WorkReviewCapacityLimits,
-  type WorkReviewApi
+  type WorkReviewApi,
+  type WorkReviewCapabilities
 } from "@/lib/client/work-review-api";
+import type { WorkProject, WorkProjectScopeFilter } from "@/lib/domain/work-project";
 
+import { WorkProjectBadges, WorkProjectFilter, WorkProjectPicker } from "./work-project-picker";
 import { WorkReviewContext, type WorkReviewFeatureFlags } from "./work-review-shell";
 import { formatMeetingDuration, WorkMeetingStatus } from "./work-review-shared";
 import styles from "./work-review.module.css";
+import { asWorkReviewV2Api, DISABLED_WORK_REVIEW_CAPABILITIES } from "./work-review-v2";
 
 function today() {
   const now = new Date();
@@ -79,15 +83,20 @@ function clearPendingUploadOperation(idempotencyKey: string) {
 
 export function WorkReviewHome({
   api: apiOverride,
+  capabilities: capabilitiesOverride,
   featureFlags: flagsOverride
 }: Readonly<{
   api?: WorkReviewApi;
+  capabilities?: WorkReviewCapabilities;
   featureFlags?: WorkReviewFeatureFlags;
 }> = {}) {
   const context = useContext(WorkReviewContext);
   const api = apiOverride ?? context?.api;
   const featureFlags = flagsOverride ?? context?.featureFlags;
   if (!api || !featureFlags) throw new Error("WorkReviewHome requires an API and feature flags");
+  const capabilities = capabilitiesOverride ?? context?.capabilities ?? DISABLED_WORK_REVIEW_CAPABILITIES;
+  const v2Api = asWorkReviewV2Api(api);
+  const projectsEnabled = capabilities.projects && Boolean(v2Api);
 
   const router = useRouter();
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -103,18 +112,47 @@ export function WorkReviewHome({
   const [capacityLimits, setCapacityLimits] = useState<WorkReviewCapacityLimits | null>(null);
   const [capacityState, setCapacityState] = useState<"loading" | "ready" | "error">("loading");
   const [capacityAttempt, setCapacityAttempt] = useState(0);
+  const [projects, setProjects] = useState<WorkProject[] | null>(null);
+  const [projectsError, setProjectsError] = useState<string | null>(null);
+  const [projectsAttempt, setProjectsAttempt] = useState(0);
+  const [projectScope, setProjectScope] = useState<WorkProjectScopeFilter>({ kind: "all" });
+  const [uploadProjectIds, setUploadProjectIds] = useState<string[]>([]);
 
   useEffect(() => {
     const controller = new AbortController();
     setLoadError(false);
-    void api.listMeetings(controller.signal).then((records) => {
+    setMeetings(null);
+    const request = projectsEnabled && v2Api
+      ? v2Api.listMeetingsByProject(projectScope, controller.signal)
+      : api.listMeetings(controller.signal);
+    void request.then((records) => {
       if (!controller.signal.aborted) setMeetings(records);
     }).catch((error: unknown) => {
       if (controller.signal.aborted || error instanceof DOMException && error.name === "AbortError") return;
       setLoadError(true);
     });
     return () => controller.abort();
-  }, [api, loadAttempt]);
+  }, [api, loadAttempt, projectScope, projectsEnabled, v2Api]);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    if (!projectsEnabled || !v2Api) {
+      setProjects([]);
+      setProjectsError(null);
+      setProjectScope({ kind: "all" });
+      setUploadProjectIds([]);
+      return () => controller.abort();
+    }
+    setProjects(null);
+    setProjectsError(null);
+    void v2Api.listProjects("all", controller.signal).then((records) => {
+      if (!controller.signal.aborted) setProjects(records);
+    }).catch((error: unknown) => {
+      if (controller.signal.aborted || error instanceof DOMException && error.name === "AbortError") return;
+      setProjectsError(error instanceof WorkReviewApiError ? error.message : "暂时无法读取项目，请稍后重试。");
+    });
+    return () => controller.abort();
+  }, [projectsAttempt, projectsEnabled, v2Api]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -148,6 +186,7 @@ export function WorkReviewHome({
         file,
         idempotencyKey: idempotencyKeyRef.current,
         meetingDate,
+        projectIds: projectsEnabled ? uploadProjectIds : undefined,
         title: title.trim() || undefined
       });
       clearPendingUploadOperation(idempotencyKeyRef.current);
@@ -204,6 +243,17 @@ export function WorkReviewHome({
               value={meetingDate}
             />
           </label>
+          {projectsEnabled ? (
+            <div className={styles.uploadProjectField}>
+              <WorkProjectPicker
+                api={api}
+                disabled={uploading}
+                label="所属项目（可选）"
+                onChange={setUploadProjectIds}
+                selectedIds={uploadProjectIds}
+              />
+            </div>
+          ) : null}
           <label className={styles.fileField}>
             <span>会议录音</span>
             <input
@@ -255,6 +305,25 @@ export function WorkReviewHome({
         <div className={styles.sectionHeading}>
           <div><h2 id="work-review-recent-title">最近会议</h2><p>打开一场会议，继续查看原文或核对会议结果。</p></div>
         </div>
+        {projectsEnabled ? (
+          <div className={styles.projectFilterBar}>
+            <WorkProjectFilter
+              disabled={projects === null || Boolean(projectsError)}
+              onChange={setProjectScope}
+              projects={projects ?? []}
+              value={projectScope}
+            />
+            <Link className={styles.secondaryButton} href="/work-review/projects">管理项目</Link>
+          </div>
+        ) : capabilities.projects ? (
+          <p className={styles.inlineNotice} role="status">项目能力暂时无法在当前页面使用。</p>
+        ) : null}
+        {projectsError ? (
+          <div className={styles.filterError} role="alert">
+            <p>{projectsError}</p>
+            <button className={styles.secondaryButton} onClick={() => setProjectsAttempt((value) => value + 1)} type="button">重新读取项目</button>
+          </div>
+        ) : null}
         {loadError ? (
           <ProductState
             action={<button className={styles.secondaryButton} onClick={() => setLoadAttempt((value) => value + 1)} type="button">重新加载</button>}
@@ -283,6 +352,7 @@ export function WorkReviewHome({
                     <div>
                       <h3>{meeting.title}</h3>
                       <p><time dateTime={meeting.meetingDate}>{meeting.meetingDate}</time>{duration ? <span>{duration}</span> : null}</p>
+                      <WorkProjectBadges projects={meeting.projects ?? []} />
                     </div>
                     <div className={styles.meetingListStatus}>
                       <WorkMeetingStatus meeting={meeting} />

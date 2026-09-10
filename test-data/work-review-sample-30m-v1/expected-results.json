@@ -1,0 +1,270 @@
+{
+  "datasetVersion": "work-review-sample-30m-v1",
+  "evaluationNote": "Freeze before the real run. Authored names are audio ground truth only, never production owner authority. Judge semantics against actual Canonical Evidence; separate ASR losses, extraction, verification, deduplication and overflow.",
+  "must": [
+    {
+      "id": "scope_adopted",
+      "sourceUtteranceIds": [
+        "u_016",
+        "u_017",
+        "u_025",
+        "u_088"
+      ],
+      "expectation": "核对方案已明确采纳，六部分范围及本轮不做自动采购/照片/免登录扫码均保留；不能因早期提议误抑制。"
+    },
+    {
+      "id": "completion_metric",
+      "sourceUtteranceIds": [
+        "u_004",
+        "u_005",
+        "u_013"
+      ],
+      "expectation": "提交、批准、发放、签收分别计数，签收才计领取完成；效率提升不是已有成果。"
+    },
+    {
+      "id": "current_launch",
+      "sourceUtteranceIds": [
+        "u_031",
+        "u_032",
+        "u_033",
+        "u_037",
+        "u_088"
+      ],
+      "expectation": "十八日取消，二十三号只是备选，当前二十五号满足权限隔离/数量追溯/更正留痕条件才开放。"
+    },
+    {
+      "id": "supplier_boundary",
+      "sourceUtteranceIds": [
+        "u_007",
+        "u_028"
+      ],
+      "expectation": "本轮没有供应商入口或邀请。"
+    },
+    {
+      "id": "aggregate_metrics",
+      "sourceUtteranceIds": [
+        "u_061",
+        "u_062",
+        "u_065"
+      ],
+      "expectation": "只做小组汇总，不做个人排行榜或责任画像。"
+    },
+    {
+      "id": "daily_digest",
+      "sourceUtteranceIds": [
+        "u_069",
+        "u_070",
+        "u_071",
+        "u_072"
+      ],
+      "expectation": "只发每日汇总，不含正文；无即时推送和个人切换开关，具体发送时刻仍未决。"
+    },
+    {
+      "id": "implementation_commitment",
+      "sourceUtteranceIds": [
+        "u_047",
+        "u_049",
+        "u_057",
+        "u_081"
+      ],
+      "expectation": "明确接受接口/用例/匿名测试数据，十一号下班前接口与说明、十四日用例；编码未到只能报本地测试通过。"
+    },
+    {
+      "id": "catalog_commitment",
+      "sourceUtteranceIds": [
+        "u_050",
+        "u_052",
+        "u_085"
+      ],
+      "expectation": "目录协调已认领：十二日前收需求、十五号前仓库确认目录，单位编码未确认或超范围先移除。"
+    },
+    {
+      "id": "training_materials",
+      "sourceUtteranceIds": [
+        "u_053",
+        "u_083"
+      ],
+      "expectation": "培训材料已认领：十三号中午前初稿、十八日前演练后修订，未交付功能不能写入材料。"
+    },
+    {
+      "id": "one_rehearsal",
+      "sourceUtteranceIds": [
+        "u_056",
+        "u_083"
+      ],
+      "expectation": "明确接受十七号下午三点的一次演练组织，不扩大成每天培训或轮值。"
+    },
+    {
+      "id": "tracking_commitment",
+      "sourceUtteranceIds": [
+        "u_062",
+        "u_064",
+        "u_084"
+      ],
+      "expectation": "埋点清单明确认领且十一日前交付；不采集理由正文/完整姓名，必须收敏感字段才能工作时取消对应埋点。"
+    },
+    {
+      "id": "rollback_commitment",
+      "sourceUtteranceIds": [
+        "u_067",
+        "u_068",
+        "u_084"
+      ],
+      "expectation": "十九号前回退准备已接受；越权/发放错配触发停止新处理、保留状态与日志，不自动删除或冲销。"
+    },
+    {
+      "id": "permission_unaccepted",
+      "sourceUtteranceIds": [
+        "u_058",
+        "u_059",
+        "u_085"
+      ],
+      "expectation": "唐宁缺席，权限核对只是请求，没有他的接受或日期承诺。"
+    },
+    {
+      "id": "readiness_review_unowned",
+      "sourceUtteranceIds": [
+        "u_040",
+        "u_041",
+        "u_042",
+        "u_043"
+      ],
+      "expectation": "准备复核形式/主持人待定，没有顾青或孟远主持承诺。"
+    },
+    {
+      "id": "support_unowned",
+      "sourceUtteranceIds": [
+        "u_073",
+        "u_074",
+        "u_075",
+        "u_083"
+      ],
+      "expectation": "每日支持轮值未认领，严重故障协助不能升级成固定轮值。"
+    },
+    {
+      "id": "contractor_eligibility",
+      "sourceUtteranceIds": [
+        "u_008",
+        "u_039",
+        "u_076",
+        "u_077"
+      ],
+      "expectation": "外包同事申领资格仍未决，不能写成已经批准。"
+    },
+    {
+      "id": "photo_retention",
+      "sourceUtteranceIds": [
+        "u_023",
+        "u_027",
+        "u_078"
+      ],
+      "expectation": "附件保留时长、删除方式、权限未决，三十天没有获批；本轮无照片功能不等于规则已解决。"
+    },
+    {
+      "id": "mobile_next_round",
+      "sourceUtteranceIds": [
+        "u_024",
+        "u_079",
+        "u_080"
+      ],
+      "expectation": "本轮手机非验收条件，下一轮移动端设备/扫码范围未决。"
+    }
+  ],
+  "mustNot": [
+    {
+      "id": "proposal_as_current",
+      "sourceUtteranceIds": [
+        "u_016",
+        "u_025",
+        "u_032",
+        "u_037"
+      ],
+      "forbiddenInterpretation": "把精简/全自动方案或二十三号备选发布为当前决定。"
+    },
+    {
+      "id": "invent_year",
+      "sourceUtteranceIds": [
+        "u_009",
+        "u_044",
+        "u_047",
+        "u_053",
+        "u_062",
+        "u_067",
+        "u_082"
+      ],
+      "forbiddenInterpretation": "给缺少年份/时区的月日或号字日期自动补全年份、午夜、时区；借旧采购年份或旧模板日期作为截止。"
+    },
+    {
+      "id": "uploader_speaker_owner",
+      "sourceUtteranceIds": [
+        "u_058",
+        "u_059",
+        "u_060",
+        "u_074"
+      ],
+      "forbiddenInterpretation": "把上传者、speaker标签或同段后续发言当成已确认负责人；把多人事项都归给一个人。"
+    },
+    {
+      "id": "assignment_as_commitment",
+      "sourceUtteranceIds": [
+        "u_058",
+        "u_059",
+        "u_085"
+      ],
+      "forbiddenInterpretation": "将缺席唐宁的权限核对请求当成他已接受的承诺。"
+    },
+    {
+      "id": "unconditional_launch",
+      "sourceUtteranceIds": [
+        "u_037",
+        "u_038",
+        "u_088",
+        "u_090"
+      ],
+      "forbiddenInterpretation": "删掉硬阻断条件，声称二十五号无条件上线或自动顺延一周已获批准。"
+    },
+    {
+      "id": "sensitive_tracking",
+      "sourceUtteranceIds": [
+        "u_062",
+        "u_064",
+        "u_084"
+      ],
+      "forbiddenInterpretation": "省略敏感字段退出条件，扩大到采集正文、姓名或责任画像。"
+    },
+    {
+      "id": "destructive_rollback",
+      "sourceUtteranceIds": [
+        "u_067",
+        "u_068",
+        "u_084"
+      ],
+      "forbiddenInterpretation": "把回退改写成删除历史、自动冲销，或不保留必要日志。"
+    },
+    {
+      "id": "permanent_support",
+      "sourceUtteranceIds": [
+        "u_056",
+        "u_073",
+        "u_074",
+        "u_083"
+      ],
+      "forbiddenInterpretation": "将一次演练/严重故障协助扩大成每天培训、两周日常轮值。"
+    },
+    {
+      "id": "unsupported_causality",
+      "sourceUtteranceIds": [
+        "u_086",
+        "u_087"
+      ],
+      "forbiddenInterpretation": "声称目录或某小组导致演示慢/项目延期，原文没有确立这个因果结论。"
+    },
+    {
+      "id": "findings_before_review",
+      "sourceUtteranceIds": [
+        "u_001"
+      ],
+      "forbiddenInterpretation": "在本次未执行用户确认时生成Finding/Todo或写入其他产品长期记忆。"
+    }
+  ]
+}

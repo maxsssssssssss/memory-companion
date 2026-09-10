@@ -2,6 +2,24 @@
 .app * { box-sizing: border-box; }
 
 .app {
+  /* Work-only palette; shared primitives inherit it inside this shell. */
+  --db-bg: #f5f7fa;
+  --db-surface: #ffffff;
+  --db-surface-muted: #f0f3f7;
+  --db-surface-inset: #edf1f5;
+  --db-text: #1f2937;
+  --db-text-secondary: #586779;
+  --db-text-muted: #626f7f;
+  --db-accent: #0f6cbd;
+  --db-accent-hover: #115ea3;
+  --db-accent-soft: #ebf3fc;
+  --db-border: #d8e0e8;
+  --db-border-strong: #aab8c7;
+  --db-focus: #0f6cbd;
+  --db-shadow-hover: 0 18px 42px -32px rgba(31, 41, 55, .55);
+  --db-shadow-overlay: 0 30px 80px -28px rgba(31, 41, 55, .62);
+  --work-success: #315945;
+  --work-success-soft: #e4ece4;
   min-height: 100svh;
   background: var(--db-bg);
   color: var(--db-text);
@@ -12,6 +30,8 @@
 .app input,
 .app select,
 .app textarea { caret-color: var(--db-accent); }
+.app input::placeholder,
+.app textarea::placeholder { color: var(--db-text-muted); opacity: 1; }
 
 .topBar {
   position: relative;
@@ -40,6 +60,7 @@
   gap: 4px;
   border-bottom: 1px solid var(--db-border);
 }
+.workReviewNav { grid-template-columns: none; grid-auto-flow: column; grid-auto-columns: minmax(0, 1fr); }
 .workReviewNav a {
   display: grid;
   min-width: 0;
@@ -141,6 +162,7 @@
 .uploadForm input:disabled,
 .editorForm input:disabled { cursor: not-allowed; opacity: .58; }
 .fileField { grid-column: 1 / -1; }
+.uploadProjectField { grid-column: 1 / -1; min-width: 0; }
 .fileField input { padding: 8px; background: var(--db-surface-muted); }
 .fileField input::file-selector-button {
   min-height: var(--db-touch-target);
@@ -209,6 +231,7 @@
 }
 .primaryButton { border: 1px solid var(--db-accent); background: var(--db-accent); color: var(--db-surface); }
 .secondaryButton { border: 1px solid var(--db-border-strong); background: var(--db-surface); color: var(--db-accent); }
+a.secondaryButton { display: inline-flex; align-items: center; justify-content: center; text-decoration: none; }
 .tertiaryButton { border: 1px solid transparent; background: transparent; color: var(--db-text-secondary); }
 .dangerButton { border: 1px solid color-mix(in srgb, var(--db-danger) 45%, var(--db-border)); background: var(--db-surface); color: var(--db-danger); }
 .sourceButton,
@@ -222,6 +245,18 @@
 
 .recentSection { margin-top: 54px; }
 .recentSection > .sectionHeading { margin-bottom: 18px; }
+.projectFilterBar {
+  display: flex;
+  min-width: 0;
+  align-items: flex-end;
+  justify-content: space-between;
+  margin-bottom: 18px;
+  gap: 14px;
+}
+.projectFilterBar > :first-child { min-width: 0; flex: 1; }
+.projectFilterBar > a { flex: none; }
+.filterError { display: flex; align-items: center; justify-content: space-between; margin-bottom: 18px; padding: 12px 14px; gap: 12px; border-radius: var(--db-radius-control); background: var(--db-danger-soft); color: var(--db-danger); }
+.filterError p { margin: 0; font-size: 12px; line-height: 1.6; }
 .meetingList { display: grid; margin: 0; padding: 0; border-top: 1px solid var(--db-border); list-style: none; }
 .meetingList li { border-bottom: 1px solid var(--db-border); }
 .meetingList a { display: flex; min-height: 104px; align-items: center; justify-content: space-between; padding: 18px 4px; gap: 24px; color: inherit; text-decoration: none; }
@@ -233,12 +268,26 @@
 .statusBadge > span { width: 7px; height: 7px; border-radius: 50%; background: var(--db-accent); }
 .statusBadge[data-tone="error"] { background: var(--db-danger-soft); color: var(--db-danger); }
 .statusBadge[data-tone="error"] > span { background: var(--db-danger); }
-.statusBadge[data-tone="complete"] { background: var(--db-accent-soft); color: var(--db-accent); }
+.statusBadge[data-tone="complete"] { background: var(--work-success-soft); color: var(--work-success); }
+.statusBadge[data-tone="complete"] > span { background: var(--work-success); }
 
 .backLink { display: inline-flex; min-height: var(--db-touch-target); align-items: center; margin-bottom: 24px; color: var(--db-accent); font-size: 12px; font-weight: 740; text-decoration: none; }
 .meetingHeader { display: flex; align-items: flex-end; justify-content: space-between; margin-bottom: 32px; gap: 30px; }
 .meetingHeader h1 { max-width: 16ch; font-size: clamp(38px, 5vw, 58px); overflow-wrap: anywhere; }
 .meetingHeader p { display: flex; flex-wrap: wrap; margin: 12px 0 0; gap: 8px 18px; color: var(--db-text-muted); font-size: 12px; }
+
+.meetingProjects {
+  display: grid;
+  margin: -8px 0 28px;
+  padding: 20px 0;
+  gap: 16px;
+  border-block: 1px solid var(--db-border);
+}
+.meetingProjectsHeading { display: flex; align-items: flex-start; justify-content: space-between; gap: 18px; }
+.meetingProjectsHeading h2 { margin: 0; font-size: 17px; font-weight: 760; letter-spacing: -.012em; }
+.meetingProjectsHeading p { margin: 5px 0 0; color: var(--db-text-secondary); font-size: 12px; line-height: 1.6; }
+.meetingProjectsActions { display: flex; min-width: 0; align-items: center; gap: 12px; }
+.projectSaveNotice { margin: 0; color: var(--db-accent); font-size: 12px; line-height: 1.5; }
 
 .page [role="tablist"] { max-width: 100%; overflow-x: auto; scrollbar-color: var(--db-border-strong) transparent; scrollbar-width: thin; }
 .page [role="tab"] { flex: 0 0 auto; }
@@ -259,6 +308,13 @@
 .stateActions { display: flex; flex-wrap: wrap; gap: 8px; }
 .reviewSection { display: grid; gap: 14px; }
 .reviewItems { display: grid; gap: 14px; }
+.reviewItems[hidden], .speakerAliasGrid[hidden] { display: none; }
+.sectionToggle { display: flex; width: 100%; min-height: var(--db-touch-target); align-items: center; padding: 8px 0; gap: 12px; border: 0; border-bottom: 1px solid var(--db-border); background: transparent; color: var(--db-text); cursor: pointer; font: inherit; text-align: left; }
+.sectionToggle > span:first-child { min-width: 0; flex: 1; }
+.sectionToggle small { flex: none; color: var(--db-text-secondary); font: 600 12px/1.5 var(--db-font-ui); }
+.sectionToggleState { flex: none; color: var(--db-accent); font: 700 12px/1.5 var(--db-font-ui); }
+.sectionToggle:focus-visible { outline: 3px solid var(--db-focus); outline-offset: 3px; }
+.speakerAliasGrid > p { grid-column: 1 / -1; margin: 0; color: var(--db-text-secondary); font-size: 12px; line-height: 1.6; }
 .candidateCard,
 .findingCard {
   display: grid;
@@ -436,6 +492,10 @@
   .pageIntro h1 { font-size: 42px; }
   .pageIntro p { font-size: 14px; }
   .primarySurface { padding: 20px 16px; border-radius: var(--db-radius-card); }
+  .projectFilterBar { display: grid; align-items: stretch; }
+  .projectFilterBar > a { width: 100%; }
+  .filterError { align-items: stretch; flex-direction: column; }
+  .filterError > button { width: 100%; }
   .sectionHeading { align-items: flex-start; flex-direction: column; }
   .uploadForm { grid-template-columns: 1fr; gap: 15px; }
   .fileField,
@@ -453,6 +513,10 @@
   .meetingListStatus { width: 100%; grid-auto-flow: column; align-items: center; justify-content: space-between; justify-items: start; }
   .meetingHeader { align-items: flex-start; flex-direction: column; gap: 15px; }
   .meetingHeader h1 { max-width: none; font-size: 38px; }
+  .meetingProjectsHeading,
+  .meetingProjectsActions { align-items: stretch; flex-direction: column; }
+  .meetingProjectsHeading > a,
+  .meetingProjectsActions > button { width: 100%; }
   .meetingResultStats { grid-template-columns: 1fr 1fr; gap: 8px 14px; }
   .candidateCard,
   .findingCard { padding: 18px 15px; }

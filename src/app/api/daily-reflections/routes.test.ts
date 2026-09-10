@@ -10,7 +10,7 @@ import {
   DailyReflectionHistoryResponseSchema
 } from "@/lib/domain/daily-reflection-api";
 import type { AuthContext } from "@/lib/server/auth/request-context";
-import { cleanupDailyReflectionStagingAssets } from "@/lib/server/daily-reflection/cleanup";
+import { cleanupDailyReflectionCompletedAudio, cleanupDailyReflectionStagingAssets } from "@/lib/server/daily-reflection/cleanup";
 import { openDailyReflectionDatabase } from "@/lib/server/daily-reflection/db";
 import { DailyReflectionRepository } from "@/lib/server/daily-reflection/repository";
 import { DailyReflectionService } from "@/lib/server/daily-reflection/service";
@@ -865,7 +865,8 @@ describe("Daily Reflection workflow API", () => {
       uploadId: created.uploadId,
       jobId: created.jobId,
       contentHash: created.contentHash,
-      status: "uploading"
+      status: "uploading",
+      uploadState: "accepted"
     });
     expect(found.headers.get("Cache-Control")).toBe("private, no-store");
 
@@ -887,6 +888,220 @@ describe("Daily Reflection workflow API", () => {
       reflectionId: created.reflectionId,
       status: "deleted"
     }));
+    expect(repository.getOperationLookupV2(accountId, operationKey)).toMatchObject({ uploadState: "terminated" });
+  });
+
+  it("allows a same-key retry after pre-plan persistence failure, without guessing from uploading", async () => {
+    uploadStorageState.failBeforePersist = true;
+    const failed = await postDailyReflection(postRequest({ idempotencyKey: "lookup-pre-plan" }));
+    expect(failed.status).toBe(503);
+    expect(repository.getOperationLookupV2(accountId, "lookup-pre-plan")).toMatchObject({
+      status: "uploading", uploadState: "reupload_allowed"
+    });
+    const retried = await postDailyReflection(postRequest({ idempotencyKey: "lookup-pre-plan" }));
+    expect(retried.status).toBe(200);
+    expect(repository.getOperationLookupV2(accountId, "lookup-pre-plan")).toMatchObject({
+      status: "uploading", uploadState: "accepted"
+    });
+  });
+
+  it("waits for a live writer even after publication and never accepts its compensatable result", async () => {
+    let unblock!: () => void;
+    let published!: () => void;
+    const blocked = new Promise<void>((resolve) => { unblock = resolve; });
+    const reached = new Promise<void>((resolve) => { published = resolve; });
+    const write = store.write.bind(store);
+    vi.spyOn(store, "write").mockImplementation(async (collection, id, value) => {
+      if (collection === "uploads") { published(); await blocked; }
+      return write(collection, id, value);
+    });
+    const first = postDailyReflection(postRequest({ idempotencyKey: "lookup-writing" }));
+    await reached;
+    try {
+      const response = await getDailyReflectionOperation(new Request("http://localhost/"), {
+        params: Promise.resolve({ operationKey: "lookup-writing" })
+      });
+      expect(await response.json()).toMatchObject({ uploadState: "still_persisting" });
+      const duplicate = await postDailyReflection(postRequest({ idempotencyKey: "lookup-writing" }));
+      expect(duplicate.status).toBe(202);
+      expect(await duplicate.json()).toMatchObject({ persistencePending: true });
+      expect(afterMock).not.toHaveBeenCalled();
+    } finally { unblock(); }
+    expect((await first).status).toBe(201);
+    expect(repository.getOperationLookupV2(accountId, "lookup-writing")).toMatchObject({ uploadState: "accepted" });
+  });
+
+  it.each(["projection", "cleanup"] as const)(
+    "keeps a compensated publication unresolved after the original writer lease expires during %s", async (phase) => {
+    let clock = "2026-08-13T08:00:00.000Z";
+    repository = new DailyReflectionRepository(database, {
+      now: () => clock,
+      idFactory: () => `api_generated_${++generatedId}`
+    });
+    moduleState.repository = repository;
+    let unblock!: () => void;
+    let published!: () => void;
+    const blocked = new Promise<void>((resolve) => { unblock = resolve; });
+    const reached = new Promise<void>((resolve) => { published = resolve; });
+    if (phase === "projection") {
+      const write = store.write.bind(store);
+      vi.spyOn(store, "write").mockImplementation(async (collection, id, value) => {
+        if (collection === "uploads") { published(); await blocked; }
+        return write(collection, id, value);
+      });
+    } else {
+      uploadStorageState.failAfterPersist = true;
+      const remove = store.delete.bind(store);
+      vi.spyOn(store, "delete").mockImplementation(async (collection, id) => {
+        if (collection === "uploads") {
+          published(); await blocked;
+          throw new Error("synthetic cleanup failure after raw compensation");
+        }
+        return remove(collection, id);
+      });
+    }
+    const operationKey = "lookup-expired-compensation";
+    const pending = postDailyReflection(postRequest({ idempotencyKey: operationKey }));
+    await reached;
+    const receipt = repository.getInputReceiptV2(accountId, operationKey)!;
+    const upload = repository.readPublishedAsset<{ filePath: string }>({
+      accountId, reflectionId: receipt.reflectionId, assetKind: "upload"
+    })!;
+    try {
+      expect(repository.getOperationLookupV2(accountId, operationKey)).toMatchObject({ uploadState: "still_persisting" });
+      if (phase === "projection") await expect(access(upload.filePath)).resolves.toBeUndefined();
+      clock = "2026-08-13T08:03:00.000Z";
+    } finally { unblock(); }
+    expect((await pending).status).toBe(phase === "projection" ? 202 : 503);
+    await expect(access(upload.filePath)).rejects.toThrow();
+    expect(repository.getOperationLookupV2(accountId, operationKey)).toMatchObject({ uploadState: "unresolved" });
+    expect(repository.getExecutionLease(accountId, receipt.reflectionId)).toMatchObject({ attemptVersion: 1 });
+    const replay = await postDailyReflection(postRequest({ idempotencyKey: operationKey }));
+    expect(replay.status).toBe(409);
+    expect(afterMock).not.toHaveBeenCalled();
+    expect(enqueueDailyReflectionJobMock).not.toHaveBeenCalled();
+  });
+
+  it("accepts canonical storage when enqueue is deferred or the durable job is missing", async () => {
+    process.env.PIPELINE_EXECUTION_MODE = "queue";
+    enqueueDailyReflectionJobMock.mockRejectedValueOnce(new Error("synthetic queue failure"));
+    const response = await postDailyReflection(postRequest({ idempotencyKey: "lookup-deferred" }));
+    expect(response.status).toBe(202);
+    const body = await response.json();
+    expect(body).toMatchObject({ enqueueDeferred: true });
+    expect(repository.getOperationLookupV2(accountId, "lookup-deferred")).toMatchObject({ uploadState: "accepted" });
+    await store.delete("daily-reflection-jobs", body.reflectionId);
+    expect(repository.getOperationLookupV2(accountId, "lookup-deferred")).toMatchObject({ uploadState: "accepted" });
+  });
+
+  it("retains accepted truth after review audio cleanup and does not dispatch a completed retry", async () => {
+    const response = await postDailyReflection(postRequest({ idempotencyKey: "lookup-cleaned" }));
+    const { reflectionId, uploadId } = await response.json();
+    await addPendingCandidate(reflectionId, uploadId);
+    const fence = repository.claimExecutionLease({
+      accountId, reflectionId, leaseOwner: "cleaned-review", leaseDurationMs: 60_000,
+      allowedStatuses: ["extracting"]
+    })!;
+    repository.publishAssetUnderExecutionFence({
+      accountId, reflectionId, ...fence, assetKind: "segments", payload: [segment(uploadId)]
+    });
+    repository.transitionStatus({
+      accountId, reflectionId, expectedVersion: repository.getReflection(accountId, reflectionId).version,
+      status: "review_pending", leaseOwner: fence.leaseOwner, attemptVersion: fence.attemptVersion
+    });
+    repository.releaseExecutionLease({ accountId, reflectionId, ...fence });
+    await cleanupDailyReflectionCompletedAudio({ repository, store, accountId, reflectionId, uploadId, uploadsRootDir });
+    expect(repository.getOperationLookupV2(accountId, "lookup-cleaned")).toMatchObject({
+      status: "review_pending", uploadState: "accepted"
+    });
+    database.prepare("UPDATE dr_reflections SET review_status = 'completed' WHERE id = ?").run(reflectionId);
+    expect(repository.getOperationLookupV2(accountId, "lookup-cleaned")).toMatchObject({
+      status: "completed", uploadState: "accepted"
+    });
+    afterMock.mockClear();
+    expect((await postDailyReflection(postRequest({ idempotencyKey: "lookup-cleaned" }))).status).toBe(200);
+    expect(afterMock).not.toHaveBeenCalled();
+  });
+
+  it("keeps an expired published writer or unknown failure unresolved and blocks POST replay", async () => {
+    const created = await createViaPost("lookup-unresolved");
+    repository.claimExecutionLease({
+      accountId, reflectionId: created.reflectionId, leaseOwner: "expired-writer", leaseDurationMs: 60_000,
+      allowedStatuses: ["uploading"], now: "2026-08-13T07:00:00.000Z"
+    });
+    expect(repository.getOperationLookupV2(accountId, "lookup-unresolved")).toMatchObject({ uploadState: "unresolved" });
+    afterMock.mockClear();
+    const replay = await postDailyReflection(postRequest({ idempotencyKey: "lookup-unresolved" }));
+    expect(replay.status).toBe(409);
+    expect(await replay.json()).toMatchObject({ persistencePending: true, error: "daily_reflection_upload_outcome_unresolved" });
+    expect(afterMock).not.toHaveBeenCalled();
+    repository.deletePublishedAsset(accountId, created.reflectionId, "upload");
+    database.prepare("UPDATE dr_reflections SET status = 'failed', error_code = 'unknown_failure' WHERE id = ?")
+      .run(created.reflectionId);
+    expect(repository.getOperationLookupV2(accountId, "lookup-unresolved")).toMatchObject({ uploadState: "unresolved" });
+  });
+
+  it("rejects foreign canonical publication and repairs only-projection storage under a new fence", async () => {
+    const created = await createViaPost("lookup-publication");
+    const raw = repository.readPublishedAsset<Record<string, unknown>>({ accountId, reflectionId: created.reflectionId, assetKind: "upload" })!;
+    database.prepare("UPDATE dr_asset_publications SET payload_json = ? WHERE reflection_id = ? AND asset_kind = 'upload'")
+      .run(JSON.stringify({ ...raw, reflectionId: "foreign_reflection" }), created.reflectionId);
+    expect(repository.getOperationLookupV2(accountId, "lookup-publication")).toMatchObject({ uploadState: "unresolved" });
+    expect((await postDailyReflection(postRequest({ idempotencyKey: "lookup-publication" }))).status).toBe(409);
+    repository.deletePublishedAsset(accountId, created.reflectionId, "upload");
+    expect(repository.getOperationLookupV2(accountId, "lookup-publication")).toMatchObject({ uploadState: "reupload_allowed" });
+    expect((await postDailyReflection(postRequest({ idempotencyKey: "lookup-publication" }))).status).toBe(200);
+    expect(repository.readPublishedAsset({ accountId, reflectionId: created.reflectionId, assetKind: "upload" }))
+      .toMatchObject({ reflectionId: created.reflectionId, persistenceAttemptVersion: 2 });
+    expect(repository.getOperationLookupV2(accountId, "lookup-publication")).toMatchObject({ uploadState: "accepted" });
+  });
+
+  it.each(["cancel", "delete"] as const)("does not return an accepted receipt after %s during queue dispatch", async (action) => {
+    process.env.PIPELINE_EXECUTION_MODE = "queue";
+    enqueueDailyReflectionJobMock.mockImplementationOnce(async ({ reflectionId }) => {
+      const request = new Request(`http://localhost/api/daily-reflections/${reflectionId}`, {
+        method: action === "delete" ? "DELETE" : "POST"
+      });
+      const params = { params: Promise.resolve({ reflectionId }) };
+      if (action === "delete") await deleteDailyReflection(request, params);
+      else await cancelDailyReflection(request, params);
+    });
+    const operationKey = `lookup-dispatch-${action}`;
+    const response = await postDailyReflection(postRequest({ idempotencyKey: operationKey }));
+    expect(response.status).toBe(409);
+    expect(await response.json()).toEqual({ error: "daily_reflection_recovery_terminated" });
+    expect(repository.getOperationLookupV2(accountId, operationKey)).toMatchObject({ uploadState: "terminated" });
+  });
+
+  it.each(["cancel", "delete"] as const)("keeps %s terminal when the original persistence response arrives late", async (action) => {
+    let unblock!: () => void;
+    let probing!: () => void;
+    const blocked = new Promise<void>((resolve) => { unblock = resolve; });
+    const reached = new Promise<void>((resolve) => { probing = resolve; });
+    const resolution = resolveDailyReflectionAuthoritativeDurationMock.getMockImplementation()!;
+    resolveDailyReflectionAuthoritativeDurationMock.mockImplementationOnce(async (...args) => {
+      probing(); await blocked; return resolution(...args);
+    });
+    const operationKey = `lookup-late-${action}`;
+    const pending = postDailyReflection(postRequest({ idempotencyKey: operationKey }));
+    await reached;
+    const receipt = repository.getInputReceiptV2(accountId, operationKey)!;
+    try {
+      const request = new Request(`http://localhost/api/daily-reflections/${receipt.reflectionId}`, {
+        method: action === "delete" ? "DELETE" : "POST"
+      });
+      const params = { params: Promise.resolve({ reflectionId: receipt.reflectionId }) };
+      const result = action === "delete"
+        ? await deleteDailyReflection(request, params) : await cancelDailyReflection(request, params);
+      expect(result!.status).toBe(action === "delete" ? 204 : 200);
+    } finally { unblock(); }
+    await pending;
+    expect(repository.getOperationLookupV2(accountId, operationKey)).toMatchObject({ uploadState: "terminated" });
+    expect(repository.readPublishedAsset({ accountId, reflectionId: receipt.reflectionId, assetKind: "upload" })).toBeNull();
+    expect(afterMock).not.toHaveBeenCalled();
+    expect(enqueueDailyReflectionJobMock).not.toHaveBeenCalled();
+    const replay = await postDailyReflection(postRequest({ idempotencyKey: operationKey }));
+    expect([404, 409]).toContain(replay.status);
   });
 
   it("fails closed when disabled", async () => {
@@ -1459,6 +1674,9 @@ describe("Daily Reflection workflow API", () => {
     await expect(readdir(uploadsRootDir).catch(() => [])).resolves.toEqual([]);
     expect(afterMock).not.toHaveBeenCalled();
 
+    expect(repository.getOperationLookupV2(accountId, "persist-compensation")).toMatchObject({
+      status: "failed", uploadState: "reupload_allowed"
+    });
     const replay = await postDailyReflection(postRequest({
       idempotencyKey: "persist-compensation",
       bytes: firstBytes
@@ -1516,6 +1734,7 @@ describe("Daily Reflection workflow API", () => {
       now: "2026-08-13T07:00:00.000Z"
     });
     expect(crashedFence).toMatchObject({ attemptVersion: 1 });
+    expect(repository.getOperationLookupV2(accountId, "crashed-persist")).toMatchObject({ uploadState: "reupload_allowed" });
     await mkdir(uploadsRootDir, { recursive: true });
     await writeFile(join(uploadsRootDir, `${uploadId}.attempt-1.wav`), "orphan");
 
@@ -1580,6 +1799,7 @@ describe("Daily Reflection workflow API", () => {
     }));
 
     expect(response.status).toBe(202);
+    expect(repository.getOperationLookupV2(accountId, "live-persist")).toMatchObject({ uploadState: "still_persisting" });
     await expect(response.json()).resolves.toMatchObject({
       reflectionId: created.reflection.id,
       uploadId,

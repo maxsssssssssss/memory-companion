@@ -1,6 +1,11 @@
 import { createHash, randomUUID } from "node:crypto";
 import type Database from "better-sqlite3";
 import { z } from "zod";
+import type {
+  DailyReflectionOperationLookupResponse,
+  DailyReflectionOperationUploadState
+} from "@/lib/domain/daily-reflection-api";
+import { AudioUploadSchema } from "@/lib/domain/types";
 
 import {
   CandidateSchema,
@@ -2298,6 +2303,62 @@ export class DailyReflectionRepository {
     const parsedOperationKey = z.string().trim().min(1).max(512).parse(operationKey);
     const row = this.findInputReceiptV2Row(parsedAccountId, parsedOperationKey);
     return row ? inputReceiptV2FromRow(row) : null;
+  }
+
+  getOperationLookupV2(accountId: string, operationKey: string): DailyReflectionOperationLookupResponse {
+    // One SQLite snapshot; no async compatibility projection can interleave a
+    // publication, compensation, lease claim, or tombstone with these reads.
+    return this.database.transaction((): DailyReflectionOperationLookupResponse => {
+      const receipt = this.getInputReceiptV2(accountId, operationKey);
+      if (!receipt) return { found: false };
+      const reflection = this.getReflection(accountId, receipt.reflectionId);
+      const plan = this.getProcessingPlan(accountId, reflection.id);
+      const lease = this.getExecutionLease(accountId, reflection.id);
+      const rawUpload = this.readPublishedAsset<unknown>({
+        accountId, reflectionId: reflection.id, assetKind: "upload"
+      });
+      const upload = AudioUploadSchema.safeParse(rawUpload);
+      const staging = reflection.status === "created" || reflection.status === "uploading"
+        || (reflection.status === "failed"
+          && reflection.errorCode === "daily_reflection_upload_persist_failed");
+      let uploadState: DailyReflectionOperationUploadState = "unresolved";
+      if (isDailyReflectionTombstone(reflection.status)
+        || reflection.errorCode === "daily_reflection_delete_requested"
+        || this.getAdmissionOperation(accountId, reflection.id)?.status === "delete_requested") {
+        uploadState = "terminated";
+      } else if (staging && lease && Date.parse(lease.leaseUntil) > Date.parse(this.now())) {
+        // Publication precedes projection/cleanup and the final persistence
+        // fence check. A live writer can still compensate that publication.
+        uploadState = "still_persisting";
+      } else if (upload.success && isDailyReflectionUploadRecord(rawUpload)
+        && rawUpload.reflectionId === reflection.id
+        && upload.data.id === receipt.uploadId
+        && rawUpload.uploadFingerprint === receipt.contentHash
+        && reflection.uploadId === receipt.uploadId
+        && plan?.uploadId === receipt.uploadId
+        && plan.reflectionId === reflection.id
+        && !(staging && lease)
+        && reflection.errorCode !== "daily_reflection_upload_persist_failed"
+        && reflection.errorCode !== "daily_reflection_audio_missing") {
+        // Completed-audio cleanup deliberately retains this canonical record.
+        // A missing transport job is recoverable from this plan + publication.
+        uploadState = "accepted";
+      } else if (rawUpload === null && staging) {
+        // Absent canonical publication plus an available/expired fence permits
+        // a same-key attempt; it does not claim the old writer never wrote bytes.
+        // claimStaging increments attemptVersion before any new publication.
+        uploadState = "reupload_allowed";
+      }
+      return {
+        found: true,
+        reflectionId: reflection.id,
+        uploadId: receipt.uploadId,
+        jobId: receipt.jobId,
+        contentHash: receipt.contentHash,
+        status: reflection.status,
+        uploadState
+      };
+    })();
   }
 
   listAccountReflections(accountId: string, limit = 24) {

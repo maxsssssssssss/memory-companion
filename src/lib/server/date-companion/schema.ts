@@ -5,7 +5,7 @@ import {
   dateCompanionEvidenceDigest
 } from "./memory-bridge-digest";
 
-export const DATE_COMPANION_SCHEMA_VERSION = 11;
+export const DATE_COMPANION_SCHEMA_VERSION = 12;
 
 const DATE_COMPANION_SCHEMA_V1 = `
   CREATE TABLE dc_relationships (
@@ -544,6 +544,62 @@ const DATE_COMPANION_SCHEMA_V11 = `
     WHERE status = 'authorized';
 `;
 
+const DATE_COMPANION_SCHEMA_V12 = `
+  CREATE TABLE dc_proactive_value_cache_v12 (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    scope TEXT NOT NULL CHECK (scope IN ('current_interaction', 'person_relationship')),
+    relationship_id TEXT NOT NULL,
+    interaction_id TEXT,
+    person_id TEXT,
+    mapping_version INTEGER NOT NULL CHECK (mapping_version >= 1),
+    source_fingerprint TEXT NOT NULL CHECK (length(source_fingerprint) = 64),
+    contract_version INTEGER NOT NULL CHECK (contract_version = 1),
+    provider TEXT NOT NULL CHECK (provider IN ('deepseek', 'none', 'tokenhub')),
+    model TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('processing', 'generated', 'fallback')),
+    payload_json TEXT,
+    failure_code TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    completed_at TEXT,
+    claim_token TEXT,
+    lease_expires_at TEXT,
+    attempt_count INTEGER NOT NULL DEFAULT 0 CHECK (attempt_count >= 0),
+    UNIQUE (id, user_id),
+    UNIQUE (user_id, source_fingerprint),
+    CHECK (
+      (scope = 'current_interaction' AND interaction_id IS NOT NULL AND person_id IS NULL) OR
+      (scope = 'person_relationship' AND interaction_id IS NULL AND person_id IS NOT NULL)
+    ),
+    CHECK (
+      (status = 'processing' AND payload_json IS NULL AND completed_at IS NULL) OR
+      (status IN ('generated', 'fallback') AND payload_json IS NOT NULL AND completed_at IS NOT NULL)
+    ),
+    FOREIGN KEY (relationship_id, user_id)
+      REFERENCES dc_relationships(id, user_id) ON DELETE CASCADE,
+    FOREIGN KEY (interaction_id, user_id)
+      REFERENCES dc_interactions(id, user_id) ON DELETE CASCADE
+  );
+
+  INSERT INTO dc_proactive_value_cache_v12 (
+    id, user_id, scope, relationship_id, interaction_id, person_id,
+    mapping_version, source_fingerprint, contract_version, provider, model,
+    status, payload_json, failure_code, created_at, updated_at, completed_at,
+    claim_token, lease_expires_at, attempt_count
+  )
+  SELECT id, user_id, scope, relationship_id, interaction_id, person_id,
+    mapping_version, source_fingerprint, contract_version, provider, model,
+    status, payload_json, failure_code, created_at, updated_at, completed_at,
+    claim_token, lease_expires_at, attempt_count
+  FROM dc_proactive_value_cache;
+
+  DROP TABLE dc_proactive_value_cache;
+  ALTER TABLE dc_proactive_value_cache_v12 RENAME TO dc_proactive_value_cache;
+  CREATE INDEX idx_dc_proactive_value_scope
+    ON dc_proactive_value_cache(user_id, scope, relationship_id, updated_at DESC);
+`;
+
 const MIGRATIONS = [
   { version: 1, sql: DATE_COMPANION_SCHEMA_V1 },
   { version: 2, sql: DATE_COMPANION_SCHEMA_V2 },
@@ -555,7 +611,8 @@ const MIGRATIONS = [
   { version: 8, sql: DATE_COMPANION_SCHEMA_V8 },
   { version: 9, sql: DATE_COMPANION_SCHEMA_V9 },
   { version: 10, sql: DATE_COMPANION_SCHEMA_V10 },
-  { version: 11, sql: DATE_COMPANION_SCHEMA_V11 }
+  { version: 11, sql: DATE_COMPANION_SCHEMA_V11 },
+  { version: 12, sql: DATE_COMPANION_SCHEMA_V12 }
 ] as const;
 
 function backfillEvidenceProvenance(database: Database.Database) {

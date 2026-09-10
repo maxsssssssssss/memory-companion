@@ -12,10 +12,13 @@ import { usePersistentDateCompanionSession } from "@/lib/client/date-companion-s
 import { useDateCompanionPersonArchive } from "@/lib/client/date-companion-people";
 import {
   dateCompanionProactiveSourceRevision,
+  homeAboutSuggestedQuestions,
+  presentDateCompanionHomeContent,
   presentDateCompanionProactiveValue,
   proactiveSuggestedQuestions,
   useDateCompanionProactiveValue,
-  type DateCompanionProactiveValueTarget
+  type DateCompanionProactiveValueTarget,
+  type DateCompanionHomeContentState
 } from "@/lib/client/date-companion-proactive-value";
 import type { AuthState, QaState, SourceRefVM, UploadState } from "@/lib/domain/date-companion";
 import { ProductAccountMenu } from "@/components/product-system/product-account-menu";
@@ -251,9 +254,16 @@ function DateCompanionShellContent({
     ),
     [currentProactiveSources, currentQaInteraction?.version]
   );
+  const homeCanonicalSources = useMemo(
+    () => [...personQaSources, ...viewModel.person.promises.flatMap((promise) => promise.sources)],
+    [personQaSources, viewModel.person.promises]
+  );
   const relationshipProactiveSourceRevision = useMemo(
-    () => dateCompanionProactiveSourceRevision(personQaSources),
-    [personQaSources]
+    () => dateCompanionProactiveSourceRevision(homeCanonicalSources, JSON.stringify(
+      viewModel.person.promises.map((promise) => [promise.id, promise.status, promise.version, promise.text])
+        .sort((left, right) => String(left[0]).localeCompare(String(right[0])))
+    )),
+    [homeCanonicalSources, viewModel.person.promises]
   );
   const currentQaSegmentIds = useMemo(
     () => new Set(currentQaInteraction?.transcript.map((line) => line.id) ?? []),
@@ -298,11 +308,18 @@ function DateCompanionShellContent({
         sourceRevision: currentProactiveSourceRevision
       }
     : null;
-  const relationshipProactiveTarget: DateCompanionProactiveValueTarget | null = trustedProactiveTarget
+  const relationshipProactiveTarget: DateCompanionProactiveValueTarget | null = auth.status === "authenticated"
+    && proactiveRelationshipId
+    && proactiveMapping?.status === "confirmed"
+    && proactiveMapping.selfPersonId !== proactiveMapping.companionPersonId
+    && homeCanonicalSources.length > 0
     && props.entry === "companion"
     ? {
         scope: "person_relationship",
-        ...trustedProactiveTarget,
+        accountId: auth.user.id,
+        relationshipId: proactiveRelationshipId,
+        personId: proactiveMapping.companionPersonId,
+        mappingVersion: proactiveMapping.version,
         sourceRevision: relationshipProactiveSourceRevision
       }
     : null;
@@ -323,6 +340,27 @@ function DateCompanionShellContent({
       : null,
     [personQaSources, relationshipProactiveState]
   );
+  const relationshipSuggestedQuestions = useMemo(
+    () => relationshipProactivePresentation
+      ? proactiveSuggestedQuestions(relationshipProactivePresentation)
+      : relationshipProactiveState.status === "ready"
+        ? homeAboutSuggestedQuestions(relationshipProactiveState.response, personQaSources)
+        : [],
+    [personQaSources, relationshipProactivePresentation, relationshipProactiveState]
+  );
+  const homeContent: DateCompanionHomeContentState = useMemo(() => {
+    if (relationshipProactiveState.status === "idle") return { status: "empty" };
+    if (relationshipProactiveState.status === "loading") return { status: "loading" };
+    if (relationshipProactiveState.status !== "ready") return { status: "unavailable" };
+    const content = presentDateCompanionHomeContent(relationshipProactiveState.response, homeCanonicalSources);
+    if (!content || content.beforeMeeting.some((item) => item.kind === "open_promise"
+      && !viewModel.person.promises.some((promise) => promise.id === item.promiseId && promise.status === "open"))) {
+      return { status: "unavailable" };
+    }
+    return content.about.length > 0 || content.beforeMeeting.length > 0
+      ? { status: "ready", content }
+      : { status: "empty" };
+  }, [homeCanonicalSources, relationshipProactiveState, viewModel.person.promises]);
   const requestedPersonId = props.entry === "companion" && props.screen === "person"
     ? props.initialPersonId?.trim() || null
     : null;
@@ -493,7 +531,7 @@ function DateCompanionShellContent({
               }}
               qaState={qaPresentation(session.qaState)}
               segmentTextById={segmentTextById}
-              suggestedQuestions={proactiveSuggestedQuestions(relationshipProactivePresentation)}
+              suggestedQuestions={relationshipSuggestedQuestions}
               validSegmentIds={validSegmentIds}
               linkableSegmentIds={linkableSegmentIds}
             />
@@ -512,8 +550,8 @@ function DateCompanionShellContent({
               onResolveToyReceipt={session.adoptToyIngestionReceipt}
               onUpload={session.upload}
               participantNotice={viewModel.home.participantNotice}
-              prepareItem={viewModel.home.preparePreview}
-              recentItem={viewModel.person.recent.at(-1) ?? null}
+              homeContent={homeContent}
+              onOpenSource={openSource}
               rememberedItem={viewModel.home.remembered}
               relationshipName={relationshipName}
               relationshipId={relationship.id}

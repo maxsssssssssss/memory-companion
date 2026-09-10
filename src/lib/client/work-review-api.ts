@@ -1,7 +1,59 @@
 import { z } from "zod";
 
 import { AuthUserSchema } from "@/lib/client/date-companion-api";
+import {
+  SetWorkResourceProjectsRequestSchema,
+  WorkProjectListStatusSchema,
+  WorkProjectReferenceSchema,
+  WorkProjectSchema,
+  WorkProjectScopeFilterSchema,
+  type CreateWorkProjectRequest,
+  type SetWorkResourceProjectsRequest,
+  type UpdateWorkProjectRequest,
+  type WorkProject,
+  type WorkProjectListStatus,
+  type WorkProjectReference,
+  type WorkProjectScopeFilter
+} from "@/lib/domain/work-project";
 import { WorkReviewDateSchema } from "@/lib/domain/work-review";
+import {
+  AskWorkWeeklyQaRequestSchema,
+  CreateWorkWeeklyUserNoteRequestSchema,
+  GenerateWorkWeeklyReviewRequestSchema,
+  RegenerateWorkWeeklyReviewRequestSchema,
+  UpdateWorkWeeklyItemRequestSchema,
+  WorkWeeklyQaMessageSchema,
+  WorkWeeklyQaRunSchema,
+  WorkWeeklyQaThreadSchema,
+  WorkWeeklyEvidenceSourceSchema,
+  WorkWeeklyFindingSourceSchema,
+  WorkWeeklyMeetingSourceSchema,
+  WorkWeeklyReviewItemSchema,
+  WorkWeeklyReviewSchema,
+  WorkWeeklyRunSchema,
+  WorkWeeklyLatestGenerationSchema,
+  WorkWeeklyDisplayedGenerationSchema,
+  WorkWeeklyScopeRequestSchema,
+  WorkWeeklySourceIdentitySchema,
+  WorkWeeklySourceRefSchema,
+  WorkWeeklySourceSummarySchema,
+  WorkWeeklyTodoEventSourceSchema,
+  WorkWeeklyTodoSourceSchema,
+  WorkWeeklyVersionedOperationRequestSchema,
+  type AskWorkWeeklyQaRequest,
+  type CreateWorkWeeklyUserNoteRequest,
+  type GenerateWorkWeeklyReviewRequest,
+  type RegenerateWorkWeeklyReviewRequest,
+  type UpdateWorkWeeklyItemRequest,
+  type WorkWeeklyQaMessage,
+  type WorkWeeklyQaRun,
+  type WorkWeeklyQaThread,
+  type WorkWeeklyReview,
+  type WorkWeeklyReviewItem,
+  type WorkWeeklyScopeRequest,
+  type WorkWeeklySourceSummary,
+  type WorkWeeklyVersionedOperationRequest
+} from "@/lib/domain/work-weekly";
 
 export const WORK_REVIEW_AUDIO_ACCEPT = [
   ".aac",
@@ -111,6 +163,8 @@ export const WorkMeetingListItemSchema = z.object({
   durationSeconds: z.number().finite().nonnegative().nullable().optional(),
   pendingCandidateCount: z.number().int().nonnegative().nullable().optional(),
   canonicalSegmentCount: z.number().int().nonnegative().nullable().optional(),
+  version: z.number().int().nonnegative().optional().default(0),
+  projects: z.array(WorkProjectReferenceSchema).max(3).optional(),
   createdAt: z.string().min(1),
   updatedAt: z.string().min(1)
 }).strict();
@@ -201,7 +255,8 @@ export const WorkTodoSchema = z.object({
   updatedAt: z.string().datetime(),
   completedAt: z.string().datetime().nullable(),
   reopenedAt: z.string().datetime().nullable(),
-  deletedAt: z.string().datetime().nullable()
+  deletedAt: z.string().datetime().nullable(),
+  projects: z.array(WorkProjectReferenceSchema).max(3).optional()
 }).strict();
 
 export const WorkTodoProjectionSchema = z.object({
@@ -299,8 +354,106 @@ export const WorkReviewCapacityLimitsSchema = z.object({
   maxAudioDurationSeconds: z.number().int().positive()
 }).strict();
 const WorkReviewConfigResponseSchema = z.object({
-  limits: WorkReviewCapacityLimitsSchema
+  limits: WorkReviewCapacityLimitsSchema,
+  capabilities: z.object({
+    projects: z.boolean(),
+    weekly: z.boolean(),
+    weeklyAi: z.boolean(),
+    weeklyVerifier: z.boolean(),
+    weeklyQa: z.boolean(),
+    weeklyQaVerifier: z.boolean()
+  }).strict().optional().default({
+    projects: false,
+    weekly: false,
+    weeklyAi: false,
+    weeklyVerifier: false,
+    weeklyQa: false,
+    weeklyQaVerifier: false
+  })
 }).strict();
+const WorkProjectListResponseSchema = z.object({
+  projects: z.array(WorkProjectSchema)
+}).strict();
+const WorkProjectMutationResponseSchema = z.object({
+  project: WorkProjectSchema,
+  reused: z.boolean()
+}).strict();
+const WorkProjectLinksResponseSchema = z.object({
+  resourceId: WorkIdSchema,
+  resourceVersion: z.number().int().nonnegative(),
+  projects: z.array(WorkProjectReferenceSchema).max(3),
+  changed: z.boolean(),
+  reused: z.boolean()
+}).strict();
+const WorkWeeklyDetailResponseSchema = z.object({
+  review: WorkWeeklyReviewSchema,
+  items: z.array(WorkWeeklyReviewItemSchema),
+  latestGeneration: WorkWeeklyLatestGenerationSchema.nullable().optional(),
+  displayedGeneration: WorkWeeklyDisplayedGenerationSchema.nullable().optional(),
+  sourceSummary: WorkWeeklySourceSummarySchema
+}).strict();
+const WorkWeeklyScopeResponseSchema = z.object({
+  review: WorkWeeklyReviewSchema.nullable(),
+  items: z.array(WorkWeeklyReviewItemSchema),
+  latestGeneration: WorkWeeklyLatestGenerationSchema.nullable().optional(),
+  displayedGeneration: WorkWeeklyDisplayedGenerationSchema.nullable().optional(),
+  sourceSummary: WorkWeeklySourceSummarySchema
+}).strict();
+const WorkWeeklyQueueResponseSchema = z.object({
+  review: WorkWeeklyReviewSchema,
+  run: WorkWeeklyRunSchema,
+  reused: z.boolean()
+}).strict();
+const WorkWeeklyItemMutationResponseSchema = z.object({
+  item: WorkWeeklyReviewItemSchema,
+  reused: z.boolean()
+}).strict();
+const WorkWeeklyQaGetResponseSchema = z.object({
+  thread: WorkWeeklyQaThreadSchema,
+  messages: z.array(WorkWeeklyQaMessageSchema)
+}).strict().nullable();
+const WorkWeeklyQaQueueResponseSchema = z.object({
+  thread: WorkWeeklyQaThreadSchema,
+  messages: z.array(WorkWeeklyQaMessageSchema),
+  run: WorkWeeklyQaRunSchema,
+  reused: z.boolean()
+}).strict();
+const WorkWeeklyLiveSourcePayloadSchema = z.union([
+  WorkWeeklyMeetingSourceSchema,
+  WorkWeeklyFindingSourceSchema,
+  WorkWeeklyTodoSourceSchema,
+  WorkWeeklyTodoEventSourceSchema,
+  WorkWeeklyEvidenceSourceSchema,
+  WorkProjectReferenceSchema
+]);
+const WorkWeeklyLiveSourceResponseSchema = z.object({
+  identity: WorkWeeklySourceIdentitySchema,
+  source: WorkWeeklyLiveSourcePayloadSchema
+}).strict().superRefine((value, context) => {
+  const schema = value.identity.sourceKind === "meeting" ? WorkWeeklyMeetingSourceSchema
+    : value.identity.sourceKind === "finding" ? WorkWeeklyFindingSourceSchema
+      : value.identity.sourceKind === "todo" ? WorkWeeklyTodoSourceSchema
+        : value.identity.sourceKind === "todo_event" ? WorkWeeklyTodoEventSourceSchema
+          : value.identity.sourceKind === "evidence" ? WorkWeeklyEvidenceSourceSchema
+            : WorkProjectReferenceSchema;
+  const parsed = schema.safeParse(value.source);
+  if (!parsed.success) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["source"],
+      message: "Live source does not match its identity kind"
+    });
+    return;
+  }
+  const source = parsed.data as { id?: string; sourceRef?: string };
+  if (value.identity.sourceKind === "project") {
+    if (source.id !== value.identity.sourceId) {
+      context.addIssue({ code: z.ZodIssueCode.custom, path: ["source"], message: "Source ID mismatch" });
+    }
+  } else if (source.sourceRef !== value.identity.sourceRef) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ["source"], message: "Source ref mismatch" });
+  }
+});
 const WorkTodoSourceStateSchema = z.enum(["none", "available", "changed", "detached", "missing"]);
 const WorkTodoMeetingSummarySchema = z.object({
   id: WorkIdSchema,
@@ -365,12 +518,22 @@ export type WorkMeetingFollowUpGetResponse = z.infer<
   typeof WorkMeetingFollowUpGetResponseSchema
 >;
 export type WorkReviewCapacityLimits = z.infer<typeof WorkReviewCapacityLimitsSchema>;
+export type WorkReviewCapabilities = z.infer<
+  typeof WorkReviewConfigResponseSchema
+>["capabilities"];
+export type WorkWeeklyDetailResponse = z.infer<typeof WorkWeeklyDetailResponseSchema>;
+export type WorkWeeklyScopeResponse = z.infer<typeof WorkWeeklyScopeResponseSchema>;
+export type WorkWeeklyQueueResponse = z.infer<typeof WorkWeeklyQueueResponseSchema>;
+export type WorkWeeklyQaGetResponse = z.infer<typeof WorkWeeklyQaGetResponseSchema>;
+export type WorkWeeklyQaQueueResponse = z.infer<typeof WorkWeeklyQaQueueResponseSchema>;
+export type WorkWeeklyLiveSourceResponse = z.infer<typeof WorkWeeklyLiveSourceResponseSchema>;
 
 export type WorkMeetingUploadInput = Readonly<{
   file: File;
   idempotencyKey: string;
   meetingDate: string;
   title?: string;
+  projectIds?: string[];
 }>;
 
 export type WorkCandidateReviewDraft =
@@ -402,6 +565,7 @@ export type WorkTodoDraft = Readonly<{
   notes: string | null;
   isImportant: boolean;
   myDayDate: string | null;
+  projectIds?: string[];
 }>;
 
 export type CreateWorkTodoInput = WorkTodoDraft & Readonly<{ operationKey: string }>;
@@ -435,7 +599,12 @@ export interface WorkReviewApi {
   getCurrentUser(signal?: AbortSignal): Promise<WorkReviewAuthUser | null>;
   logout(signal?: AbortSignal): Promise<void>;
   getRuntimeConfig(signal?: AbortSignal): Promise<WorkReviewCapacityLimits>;
+  getCapabilities?(signal?: AbortSignal): Promise<WorkReviewCapabilities>;
   listMeetings(signal?: AbortSignal): Promise<WorkMeetingListItem[]>;
+  listMeetingsByProject?(
+    scope: WorkProjectScopeFilter,
+    signal?: AbortSignal
+  ): Promise<WorkMeetingListItem[]>;
   uploadMeeting(input: WorkMeetingUploadInput, signal?: AbortSignal): Promise<WorkMeetingCreateReceipt>;
   getMeeting(meetingId: string, signal?: AbortSignal): Promise<WorkMeetingDetail>;
   retryMeeting(meetingId: string, operationKey: string, signal?: AbortSignal): Promise<void>;
@@ -464,6 +633,11 @@ export interface WorkReviewApi {
     policy?: WorkMeetingDeletePolicy,
     signal?: AbortSignal
   ): Promise<void>;
+  setMeetingProjects?(
+    meetingId: string,
+    input: SetWorkResourceProjectsRequest,
+    signal?: AbortSignal
+  ): Promise<{ resourceVersion: number; projects: WorkProjectReference[] }>;
   getMeetingFollowUp(
     meetingId: string,
     signal?: AbortSignal
@@ -484,6 +658,12 @@ export interface WorkReviewApi {
     signal?: AbortSignal
   ): Promise<WorkMeetingFollowUpDraft>;
   listTodos(view: WorkTodoView, day?: string, signal?: AbortSignal): Promise<WorkTodo[]>;
+  listTodosByProject?(
+    view: WorkTodoView,
+    scope: WorkProjectScopeFilter,
+    day?: string,
+    signal?: AbortSignal
+  ): Promise<WorkTodo[]>;
   createTodo(input: CreateWorkTodoInput, signal?: AbortSignal): Promise<WorkTodo>;
   createTodoFromFinding(
     meetingId: string,
@@ -499,7 +679,105 @@ export interface WorkReviewApi {
   removeTodoMyDay(todoId: string, input: WorkTodoVersionedOperationInput, signal?: AbortSignal): Promise<WorkTodo>;
   deleteTodo(todoId: string, input: WorkTodoVersionedOperationInput, signal?: AbortSignal): Promise<WorkTodo>;
   getTodoSource(todoId: string, signal?: AbortSignal): Promise<WorkTodoSourceResponse>;
+  setTodoProjects?(
+    todoId: string,
+    input: SetWorkResourceProjectsRequest,
+    signal?: AbortSignal
+  ): Promise<{ resourceVersion: number; projects: WorkProjectReference[] }>;
+  listProjects?(status?: WorkProjectListStatus, signal?: AbortSignal): Promise<WorkProject[]>;
+  getProject?(projectId: string, signal?: AbortSignal): Promise<WorkProject>;
+  createProject?(input: CreateWorkProjectRequest, signal?: AbortSignal): Promise<WorkProject>;
+  updateProject?(
+    projectId: string,
+    input: UpdateWorkProjectRequest,
+    signal?: AbortSignal
+  ): Promise<WorkProject>;
+  getWeeklyReview?(
+    scope: WorkWeeklyScopeRequest,
+    signal?: AbortSignal
+  ): Promise<WorkWeeklyScopeResponse>;
+  generateWeeklyReview?(
+    input: GenerateWorkWeeklyReviewRequest,
+    signal?: AbortSignal
+  ): Promise<WorkWeeklyQueueResponse>;
+  getWeeklyReviewDetail?(
+    reviewId: string,
+    signal?: AbortSignal
+  ): Promise<WorkWeeklyDetailResponse>;
+  regenerateWeeklyReview?(
+    reviewId: string,
+    input: RegenerateWorkWeeklyReviewRequest,
+    signal?: AbortSignal
+  ): Promise<WorkWeeklyQueueResponse>;
+  updateWeeklyItem?(
+    reviewId: string,
+    itemId: string,
+    input: UpdateWorkWeeklyItemRequest,
+    signal?: AbortSignal
+  ): Promise<WorkWeeklyReviewItem>;
+  createWeeklyUserNote?(
+    reviewId: string,
+    input: CreateWorkWeeklyUserNoteRequest,
+    signal?: AbortSignal
+  ): Promise<WorkWeeklyReviewItem>;
+  deleteWeeklyUserNote?(
+    reviewId: string,
+    itemId: string,
+    input: WorkWeeklyVersionedOperationRequest,
+    signal?: AbortSignal
+  ): Promise<void>;
+  resetWeeklyReview?(
+    reviewId: string,
+    input: WorkWeeklyVersionedOperationRequest,
+    signal?: AbortSignal
+  ): Promise<WorkWeeklyReview>;
+  deleteWeeklyReview?(
+    reviewId: string,
+    input: WorkWeeklyVersionedOperationRequest,
+    signal?: AbortSignal
+  ): Promise<void>;
+  getWeeklyQa?(reviewId: string, signal?: AbortSignal): Promise<WorkWeeklyQaGetResponse>;
+  askWeeklyQa?(
+    reviewId: string,
+    input: AskWorkWeeklyQaRequest,
+    signal?: AbortSignal
+  ): Promise<WorkWeeklyQaQueueResponse>;
+  clearWeeklyQa?(
+    reviewId: string,
+    input: WorkWeeklyVersionedOperationRequest,
+    signal?: AbortSignal
+  ): Promise<void>;
+  getWeeklySource?(
+    reviewId: string,
+    sourceRef: string,
+    signal?: AbortSignal
+  ): Promise<WorkWeeklyLiveSourceResponse>;
 }
+
+export type WorkReviewV2CoreApi = WorkReviewApi & Required<Pick<WorkReviewApi,
+  | "getCapabilities"
+  | "listMeetingsByProject"
+  | "setMeetingProjects"
+  | "listTodosByProject"
+  | "setTodoProjects"
+  | "listProjects"
+  | "getProject"
+  | "createProject"
+  | "updateProject"
+  | "getWeeklyReview"
+  | "generateWeeklyReview"
+  | "getWeeklyReviewDetail"
+  | "regenerateWeeklyReview"
+  | "updateWeeklyItem"
+  | "createWeeklyUserNote"
+  | "deleteWeeklyUserNote"
+  | "resetWeeklyReview"
+  | "deleteWeeklyReview"
+  | "getWeeklyQa"
+  | "askWeeklyQa"
+  | "clearWeeklyQa"
+  | "getWeeklySource"
+>>;
 
 const ERROR_MESSAGES: Readonly<Record<string, string>> = {
   unauthenticated: "登录状态已经失效，请重新登录。",
@@ -529,6 +807,22 @@ const ERROR_MESSAGES: Readonly<Record<string, string>> = {
   follow_up_review_incomplete: "请先完成会议结果确认，再生成会后纪要。",
   follow_up_not_generated: "请先生成会后纪要草稿。",
   follow_up_operation_conflict: "这次纪要操作标识已用于其他内容，请重新操作。",
+  projects_disabled: "工作复盘项目暂未开放。",
+  project_not_found: "这个项目不存在或不属于当前账号。",
+  project_name_conflict: "当前账号已有同名的活跃项目。",
+  project_operation_conflict: "这次项目操作标识已用于其他内容，请重新操作。",
+  project_link_limit: "一次最多可以关联 3 个项目。",
+  weekly_disabled: "工作复盘周回顾暂未开放。",
+  weekly_ai_disabled: "周回顾生成暂未开放。",
+  weekly_qa_disabled: "问问本周暂未开放。",
+  weekly_not_found: "这份周回顾不存在或已经删除。",
+  weekly_qa_not_found: "这份周回顾还没有问答记录。",
+  weekly_insufficient_sources: "当前范围还没有足够的已确认来源生成可靠回顾。",
+  weekly_time_zone_conflict: "这份周回顾已按另一个时区创建，请使用原时区打开。",
+  weekly_not_ready: "请先完成周回顾生成，再开始问答。",
+  weekly_processing_busy: "周回顾正在由另一项处理继续，请稍后重试。",
+  weekly_source_changed: "来源已发生变化，请载入最新状态后重新生成。",
+  weekly_source_not_found: "这个来源已删除、失效或不在当前回顾范围内。",
   invalid_response: "服务返回了无法识别的数据，请稍后重试。",
   network_error: "暂时无法连接服务，请检查网络后重试。"
 };
@@ -607,7 +901,7 @@ async function parseResponse<Schema extends z.ZodTypeAny>(response: Response, sc
   return parsed.data as z.output<Schema>;
 }
 
-export function createWorkReviewApi(fetchImpl: typeof fetch = fetch): WorkReviewApi {
+export function createWorkReviewApi(fetchImpl: typeof fetch = fetch): WorkReviewV2CoreApi {
   const sameOrigin = async (input: RequestInfo | URL, init?: RequestInit) => {
     try {
       return await fetchImpl(input, { ...init, credentials: "same-origin" });
@@ -620,6 +914,28 @@ export function createWorkReviewApi(fetchImpl: typeof fetch = fetch): WorkReview
     `/api/work-reviews/meetings/${pathId(meetingId, "invalid_meeting_id")}`
   );
   const todoPath = (todoId: string) => `/api/work-reviews/todos/${pathId(todoId, "invalid_todo_id")}`;
+  const projectPath = (projectId: string) => (
+    `/api/work-reviews/projects/${pathId(projectId, "invalid_project_id")}`
+  );
+  const weeklyPath = (reviewId: string) => (
+    `/api/work-reviews/weekly/${pathId(reviewId, "invalid_weekly_review_id")}`
+  );
+  const projectScopeQuery = (scope: WorkProjectScopeFilter) => {
+    const parsed = WorkProjectScopeFilterSchema.parse(scope);
+    const query = new URLSearchParams({ projectScope: parsed.kind });
+    if (parsed.kind === "project") query.set("projectId", parsed.projectId);
+    return query;
+  };
+  const weeklyScopeQuery = (scope: WorkWeeklyScopeRequest) => {
+    const parsed = WorkWeeklyScopeRequestSchema.parse(scope);
+    const query = new URLSearchParams({
+      weekStart: parsed.weekStart,
+      timeZone: parsed.timeZone,
+      scopeKind: parsed.scopeKind
+    });
+    if (parsed.projectId) query.set("projectId", parsed.projectId);
+    return query;
+  };
   const versionedBody = (input: WorkTodoVersionedOperationInput) => ({
     expectedVersion: input.expectedVersion,
     operationKey: requestId(input.operationKey, "invalid_operation_key")
@@ -642,8 +958,20 @@ export function createWorkReviewApi(fetchImpl: typeof fetch = fetch): WorkReview
       const response = await sameOrigin("/api/work-reviews/config", { method: "GET", signal });
       return (await parseResponse(response, WorkReviewConfigResponseSchema)).limits;
     },
+    async getCapabilities(signal) {
+      const response = await sameOrigin("/api/work-reviews/config", { method: "GET", signal });
+      return (await parseResponse(response, WorkReviewConfigResponseSchema)).capabilities;
+    },
     async listMeetings(signal) {
       const response = await sameOrigin("/api/work-reviews/meetings", { method: "GET", signal });
+      return (await parseResponse(response, WorkMeetingListResponseSchema)).meetings;
+    },
+    async listMeetingsByProject(scope, signal) {
+      const query = projectScopeQuery(scope);
+      const response = await sameOrigin(`/api/work-reviews/meetings?${query.toString()}`, {
+        method: "GET",
+        signal
+      });
       return (await parseResponse(response, WorkMeetingListResponseSchema)).meetings;
     },
     async uploadMeeting(input, signal) {
@@ -656,6 +984,10 @@ export function createWorkReviewApi(fetchImpl: typeof fetch = fetch): WorkReview
       body.set("file", input.file);
       body.set("meetingDate", meetingDate.data);
       if (input.title?.trim()) body.set("title", input.title.trim());
+      if (input.projectIds !== undefined) {
+        body.set("projectIds", JSON.stringify(input.projectIds.map((projectId) =>
+          requestId(projectId, "invalid_project_id"))));
+      }
       const response = await sameOrigin("/api/work-reviews/meetings", {
         method: "POST",
         body,
@@ -741,6 +1073,17 @@ export function createWorkReviewApi(fetchImpl: typeof fetch = fetch): WorkReview
       }
       await response.body?.cancel().catch(() => undefined);
     },
+    async setMeetingProjects(meetingId, input, signal) {
+      const body = SetWorkResourceProjectsRequestSchema.parse(input);
+      const response = await sameOrigin(`${meetingPath(meetingId)}/projects`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+        signal
+      });
+      const result = await parseResponse(response, WorkProjectLinksResponseSchema);
+      return { resourceVersion: result.resourceVersion, projects: result.projects };
+    },
     async getMeetingFollowUp(meetingId, signal) {
       const response = await sameOrigin(`${meetingPath(meetingId)}/follow-up`, {
         method: "GET",
@@ -789,6 +1132,16 @@ export function createWorkReviewApi(fetchImpl: typeof fetch = fetch): WorkReview
       const query = new URLSearchParams({ view: WorkTodoViewSchema.parse(view) });
       if (day) query.set("day", WorkReviewDateSchema.parse(day));
       const response = await sameOrigin(`/api/work-reviews/todos?${query.toString()}`, { method: "GET", signal });
+      return (await parseResponse(response, WorkTodoListResponseSchema)).todos;
+    },
+    async listTodosByProject(view, scope, day, signal) {
+      const query = projectScopeQuery(scope);
+      query.set("view", WorkTodoViewSchema.parse(view));
+      if (day) query.set("day", WorkReviewDateSchema.parse(day));
+      const response = await sameOrigin(`/api/work-reviews/todos?${query.toString()}`, {
+        method: "GET",
+        signal
+      });
       return (await parseResponse(response, WorkTodoListResponseSchema)).todos;
     },
     async createTodo(input, signal) {
@@ -873,6 +1226,170 @@ export function createWorkReviewApi(fetchImpl: typeof fetch = fetch): WorkReview
     async getTodoSource(todoId, signal) {
       const response = await sameOrigin(`${todoPath(todoId)}/source`, { method: "GET", signal });
       return await parseResponse(response, WorkTodoSourceResponseSchema);
+    },
+    async setTodoProjects(todoId, input, signal) {
+      const body = SetWorkResourceProjectsRequestSchema.parse(input);
+      const response = await sameOrigin(`${todoPath(todoId)}/projects`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+        signal
+      });
+      const result = await parseResponse(response, WorkProjectLinksResponseSchema);
+      return { resourceVersion: result.resourceVersion, projects: result.projects };
+    },
+    async listProjects(status = "active", signal) {
+      const query = new URLSearchParams({ status: WorkProjectListStatusSchema.parse(status) });
+      const response = await sameOrigin(`/api/work-reviews/projects?${query.toString()}`, {
+        method: "GET",
+        signal
+      });
+      return (await parseResponse(response, WorkProjectListResponseSchema)).projects;
+    },
+    async getProject(projectId, signal) {
+      const response = await sameOrigin(projectPath(projectId), { method: "GET", signal });
+      return (await parseResponse(response, z.object({ project: WorkProjectSchema }).strict())).project;
+    },
+    async createProject(input, signal) {
+      const response = await sameOrigin("/api/work-reviews/projects", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(input),
+        signal
+      });
+      return (await parseResponse(response, WorkProjectMutationResponseSchema)).project;
+    },
+    async updateProject(projectId, input, signal) {
+      const response = await sameOrigin(projectPath(projectId), {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(input),
+        signal
+      });
+      return (await parseResponse(response, WorkProjectMutationResponseSchema)).project;
+    },
+    async getWeeklyReview(scope, signal) {
+      const query = weeklyScopeQuery(scope);
+      const response = await sameOrigin(`/api/work-reviews/weekly?${query.toString()}`, {
+        method: "GET",
+        signal
+      });
+      return await parseResponse(response, WorkWeeklyScopeResponseSchema);
+    },
+    async generateWeeklyReview(input, signal) {
+      const body = GenerateWorkWeeklyReviewRequestSchema.parse(input);
+      const response = await sameOrigin("/api/work-reviews/weekly/generate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+        signal
+      });
+      return await parseResponse(response, WorkWeeklyQueueResponseSchema);
+    },
+    async getWeeklyReviewDetail(reviewId, signal) {
+      const response = await sameOrigin(weeklyPath(reviewId), { method: "GET", signal });
+      return await parseResponse(response, WorkWeeklyDetailResponseSchema);
+    },
+    async regenerateWeeklyReview(reviewId, input, signal) {
+      const body = RegenerateWorkWeeklyReviewRequestSchema.parse(input);
+      const response = await sameOrigin(`${weeklyPath(reviewId)}/regenerate`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+        signal
+      });
+      return await parseResponse(response, WorkWeeklyQueueResponseSchema);
+    },
+    async updateWeeklyItem(reviewId, itemId, input, signal) {
+      const body = UpdateWorkWeeklyItemRequestSchema.parse(input);
+      const response = await sameOrigin(
+        `${weeklyPath(reviewId)}/items/${pathId(itemId, "invalid_weekly_item_id")}`,
+        {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+          signal
+        }
+      );
+      return (await parseResponse(response, WorkWeeklyItemMutationResponseSchema)).item;
+    },
+    async createWeeklyUserNote(reviewId, input, signal) {
+      const body = CreateWorkWeeklyUserNoteRequestSchema.parse(input);
+      const response = await sameOrigin(`${weeklyPath(reviewId)}/items`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+        signal
+      });
+      return (await parseResponse(response, WorkWeeklyItemMutationResponseSchema)).item;
+    },
+    async deleteWeeklyUserNote(reviewId, itemId, input, signal) {
+      const body = WorkWeeklyVersionedOperationRequestSchema.parse(input);
+      const response = await sameOrigin(
+        `${weeklyPath(reviewId)}/items/${pathId(itemId, "invalid_weekly_item_id")}`,
+        {
+          method: "DELETE",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+          signal
+        }
+      );
+      await parseResponse(response, z.object({ deleted: z.literal(true), reused: z.boolean() }).strict());
+    },
+    async resetWeeklyReview(reviewId, input, signal) {
+      const body = WorkWeeklyVersionedOperationRequestSchema.parse(input);
+      const response = await sameOrigin(`${weeklyPath(reviewId)}/reset`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+        signal
+      });
+      return (await parseResponse(response, z.object({
+        review: WorkWeeklyReviewSchema,
+        reused: z.boolean()
+      }).strict())).review;
+    },
+    async deleteWeeklyReview(reviewId, input, signal) {
+      const body = WorkWeeklyVersionedOperationRequestSchema.parse(input);
+      const response = await sameOrigin(weeklyPath(reviewId), {
+        method: "DELETE",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+        signal
+      });
+      await parseResponse(response, z.object({ deleted: z.literal(true), reused: z.boolean() }).strict());
+    },
+    async getWeeklyQa(reviewId, signal) {
+      const response = await sameOrigin(`${weeklyPath(reviewId)}/qa`, { method: "GET", signal });
+      return await parseResponse(response, WorkWeeklyQaGetResponseSchema);
+    },
+    async askWeeklyQa(reviewId, input, signal) {
+      const body = AskWorkWeeklyQaRequestSchema.parse(input);
+      const response = await sameOrigin(`${weeklyPath(reviewId)}/qa`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+        signal
+      });
+      return await parseResponse(response, WorkWeeklyQaQueueResponseSchema);
+    },
+    async clearWeeklyQa(reviewId, input, signal) {
+      const body = WorkWeeklyVersionedOperationRequestSchema.parse(input);
+      const response = await sameOrigin(`${weeklyPath(reviewId)}/qa`, {
+        method: "DELETE",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+        signal
+      });
+      await parseResponse(response, z.object({ cleared: z.literal(true), reused: z.boolean() }).strict());
+    },
+    async getWeeklySource(reviewId, sourceRef, signal) {
+      const parsedSourceRef = WorkWeeklySourceRefSchema.parse(sourceRef);
+      const response = await sameOrigin(
+        `${weeklyPath(reviewId)}/sources/${encodeURIComponent(parsedSourceRef)}`,
+        { method: "GET", signal }
+      );
+      return await parseResponse(response, WorkWeeklyLiveSourceResponseSchema);
     }
   };
 }

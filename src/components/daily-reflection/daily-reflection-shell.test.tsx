@@ -349,6 +349,7 @@ function session(
     sourceOrigin: null,
     recordingDate: "",
     operationReceipt: null,
+    recordingRecovery: null,
     history: [],
     historyState: "ready",
     historyErrorMessage: null,
@@ -364,6 +365,11 @@ function session(
     reload: vi.fn(async () => undefined),
     refreshHistory: vi.fn(async () => undefined),
     startNew: vi.fn(),
+    preserveRecording: vi.fn(async () => undefined),
+    resumeRecording: vi.fn(async () => undefined),
+    retryRecordingUpload: vi.fn(async () => undefined),
+    setRecordingRecoverySource: vi.fn(async () => undefined),
+    discardRecordingDraft: vi.fn(async () => undefined),
     updateCandidate: vi.fn(async () => undefined),
     updateCandidates: vi.fn(async () => undefined),
     updateCard: vi.fn(async () => undefined),
@@ -706,7 +712,7 @@ describe("DailyReflectionShellContent", () => {
     fireEvent.click(screen.getByRole("button", { name: "开始说" }));
     await waitFor(() => expect(screen.getByRole("button", { name: "结束表达" })).toBeVisible());
     fireEvent.click(screen.getByRole("button", { name: "结束表达" }));
-    expect(screen.getByText("正在整理这次复盘……")).toBeVisible();
+    expect(screen.getByText("正在准备本地录音…")).toBeVisible();
     act(() => recorder.finishStop(181_000));
     await waitFor(() => expect(screen.getByText("本地录音已准备好")).toBeVisible());
 
@@ -837,7 +843,7 @@ describe("DailyReflectionShellContent", () => {
     expect(date).toMatch(/^\d{4}-\d{2}-\d{2}$/u);
     expect(operationKey).toBe("stable-browser-key");
     expect(submittedSource).toBe("direct_conversation");
-    expect(screen.getByText("正在整理这次复盘……")).toBeVisible();
+    expect(screen.getByText("正在上传这次录音……")).toBeVisible();
 
     await act(async () => finishUpload());
   });
@@ -975,8 +981,8 @@ describe("DailyReflectionShellContent", () => {
 
     expect(screen.getByRole("button", { name: "完成这次复盘" })).toBeEnabled();
     expect(screen.getByText(/还有 1 条可以以后再看/u)).toBeVisible();
-    expect(screen.getByText("看完后，完成这次复盘")).toBeVisible();
-    expect(screen.queryByText(/0 张卡片/u)).not.toBeInTheDocument();
+    expect(screen.getByText("0 张卡片 · 0 条长期记忆（已选择，待处理）")).toBeVisible();
+    expect(screen.getByText(/0 张卡片 · 0 条长期记忆/u)).toBeVisible();
     expect(screen.getByRole("button", { name: "长期记住" })).toHaveAttribute("aria-pressed", "false");
     expect(screen.getByRole("button", { name: "不保存" })).toHaveAttribute("aria-pressed", "false");
     expect(screen.queryByRole("combobox")).not.toBeInTheDocument();
@@ -1065,8 +1071,8 @@ describe("DailyReflectionShellContent", () => {
       })
     })} />);
 
-    expect(screen.getByText("已保存 0 张卡片 · 已选择长期记住 1 条")).toBeVisible();
-    expect(screen.queryByText("看完后，完成这次复盘")).not.toBeInTheDocument();
+    expect(screen.getByText("0 张卡片 · 1 条长期记忆（已选择，待处理）")).toBeVisible();
+    expect(screen.queryByText("0 张卡片 · 0 条长期记忆（已选择，待处理）")).not.toBeInTheDocument();
   });
 
   it("expands every Evidence item, explicitly claims an action, deletes one card, and creates a manual card", () => {
@@ -1437,7 +1443,7 @@ describe("DailyReflectionShellContent", () => {
     expect(container.textContent).not.toContain("Candidate #");
     expect(screen.queryByText("第一段真实原话。")).not.toBeInTheDocument();
     const transcriptHeading = screen.getByText("完整文字记录");
-    const completionHeading = screen.getByText("看完后，完成这次复盘");
+    const completionHeading = screen.getByText("0 张卡片 · 0 条长期记忆（已选择，待处理）");
     expect(transcriptHeading.compareDocumentPosition(completionHeading)
       & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     expect(screen.getAllByRole("button", { name: "完成这次复盘" })).toHaveLength(1);
@@ -1562,7 +1568,7 @@ describe("DailyReflectionShellContent", () => {
     })} />);
 
     expect(screen.getByText("有 1 条行动还没有由你认领，只能随本次复盘保存。")).toBeVisible();
-    expect(screen.getByText("已保存 0 张卡片 · 已选择长期记住 1 条")).toBeVisible();
+    expect(screen.getByText("0 张卡片 · 1 条长期记忆（已选择，待处理）")).toBeVisible();
     fireEvent.click(screen.getByRole("button", { name: "完成这次复盘" }));
     expect(finalize).toHaveBeenCalledWith("retain_selected");
   });

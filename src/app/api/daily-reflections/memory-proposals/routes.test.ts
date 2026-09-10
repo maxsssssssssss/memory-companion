@@ -9,7 +9,9 @@ import {
 
 const state = vi.hoisted(() => ({
   accountId: "account_1",
+  repository: { getWorkingCard: vi.fn(), listReflectionCards: vi.fn() },
   service: {
+    getByCard: vi.fn(),
     create: vi.fn(),
     get: vi.fn(),
     list: vi.fn(),
@@ -28,6 +30,7 @@ vi.mock("@/lib/server/auth/request-context", async (importOriginal) => ({
 
 vi.mock("@/lib/server/daily-reflection", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/server/daily-reflection")>()),
+  getDailyReflectionRepository: () => state.repository,
   getDailyReflectionMemoryProposalService: () => state.service
 }));
 
@@ -35,7 +38,7 @@ import {
   DailyReflectionConflictError,
   DailyReflectionNotFoundError
 } from "@/lib/server/daily-reflection";
-import { POST as createProposal } from
+import { POST as createProposal, GET as lookupProposal } from
   "../cards/[cardId]/memory-proposals/route";
 import { GET as listProposals } from "./route";
 import { GET as getProposal } from "./[proposalId]/route";
@@ -125,6 +128,9 @@ beforeEach(() => {
     memoryId: "memory_1",
     admittedAt: "2026-08-24T08:01:00.000Z"
   });
+  state.repository.getWorkingCard.mockReturnValue({ id: "card_1", cardKind: "insight", sourceReflectionIds: ["reflection_1"], sourceUnavailable: false });
+  state.repository.listReflectionCards.mockReturnValue([]);
+  state.service.getByCard.mockReturnValue(null);
   state.service.create.mockReturnValue({ proposal: pending, reused: false });
   state.service.get.mockReturnValue(pending);
   state.service.list.mockReturnValue({ proposals: [pending], total: 1, limit: 24, offset: 0 });
@@ -376,5 +382,41 @@ describe("Daily Reflection Memory Proposal routes", () => {
     expect(await response.json()).toEqual({
       error: "daily_reflection_memory_proposal_conflict"
     });
+  });
+});
+
+describe("Card Library read-only Memory lookup", () => {
+  it("reads absent or rejected proposals without creating, evaluating or admitting", async () => {
+    const request = () => lookupProposal(new Request("http://localhost/api/daily-reflections/cards/card_1/memory-proposals"), {
+      params: Promise.resolve({ cardId: "card_1" })
+    });
+    expect(await (await request()).json()).toEqual({ proposal: null, publicationStatus: null, revoked: false, actionClaimed: false });
+    state.service.getByCard.mockReturnValue(proposal({ status: "rejected", reasons: ["canonical_evidence_invalid"] }));
+    const payload = await (await request()).json();
+    expect(payload.proposal).toMatchObject({ status: "rejected", reasons: ["canonical_evidence_invalid"] });
+    expectPublicProposal(payload.proposal);
+    expect(state.repository.getWorkingCard).toHaveBeenCalledWith("account_1", "card_1");
+    expect(state.service.getByCard).toHaveBeenCalledWith("account_1", "card_1");
+    expect(state.service.create).not.toHaveBeenCalled();
+    expect(state.service.evaluate).not.toHaveBeenCalled();
+    expect(state.service.admit).not.toHaveBeenCalled();
+  });
+
+  it("does not disclose another account's Card", async () => {
+    state.repository.getWorkingCard.mockImplementationOnce(() => { throw new DailyReflectionNotFoundError(); });
+    const response = await lookupProposal(new Request("http://localhost/api/daily-reflections/cards/card_1/memory-proposals"), {
+      params: Promise.resolve({ cardId: "card_1" })
+    });
+    expect(response.status).toBe(404);
+    expect(state.service.getByCard).not.toHaveBeenCalled();
+  });
+
+  it.each([true, false])("projects only the user's stored action claim: %s", async (claimed) => {
+    state.repository.getWorkingCard.mockReturnValue({ id: "card_1", cardKind: "action", sourceReflectionIds: ["reflection_1"], sourceUnavailable: false });
+    state.repository.listReflectionCards.mockReturnValue([{ id: "card_1", cardKind: "user_action", reviewStatus: "pending", actionClaimed: claimed }]);
+    const response = await lookupProposal(new Request("http://localhost/api/daily-reflections/cards/card_1/memory-proposals"), {
+      params: Promise.resolve({ cardId: "card_1" })
+    });
+    expect((await response.json()).actionClaimed).toBe(claimed);
   });
 });

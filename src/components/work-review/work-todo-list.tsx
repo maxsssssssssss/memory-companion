@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useContext, useEffect, useState } from "react";
 
 import { ProductState, ProductTabs } from "@/components/product-system/product-primitives";
@@ -9,8 +10,11 @@ import {
   type WorkTodo,
   type WorkTodoView
 } from "@/lib/client/work-review-api";
+import type { WorkProject, WorkProjectScopeFilter } from "@/lib/domain/work-project";
 
+import { WorkProjectBadges, WorkProjectFilter } from "./work-project-picker";
 import { WorkReviewContext } from "./work-review-shell";
+import { asWorkReviewV2Api, DISABLED_WORK_REVIEW_CAPABILITIES } from "./work-review-v2";
 import { WorkTodoDetail } from "./work-todo-detail";
 import { WorkTodoDialog, type WorkTodoDialogSubmission } from "./work-todo-dialog";
 import workStyles from "./work-review.module.css";
@@ -64,6 +68,7 @@ export function WorkTodoRows({
                 {todo.origin === "meeting_finding" ? <span>来源会议</span> : null}
                 {todo.origin === "detached_meeting_finding" ? <span>原来源会议已删除</span> : null}
                 {todo.isImportant ? <strong>重要</strong> : null}
+                <WorkProjectBadges projects={todo.projects ?? []} />
               </div>
             </div>
             {!completed ? (
@@ -98,6 +103,9 @@ export function WorkTodoListPage({ api: apiOverride }: Readonly<{ api?: WorkRevi
   const context = useContext(WorkReviewContext);
   const api = apiOverride ?? context?.api;
   if (!api) throw new Error("WorkTodoListPage requires an API");
+  const capabilities = context?.capabilities ?? DISABLED_WORK_REVIEW_CAPABILITIES;
+  const v2Api = asWorkReviewV2Api(api);
+  const projectsEnabled = capabilities.projects && Boolean(v2Api);
   const today = workReviewLocalDay();
   const [view, setView] = useState<Exclude<WorkTodoView, "today">>("all");
   const [todos, setTodos] = useState<WorkTodo[] | null>(null);
@@ -108,20 +116,46 @@ export function WorkTodoListPage({ api: apiOverride }: Readonly<{ api?: WorkRevi
   const [dialogError, setDialogError] = useState<string | null>(null);
   const [selectedTodoId, setSelectedTodoId] = useState<string | null>(null);
   const [statusNotice, setStatusNotice] = useState<string | null>(null);
+  const [projects, setProjects] = useState<WorkProject[] | null>(null);
+  const [projectError, setProjectError] = useState<string | null>(null);
+  const [projectAttempt, setProjectAttempt] = useState(0);
+  const [projectScope, setProjectScope] = useState<WorkProjectScopeFilter>({ kind: "all" });
   const operationKeys = useWorkTodoOperationKeys();
 
   useEffect(() => {
     const controller = new AbortController();
     setLoadError(null);
     setTodos(null);
-    void api.listTodos(view, today, controller.signal).then((records) => {
+    const request = projectsEnabled && v2Api
+      ? v2Api.listTodosByProject(view, projectScope, today, controller.signal)
+      : api.listTodos(view, today, controller.signal);
+    void request.then((records) => {
       if (!controller.signal.aborted) setTodos(records);
     }).catch((error: unknown) => {
       if (controller.signal.aborted || error instanceof DOMException && error.name === "AbortError") return;
       setLoadError(todoError(error));
     });
     return () => controller.abort();
-  }, [api, loadAttempt, today, view]);
+  }, [api, loadAttempt, projectScope, projectsEnabled, today, v2Api, view]);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    if (!projectsEnabled || !v2Api) {
+      setProjects([]);
+      setProjectError(null);
+      setProjectScope({ kind: "all" });
+      return () => controller.abort();
+    }
+    setProjects(null);
+    setProjectError(null);
+    void v2Api.listProjects("all", controller.signal).then((records) => {
+      if (!controller.signal.aborted) setProjects(records);
+    }).catch((error: unknown) => {
+      if (controller.signal.aborted || error instanceof DOMException && error.name === "AbortError") return;
+      setProjectError(todoError(error));
+    });
+    return () => controller.abort();
+  }, [projectAttempt, projectsEnabled, v2Api]);
 
   const refresh = () => setLoadAttempt((value) => value + 1);
   const mutate = async (todo: WorkTodo, action: WorkTodoRowAction) => {
@@ -166,6 +200,23 @@ export function WorkTodoListPage({ api: apiOverride }: Readonly<{ api?: WorkRevi
         <button className={workStyles.primaryButton} onClick={() => { setDialogError(null); setDialog({ mode: "create" }); }} type="button">新建待办</button>
       </header>
       {statusNotice ? <p aria-live="polite" className={styles.statusNotice}>{statusNotice}</p> : null}
+      {projectsEnabled ? (
+        <div className={workStyles.projectFilterBar}>
+          <WorkProjectFilter
+            disabled={projects === null || Boolean(projectError)}
+            onChange={setProjectScope}
+            projects={projects ?? []}
+            value={projectScope}
+          />
+          <Link className={workStyles.secondaryButton} href="/work-review/projects">管理项目</Link>
+        </div>
+      ) : null}
+      {projectError ? (
+        <div className={workStyles.filterError} role="alert">
+          <p>{projectError}</p>
+          <button className={workStyles.secondaryButton} onClick={() => setProjectAttempt((value) => value + 1)} type="button">重新读取项目</button>
+        </div>
+      ) : null}
       <ProductTabs
         ariaLabel="待办视图"
         items={VIEW_ITEMS.map((item) => ({ id: item.id, label: item.label, panel }))}
@@ -173,6 +224,7 @@ export function WorkTodoListPage({ api: apiOverride }: Readonly<{ api?: WorkRevi
         value={view}
       />
       <WorkTodoDialog
+        api={api}
         error={dialogError}
         mode={dialog?.mode ?? "create"}
         onClose={() => setDialog(null)}
@@ -188,6 +240,7 @@ export function WorkTodoListPage({ api: apiOverride }: Readonly<{ api?: WorkRevi
                 notes: input.notes,
                 isImportant: input.isImportant,
                 myDayDate: input.myDayDate,
+                projectIds: input.projectIds,
                 expectedVersion: dialog.todo.version,
                 operationKey: input.operationKey
               });
@@ -200,6 +253,7 @@ export function WorkTodoListPage({ api: apiOverride }: Readonly<{ api?: WorkRevi
                 notes: input.notes,
                 isImportant: input.isImportant,
                 myDayDate: input.myDayDate,
+                projectIds: input.projectIds,
                 operationKey: input.operationKey
               });
             }
@@ -211,6 +265,7 @@ export function WorkTodoListPage({ api: apiOverride }: Readonly<{ api?: WorkRevi
           }
         }}
         open={Boolean(dialog)}
+        projectsEnabled={projectsEnabled}
         today={today}
         todo={dialog?.mode === "edit" ? dialog.todo : null}
       />

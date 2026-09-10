@@ -1,0 +1,82 @@
+{
+  "datasetVersion": "work-review-sample-30m-v1",
+  "title": "澄禾行政物资申领试点范围与准备会",
+  "recordingDate": "2026-09-08",
+  "purpose": "New fictional 30-minute Work Review audio; decision chronology, conditional commitments, Chinese dates and global deduplication",
+  "dialogueFile": "dialogue.json",
+  "audioFile": "audio/work-review-sample-30m-v1.wav",
+  "transcriptFile": "transcript.md",
+  "manifestFile": "manifest.json",
+  "targetDurationSeconds": 1800,
+  "speakers": [
+    {
+      "id": "su_he",
+      "name": "苏禾",
+      "role": "行政项目协调",
+      "preferredVoice": "Microsoft Huihui"
+    },
+    {
+      "id": "meng_yuan",
+      "name": "孟远",
+      "role": "系统实施",
+      "preferredVoice": "Microsoft Kangkang"
+    },
+    {
+      "id": "gu_qing",
+      "name": "顾青",
+      "role": "财务运营",
+      "preferredVoice": "Microsoft Yaoyao"
+    }
+  ],
+  "sections": [
+    {
+      "id": "background",
+      "title": "申领现状与验收目标",
+      "targetDurationSeconds": 300
+    },
+    {
+      "id": "options",
+      "title": "方案比较与试点范围决定",
+      "targetDurationSeconds": 300
+    },
+    {
+      "id": "schedule",
+      "title": "发布日期变化与退出条件",
+      "targetDurationSeconds": 300
+    },
+    {
+      "id": "delivery",
+      "title": "接口、培训和目录准备认领",
+      "targetDurationSeconds": 300
+    },
+    {
+      "id": "operations",
+      "title": "埋点、回退与通知方案",
+      "targetDurationSeconds": 300
+    },
+    {
+      "id": "closure",
+      "title": "未决事项、验收边界与会末核对",
+      "targetDurationSeconds": 300
+    }
+  ],
+  "generationConfig": {
+    "sampleRate": 16000,
+    "channels": 1,
+    "codec": "pcm_s16le",
+    "loudnessTargetLufs": -20,
+    "truePeakDb": -2,
+    "normalPauseSeconds": [
+      0.65,
+      0.8,
+      0.95,
+      0.7,
+      0.85
+    ],
+    "sectionTransitionPauseSeconds": 3.5,
+    "tempoRange": [
+      0.82,
+      1.18
+    ]
+  }
+}

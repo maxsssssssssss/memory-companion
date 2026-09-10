@@ -897,7 +897,7 @@ function sourceLabel(origin: DateCompanionProactiveValueContext["evidence"][numb
     : "direct_conversation：真实交流记录，只支持记录中直接出现的内容";
 }
 
-function dateCompanionValuePrompt(context: DateCompanionProactiveValueContext) {
+export function dateCompanionValuePrompt(context: DateCompanionProactiveValueContext) {
   const distinctDates = [...new Set(context.evidence.map((item) => item.recordingDate))].sort();
   const dateRule = distinctDates.length === 1
     ? "只有一个日期：只能使用‘这次/当天’等单次措辞，禁止‘再次/重复/模式/长期’。"

@@ -5,6 +5,7 @@ import { useEffect, useState } from "react";
 
 import { PRODUCT_CATALOG, type ProductId } from "./product-catalog";
 import { ProductAccountMenu } from "./product-account-menu";
+import { useProductCapabilities } from "./product-capabilities";
 import { readLastProduct, rememberLastProduct } from "./product-preference";
 import styles from "./product-system.module.css";
 
@@ -13,7 +14,7 @@ export function GlobalProductEntry({
   dailyReflectionEnabled,
   onLogout,
   userLabel,
-  workReviewEnabled = false
+  workReviewEnabled
 }: Readonly<{
   accountId: string;
   dailyReflectionEnabled: boolean;
@@ -21,6 +22,8 @@ export function GlobalProductEntry({
   userLabel: string;
   workReviewEnabled?: boolean;
 }>) {
+  const capabilities = useProductCapabilities();
+  const workReviewAvailable = workReviewEnabled ?? capabilities.workReviewEnabled;
   const [lastProduct, setLastProduct] = useState<ProductId | null>(null);
 
   useEffect(() => {
@@ -46,11 +49,11 @@ export function GlobalProductEntry({
         {PRODUCT_CATALOG.map((product) => {
           const enabled = product.id === "date_companion"
             || (product.id === "daily_reflection" && dailyReflectionEnabled)
-            || (product.id === "office_review" && workReviewEnabled);
+            || (product.id === "office_review" && workReviewAvailable);
           const wasLast = enabled && product.id === lastProduct;
           if (!product.href || !enabled) {
             return (
-              <article aria-disabled="true" className={styles.globalProductUnavailable} key={product.id}>
+              <article aria-disabled="true" className={styles.globalProductUnavailable} data-product={product.id} key={product.id}>
                 <div><span aria-hidden="true">{product.mark}</span><small>{product.href ? "暂未开放" : "开发中"}</small></div>
                 <h2>{product.name}</h2>
                 <p>{product.description}</p>

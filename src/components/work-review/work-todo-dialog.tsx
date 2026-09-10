@@ -3,14 +3,17 @@
 import { type FormEvent, useEffect, useRef, useState } from "react";
 
 import { ProductDialog } from "@/components/product-system/product-primitives";
-import type {
-  WorkMeetingFinding,
-  WorkTodo,
-  WorkTodoDraft,
-  WorkTodoKind
+import {
+  isDefinitiveWorkReviewApiError,
+  type WorkMeetingFinding,
+  type WorkReviewApi,
+  type WorkTodo,
+  type WorkTodoDraft,
+  type WorkTodoKind
 } from "@/lib/client/work-review-api";
 
 import workStyles from "./work-review.module.css";
+import { WorkProjectPicker } from "./work-project-picker";
 import styles from "./work-todo.module.css";
 import { workTodoOperationKey } from "./work-todo-utils";
 
@@ -21,6 +24,8 @@ export type WorkTodoDialogSubmission = WorkTodoDraft & Readonly<{
 
 export function WorkTodoDialog({
   addToTodayDefault = false,
+  api,
+  defaultProjectIds = [],
   error,
   finding = null,
   initialKind = "self",
@@ -28,10 +33,14 @@ export function WorkTodoDialog({
   onClose,
   onSubmit,
   open,
+  projectApi,
+  projectsEnabled = false,
   today,
   todo = null
 }: Readonly<{
   addToTodayDefault?: boolean;
+  api?: WorkReviewApi;
+  defaultProjectIds?: readonly string[];
   error?: string | null;
   finding?: WorkMeetingFinding | null;
   initialKind?: WorkTodoKind;
@@ -39,6 +48,8 @@ export function WorkTodoDialog({
   onClose: () => void;
   onSubmit: (input: WorkTodoDialogSubmission) => Promise<void>;
   open: boolean;
+  projectApi?: WorkReviewApi;
+  projectsEnabled?: boolean;
   today: string;
   todo?: WorkTodo | null;
 }>) {
@@ -49,11 +60,15 @@ export function WorkTodoDialog({
   const [notes, setNotes] = useState("");
   const [isImportant, setIsImportant] = useState(false);
   const [myDayDate, setMyDayDate] = useState<string | null>(null);
+  const [projectIds, setProjectIds] = useState<string[]>([]);
   const [ownershipOverrideConfirmed, setOwnershipOverrideConfirmed] = useState(false);
   const [saving, setSaving] = useState(false);
   const [localError, setLocalError] = useState<string | null>(null);
   const operationKeyRef = useRef(workTodoOperationKey("todo"));
+  const operationFingerprintRef = useRef<string | null>(null);
   const identity = todo?.id ?? finding?.id ?? mode;
+  const defaultProjectIdsKey = JSON.stringify(defaultProjectIds);
+  const resolvedProjectApi = projectApi ?? api;
 
   useEffect(() => {
     if (!open) return;
@@ -70,10 +85,15 @@ export function WorkTodoDialog({
     setNotes(todo?.notes ?? finding?.body ?? "");
     setIsImportant(todo?.isImportant ?? false);
     setMyDayDate(todo?.myDayDate ?? (addToTodayDefault ? today : null));
+    setProjectIds(
+      todo?.projects?.map((project) => project.id)
+      ?? (JSON.parse(defaultProjectIdsKey) as string[])
+    );
     setOwnershipOverrideConfirmed(false);
     setLocalError(null);
     operationKeyRef.current = workTodoOperationKey(mode === "projection" ? "finding-todo" : mode === "edit" ? "edit-todo" : "create-todo");
-  }, [addToTodayDefault, finding, identity, initialKind, mode, open, today, todo]);
+    operationFingerprintRef.current = null;
+  }, [addToTodayDefault, defaultProjectIdsKey, finding, identity, initialKind, mode, open, today, todo]);
 
   const requiresOwnershipOverride = finding?.actionBasis === "assignment_without_acceptance" && kind === "self";
   const submit = async (event: FormEvent<HTMLFormElement>) => {
@@ -95,20 +115,33 @@ export function WorkTodoDialog({
     }
     setSaving(true);
     setLocalError(null);
+    const submission = {
+      title: cleanTitle,
+      kind,
+      ownerLabel: kind === "waiting_for_other" ? cleanOwner : null,
+      currentDueDate: currentDueDate || null,
+      notes: notes.trim() || null,
+      isImportant,
+      myDayDate,
+      projectIds: projectsEnabled ? projectIds : undefined,
+      ownershipOverrideConfirmed: requiresOwnershipOverride && ownershipOverrideConfirmed
+    };
+    const fingerprint = JSON.stringify(submission);
+    if (operationFingerprintRef.current !== fingerprint) {
+      operationKeyRef.current = workTodoOperationKey(mode === "projection" ? "finding-todo" : mode === "edit" ? "edit-todo" : "create-todo");
+      operationFingerprintRef.current = fingerprint;
+    }
     try {
       await onSubmit({
-        title: cleanTitle,
-        kind,
-        ownerLabel: kind === "waiting_for_other" ? cleanOwner : null,
-        currentDueDate: currentDueDate || null,
-        notes: notes.trim() || null,
-        isImportant,
-        myDayDate,
+        ...submission,
         operationKey: operationKeyRef.current,
-        ownershipOverrideConfirmed: requiresOwnershipOverride && ownershipOverrideConfirmed
       });
-    } catch {
-      // The caller supplies the server-safe error copy; keep this operation key for an uncertain retry.
+    } catch (submitError) {
+      if (isDefinitiveWorkReviewApiError(submitError)) {
+        operationKeyRef.current = workTodoOperationKey(mode === "projection" ? "finding-todo" : mode === "edit" ? "edit-todo" : "create-todo");
+        operationFingerprintRef.current = null;
+      }
+      // The caller supplies safe error copy. Only uncertain retries keep the same key and payload fingerprint.
     } finally {
       setSaving(false);
     }
@@ -120,7 +153,10 @@ export function WorkTodoDialog({
       ? "从会议结果创建待办"
       : "新建待办";
 
+  if (!open) return null;
+
   return (
+    <div className={styles.todoDialog}>
     <ProductDialog
       footer={(
         <div className={styles.dialogActions}>
@@ -162,6 +198,17 @@ export function WorkTodoDialog({
           <span>当前计划日期</span>
           <input onChange={(event) => setCurrentDueDate(event.target.value)} type="date" value={currentDueDate} />
         </label>
+        {projectsEnabled ? resolvedProjectApi ? (
+          <WorkProjectPicker
+            api={resolvedProjectApi}
+            defaultProjectIds={defaultProjectIds}
+            disabled={saving}
+            onChange={setProjectIds}
+            selectedIds={projectIds}
+          />
+        ) : (
+          <p className={styles.projectUnavailable} role="status">项目选择暂不可用；当前项目关联会保持不变。</p>
+        ) : null}
         <label>
           <span>备注</span>
           <textarea maxLength={5_000} onChange={(event) => setNotes(event.target.value)} rows={4} value={notes} />
@@ -182,5 +229,6 @@ export function WorkTodoDialog({
         {localError || error ? <p className={workStyles.formError} role="alert">{localError ?? error}</p> : null}
       </form>
     </ProductDialog>
+    </div>
   );
 }

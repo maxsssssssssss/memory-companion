@@ -40,10 +40,12 @@ import {
   WorkMeetingFollowUpPanel,
   WorkMeetingResultStats
 } from "./work-meeting-follow-up";
+import { WorkProjectPicker } from "./work-project-picker";
 import { WorkReviewContext, type WorkReviewFeatureFlags } from "./work-review-shell";
 import { formatEvidenceTime, formatMeetingDuration, WorkMeetingStatus } from "./work-review-shared";
 import { WorkTodoDetail } from "./work-todo-detail";
 import { formatWorkTodoSourceDateTime } from "./work-todo-utils";
+import { asWorkReviewV2Api, DISABLED_WORK_REVIEW_CAPABILITIES, workReviewOperationKey } from "./work-review-v2";
 import styles from "./work-review.module.css";
 
 const KIND_LABELS: Readonly<Record<WorkMeetingCandidateKind, string>> = {
@@ -163,11 +165,13 @@ function dueDateToIso(value: string) {
 }
 
 function EvidenceDialog({
+  displaySpeakerLabel,
   evidence,
   meetingTitle,
   onClose,
   onLocate
 }: Readonly<{
+  displaySpeakerLabel?: string;
   evidence: WorkEvidenceView | null;
   meetingTitle: string;
   onClose: () => void;
@@ -180,7 +184,7 @@ function EvidenceDialog({
           <dl>
             <div><dt>会议</dt><dd>{meetingTitle}</dd></div>
             <div><dt>时间点</dt><dd>{formatEvidenceTime(evidence.startSeconds, evidence.endSeconds)}</dd></div>
-            <div><dt>原始发言人</dt><dd>{evidence.rawSpeakerLabel ?? "未标注"}</dd></div>
+            {displaySpeakerLabel ? <div><dt>本次会议显示名称</dt><dd>{displaySpeakerLabel}</dd></div> : null}
           </dl>
           {evidence.contextBefore ? <p className={styles.evidenceContext}>{evidence.contextBefore}</p> : null}
           <ProductEvidence label="会议原文" meta={evidence.timestampQuality ? `时间信息：${evidence.timestampQuality}` : undefined}>
@@ -425,7 +429,6 @@ function CandidateCard({
         label="来源原文"
         meta={formatEvidenceTime(evidence.startSeconds, evidence.endSeconds)}
       >
-        <span className={styles.evidenceSpeaker}>{evidence.rawSpeakerLabel ?? "未标注发言人"}</span>
         {evidence.text}
       </ProductEvidence>
       <div aria-label="候选来源" className={styles.sourceButtonGroup}>
@@ -462,6 +465,7 @@ function CandidateCard({
 
 function FindingCard({
   api,
+  defaultProjectIds,
   finding,
   linkedTodo,
   meetingId,
@@ -469,9 +473,11 @@ function FindingCard({
   onTodoCreated,
   onOpenTodo,
   projectionEnabled,
+  projectsEnabled,
   todoEnabled
 }: Readonly<{
   api?: WorkReviewApi;
+  defaultProjectIds: readonly string[];
   finding: WorkMeetingFinding;
   linkedTodo: WorkTodoProjection | null;
   meetingId: string;
@@ -479,6 +485,7 @@ function FindingCard({
   onTodoCreated: (todo: WorkTodo) => void;
   onOpenTodo: (todoId: string) => void;
   projectionEnabled: boolean;
+  projectsEnabled: boolean;
   todoEnabled: boolean;
 }>) {
   return (
@@ -523,12 +530,14 @@ function FindingCard({
       {api && todoEnabled && (finding.kind === "action_item" || finding.kind === "commitment") ? (
         <WorkFindingTodoActions
           api={api}
+          defaultProjectIds={defaultProjectIds}
           finding={finding}
           linkedTodo={linkedTodo}
           meetingId={meetingId}
           onCreated={onTodoCreated}
           onOpenTodo={onOpenTodo}
           projectionEnabled={projectionEnabled}
+          projectsEnabled={projectsEnabled}
         />
       ) : null}
     </article>
@@ -546,7 +555,8 @@ function ReviewPanel({
   onReview,
   onTodoCreated,
   onOpenTodo,
-  onSelectTranscript
+  onSelectTranscript,
+  projectsEnabled
 }: Readonly<{
   api?: WorkReviewApi;
   busyCandidateId: string | null;
@@ -559,9 +569,11 @@ function ReviewPanel({
   onTodoCreated: (todo: WorkTodo) => void;
   onOpenTodo: (todoId: string) => void;
   onSelectTranscript: () => void;
+  projectsEnabled: boolean;
 }>) {
   const [evidence, setEvidence] = useState<WorkEvidenceView | null>(null);
   const [editor, setEditor] = useState<EditorState | null>(null);
+  const [expandedSections, setExpandedSections] = useState<Record<string, boolean>>({ decision: true });
   const locateEvidence = (item: WorkEvidenceView) => {
     setEvidence(null);
     onSelectTranscript();
@@ -670,10 +682,15 @@ function ReviewPanel({
             const findings = detail.findings.filter((finding) => section.kinds.includes(finding.kind));
             if (!candidates.length && !findings.length) return null;
             const sectionId = `work-section-${section.kinds[0]}`;
+            const expanded = expandedSections[section.kinds[0]] ?? false;
             return (
               <section aria-labelledby={sectionId} className={styles.reviewSection} key={section.title}>
-                <h2 id={sectionId}>{section.title}</h2>
-                <div className={styles.reviewItems}>
+                <h2 id={sectionId}>
+                  <button aria-controls={`${sectionId}-items`} aria-expanded={expanded} className={styles.sectionToggle} onClick={() => setExpandedSections((current) => ({ ...current, [section.kinds[0]]: !expanded }))} type="button">
+                    <span>{section.title}</span><small>{candidates.length + findings.length} 条</small><span className={styles.sectionToggleState}>{expanded ? "收起" : "展开"}</span>
+                  </button>
+                </h2>
+                <div className={styles.reviewItems} hidden={!expanded} id={`${sectionId}-items`}>
                   {candidates.map((candidate) => (
                     <CandidateCard
                       busy={busyCandidateId === candidate.id}
@@ -687,6 +704,7 @@ function ReviewPanel({
                   {findings.map((finding) => (
                     <FindingCard
                       api={api}
+                      defaultProjectIds={(detail.meeting.projects ?? []).map((project) => project.id)}
                       finding={finding}
                       key={finding.id}
                       linkedTodo={detail.todoProjections.find((todo) => todo.sourceFindingId === finding.id) ?? null}
@@ -695,6 +713,7 @@ function ReviewPanel({
                       onOpenTodo={onOpenTodo}
                       onTodoCreated={onTodoCreated}
                       projectionEnabled={featureFlags.todoMeetingProjectionEnabled}
+                      projectsEnabled={projectsEnabled}
                       todoEnabled={featureFlags.todoEnabled}
                     />
                   ))}
@@ -714,6 +733,7 @@ function ReviewPanel({
         </>
       ) : null}
       <EvidenceDialog
+        displaySpeakerLabel={detail.speakerAliases.find((alias) => alias.rawLabel === evidence?.rawSpeakerLabel)?.displayLabel}
         evidence={evidence}
         meetingTitle={detail.meeting.title}
         onClose={() => setEvidence(null)}
@@ -747,6 +767,7 @@ function TranscriptPanel({
   ), [detail.speakerAliases]);
   const [drafts, setDrafts] = useState<Record<string, string>>(aliasesBySpeaker);
   const [savingSpeaker, setSavingSpeaker] = useState<string | null>(null);
+  const [showSpeakerSettings, setShowSpeakerSettings] = useState(false);
 
   useEffect(() => setDrafts(aliasesBySpeaker), [aliasesBySpeaker]);
 
@@ -757,8 +778,9 @@ function TranscriptPanel({
     <div className={styles.transcriptPanel}>
       {speakers.length ? (
         <section aria-labelledby="work-speaker-alias-title" className={styles.speakerAliases}>
-          <div><h2 id="work-speaker-alias-title">发言人显示名称</h2><p>名称只在本次会议中显示，不会修改原始 Speaker 标签或共享人物资料。</p></div>
-          <div className={styles.speakerAliasGrid}>
+          <div><h2 id="work-speaker-alias-title"><button aria-controls="work-speaker-settings" aria-expanded={showSpeakerSettings} className={styles.sectionToggle} onClick={() => setShowSpeakerSettings((value) => !value)} type="button"><span>发言人显示名称</span><span className={styles.sectionToggleState}>{showSpeakerSettings ? "收起" : "设置"}</span></button></h2></div>
+          <div className={styles.speakerAliasGrid} hidden={!showSpeakerSettings} id="work-speaker-settings">
+            <p>名称只在本次会议中显示，不会修改原始标签或共享人物资料。</p>
             {speakers.map((speaker) => (
               <form
                 key={speaker}
@@ -787,7 +809,7 @@ function TranscriptPanel({
               <li data-segment-id={segment.id} id={`segment-${segment.id}`} key={segment.id} tabIndex={-1}>
                 <div>
                   <time>{formatEvidenceTime(segment.startSeconds, segment.endSeconds)}</time>
-                  <span>{segment.speaker ?? "未标注发言人"}{alias ? <b> · {alias}</b> : null}</span>
+                  {alias ? <span>{alias}</span> : null}
                 </div>
                 <p>{segment.text}</p>
               </li>
@@ -847,6 +869,92 @@ function MeetingTodosPanel({
   );
 }
 
+function WorkMeetingProjectEditor({
+  api,
+  meeting,
+  onChanged
+}: Readonly<{
+  api: WorkReviewApi;
+  meeting: WorkMeetingDetail["meeting"];
+  onChanged: () => void;
+}>) {
+  const v2Api = asWorkReviewV2Api(api);
+  const linkedIds = useMemo(() => (meeting.projects ?? []).map((project) => project.id), [meeting.projects]);
+  const [selectedIds, setSelectedIds] = useState<string[]>(linkedIds);
+  const [resourceVersion, setResourceVersion] = useState(meeting.version);
+  const [busy, setBusy] = useState(false);
+  const [notice, setNotice] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const operationKeyRef = useRef(workReviewOperationKey("meeting-projects"));
+
+  useEffect(() => {
+    setSelectedIds(linkedIds);
+    setResourceVersion(meeting.version);
+    operationKeyRef.current = workReviewOperationKey("meeting-projects");
+  }, [linkedIds, meeting.version]);
+
+  if (!v2Api) {
+    return <p className={styles.inlineNotice} role="status">项目能力暂时无法在这次会议中使用。</p>;
+  }
+
+  const unchanged = selectedIds.length === linkedIds.length
+    && selectedIds.every((id) => linkedIds.includes(id));
+  return (
+    <section aria-labelledby="meeting-projects-title" className={styles.meetingProjects}>
+      <div className={styles.meetingProjectsHeading}>
+        <div>
+          <h2 id="meeting-projects-title">所属项目</h2>
+          <p>项目只用于整理这次会议；不会改变原文或会议结果。</p>
+        </div>
+        <Link className={styles.secondaryButton} href="/work-review/projects">管理项目</Link>
+      </div>
+      <WorkProjectPicker
+        api={api}
+        disabled={busy}
+        label="选择项目"
+        onChange={(ids) => {
+          setSelectedIds([...ids]);
+          operationKeyRef.current = workReviewOperationKey("meeting-projects");
+          setNotice(null);
+          setError(null);
+        }}
+        selectedIds={selectedIds}
+      />
+      <div className={styles.meetingProjectsActions}>
+        <button
+          className={styles.primaryButton}
+          disabled={busy || unchanged}
+          onClick={() => {
+            if (busy) return;
+            setBusy(true);
+            setNotice(null);
+            setError(null);
+            void v2Api.setMeetingProjects(meeting.id, {
+              expectedVersion: resourceVersion,
+              operationKey: operationKeyRef.current,
+              projectIds: selectedIds
+            }).then((result) => {
+              operationKeyRef.current = workReviewOperationKey("meeting-projects");
+              setResourceVersion(result.resourceVersion);
+              setSelectedIds(result.projects.map((project) => project.id));
+              setNotice("会议所属项目已保存。");
+              onChanged();
+            }).catch((saveError: unknown) => {
+              if (isDefinitiveWorkReviewApiError(saveError)) {
+                operationKeyRef.current = workReviewOperationKey("meeting-projects");
+              }
+              setError(errorMessage(saveError));
+            }).finally(() => setBusy(false));
+          }}
+          type="button"
+        >{busy ? "正在保存…" : "保存项目"}</button>
+        {notice ? <p aria-live="polite" className={styles.projectSaveNotice}>{notice}</p> : null}
+      </div>
+      {error ? <p className={styles.formError} role="alert">{error}</p> : null}
+    </section>
+  );
+}
+
 export function WorkMeetingDetailView({
   api,
   busyCandidateId,
@@ -857,9 +965,11 @@ export function WorkMeetingDetailView({
   onDelete,
   onRetry,
   onReview,
+  onProjectsChanged,
   onTodoCreated,
   onTodosChanged,
-  onUpdateSpeakerAlias
+  onUpdateSpeakerAlias,
+  projectsEnabled = false
 }: Readonly<{
   api?: WorkReviewApi;
   busyCandidateId: string | null;
@@ -870,9 +980,11 @@ export function WorkMeetingDetailView({
   onDelete: (policy?: WorkMeetingDeletePolicy) => Promise<void>;
   onRetry: () => Promise<void>;
   onReview: ReviewHandler;
+  onProjectsChanged?: () => void;
   onTodoCreated: (todo: WorkTodo) => void;
   onTodosChanged: () => void;
   onUpdateSpeakerAlias: (rawLabel: string, displayName: string, expectedVersion: number) => Promise<void>;
+  projectsEnabled?: boolean;
 }>) {
   const [tab, setTab] = useState("results");
   const [deleteOpen, setDeleteOpen] = useState(false);
@@ -902,6 +1014,9 @@ export function WorkMeetingDetailView({
         <div><h1>{detail.meeting.title}</h1><p><time dateTime={detail.meeting.meetingDate}>{detail.meeting.meetingDate}</time>{duration ? <span>{duration}</span> : null}</p></div>
         <WorkMeetingStatus meeting={detail.meeting} />
       </header>
+      {projectsEnabled && api ? (
+        <WorkMeetingProjectEditor api={api} meeting={detail.meeting} onChanged={onProjectsChanged ?? (() => undefined)} />
+      ) : null}
       {mutationError && !deleteOpen ? <p className={styles.formError} role="alert">{mutationError}</p> : null}
       {reviewCompleted && followUp.sourceStats ? <WorkMeetingResultStats stats={followUp.sourceStats} /> : null}
       <ProductTabs
@@ -923,6 +1038,7 @@ export function WorkMeetingDetailView({
                 onSelectTranscript={() => setTab("transcript")}
                 onOpenTodo={setSelectedTodoId}
                 onTodoCreated={onTodoCreated}
+                projectsEnabled={projectsEnabled}
               />
             )
           },
@@ -1011,6 +1127,8 @@ export function WorkMeetingDetail({
   const api = apiOverride ?? context?.api;
   const featureFlags = flagsOverride ?? context?.featureFlags;
   if (!api || !featureFlags) throw new Error("WorkMeetingDetail requires an API and feature flags");
+  const capabilities = context?.capabilities ?? DISABLED_WORK_REVIEW_CAPABILITIES;
+  const projectsEnabled = capabilities.projects && Boolean(asWorkReviewV2Api(api));
   const router = useRouter();
   const [detail, setDetail] = useState<WorkMeetingDetail | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -1145,6 +1263,7 @@ export function WorkMeetingDetail({
         }
       }}
       onReview={review}
+      onProjectsChanged={refresh}
       onTodoCreated={() => refresh()}
       onTodosChanged={refresh}
       onUpdateSpeakerAlias={async (rawLabel, displayName, expectedVersion) => {
@@ -1165,6 +1284,7 @@ export function WorkMeetingDetail({
           setMutationError(errorMessage(error));
         }
       }}
+      projectsEnabled={projectsEnabled}
     />
   );
 }

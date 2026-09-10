@@ -1,0 +1,63 @@
+{
+  "datasetVersion": "work-review-sample-20m-v1",
+  "title": "星桥项目试点范围评审会",
+  "recordingDate": "2026-09-03",
+  "purpose": "Synthetic Work Review upload, Evidence, Finding, Todo, and follow-up boundary testing",
+  "dialogueFile": "dialogue.json",
+  "audioFile": "audio/work-review-sample-20m-v1.wav",
+  "transcriptFile": "transcript.md",
+  "manifestFile": "manifest.json",
+  "targetDurationSeconds": 1200,
+  "speakers": [
+    {
+      "id": "lin_lan",
+      "name": "林岚",
+      "role": "产品负责人",
+      "preferredVoice": "Microsoft Huihui"
+    },
+    {
+      "id": "zhou_qi",
+      "name": "周启",
+      "role": "技术负责人",
+      "preferredVoice": "Microsoft Kangkang"
+    },
+    {
+      "id": "chen_nuo",
+      "name": "陈诺",
+      "role": "运营负责人",
+      "preferredVoice": "Microsoft Yaoyao"
+    }
+  ],
+  "sections": [
+    {
+      "id": "background_and_scope",
+      "title": "背景与初始范围",
+      "targetDurationSeconds": 300
+    },
+    {
+      "id": "options_and_disagreement",
+      "title": "方案分歧与证据",
+      "targetDurationSeconds": 300
+    },
+    {
+      "id": "decision_and_change",
+      "title": "方案变化与明确决定",
+      "targetDurationSeconds": 300
+    },
+    {
+      "id": "actions_and_open_questions",
+      "title": "行动、认领与未解决问题",
+      "targetDurationSeconds": 300
+    }
+  ],
+  "generationConfig": {
+    "sampleRate": 16000,
+    "channels": 1,
+    "codec": "pcm_s16le",
+    "loudnessTargetLufs": -20,
+    "truePeakDb": -2,
+    "normalPauseSeconds": [0.65, 0.8, 0.95, 0.7, 0.85],
+    "sectionTransitionPauseSeconds": 4,
+    "tempoRange": [0.82, 1.18]
+  }
+}

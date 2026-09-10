@@ -30,9 +30,8 @@ const EMPTY_SUMMARY: WorkMeetingRecoverySummary = {
 
 describe("Work Review startup recovery runtime", () => {
   it.each([
-    ["missing recovery flag", {
-      WORK_REVIEW_ENABLED: "true",
-      WORK_REVIEW_UPLOAD_ENABLED: "true"
+    ["disabled top-level flag", {
+      WORK_REVIEW_ENABLED: "false"
     }],
     ["disabled recovery flag", {
       ...ENABLED_ENV,
@@ -58,7 +57,7 @@ describe("Work Review startup recovery runtime", () => {
     expect(logger.info).not.toHaveBeenCalled();
   });
 
-  it("runs exactly one bounded Core recovery pass with enabled Work stages", async () => {
+  it("runs exactly one bounded Core recovery pass with default-on Work stages", async () => {
     const runtime = {
       store: { kind: "account-store" },
       uploadsRootDir: "C:/data/users/account_a/uploads"
@@ -97,7 +96,7 @@ describe("Work Review startup recovery runtime", () => {
     });
     const logger = { info: vi.fn() };
 
-    await expect(runWorkReviewStartupRecovery(ENABLED_ENV, {
+    await expect(runWorkReviewStartupRecovery({}, {
       recoverStaleWorkMeetings,
       resolveRuntime,
       logger

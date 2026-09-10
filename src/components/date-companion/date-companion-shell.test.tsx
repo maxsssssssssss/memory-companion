@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { useDateCompanionSession, type DateCompanionSessionValue } from "@/lib/client/date-companion-session";
@@ -313,7 +313,8 @@ describe("DateCompanionShell", () => {
     expect(screen.getByRole("link", { name: "首页" })).toHaveAttribute("aria-current", "page");
     expect(screen.getByText("约会陪伴 · 小林")).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "你和 小林" })).toBeInTheDocument();
-    expect(screen.getByText("Ta 最近在准备考试")).toBeInTheDocument();
+    expect(screen.queryByText("Ta 最近在准备考试")).not.toBeInTheDocument();
+    expect(screen.getByText("还没有适合放在这里的近况。")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "问问 Ta" }));
     expect(screen.getByRole("textbox", { name: "向 Ta 的相处记录提问" })).toBeEnabled();
     fireEvent.click(screen.getByRole("button", { name: /Ta 以前明确提到过哪些在意的事/u }));
@@ -485,6 +486,93 @@ describe("DateCompanionShell", () => {
     expect(screen.getByRole("textbox", { name: "向 Ta 的相处记录提问" })).toHaveValue(
       "Ta 之前还在哪些时刻提到过类似感受？"
     );
+  });
+
+  it.each([false, true])("uses canonical home promise sources with self-only=%s and withdraws completed promises", async (selfOnly) => {
+    const taSource: SourceRefVM = {
+      id: "snapshot_ta", uploadId: "upload-1", segmentIds: ["segment-ta"], recordingDate: "2026-08-04",
+      startSeconds: 10, endSeconds: 15, speakerId: "speaker_ta", quote: "我想去看这个展。",
+      contentDigest: "a".repeat(64), kind: "transcript", presentation: "direct_quote",
+      memorySubject: "companion", canOpenTranscript: true
+    };
+    const selfSource: SourceRefVM = {
+      ...taSource, id: "snapshot_self", segmentIds: ["segment-self"], speakerId: "speaker_self",
+      quote: "我来查一下展览的开放时间。", contentDigest: "c".repeat(64), memorySubject: "self"
+    };
+    const generated = {
+      schemaVersion: 2, scope: "person_relationship", relationshipId: "relationship-1", personId: "person-ta",
+      mappingVersion: 2, status: "ready", sourceFingerprint: "b".repeat(64), cacheHit: false,
+      value: {
+        home: {
+          about: selfOnly ? [] : [{ kind: "preference", text: "Ta 想去看上次聊到的展览。", evidenceIds: ["snapshot_ta"] }],
+          beforeMeeting: [{ kind: "open_promise", text: "查一下展览的开放时间。", reason: "你上次答应查好时间。", promiseId: "promise-1", evidenceIds: ["snapshot_self"] }]
+        },
+        evidenceIds: selfOnly ? ["snapshot_self"] : ["snapshot_ta", "snapshot_self"]
+      },
+      evidenceReferences: (selfOnly ? [selfSource] : [taSource, selfSource]).map((source) => ({
+        evidenceId: source.id, uploadId: source.uploadId, sourceSegmentId: source.segmentIds[0],
+        recordingDate: source.recordingDate, startSeconds: source.startSeconds, endSeconds: source.endSeconds,
+        speakerId: source.speakerId, quote: source.quote, contentDigest: source.contentDigest,
+        origin: "direct_conversation", subject: source.memorySubject
+      }))
+    };
+    let resolveRefresh!: (value: Response) => void;
+    const fetcher = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify(generated), { status: 200 }))
+      .mockImplementationOnce(() => new Promise<Response>((resolve) => { resolveRefresh = resolve; }));
+    vi.stubGlobal("fetch", fetcher);
+    const model = emptyDateCompanionViewModel();
+    model.person.promises = [{
+      id: "promise-1", relationshipId: "relationship-1", originatingRecapItemId: "recap-1",
+      text: selfSource.quote, status: "open", version: 1, sources: [selfSource]
+    }];
+    const rawItem = {
+      id: "raw-1", kind: "mentioned" as const, title: "Ta 提到的", proposedText: "混乱的原始长转写不能作为首页摘要",
+      displayedText: "混乱的原始长转写不能作为首页摘要", disposition: "kept" as const, sources: [taSource]
+    };
+    model.person.recent = [rawItem];
+    model.home.preparePreview = rawItem;
+    const personQaSources = vi.fn(() => selfOnly ? [] : [taSource]);
+    const selectCachedInteraction = vi.fn(() => true);
+    const session = makeSession({
+      auth: { status: "authenticated", user: { id: "user-1", email: "user@example.com" } },
+      viewModel: model,
+      relationshipState: { status: "ready", relationship: { id: "relationship-1", displayName: "小林", participantState: "confirmed", version: 1 } },
+      memoryBridgeState: readyMemoryBridgeState(personQaSources()), personQaSources, selectCachedInteraction,
+      personQaAvailability: vi.fn(() => selfOnly ? { enabled: false as const, message: "还没有可用于人物提问的内容。" }
+        : { enabled: true as const, personId: "person-ta", mappingVersion: 2 })
+    });
+    mockedUseDateCompanionSession.mockReturnValue(session);
+    const { rerender } = render(<DateCompanionShell entry="companion" screen="home" />);
+    expect(await screen.findByText("查一下展览的开放时间。")).toBeInTheDocument();
+    if (!selfOnly) expect(screen.getByText("Ta 想去看上次聊到的展览。")).toBeInTheDocument();
+    expect(screen.queryByText(rawItem.displayedText)).not.toBeInTheDocument();
+    expect(personQaSources()).toEqual(selfOnly ? [] : [taSource]);
+    const preparation = screen.getByRole("region", { name: "下次见面前的首页建议" });
+    fireEvent.click(within(preparation).getByText("查看原话"));
+    fireEvent.click(within(preparation).getByRole("button", { name: "在完整文字稿中查看" }));
+    expect(selectCachedInteraction).toHaveBeenCalledWith("upload-1");
+    expect(routerMocks.push).toHaveBeenCalledWith("/date-companion/a/recap?segment=segment-self#full-transcript");
+    if (!selfOnly) {
+      fireEvent.click(screen.getByRole("button", { name: "问问 Ta" }));
+      const question = "关于「Ta 想去看上次聊到的展览。」，当时具体说了什么？";
+      fireEvent.click(screen.getByRole("button", { name: question }));
+      expect(screen.getByRole("textbox", { name: "向 Ta 的相处记录提问" })).toHaveValue(question);
+      expect(screen.queryByRole("button", { name: /关于「查一下展览的开放时间/u })).not.toBeInTheDocument();
+    }
+
+    mockedUseDateCompanionSession.mockReturnValue({
+      ...session,
+      viewModel: { ...model, person: { ...model.person, promises: [{ ...model.person.promises[0], status: "done", version: 2 }] } }
+    });
+    rerender(<DateCompanionShell entry="companion" screen="home" />);
+    expect(screen.queryByText("查一下展览的开放时间。")).not.toBeInTheDocument();
+    await waitFor(() => expect(fetcher).toHaveBeenCalledTimes(2));
+    expect(screen.getByText("正在整理见面前值得留意的事…")).toBeInTheDocument();
+    await act(async () => resolveRefresh(new Response(JSON.stringify(generated), { status: 200 })));
+    expect(screen.getByText("见面前的建议暂时未能整理，请稍后再看。")).toBeInTheDocument();
+    expect(screen.queryByText("查一下展览的开放时间。")).not.toBeInTheDocument();
+    expect(screen.queryByText(rawItem.displayedText)).not.toBeInTheDocument();
   });
 
   it.each([

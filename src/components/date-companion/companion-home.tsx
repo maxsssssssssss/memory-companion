@@ -10,9 +10,11 @@ import {
 } from "@/components/daily-reflection/daily-reflection-toy-sync";
 import type { ToySyncRuntime } from "@/lib/client/daily-reflection-toy-sync-storage";
 import type { DateCompanionUploadOptions } from "@/lib/client/date-companion-session";
+import type { DateCompanionHomeContentState } from "@/lib/client/date-companion-proactive-value";
 import type {
   InteractionVM,
   RecapItemVM,
+  SourceRefVM,
   ToyIngestionReceipt
 } from "@/lib/domain/date-companion";
 import type { DateCompanionToyUploadRequest } from "@/lib/client/date-companion-api";
@@ -32,8 +34,8 @@ export type CompanionUploadPresentation = {
 type CompanionHomeProps = {
   currentInteraction: InteractionVM | null;
   rememberedItem?: RecapItemVM | null;
-  prepareItem?: RecapItemVM | null;
-  recentItem?: RecapItemVM | null;
+  homeContent?: DateCompanionHomeContentState;
+  onOpenSource?: (source: SourceRefVM, segmentId: string) => Promise<void> | void;
   relationshipName?: string;
   relationshipId?: string;
   participantNotice?: string | null;
@@ -90,11 +92,46 @@ function rememberedText(item: RecapItemVM | null | undefined) {
   return item.displayedText.trim() || item.proposedText.trim() || null;
 }
 
+function HomeItemSources({ sources, onOpenSource }: {
+  sources: SourceRefVM[];
+  onOpenSource?: CompanionHomeProps["onOpenSource"];
+}) {
+  return (
+    <details className={styles.sourceDetails}>
+      <summary>查看原话</summary>
+      <ul className={styles.sourceList}>
+        {sources.map((source) => {
+          const segmentId = source.segmentIds[0];
+          return (
+            <li className={styles.sourceItem} key={`${source.uploadId}:${source.id}`}>
+              <blockquote>{source.quote}</blockquote>
+              <div className={styles.sourceMeta}>
+                <time dateTime={source.recordingDate}>{source.recordingDate}</time>
+                {source.canOpenTranscript && segmentId && onOpenSource ? (
+                  <button className={styles.sourceJump} onClick={() => void onOpenSource(source, segmentId)} type="button">
+                    在完整文字稿中查看
+                  </button>
+                ) : <span>已保留可核对原话</span>}
+              </div>
+            </li>
+          );
+        })}
+      </ul>
+    </details>
+  );
+}
+
+function homeContentStatusText(state: DateCompanionHomeContentState, block: "about" | "beforeMeeting") {
+  if (state.status === "loading") return block === "about" ? "正在整理值得记住的近况…" : "正在整理见面前值得留意的事…";
+  if (state.status === "unavailable") return block === "about" ? "近况暂时未能整理，请稍后再看。" : "见面前的建议暂时未能整理，请稍后再看。";
+  return block === "about" ? "还没有适合放在这里的近况。" : "暂时没有需要跟进的事。";
+}
+
 export function CompanionHome({
   currentInteraction,
   rememberedItem,
-  prepareItem,
-  recentItem,
+  homeContent = { status: "empty" },
+  onOpenSource,
   relationshipName,
   relationshipId,
   participantNotice,
@@ -115,8 +152,8 @@ export function CompanionHome({
   const [toySelection, setToySelection] = useState<ToySyncSelection | null>(null);
   const remembered = rememberedText(rememberedItem);
   const rememberedIsDirectQuote = Boolean(rememberedItem?.sources.length) && rememberedItem!.sources.every((source) => source.presentation === "direct_quote");
-  const preparation = rememberedText(prepareItem);
-  const recent = rememberedText(recentItem);
+  const about = homeContent.status === "ready" ? homeContent.content.about : [];
+  const beforeMeeting = homeContent.status === "ready" ? homeContent.content.beforeMeeting : [];
   const displayName = relationshipName?.trim() || "Ta";
   const busy = uploadState.status === "uploading" || uploadState.status === "processing";
   const hasUploadState = uploadState.status !== "idle";
@@ -362,23 +399,30 @@ export function CompanionHome({
         ) : null}
       </section>
 
-      <section className={styles.homeSideCard}>
+      <section aria-label={`关于 ${displayName} 的首页摘要`} className={styles.homeSideCard}>
         <div className={styles.sectionHeading}>
           <h2>{displayName === "Ta" ? "关于 Ta" : `你和 ${displayName}`}</h2>
-          <span>只显示你确认留下的内容</span>
+          <span>根据已确认的记录整理</span>
         </div>
-        <Link
-          aria-label={`打开关于 ${displayName}`}
-          className={styles.personEmpty}
-          href="/date-companion/a/person"
-        >
-          <span className={styles.personEmptyMark} aria-hidden="true">Ta</span>
-          <b>{recent ?? participantNotice ?? `还没有留下关于 ${displayName} 的近况`}</b>
-          <span>{recent
-            ? "Ta 最近 · 来自你确认留下的相处记录"
-            : participantNotice
-              ? "人物尚未核对的内容不会进入长期记录"
-              : "整理并确认一段相处后，值得记住的近况会出现在这里"}</span>
+        {about.length > 0 ? (
+          <ul className={styles.homeContentList}>
+            {about.map((item, index) => (
+              <li className={styles.homeContentItem} key={`${item.kind}:${index}`}>
+                <small>{item.kind === "preference" ? "Ta 的偏好" : item.kind === "shared_moment" ? "你们一起经历的" : "Ta 的近况"}</small>
+                <p className={styles.homeContentText}>{item.text}</p>
+                <span className={styles.homeContentDate}>记录于 {[...new Set(item.sources.map((source) => source.recordingDate))].sort().join("、")}</span>
+                <HomeItemSources onOpenSource={onOpenSource} sources={item.sources} />
+              </li>
+            ))}
+          </ul>
+        ) : (
+          <p className={styles.homeContentStatus} role="status">
+            {homeContentStatusText(homeContent, "about")}
+            {homeContent.status === "empty" && participantNotice ? <span>{participantNotice}</span> : null}
+          </p>
+        )}
+        <Link aria-label={`打开关于 ${displayName}`} className={styles.sideLink} href="/date-companion/a/person">
+          打开关于 {displayName} <span aria-hidden="true">→</span>
         </Link>
         {currentInteraction ? (
           <div className={styles.relationshipMeta}>
@@ -388,12 +432,23 @@ export function CompanionHome({
         ) : null}
       </section>
 
-      <Link className={styles.preparePreview} href="/date-companion/a/prepare">
+      <section aria-label="下次见面前的首页建议" className={styles.preparePreview}>
         <small>下次见面前</small>
-        <b>{preparation ?? "还没有需要特别记住的事"}</b>
-        <p>{preparation ? "来自你确认留下的相处记录，不包含虚构的见面时间和地点。" : "不会猜测下次见面的日期、地点，也不会创建提醒。"}</p>
-        <span className={styles.sideLink}>打开准备卡 <span aria-hidden="true">→</span></span>
-      </Link>
+        {beforeMeeting.length > 0 ? (
+          <ul className={styles.homeContentList}>
+            {beforeMeeting.map((item, index) => (
+              <li className={styles.homeContentItem} key={`${item.kind}:${index}`}>
+                <small>{item.kind === "open_promise" ? "你答应过" : "可以问问 Ta"}</small>
+                <p className={styles.homeContentText}>{item.text}</p>
+                <p>{item.reason}</p>
+                <span className={styles.homeContentDate}>记录于 {[...new Set(item.sources.map((source) => source.recordingDate))].sort().join("、")}</span>
+                <HomeItemSources onOpenSource={onOpenSource} sources={item.sources} />
+              </li>
+            ))}
+          </ul>
+        ) : <p className={styles.homeContentStatus} role="status">{homeContentStatusText(homeContent, "beforeMeeting")}</p>}
+        <Link className={styles.sideLink} href="/date-companion/a/prepare">打开准备卡 <span aria-hidden="true">→</span></Link>
+      </section>
 
       {remembered ? (
         <section className={styles.remembered}>

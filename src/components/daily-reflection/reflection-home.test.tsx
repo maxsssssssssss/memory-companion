@@ -30,7 +30,8 @@ beforeEach(() => {
   window.sessionStorage.clear();
   state.app = {
     browserRecordingEnabled: true,
-    toySyncEnabled: true
+    toySyncEnabled: true,
+    session: { recordingRecovery: null, reflectionId: null }
   };
 });
 
@@ -39,7 +40,7 @@ afterEach(() => {
 });
 
 describe("ReflectionHome", () => {
-  it("renders only the stable date and three capture entrances without dashboard reads", () => {
+  it("keeps the recording entrance and adds a permanent recent sessions link without dashboard reads", () => {
     const fetcher = vi.fn<typeof fetch>();
     vi.stubGlobal("fetch", fetcher);
     render(<ReflectionHome {...HOME_DATE} />);
@@ -52,6 +53,7 @@ describe("ReflectionHome", () => {
       .toHaveAttribute("href", "/reflection/capture?new=1&method=toy");
     expect(screen.getByRole("link", { name: "上传文件" }))
       .toHaveAttribute("href", "/reflection/capture?new=1&method=upload");
+    expect(screen.getByRole("link", { name: "最近复盘" })).toHaveAttribute("href", "/reflection/sessions");
 
     for (const removedCopy of [
       "早上好",
@@ -59,7 +61,6 @@ describe("ReflectionHome", () => {
       "值得继续",
       "查看回看",
       "今天还没有记录",
-      "最近复盘",
       "过去的表达",
       "更多方式导入"
     ]) {
@@ -80,6 +81,7 @@ describe("ReflectionHome", () => {
 
   it("keeps disabled input methods honest instead of exposing fake actions", () => {
     state.app = {
+      ...state.app,
       browserRecordingEnabled: false,
       toySyncEnabled: false
     };
@@ -89,5 +91,18 @@ describe("ReflectionHome", () => {
     expect(screen.queryByRole("link", { name: "玩偶导入" })).not.toBeInTheDocument();
     expect(screen.getByRole("link", { name: "上传文件" })).toBeVisible();
     expect(state.router.push).not.toHaveBeenCalled();
+  });
+
+  it("keeps an interrupted local operation reachable before a reflection ID exists", () => {
+    const resumeRecording = vi.fn();
+    state.app.session = { resumeRecording, reflectionId: null, recordingRecovery: {
+      phase: "interrupted", reflectionId: null, localCopy: "saved", file: null, errorMessage: null
+    } };
+    render(<ReflectionHome {...HOME_DATE} />);
+    const resume = screen.getByRole("link", { name: "继续这次复盘" });
+    expect(resume).toHaveAttribute("href", "/reflection/capture?resume=1");
+    fireEvent.click(resume);
+    expect(resumeRecording).toHaveBeenCalledOnce();
+    expect(screen.getByText(/原录音已暂存在本机/u)).toBeVisible();
   });
 });

@@ -1,6 +1,10 @@
 import { createHash, randomUUID } from "node:crypto";
 import type Database from "better-sqlite3";
 import { WorkMeetingCandidateStructuredDataSchema } from "@/lib/domain/work-review";
+import {
+  WorkProjectIdsSchema,
+  type WorkProjectScopeFilter
+} from "@/lib/domain/work-project";
 import type {
   WorkMeetingCandidateStructuredData,
   WorkAtomicClaimType,
@@ -21,6 +25,11 @@ import {
   detachLinkedMeetingTodosWithinTransaction,
   listActiveMeetingTodoIdsWithinTransaction
 } from "./todo-meeting-deletion";
+import { invalidateWorkWeeklySourcesWithinTransaction } from "./weekly-invalidation";
+import {
+  validateWorkMeetingAnalysisAudit, WorkMeetingAnalysisAuditSchema,
+  WORK_MEETING_ANALYSIS_AUDIT_VERSION
+} from "./analysis-audit";
 
 export type WorkIngestionStatus = WorkMeetingIngestionStatus;
 export type WorkAnalysisStatus = WorkMeetingAnalysisStatus;
@@ -82,6 +91,37 @@ export type WorkProcessingFence = {
   attemptVersion: number;
   leaseOwner: string;
   leaseExpiresAt: string;
+  deadlineAt: string | null;
+};
+
+export type WorkAnalysisCheckpointKind = "extractor_block" | "organization_plan" | "verifier_batch";
+
+export type WorkAnalysisCheckpointRecord = {
+  accountId: string;
+  meetingId: string;
+  publicationId: string;
+  canonicalContentDigest: string;
+  checkpointKind: WorkAnalysisCheckpointKind;
+  logicalInputDigest: string;
+  providerContractDigest: string;
+  outputSchemaVersion: string;
+  payload: unknown;
+  payloadDigest: string;
+  originAttemptVersion: number;
+  createdAt: string;
+};
+
+export type WorkAnalysisCheckpointInput = {
+  accountId: string;
+  meetingId: string;
+  fence: WorkProcessingFence;
+  publicationId: string;
+  canonicalContentDigest: string;
+  checkpointKind: WorkAnalysisCheckpointKind;
+  logicalInputDigest: string;
+  providerContractDigest: string;
+  outputSchemaVersion: string;
+  now?: string;
 };
 
 export type WorkCanonicalPublicationRecord = {
@@ -230,6 +270,11 @@ export class WorkReviewLeaseLostError extends Error {
   constructor() { super("Work Review processing lease is no longer owned by this attempt"); }
 }
 
+export class WorkReviewAnalysisDeadlineExceededError extends Error {
+  readonly code = "work_analysis_deadline_exceeded";
+  constructor() { super("Work Review analysis deadline was exceeded"); }
+}
+
 export class WorkReviewFeatureDisabledError extends Error {
   constructor(readonly code: "upload_disabled" | "analysis_disabled") {
     super(code);
@@ -276,6 +321,21 @@ type PublicationRow = {
   publication_id: string; account_id: string; meeting_id: string;
   source_upload_id: string; attempt_version: number; content_digest: string;
   segment_count: number; payload_json: string; created_at: string;
+};
+
+type AnalysisCheckpointRow = {
+  account_id: string;
+  meeting_id: string;
+  publication_id: string;
+  canonical_content_digest: string;
+  checkpoint_kind: WorkAnalysisCheckpointKind;
+  logical_input_digest: string;
+  provider_contract_digest: string;
+  output_schema_version: string;
+  payload_json: string;
+  payload_digest: string;
+  origin_attempt_version: number;
+  created_at: string;
 };
 
 type CandidateRow = {
@@ -362,6 +422,27 @@ function digest(value: unknown) {
   return createHash("sha256").update(stableStringify(value)).digest("hex");
 }
 
+function canonicalJson(value: unknown) {
+  try {
+    const serialized = stableStringify(value);
+    if (typeof serialized !== "string") throw new Error("not_json");
+    JSON.parse(serialized);
+    return serialized;
+  } catch {
+    throw new WorkReviewConflictError("work_review_analysis_checkpoint_payload_invalid");
+  }
+}
+
+function serializedDigest(value: string) {
+  return createHash("sha256").update(value).digest("hex");
+}
+
+function normalizeIsoTimestamp(value: string, code: string) {
+  const timestamp = Date.parse(value);
+  if (!Number.isFinite(timestamp)) throw new WorkReviewConflictError(code);
+  return new Date(timestamp).toISOString();
+}
+
 function requireText(value: string, code: string) {
   const normalized = value.trim();
   if (!normalized) throw new WorkReviewConflictError(code);
@@ -372,6 +453,39 @@ function requireDigest(value: string, code: string) {
   const normalized = value.trim().toLowerCase();
   if (!/^[a-f0-9]{64}$/u.test(normalized)) throw new WorkReviewConflictError(code);
   return normalized;
+}
+
+function requireCheckpointKind(value: WorkAnalysisCheckpointKind) {
+  if (value !== "extractor_block" && value !== "verifier_batch" && value !== "organization_plan") {
+    throw new WorkReviewConflictError("work_review_analysis_checkpoint_kind_invalid");
+  }
+  return value;
+}
+
+function checkpointFromRow(row: AnalysisCheckpointRow): WorkAnalysisCheckpointRecord {
+  if (serializedDigest(row.payload_json) !== row.payload_digest) {
+    throw new WorkReviewConflictError("work_review_analysis_checkpoint_invalid");
+  }
+  let payload: unknown;
+  try {
+    payload = JSON.parse(row.payload_json) as unknown;
+  } catch {
+    throw new WorkReviewConflictError("work_review_analysis_checkpoint_invalid");
+  }
+  return {
+    accountId: row.account_id,
+    meetingId: row.meeting_id,
+    publicationId: row.publication_id,
+    canonicalContentDigest: row.canonical_content_digest,
+    checkpointKind: row.checkpoint_kind,
+    logicalInputDigest: row.logical_input_digest,
+    providerContractDigest: row.provider_contract_digest,
+    outputSchemaVersion: row.output_schema_version,
+    payload,
+    payloadDigest: row.payload_digest,
+    originAttemptVersion: row.origin_attempt_version,
+    createdAt: row.created_at
+  };
 }
 
 function canonicalizeSegments(raw: WorkTranscriptSegment[], sourceUploadId: string) {
@@ -443,13 +557,31 @@ export class WorkReviewRepository {
     ));
   }
 
-  listMeetings(accountId: string) {
+  listMeetings(accountId: string, projectScope: WorkProjectScopeFilter = { kind: "all" }) {
     const parsedAccount = requireText(accountId, "work_review_invalid_account");
+    const scope = projectScope;
+    let scopeSql = "";
+    const parameters: unknown[] = [parsedAccount];
+    if (scope.kind === "project") {
+      scopeSql = `AND EXISTS (
+        SELECT 1 FROM wr_meeting_projects mp
+        WHERE mp.account_id = wr_meetings.account_id
+          AND mp.meeting_id = wr_meetings.id AND mp.project_id = ?
+      )`;
+      parameters.push(scope.projectId);
+    } else if (scope.kind === "unassigned") {
+      scopeSql = `AND NOT EXISTS (
+        SELECT 1 FROM wr_meeting_projects mp
+        WHERE mp.account_id = wr_meetings.account_id
+          AND mp.meeting_id = wr_meetings.id
+      )`;
+    }
     return (this.database.prepare(`
       SELECT * FROM wr_meetings
       WHERE account_id = ? AND ingestion_status <> 'deleted'
+      ${scopeSql}
       ORDER BY meeting_date DESC, created_at DESC, id
-    `).all(parsedAccount) as MeetingRow[]).map(meetingFromRow);
+    `).all(...parameters) as MeetingRow[]).map(meetingFromRow);
   }
 
   reserveMeeting(input: {
@@ -457,6 +589,7 @@ export class WorkReviewRepository {
     contentHash: string; meetingId?: string; receiptId?: string;
     sourceUploadId: string; title?: string | null; meetingDate: string;
     sourceDurationSeconds?: number | null;
+    projectIds?: string[];
   }) {
     const accountId = requireText(input.accountId, "work_review_invalid_account");
     const idempotencyKey = requireText(input.idempotencyKey, "work_review_idempotency_key_required");
@@ -466,11 +599,18 @@ export class WorkReviewRepository {
     const meetingDate = requireText(input.meetingDate, "work_review_invalid_meeting_date");
     const title = input.title === undefined || input.title === null || !input.title.trim()
       ? `工作会议 · ${meetingDate}` : input.title.trim();
+    const parsedProjectIds = WorkProjectIdsSchema.safeParse(input.projectIds ?? []);
+    if (!parsedProjectIds.success) {
+      throw new WorkReviewConflictError("work_project_invalid_links");
+    }
+    const projectIds = [...parsedProjectIds.data].sort();
     if (input.sourceDurationSeconds !== undefined && input.sourceDurationSeconds !== null
       && (!Number.isFinite(input.sourceDurationSeconds) || input.sourceDurationSeconds <= 0)) {
       throw new WorkReviewConflictError("work_review_invalid_duration");
     }
-    const requestFingerprint = digest({ contentHash });
+    const requestFingerprint = digest(projectIds.length > 0
+      ? { contentHash, projectIds }
+      : { contentHash });
     const run = this.database.transaction(() => {
       const existing = this.database.prepare(`
         SELECT * FROM wr_input_receipts
@@ -496,6 +636,15 @@ export class WorkReviewRepository {
       const now = this.now();
       const meetingId = input.meetingId ?? this.nextId("wrm");
       const receiptId = input.receiptId ?? this.nextId("wrr");
+      if (projectIds.length > 0) {
+        const found = this.database.prepare(`
+          SELECT count(*) AS count FROM wr_projects
+          WHERE account_id = ? AND id IN (${projectIds.map(() => "?").join(",")})
+        `).get(accountId, ...projectIds) as { count: number };
+        if (found.count !== projectIds.length) {
+          throw new WorkReviewConflictError("work_project_not_found");
+        }
+      }
       this.database.prepare(`
         INSERT INTO wr_meetings (
           id, account_id, product_space, title, meeting_date, source_upload_id,
@@ -505,6 +654,12 @@ export class WorkReviewRepository {
                   'not_started', ?, ?)
       `).run(meetingId, accountId, title, meetingDate, sourceUploadId,
         input.sourceDurationSeconds ?? null, now, now);
+      for (const projectId of projectIds) {
+        this.database.prepare(`
+          INSERT INTO wr_meeting_projects(account_id, meeting_id, project_id, created_at)
+          VALUES (?, ?, ?, ?)
+        `).run(accountId, meetingId, projectId, now);
+      }
       this.database.prepare(`
         INSERT INTO wr_input_receipts (
           receipt_id, account_id, meeting_id, operation_key, idempotency_key,
@@ -853,6 +1008,7 @@ export class WorkReviewRepository {
     accountId: string; meetingId: string; stage: WorkProcessingStage;
     leaseOwner: string; leaseDurationMs: number; pipelineVersion: string;
     providerProfile: string; promptVersion?: string | null; now?: string;
+    deadlineAt?: string | null;
     expectedAttemptVersion?: number; expectedUpdatedAt?: string;
   }): WorkProcessingFence | null {
     const leaseOwner = requireText(input.leaseOwner, "work_review_lease_owner_required");
@@ -863,6 +1019,12 @@ export class WorkReviewRepository {
     const nowMs = Date.parse(now);
     if (!Number.isFinite(nowMs)) throw new WorkReviewConflictError("work_review_invalid_lease_clock");
     const leaseExpiresAt = new Date(nowMs + input.leaseDurationMs).toISOString();
+    const deadlineAt = input.deadlineAt == null
+      ? null
+      : normalizeIsoTimestamp(input.deadlineAt, "work_review_invalid_processing_deadline");
+    if (deadlineAt !== null && Date.parse(deadlineAt) <= nowMs) {
+      throw new WorkReviewConflictError("work_review_invalid_processing_deadline");
+    }
     const run = this.database.transaction(() => {
       const meeting = this.assertLiveMeeting(input.accountId, input.meetingId);
       if (input.stage === "transcription"
@@ -899,13 +1061,13 @@ export class WorkReviewRepository {
         INSERT INTO wr_processing_attempts (
           id, account_id, meeting_id, stage, attempt_version, lease_owner,
           lease_expires_at, pipeline_version, provider_profile, prompt_version,
-          state, created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'processing', ?)
+          state, created_at, deadline_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'processing', ?, ?)
       `).run(this.nextId("wra"), input.accountId, input.meetingId, input.stage, attemptVersion,
         leaseOwner, leaseExpiresAt,
         requireText(input.pipelineVersion, "work_review_pipeline_version_required"),
         requireText(input.providerProfile, "work_review_provider_profile_required"),
-        input.promptVersion ?? null, now);
+        input.promptVersion ?? null, now, deadlineAt);
       const statusAssignment = input.stage === "transcription"
         ? "ingestion_status = 'transcribing'"
         : "analysis_status = 'extracting'";
@@ -919,29 +1081,38 @@ export class WorkReviewRepository {
         UPDATE wr_input_receipts SET state = 'processing', error_code = NULL
         WHERE account_id = ? AND meeting_id = ? AND state <> 'deleted'
       `).run(input.accountId, input.meetingId);
-      return { stage: input.stage, attemptVersion, leaseOwner, leaseExpiresAt };
+      return { stage: input.stage, attemptVersion, leaseOwner, leaseExpiresAt, deadlineAt };
     });
     return run.immediate();
   }
 
   private assertFence(input: {
     accountId: string; meetingId: string; fence: WorkProcessingFence; now?: string;
+    allowExpiredDeadline?: boolean;
   }) {
     const meeting = this.assertLiveMeeting(input.accountId, input.meetingId);
     const currentAttempt = input.fence.stage === "transcription"
       ? meeting.current_transcription_attempt : meeting.current_analysis_attempt;
     const now = input.now ?? this.now();
     const attempt = this.database.prepare(`
-      SELECT lease_owner, lease_expires_at, state FROM wr_processing_attempts
+      SELECT lease_owner, lease_expires_at, deadline_at, state FROM wr_processing_attempts
       WHERE account_id = ? AND meeting_id = ? AND stage = ? AND attempt_version = ?
     `).get(input.accountId, input.meetingId, input.fence.stage,
       input.fence.attemptVersion) as {
-        lease_owner: string | null; lease_expires_at: string | null; state: string;
+        lease_owner: string | null; lease_expires_at: string | null;
+        deadline_at: string | null; state: string;
       } | undefined;
     if (currentAttempt !== input.fence.attemptVersion || !attempt
       || attempt.state !== "processing" || attempt.lease_owner !== input.fence.leaseOwner
       || !attempt.lease_expires_at || attempt.lease_expires_at <= now) {
       throw new WorkReviewLeaseLostError();
+    }
+    if (!input.allowExpiredDeadline && attempt.deadline_at !== null) {
+      const deadlineMs = Date.parse(attempt.deadline_at);
+      const nowMs = Date.parse(now);
+      if (!Number.isFinite(deadlineMs) || !Number.isFinite(nowMs) || deadlineMs <= nowMs) {
+        throw new WorkReviewAnalysisDeadlineExceededError();
+      }
     }
     return meeting;
   }
@@ -1059,7 +1230,7 @@ export class WorkReviewRepository {
   }) {
     const now = input.now ?? this.now();
     const run = this.database.transaction(() => {
-      this.assertFence({ ...input, now });
+      this.assertFence({ ...input, now, allowExpiredDeadline: true });
       const statusAssignment = input.fence.stage === "transcription"
         ? "ingestion_status = 'failed'" : "analysis_status = 'failed'";
       this.database.prepare(`
@@ -1089,8 +1260,8 @@ export class WorkReviewRepository {
     accountId: string; meetingId: string; fence: WorkProcessingFence; now?: string;
   }) {
     if (input.fence.stage !== "meeting_analysis") throw new WorkReviewLeaseLostError();
-    const now = input.now ?? this.now();
     const run = this.database.transaction(() => {
+      const now = input.now ?? this.now();
       const meeting = this.assertFence({ ...input, now });
       if (meeting.analysis_status !== "extracting") {
         throw new WorkReviewConflictError("work_review_analysis_not_extracting");
@@ -1130,9 +1301,158 @@ export class WorkReviewRepository {
     return row ? this.publicationFromRow(row) : null;
   }
 
+  private assertAnalysisCheckpointContext(input: {
+    accountId: string;
+    meetingId: string;
+    fence: WorkProcessingFence;
+    publicationId: string;
+    canonicalContentDigest: string;
+    now: string;
+  }) {
+    if (input.fence.stage !== "meeting_analysis") throw new WorkReviewLeaseLostError();
+    const meeting = this.assertFence(input);
+    if (meeting.ingestion_status !== "transcript_ready"
+      || meeting.canonical_publication_id !== input.publicationId
+      || meeting.canonical_content_digest !== input.canonicalContentDigest) {
+      throw new WorkReviewConflictError("work_review_canonical_digest_mismatch");
+    }
+    const publication = this.database.prepare(`
+      SELECT 1 FROM wr_canonical_publications
+      WHERE publication_id = ? AND account_id = ? AND meeting_id = ?
+        AND content_digest = ? AND asset_kind = 'segments' AND tombstoned_at IS NULL
+    `).get(input.publicationId, input.accountId, input.meetingId,
+      input.canonicalContentDigest);
+    if (!publication) {
+      throw new WorkReviewConflictError("work_review_canonical_digest_mismatch");
+    }
+  }
+
+  readAnalysisCheckpoint(
+    input: WorkAnalysisCheckpointInput
+  ): WorkAnalysisCheckpointRecord | null {
+    const publicationId = requireText(
+      input.publicationId,
+      "work_review_analysis_checkpoint_publication_required"
+    );
+    const canonicalContentDigest = requireDigest(
+      input.canonicalContentDigest,
+      "work_review_invalid_canonical_digest"
+    );
+    const checkpointKind = requireCheckpointKind(input.checkpointKind);
+    const logicalInputDigest = requireDigest(
+      input.logicalInputDigest,
+      "work_review_analysis_checkpoint_input_digest_invalid"
+    );
+    const providerContractDigest = requireDigest(
+      input.providerContractDigest,
+      "work_review_analysis_checkpoint_contract_digest_invalid"
+    );
+    const outputSchemaVersion = requireText(
+      input.outputSchemaVersion,
+      "work_review_analysis_checkpoint_schema_required"
+    );
+    const run = this.database.transaction(() => {
+      const now = input.now ?? this.now();
+      this.assertAnalysisCheckpointContext({
+        ...input,
+        publicationId,
+        canonicalContentDigest,
+        now
+      });
+      const row = this.database.prepare(`
+        SELECT * FROM wr_analysis_checkpoints
+        WHERE account_id = ? AND meeting_id = ? AND publication_id = ?
+          AND checkpoint_kind = ? AND logical_input_digest = ?
+          AND provider_contract_digest = ?
+      `).get(input.accountId, input.meetingId, publicationId, checkpointKind,
+        logicalInputDigest, providerContractDigest) as AnalysisCheckpointRow | undefined;
+      if (!row) return null;
+      if (row.canonical_content_digest !== canonicalContentDigest
+        || row.output_schema_version !== outputSchemaVersion) {
+        throw new WorkReviewConflictError("work_review_analysis_checkpoint_conflict");
+      }
+      return checkpointFromRow(row);
+    });
+    return run.immediate();
+  }
+
+  saveAnalysisCheckpoint(
+    input: WorkAnalysisCheckpointInput & { payload: unknown }
+  ): { checkpoint: WorkAnalysisCheckpointRecord; reused: boolean } {
+    const publicationId = requireText(
+      input.publicationId,
+      "work_review_analysis_checkpoint_publication_required"
+    );
+    const canonicalContentDigest = requireDigest(
+      input.canonicalContentDigest,
+      "work_review_invalid_canonical_digest"
+    );
+    const checkpointKind = requireCheckpointKind(input.checkpointKind);
+    const logicalInputDigest = requireDigest(
+      input.logicalInputDigest,
+      "work_review_analysis_checkpoint_input_digest_invalid"
+    );
+    const providerContractDigest = requireDigest(
+      input.providerContractDigest,
+      "work_review_analysis_checkpoint_contract_digest_invalid"
+    );
+    const outputSchemaVersion = requireText(
+      input.outputSchemaVersion,
+      "work_review_analysis_checkpoint_schema_required"
+    );
+    const payloadJson = canonicalJson(input.payload);
+    const payloadDigest = serializedDigest(payloadJson);
+    const run = this.database.transaction(() => {
+      const now = input.now ?? this.now();
+      this.assertAnalysisCheckpointContext({
+        ...input,
+        publicationId,
+        canonicalContentDigest,
+        now
+      });
+      const existing = this.database.prepare(`
+        SELECT * FROM wr_analysis_checkpoints
+        WHERE account_id = ? AND meeting_id = ? AND publication_id = ?
+          AND checkpoint_kind = ? AND logical_input_digest = ?
+          AND provider_contract_digest = ?
+      `).get(input.accountId, input.meetingId, publicationId, checkpointKind,
+        logicalInputDigest, providerContractDigest) as AnalysisCheckpointRow | undefined;
+      if (existing) {
+        if (existing.canonical_content_digest !== canonicalContentDigest
+          || existing.output_schema_version !== outputSchemaVersion
+          || existing.payload_digest !== payloadDigest
+          || existing.payload_json !== payloadJson) {
+          throw new WorkReviewConflictError("work_review_analysis_checkpoint_conflict");
+        }
+        return { checkpoint: checkpointFromRow(existing), reused: true };
+      }
+      this.database.prepare(`
+        INSERT INTO wr_analysis_checkpoints (
+          account_id, meeting_id, publication_id, canonical_content_digest,
+          checkpoint_kind, logical_input_digest, provider_contract_digest,
+          output_schema_version, payload_json, payload_digest,
+          origin_attempt_version, attempt_stage, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'meeting_analysis', ?)
+      `).run(input.accountId, input.meetingId, publicationId, canonicalContentDigest,
+        checkpointKind, logicalInputDigest, providerContractDigest,
+        outputSchemaVersion, payloadJson, payloadDigest,
+        input.fence.attemptVersion, now);
+      const row = this.database.prepare(`
+        SELECT * FROM wr_analysis_checkpoints
+        WHERE account_id = ? AND meeting_id = ? AND publication_id = ?
+          AND checkpoint_kind = ? AND logical_input_digest = ?
+          AND provider_contract_digest = ?
+      `).get(input.accountId, input.meetingId, publicationId, checkpointKind,
+        logicalInputDigest, providerContractDigest) as AnalysisCheckpointRow;
+      return { checkpoint: checkpointFromRow(row), reused: false };
+    });
+    return run.immediate();
+  }
+
   publishAnalysisResult(input: {
     accountId: string; meetingId: string; fence: WorkProcessingFence;
     canonicalContentDigest: string;
+    analysisAudit?: unknown;
     candidates: Array<{
       id?: string; kind: WorkCandidateKind; title: string; body: string;
       structuredData: unknown; publicationAction: WorkPublicationAction;
@@ -1156,8 +1476,8 @@ export class WorkReviewRepository {
     const expectedDigest = requireDigest(
       input.canonicalContentDigest, "work_review_invalid_canonical_digest"
     );
-    const now = input.now ?? this.now();
     const run = this.database.transaction(() => {
+      const now = input.now ?? this.now();
       const meeting = this.assertFence({ ...input, now });
       if (meeting.ingestion_status !== "transcript_ready"
         || meeting.analysis_status !== "verifying"
@@ -1270,6 +1590,30 @@ export class WorkReviewRepository {
             requireText(claim.evaluation.policyVersion, "work_review_policy_version_required"), now);
         });
       });
+      if (input.analysisAudit !== undefined) {
+        const auditJson = JSON.stringify(input.analysisAudit);
+        if (Buffer.byteLength(auditJson, "utf8") > 8 * 1024 * 1024) {
+          throw new WorkReviewConflictError("work_review_analysis_audit_limit_exceeded");
+        }
+        try {
+          validateWorkMeetingAnalysisAudit({ audit: input.analysisAudit, segments: canonicalSegments,
+            accountId: input.accountId, meetingId: input.meetingId, canonicalDigest: expectedDigest,
+            publicationId: publication.publication_id, publishedCandidates: input.candidates });
+        } catch {
+          throw new WorkReviewConflictError("work_review_analysis_audit_invalid");
+        }
+        this.database.prepare(`
+          INSERT INTO wr_analysis_audits (
+            account_id, meeting_id, publication_id, canonical_content_digest,
+            attempt_version, schema_version, payload_json, payload_digest, created_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `).run(input.accountId, input.meetingId, publication.publication_id, expectedDigest,
+          input.fence.attemptVersion, WORK_MEETING_ANALYSIS_AUDIT_VERSION, auditJson, serializedDigest(auditJson), now);
+      }
+      this.database.prepare(`
+        DELETE FROM wr_analysis_checkpoints
+        WHERE account_id = ? AND meeting_id = ?
+      `).run(input.accountId, input.meetingId);
       const updated = this.database.prepare(`
         UPDATE wr_meetings
         SET analysis_status = 'review_ready', review_status = 'not_started',
@@ -1290,6 +1634,21 @@ export class WorkReviewRepository {
       return this.listCandidates(input.accountId, input.meetingId);
     });
     return run.immediate();
+  }
+
+  readAnalysisAudit(accountId: string, meetingId: string) {
+    const meeting = this.assertLiveMeeting(accountId, meetingId);
+    const row = this.database.prepare(`
+      SELECT payload_json, payload_digest, schema_version FROM wr_analysis_audits
+      WHERE account_id = ? AND meeting_id = ? AND publication_id = ? AND canonical_content_digest = ?
+      ORDER BY attempt_version DESC LIMIT 1
+    `).get(accountId, meetingId, meeting.canonical_publication_id, meeting.canonical_content_digest) as
+      { payload_json: string; payload_digest: string; schema_version: string } | undefined;
+    if (!row) return null;
+    if (row.schema_version !== WORK_MEETING_ANALYSIS_AUDIT_VERSION || serializedDigest(row.payload_json) !== row.payload_digest) {
+      throw new WorkReviewConflictError("work_review_analysis_audit_invalid");
+    }
+    return WorkMeetingAnalysisAuditSchema.parse(JSON.parse(row.payload_json));
   }
 
   listCandidates(accountId: string, meetingId: string, includeSuppressed = true) {
@@ -1788,6 +2147,11 @@ export class WorkReviewRepository {
       if (linkedTodoIds.length > 0 && !input.linkedTodoPolicy) {
         throw new WorkReviewLinkedTodosPolicyRequiredError(linkedTodoIds);
       }
+      invalidateWorkWeeklySourcesWithinTransaction(this.database, {
+        accountId: input.accountId,
+        meetingId: input.meetingId,
+        now
+      });
       if (input.linkedTodoPolicy === "delete_linked_todos") {
         deleteLinkedMeetingTodosWithinTransaction(this.database, {
           accountId: input.accountId,
@@ -1801,6 +2165,13 @@ export class WorkReviewRepository {
           now
         }, { idFactory: this.idFactory });
       }
+      this.database.prepare(`
+        DELETE FROM wr_meeting_projects WHERE account_id = ? AND meeting_id = ?
+      `).run(input.accountId, input.meetingId);
+      this.database.prepare(`
+        DELETE FROM wr_project_operations
+        WHERE account_id = ? AND target_kind = 'meeting_projects' AND target_id = ?
+      `).run(input.accountId, input.meetingId);
       const sourceUpload = this.readSourceUpload(input.accountId, input.meetingId);
       this.database.prepare(`
         INSERT INTO wr_tombstones (

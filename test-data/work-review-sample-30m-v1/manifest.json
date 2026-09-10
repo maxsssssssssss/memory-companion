@@ -1,0 +1,123 @@
+{
+  "datasetVersion": "work-review-sample-30m-v1",
+  "title": "澄禾行政物资申领试点范围与准备会",
+  "generatedAt": "2026-09-08T02:35:10.455Z",
+  "synthetic": true,
+  "privacy": "All participants, organization, project, dialogue, and facts are fictional.",
+  "purpose": "New fictional 30-minute Work Review audio; decision chronology, conditional commitments, Chinese dates and global deduplication",
+  "audio": {
+    "file": "audio/work-review-sample-30m-v1.wav",
+    "durationSeconds": 1800,
+    "sizeBytes": 57600078,
+    "sha256": "5523b154f2685f2578c753e26ff19a8810f70c4495f243614271e907395ef367",
+    "container": "wav",
+    "codec": "pcm_s16le",
+    "sampleRateHz": 16000,
+    "channels": 1
+  },
+  "transcript": {
+    "file": "transcript.md",
+    "utteranceCount": 90,
+    "sha256": "7de8d7cb1b8283f37eee7b1c770a997f6409fdf7313fd7714c97fd2ef700c08b",
+    "timestampMethod": "Derived from each normalized utterance duration and inserted pause before section concatenation"
+  },
+  "speakers": [
+    {
+      "id": "su_he",
+      "name": "苏禾",
+      "role": "行政项目协调",
+      "voice": "Microsoft Huihui",
+      "voiceGender": "Female"
+    },
+    {
+      "id": "meng_yuan",
+      "name": "孟远",
+      "role": "系统实施",
+      "voice": "Microsoft Kangkang",
+      "voiceGender": "Male"
+    },
+    {
+      "id": "gu_qing",
+      "name": "顾青",
+      "role": "财务运营",
+      "voice": "Microsoft Yaoyao",
+      "voiceGender": "Female"
+    }
+  ],
+  "generation": {
+    "method": "Windows OneCore offline TTS per utterance, FFmpeg atempo/loudnorm normalization, deterministic section concatenation",
+    "script": "generate-audio.mjs",
+    "source": "source.json",
+    "dialogue": "dialogue.json",
+    "targetDurationSeconds": 1800,
+    "sections": [
+      {
+        "sectionId": "background",
+        "utteranceCount": 15,
+        "rawSpeechSeconds": 271.411,
+        "pauseSeconds": 14.5,
+        "tempo": 0.950653,
+        "durationSeconds": 300,
+        "finalSilenceGuardSeconds": 3.5
+      },
+      {
+        "sectionId": "options",
+        "utteranceCount": 15,
+        "rawSpeechSeconds": 290.049,
+        "pauseSeconds": 14.5,
+        "tempo": 1.015932,
+        "durationSeconds": 300,
+        "finalSilenceGuardSeconds": 3.5
+      },
+      {
+        "sectionId": "schedule",
+        "utteranceCount": 15,
+        "rawSpeechSeconds": 298.282,
+        "pauseSeconds": 14.5,
+        "tempo": 1.044769,
+        "durationSeconds": 300,
+        "finalSilenceGuardSeconds": 3.5
+      },
+      {
+        "sectionId": "delivery",
+        "utteranceCount": 15,
+        "rawSpeechSeconds": 315.076,
+        "pauseSeconds": 14.5,
+        "tempo": 1.103592,
+        "durationSeconds": 300,
+        "finalSilenceGuardSeconds": 3.5
+      },
+      {
+        "sectionId": "operations",
+        "utteranceCount": 15,
+        "rawSpeechSeconds": 309.699,
+        "pauseSeconds": 14.5,
+        "tempo": 1.084761,
+        "durationSeconds": 300,
+        "finalSilenceGuardSeconds": 3.5
+      },
+      {
+        "sectionId": "closure",
+        "utteranceCount": 15,
+        "rawSpeechSeconds": 313.032,
+        "pauseSeconds": 14.5,
+        "tempo": 1.096436,
+        "durationSeconds": 300,
+        "finalSilenceGuardSeconds": 3.5
+      }
+    ]
+  },
+  "verification": {
+    "audioTextSource": "Every spoken utterance is synthesized directly from dialogue.json text",
+    "transcriptTextSource": "Every transcript utterance is rendered from the same dialogue.json text",
+    "expectedSemanticTags": [
+      "decision_final",
+      "action_assigned",
+      "commitment_explicit",
+      "action_unassigned",
+      "deadline",
+      "unresolved_question",
+      "plan_change"
+    ]
+  }
+}

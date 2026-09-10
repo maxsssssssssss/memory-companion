@@ -202,9 +202,9 @@ function projectFinding(
 }
 
 describe("WorkTodoRepository", () => {
-  it("migrates the Work database to v3 with scoped indexes and no extra database", () => {
+  it("migrates the Work database to v7 with scoped Todo and Project indexes", () => {
     expect(database.pragma("user_version", { simple: true })).toBe(WORK_REVIEW_SCHEMA_VERSION);
-    expect(WORK_REVIEW_SCHEMA_VERSION).toBe(4);
+    expect(WORK_REVIEW_SCHEMA_VERSION).toBe(8);
     const tables = database.prepare(`
       SELECT name FROM sqlite_master WHERE type = 'table' AND name LIKE 'wr_todo%'
       ORDER BY name
@@ -212,6 +212,7 @@ describe("WorkTodoRepository", () => {
     expect(tables.map((row) => row.name)).toEqual([
       "wr_todo_events",
       "wr_todo_operations",
+      "wr_todo_projects",
       "wr_todos"
     ]);
     const uniqueIndex = database.prepare(`

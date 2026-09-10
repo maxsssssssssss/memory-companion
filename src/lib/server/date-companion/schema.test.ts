@@ -8,7 +8,7 @@ import {
   getDateCompanionDatabasePath,
   openDateCompanionDatabase
 } from "./db";
-import { migrateDateCompanionSchema } from "./schema";
+import { DATE_COMPANION_SCHEMA_VERSION, migrateDateCompanionSchema } from "./schema";
 
 const roots: string[] = [];
 
@@ -17,6 +17,81 @@ afterEach(async () => {
 });
 
 describe("date-companion SQLite schema", () => {
+  it("migrates the V11 cache to TokenHub without losing payloads, leases, uniqueness or account-scoped delete cascades", () => {
+    const database = openDateCompanionDatabase({ filePath: ":memory:" });
+    try {
+      const cacheDefinition = database.prepare(`
+        SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'dc_proactive_value_cache'
+      `).get() as { sql: string };
+      const legacyDefinition = cacheDefinition.sql.replace("'deepseek', 'none', 'tokenhub'", "'deepseek', 'none'");
+      expect(legacyDefinition).not.toContain("tokenhub");
+      database.exec("DROP TABLE dc_proactive_value_cache");
+      database.exec(legacyDefinition);
+      database.prepare("DELETE FROM dc_schema_migrations WHERE version = 12").run();
+      const time = "2026-09-08T00:00:00.000Z";
+      database.prepare(`
+        INSERT INTO dc_relationships (
+          id, user_id, display_name, status, version, created_at, updated_at
+        ) VALUES ('migration_relationship', 'user_a', 'Love', 'active', 1, ?, ?)
+      `).run(time, time);
+      database.prepare(`
+        INSERT INTO dc_interactions (
+          id, user_id, relationship_id, source_upload_id, recording_date,
+          original_name, status, source_state, version, created_at, updated_at
+        ) VALUES ('migration_interaction', 'user_a', 'migration_relationship', 'migration_upload',
+          '2026-09-08', 'migration.wav', 'confirmed', 'available', 1, ?, ?)
+      `).run(time, time);
+      const insertCache = database.prepare(`
+        INSERT INTO dc_proactive_value_cache (
+          id, user_id, scope, relationship_id, interaction_id, person_id,
+          mapping_version, source_fingerprint, contract_version, provider, model,
+          status, payload_json, failure_code, created_at, updated_at, completed_at,
+          claim_token, lease_expires_at, attempt_count
+        ) VALUES (?, 'user_a', ?, 'migration_relationship', ?, ?, 1, ?, 1, ?,
+          'fixture-model', ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `);
+      insertCache.run("cached_generated", "person_relationship", null, "person_companion", "a".repeat(64),
+        "deepseek", "generated", '{"fixture":"generated"}', null, time, time, time, null, null, 1);
+      insertCache.run("cached_fallback", "current_interaction", "migration_interaction", null, "b".repeat(64),
+        "none", "fallback", '{"fixture":"fallback"}', "disabled", time, time, time, null, null, 2);
+      insertCache.run("cached_processing", "current_interaction", "migration_interaction", null, "c".repeat(64),
+        "deepseek", "processing", null, null, time, time, null, "owned_claim", "2026-09-08T00:00:45.000Z", 3);
+      const before = database.prepare("SELECT * FROM dc_proactive_value_cache ORDER BY id").all();
+      migrateDateCompanionSchema(database);
+      migrateDateCompanionSchema(database);
+      expect(database.prepare("SELECT * FROM dc_proactive_value_cache ORDER BY id").all()).toEqual(before);
+      expect(database.prepare("SELECT COUNT(*) AS count FROM dc_schema_migrations WHERE version = 12").get())
+        .toEqual({ count: 1 });
+      expect(database.prepare("SELECT MAX(version) AS version FROM dc_schema_migrations").get())
+        .toEqual({ version: DATE_COMPANION_SCHEMA_VERSION });
+      const tokenhub = database.prepare(`
+        INSERT INTO dc_proactive_value_cache (
+          id, user_id, scope, relationship_id, person_id, mapping_version,
+          source_fingerprint, contract_version, provider, model, status, created_at, updated_at
+        ) VALUES (?, ?, 'person_relationship', 'migration_relationship', 'person_companion',
+          1, ?, 1, ?, 'deepseek-v4-pro', 'processing', ?, ?)
+      `);
+      tokenhub.run("new_tokenhub", "user_a", "d".repeat(64), "tokenhub", time, time);
+      expect(() => tokenhub.run("duplicate_tokenhub", "user_a", "d".repeat(64), "tokenhub", time, time))
+        .toThrow(/UNIQUE/u);
+      expect(() => tokenhub.run("foreign_tokenhub", "user_b", "e".repeat(64), "tokenhub", time, time))
+        .toThrow(/FOREIGN KEY/u);
+      expect(() => tokenhub.run("invalid_provider", "user_a", "f".repeat(64), "unexpected", time, time))
+        .toThrow(/CHECK/u);
+      database.prepare("DELETE FROM dc_interactions WHERE id = 'migration_interaction'").run();
+      expect(database.prepare("SELECT id FROM dc_proactive_value_cache ORDER BY id").all())
+        .toEqual([{ id: "cached_generated" }, { id: "new_tokenhub" }]);
+      database.prepare("DELETE FROM dc_relationships WHERE id = 'migration_relationship'").run();
+      expect(database.prepare("SELECT COUNT(*) AS count FROM dc_proactive_value_cache").get())
+        .toEqual({ count: 0 });
+      expect(database.pragma("foreign_key_check")).toEqual([]);
+      expect(database.prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'idx_dc_proactive_value_scope'").get())
+        .toEqual({ name: "idx_dc_proactive_value_scope" });
+    } finally {
+      database.close();
+    }
+  });
+
   function createVersionFiveFixture(database: Database.Database, conflicting = false) {
     database.exec(`
       CREATE TABLE dc_schema_migrations (
@@ -81,7 +156,7 @@ describe("date-companion SQLite schema", () => {
       expect(database.pragma("foreign_keys", { simple: true })).toBe(1);
       migrateDateCompanionSchema(database);
       expect(database.prepare("SELECT COUNT(*) AS count FROM dc_schema_migrations").get()).toEqual({
-        count: 11
+        count: 12
       });
       expect(database.prepare("PRAGMA table_info(dc_participant_audio_samples)").all()).not.toHaveLength(0);
       expect(database.prepare("PRAGMA table_info(dc_relationship_speaker_bindings)").all()).not.toHaveLength(0);
@@ -137,7 +212,9 @@ describe("date-companion SQLite schema", () => {
       INSERT INTO dc_schema_migrations (version, applied_at)
       VALUES (1, '2026-08-04T00:00:00.000Z');
       CREATE TABLE dc_interactions (
-        id TEXT PRIMARY KEY
+        id TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL,
+        UNIQUE (id, user_id)
       );
       CREATE TABLE dc_relationships (
         id TEXT NOT NULL,
@@ -186,12 +263,13 @@ describe("date-companion SQLite schema", () => {
         { version: 8 },
         { version: 9 },
         { version: 10 },
-        { version: 11 }
+        { version: 11 },
+        { version: 12 }
       ]);
       migrateDateCompanionSchema(database);
       expect(database.prepare(
         "SELECT COUNT(*) AS count FROM dc_schema_migrations"
-      ).get()).toEqual({ count: 11 });
+      ).get()).toEqual({ count: 12 });
     } finally {
       database.close();
     }

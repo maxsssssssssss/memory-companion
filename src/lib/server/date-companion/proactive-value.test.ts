@@ -400,7 +400,8 @@ describe("Date Companion proactive value cache service", () => {
       cacheHit: false,
       value: { evidenceIds: ["evidence_1", "evidence_2", "evidence_3", "evidence_4"] }
     });
-    expect(result.value?.observation).not.toMatch(/再次|模式/u);
+    expect(result.value && "observation" in result.value ? result.value.observation : undefined)
+      .not.toMatch(/再次|模式/u);
     expect(validateCanonicalDateCompanionProactiveValue({ context, value: result.value }).value)
       .toEqual(result.value);
     expect(dateDatabase.prepare(`
@@ -512,7 +513,7 @@ describe("Date Companion proactive value cache service", () => {
     expect(result).not.toHaveProperty("sourceDiagnostic");
   });
 
-  it("keeps both reflection and conversation attribution in every mixed-source fallback field", async () => {
+  it("keeps a failed relationship selection empty even when mixed-source evidence is available", async () => {
     const mock = provider({ generated: false });
     const base = relationshipContext();
     const mixedContext: DateCompanionProactiveValueContext = {
@@ -548,10 +549,8 @@ describe("Date Companion proactive value cache service", () => {
     });
     expect(mock.generate).toHaveBeenCalledTimes(1);
     expect(result).toMatchObject({ status: "fallback", failureCode: "api_error" });
-    expect(validateCanonicalDateCompanionProactiveValue({
-      context: mixedContext,
-      value: result.value
-    }).value).toEqual(result.value);
+    expect(result.value).toEqual({ home: { about: [], beforeMeeting: [] }, evidenceIds: [] });
+    expect(result.evidenceReferences).toEqual([]);
   });
 
   it("makes old cards immediately unavailable after delete/revoke/archive resolution and writes no Memory or Evidence", async () => {

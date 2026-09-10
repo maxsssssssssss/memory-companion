@@ -1,10 +1,13 @@
 import type { ProactiveInsightContext } from "@/lib/domain/proactive-insights";
-import type { DateCompanionProactiveValueContext } from "@/lib/domain/date-companion-proactive-value";
+import type {
+  DateCompanionGeneratedValue,
+  DateCompanionProactiveValueContext
+} from "@/lib/domain/date-companion-proactive-value";
+import { createTokenHubDateCompanionContentProvider } from "@/lib/server/date-companion/tokenhub-content-provider";
 
 import {
-  createDeepseekDateCompanionProactiveValueProvider,
   createDeepseekProactiveInsightProvider,
-  type DateCompanionProactiveValueRunResult,
+  type DateCompanionProactiveSourceDiagnostic,
   type ProactiveInsightRunResult
 } from "./deepseek-provider";
 import type { ProactiveInsightMemoryContext } from "./memory-context";
@@ -61,8 +64,19 @@ export function getProactiveInsightProvider(deps: ProviderDependencies = {}) {
   return createProactiveInsightProvider(deps);
 }
 
+export type DateCompanionProactiveValueRunResult = {
+  status: "generated" | "fallback";
+  value: DateCompanionGeneratedValue | null;
+  provider: "tokenhub" | "deepseek" | "none";
+  model: string;
+  elapsedMs: number;
+  sourceFingerprint: string;
+  failureCode?: string;
+  sourceDiagnostic?: DateCompanionProactiveSourceDiagnostic;
+};
+
 export type DateCompanionProactiveValueProvider = {
-  provider: "deepseek" | "none";
+  provider: "tokenhub" | "deepseek" | "none";
   model: string;
   generate(input: {
     context: DateCompanionProactiveValueContext;
@@ -71,24 +85,7 @@ export type DateCompanionProactiveValueProvider = {
 };
 
 export function createDateCompanionProactiveValueProvider(
-  deps: ProviderDependencies = {}
+  deps: Parameters<typeof createTokenHubDateCompanionContentProvider>[0] = {}
 ): DateCompanionProactiveValueProvider {
-  if (getProviderNameByEnv() === "deepseek") {
-    return createDeepseekDateCompanionProactiveValueProvider(deps);
-  }
-  return {
-    provider: "none",
-    model: "none",
-    async generate(input) {
-      return {
-        status: "fallback",
-        value: null,
-        provider: "deepseek",
-        model: "none",
-        elapsedMs: 0,
-        sourceFingerprint: input.sourceFingerprint,
-        failureCode: "provider_disabled"
-      };
-    }
-  };
+  return createTokenHubDateCompanionContentProvider(deps);
 }

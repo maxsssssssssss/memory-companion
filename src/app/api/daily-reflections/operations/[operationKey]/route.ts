@@ -33,19 +33,7 @@ export async function GET(
     throw error;
   }
   const repository = getDailyReflectionRepository();
-  const receipt = repository.getInputReceiptV2(authContext.user.id, operationKey.data);
-  if (!receipt) {
-    return NextResponse.json(DailyReflectionOperationLookupResponseSchema.parse({ found: false }), {
-      headers: { "Cache-Control": "private, no-store" }
-    });
-  }
-  const reflection = repository.getReflection(authContext.user.id, receipt.reflectionId);
-  return NextResponse.json(DailyReflectionOperationLookupResponseSchema.parse({
-    found: true,
-    reflectionId: receipt.reflectionId,
-    uploadId: receipt.uploadId,
-    jobId: receipt.jobId,
-    contentHash: receipt.contentHash,
-    status: reflection.status
-  }), { headers: { "Cache-Control": "private, no-store" } });
+  return NextResponse.json(DailyReflectionOperationLookupResponseSchema.parse(
+    repository.getOperationLookupV2(authContext.user.id, operationKey.data)
+  ), { headers: { "Cache-Control": "private, no-store" } });
 }

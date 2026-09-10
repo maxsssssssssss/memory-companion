@@ -11,6 +11,7 @@ async function main() {
       { startDateCompanionSensitiveAudioCleanupRuntime },
       { getDateCompanionMemoryBridgeRuntimeConfig },
       { getDailyReflectionAiReviewMode },
+      { resolveWorkReviewFeatureFlags },
       { isDateCompanionVoiceEnrollmentRuntimeAvailable },
       { isVoiceprintSelfEnrollmentEnabled }
     ] =
@@ -19,11 +20,13 @@ async function main() {
         import("@/lib/server/date-companion/sensitive-audio-cleanup-runtime"),
         import("@/lib/server/date-companion/memory-bridge-runtime-config"),
         import("@/lib/server/daily-reflection/runtime-config"),
+        import("@/lib/server/work-review/runtime-config"),
         import("@/lib/server/date-companion/voice-enrollment"),
         import("@/lib/server/speaker-identity/voiceprint-training-candidates")
       ]);
     const memoryBridgeConfig = getDateCompanionMemoryBridgeRuntimeConfig();
     const dailyReflectionAiReviewMode = getDailyReflectionAiReviewMode();
+    const workReviewFlags = resolveWorkReviewFeatureFlags();
     const runtimes: Array<{
       runPromise: Promise<void>;
       close(): Promise<unknown>;
@@ -48,6 +51,16 @@ async function main() {
           );
         }
         runtimes.push(aiReviewRuntime);
+      }
+      if (workReviewFlags.weeklyAiEnabled) {
+        const { startWorkWeeklyRuntime } = await import(
+          "@/lib/server/queue/work-weekly-runtime"
+        );
+        const workWeeklyRuntime = await startWorkWeeklyRuntime();
+        if (!workWeeklyRuntime) {
+          throw new Error("Work Weekly runtime was not started while enabled");
+        }
+        runtimes.push(workWeeklyRuntime);
       }
       // Sensitive audio retention is a storage invariant, not a Provider
       // feature. It remains active even when voice enrollment is disabled.

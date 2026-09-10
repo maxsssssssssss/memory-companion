@@ -2,8 +2,28 @@ import { describe, expect, it } from "vitest";
 
 import {
   DailyReflectionDetailResponseSchema,
+  DailyReflectionOperationLookupResponseSchema,
   DailyReflectionUploadSourceSchema
 } from "./daily-reflection-api";
+
+describe("operation upload recovery contract", () => {
+  const receipt = {
+    found: true, reflectionId: "reflection", uploadId: "upload", jobId: "job",
+    contentHash: "a".repeat(64), status: "uploading"
+  };
+  it.each(["still_persisting", "accepted", "reupload_allowed", "unresolved", "terminated"])(
+    "requires explicit server upload state %s", (uploadState) => {
+      expect(DailyReflectionOperationLookupResponseSchema.parse({ ...receipt, uploadState }))
+        .toEqual({ ...receipt, uploadState });
+    }
+  );
+  it("rejects missing or invented states and body-bearing absent receipts", () => {
+    expect(DailyReflectionOperationLookupResponseSchema.safeParse(receipt).success).toBe(false);
+    expect(DailyReflectionOperationLookupResponseSchema.safeParse({ ...receipt, uploadState: "probably_saved" }).success).toBe(false);
+    expect(DailyReflectionOperationLookupResponseSchema.parse({ found: false })).toEqual({ found: false });
+    expect(DailyReflectionOperationLookupResponseSchema.safeParse({ found: false, uploadState: "reupload_allowed" }).success).toBe(false);
+  });
+});
 
 function detailResponse() {
   return {

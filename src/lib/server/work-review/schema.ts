@@ -1,6 +1,6 @@
 import type Database from "better-sqlite3";
 
-export const WORK_REVIEW_SCHEMA_VERSION = 4;
+export const WORK_REVIEW_SCHEMA_VERSION = 8;
 
 const WORK_REVIEW_SCHEMA_V1 = `
   CREATE TABLE wr_meetings (
@@ -634,11 +634,631 @@ const WORK_REVIEW_SCHEMA_V4 = `
     ON wr_follow_up_operations(account_id, meeting_id, created_at DESC);
 `;
 
+const WORK_REVIEW_SCHEMA_V5 = `
+  CREATE INDEX idx_wr_meetings_account_date
+    ON wr_meetings(account_id, meeting_date, id);
+  CREATE INDEX idx_wr_todo_events_account_created
+    ON wr_todo_events(account_id, created_at, event_id);
+
+  CREATE TABLE wr_projects (
+    id TEXT PRIMARY KEY,
+    account_id TEXT NOT NULL,
+    name TEXT NOT NULL CHECK (length(trim(name)) BETWEEN 1 AND 120),
+    name_key TEXT NOT NULL CHECK (length(trim(name_key)) >= 1),
+    description TEXT CHECK (description IS NULL OR length(description) <= 2000),
+    status TEXT NOT NULL CHECK (status IN ('active', 'archived')),
+    version INTEGER NOT NULL DEFAULT 0 CHECK (version >= 0),
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    archived_at TEXT,
+    UNIQUE (id, account_id),
+    CHECK ((status = 'archived') = (archived_at IS NOT NULL))
+  );
+
+  CREATE UNIQUE INDEX idx_wr_projects_active_name
+    ON wr_projects(account_id, name_key) WHERE status = 'active';
+  CREATE INDEX idx_wr_projects_account_status
+    ON wr_projects(account_id, status, updated_at DESC, id);
+
+  CREATE TABLE wr_meeting_projects (
+    account_id TEXT NOT NULL,
+    meeting_id TEXT NOT NULL,
+    project_id TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (account_id, meeting_id, project_id),
+    FOREIGN KEY (meeting_id, account_id)
+      REFERENCES wr_meetings(id, account_id) ON DELETE CASCADE,
+    FOREIGN KEY (project_id, account_id)
+      REFERENCES wr_projects(id, account_id) ON DELETE CASCADE
+  );
+
+  CREATE INDEX idx_wr_meeting_projects_project
+    ON wr_meeting_projects(account_id, project_id, meeting_id);
+
+  CREATE TRIGGER wr_meeting_projects_limit
+  BEFORE INSERT ON wr_meeting_projects
+  WHEN (SELECT count(*) FROM wr_meeting_projects
+        WHERE account_id = NEW.account_id AND meeting_id = NEW.meeting_id) >= 3
+  BEGIN
+    SELECT RAISE(ABORT, 'work_project_link_limit');
+  END;
+
+  CREATE TABLE wr_todo_projects (
+    account_id TEXT NOT NULL,
+    todo_id TEXT NOT NULL,
+    project_id TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (account_id, todo_id, project_id),
+    FOREIGN KEY (todo_id, account_id)
+      REFERENCES wr_todos(id, account_id) ON DELETE CASCADE,
+    FOREIGN KEY (project_id, account_id)
+      REFERENCES wr_projects(id, account_id) ON DELETE CASCADE
+  );
+
+  CREATE INDEX idx_wr_todo_projects_project
+    ON wr_todo_projects(account_id, project_id, todo_id);
+
+  CREATE TRIGGER wr_todo_projects_limit
+  BEFORE INSERT ON wr_todo_projects
+  WHEN (SELECT count(*) FROM wr_todo_projects
+        WHERE account_id = NEW.account_id AND todo_id = NEW.todo_id) >= 3
+  BEGIN
+    SELECT RAISE(ABORT, 'work_project_link_limit');
+  END;
+
+  CREATE TABLE wr_project_operations (
+    account_id TEXT NOT NULL,
+    operation_key TEXT NOT NULL CHECK (length(trim(operation_key)) > 0),
+    target_kind TEXT NOT NULL CHECK (target_kind IN (
+      'project', 'meeting_projects', 'todo_projects'
+    )),
+    target_id TEXT NOT NULL CHECK (length(trim(target_id)) > 0),
+    operation_type TEXT NOT NULL CHECK (operation_type IN (
+      'create', 'update', 'set_meeting_projects', 'set_todo_projects'
+    )),
+    request_fingerprint TEXT NOT NULL CHECK (length(request_fingerprint) = 64),
+    response_json TEXT NOT NULL CHECK (json_valid(response_json)),
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (account_id, operation_key)
+  );
+
+  CREATE INDEX idx_wr_project_operations_target
+    ON wr_project_operations(account_id, target_kind, target_id, created_at DESC);
+
+  CREATE TABLE wr_weekly_reviews (
+    id TEXT PRIMARY KEY,
+    account_id TEXT NOT NULL,
+    week_start TEXT NOT NULL,
+    week_end TEXT NOT NULL,
+    observed_through TEXT NOT NULL,
+    window_complete INTEGER NOT NULL CHECK (window_complete IN (0, 1)),
+    time_zone TEXT NOT NULL CHECK (length(trim(time_zone)) BETWEEN 1 AND 128),
+    scope_kind TEXT NOT NULL CHECK (scope_kind IN ('all', 'project', 'unassigned')),
+    project_id TEXT,
+    status TEXT NOT NULL CHECK (status IN (
+      'queued', 'generating', 'verifying', 'ready', 'stale', 'failed', 'deleted'
+    )),
+    source_snapshot_digest TEXT NOT NULL CHECK (length(source_snapshot_digest) = 64),
+    source_summary_json TEXT NOT NULL CHECK (json_valid(source_summary_json)),
+    current_system_version INTEGER NOT NULL DEFAULT 0 CHECK (current_system_version >= 0),
+    current_run_version INTEGER NOT NULL DEFAULT 0 CHECK (current_run_version >= 0),
+    version INTEGER NOT NULL DEFAULT 0 CHECK (version >= 0),
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    generated_at TEXT,
+    failed_at TEXT,
+    deleted_at TEXT,
+    error_code TEXT,
+    UNIQUE (id, account_id),
+    FOREIGN KEY (project_id, account_id)
+      REFERENCES wr_projects(id, account_id),
+    CHECK ((scope_kind = 'project') = (project_id IS NOT NULL)),
+    CHECK ((status = 'deleted') = (deleted_at IS NOT NULL))
+  );
+
+  CREATE UNIQUE INDEX idx_wr_weekly_reviews_active_scope
+    ON wr_weekly_reviews(account_id, week_start, scope_kind, COALESCE(project_id, ''))
+    WHERE deleted_at IS NULL;
+  CREATE INDEX idx_wr_weekly_reviews_account_week
+    ON wr_weekly_reviews(account_id, week_start DESC, scope_kind, project_id);
+
+  CREATE TABLE wr_weekly_review_runs (
+    id TEXT PRIMARY KEY,
+    account_id TEXT NOT NULL,
+    weekly_review_id TEXT NOT NULL,
+    run_version INTEGER NOT NULL CHECK (run_version > 0),
+    run_kind TEXT NOT NULL CHECK (run_kind IN ('generate', 'regenerate')),
+    source_snapshot_digest TEXT NOT NULL CHECK (length(source_snapshot_digest) = 64),
+    source_manifest_json TEXT NOT NULL CHECK (json_valid(source_manifest_json)),
+    source_summary_json TEXT NOT NULL CHECK (json_valid(source_summary_json)),
+    state TEXT NOT NULL CHECK (state IN (
+      'queued', 'processing', 'verifying', 'completed', 'failed', 'superseded', 'deleted'
+    )),
+    lease_owner TEXT,
+    lease_expires_at TEXT,
+    pipeline_version TEXT NOT NULL CHECK (length(trim(pipeline_version)) > 0),
+    synthesizer_profile TEXT,
+    verifier_profile TEXT,
+    created_at TEXT NOT NULL,
+    started_at TEXT,
+    completed_at TEXT,
+    error_code TEXT,
+    UNIQUE (id, account_id, weekly_review_id),
+    UNIQUE (account_id, weekly_review_id, run_version),
+    FOREIGN KEY (weekly_review_id, account_id)
+      REFERENCES wr_weekly_reviews(id, account_id) ON DELETE CASCADE,
+    CHECK (
+      (state IN ('processing', 'verifying') AND lease_owner IS NOT NULL
+        AND lease_expires_at IS NOT NULL AND completed_at IS NULL)
+      OR
+      (state NOT IN ('processing', 'verifying') AND lease_owner IS NULL
+        AND lease_expires_at IS NULL)
+    )
+  );
+
+  CREATE UNIQUE INDEX idx_wr_weekly_runs_one_active
+    ON wr_weekly_review_runs(account_id, weekly_review_id)
+    WHERE state IN ('queued', 'processing', 'verifying');
+  CREATE INDEX idx_wr_weekly_runs_recovery
+    ON wr_weekly_review_runs(state, lease_expires_at, created_at, id);
+
+  CREATE TABLE wr_weekly_run_sources (
+    account_id TEXT NOT NULL,
+    weekly_review_id TEXT NOT NULL,
+    run_id TEXT NOT NULL,
+    source_ref TEXT NOT NULL,
+    source_kind TEXT NOT NULL CHECK (source_kind IN (
+      'meeting', 'finding', 'todo', 'todo_event', 'project', 'evidence'
+    )),
+    source_entity_id TEXT NOT NULL,
+    source_version INTEGER CHECK (source_version IS NULL OR source_version >= 0),
+    source_digest TEXT CHECK (source_digest IS NULL OR length(source_digest) = 64),
+    meeting_id TEXT,
+    todo_id TEXT,
+    publication_id TEXT,
+    segment_id TEXT,
+    included INTEGER NOT NULL CHECK (included IN (0, 1)),
+    PRIMARY KEY (account_id, run_id, source_ref),
+    FOREIGN KEY (run_id, account_id, weekly_review_id)
+      REFERENCES wr_weekly_review_runs(id, account_id, weekly_review_id) ON DELETE CASCADE
+  );
+
+  CREATE INDEX idx_wr_weekly_run_sources_entity
+    ON wr_weekly_run_sources(account_id, source_kind, source_entity_id, run_id);
+
+  CREATE TABLE wr_weekly_system_versions (
+    account_id TEXT NOT NULL,
+    weekly_review_id TEXT NOT NULL,
+    system_version INTEGER NOT NULL CHECK (system_version > 0),
+    run_id TEXT NOT NULL,
+    source_snapshot_digest TEXT NOT NULL CHECK (length(source_snapshot_digest) = 64),
+    source_summary_json TEXT NOT NULL CHECK (json_valid(source_summary_json)),
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (account_id, weekly_review_id, system_version),
+    UNIQUE (run_id, account_id, weekly_review_id),
+    FOREIGN KEY (weekly_review_id, account_id)
+      REFERENCES wr_weekly_reviews(id, account_id) ON DELETE CASCADE,
+    FOREIGN KEY (run_id, account_id, weekly_review_id)
+      REFERENCES wr_weekly_review_runs(id, account_id, weekly_review_id)
+  );
+
+  CREATE TABLE wr_weekly_system_items (
+    id TEXT PRIMARY KEY,
+    account_id TEXT NOT NULL,
+    weekly_review_id TEXT NOT NULL,
+    system_version INTEGER NOT NULL CHECK (system_version > 0),
+    section_kind TEXT NOT NULL CHECK (section_kind IN (
+      'overview', 'progress', 'decisions', 'completed', 'in_progress',
+      'waiting_for_others', 'open_questions', 'next_week'
+    )),
+    body_text TEXT NOT NULL CHECK (length(trim(body_text)) BETWEEN 1 AND 20000),
+    verification_state TEXT NOT NULL CHECK (verification_state IN ('verified', 'qualified')),
+    sort_order INTEGER NOT NULL CHECK (sort_order >= 0),
+    created_at TEXT NOT NULL,
+    erased_at TEXT,
+    UNIQUE (id, account_id, weekly_review_id),
+    FOREIGN KEY (account_id, weekly_review_id, system_version)
+      REFERENCES wr_weekly_system_versions(account_id, weekly_review_id, system_version)
+      ON DELETE CASCADE
+  );
+
+  CREATE TRIGGER wr_weekly_system_versions_immutable
+  BEFORE UPDATE ON wr_weekly_system_versions
+  BEGIN
+    SELECT RAISE(ABORT, 'work_weekly_system_version_immutable');
+  END;
+
+  CREATE TRIGGER wr_weekly_system_items_immutable
+  BEFORE UPDATE ON wr_weekly_system_items
+  WHEN NOT (
+    OLD.erased_at IS NULL AND NEW.erased_at IS NOT NULL
+    AND NEW.body_text = '来源已失效，内容不可用'
+    AND NEW.id IS OLD.id
+    AND NEW.account_id IS OLD.account_id
+    AND NEW.weekly_review_id IS OLD.weekly_review_id
+    AND NEW.system_version IS OLD.system_version
+    AND NEW.section_kind IS OLD.section_kind
+    AND NEW.verification_state IS OLD.verification_state
+    AND NEW.sort_order IS OLD.sort_order
+    AND NEW.created_at IS OLD.created_at
+  )
+  BEGIN
+    SELECT RAISE(ABORT, 'work_weekly_system_item_immutable');
+  END;
+
+  CREATE TABLE wr_weekly_system_item_sources (
+    account_id TEXT NOT NULL,
+    weekly_review_id TEXT NOT NULL,
+    system_item_id TEXT NOT NULL,
+    position INTEGER NOT NULL CHECK (position >= 0),
+    source_ref TEXT NOT NULL,
+    source_kind TEXT NOT NULL CHECK (source_kind IN (
+      'meeting', 'finding', 'todo', 'todo_event', 'project', 'evidence'
+    )),
+    source_entity_id TEXT NOT NULL,
+    source_version INTEGER CHECK (source_version IS NULL OR source_version >= 0),
+    meeting_id TEXT,
+    todo_id TEXT,
+    publication_id TEXT,
+    segment_id TEXT,
+    invalidated_at TEXT,
+    PRIMARY KEY (account_id, system_item_id, position),
+    UNIQUE (account_id, system_item_id, source_ref),
+    FOREIGN KEY (system_item_id, account_id, weekly_review_id)
+      REFERENCES wr_weekly_system_items(id, account_id, weekly_review_id) ON DELETE CASCADE
+  );
+
+  CREATE INDEX idx_wr_weekly_system_item_sources_entity
+    ON wr_weekly_system_item_sources(account_id, source_kind, source_entity_id, system_item_id);
+
+  CREATE TRIGGER wr_weekly_system_item_sources_immutable
+  BEFORE UPDATE ON wr_weekly_system_item_sources
+  WHEN NOT (
+    OLD.invalidated_at IS NULL AND NEW.invalidated_at IS NOT NULL
+    AND NEW.account_id IS OLD.account_id
+    AND NEW.weekly_review_id IS OLD.weekly_review_id
+    AND NEW.system_item_id IS OLD.system_item_id
+    AND NEW.position IS OLD.position
+    AND NEW.source_ref IS OLD.source_ref
+    AND NEW.source_kind IS OLD.source_kind
+    AND NEW.source_entity_id IS OLD.source_entity_id
+    AND NEW.source_version IS OLD.source_version
+    AND NEW.meeting_id IS OLD.meeting_id
+    AND NEW.todo_id IS OLD.todo_id
+    AND NEW.publication_id IS OLD.publication_id
+    AND NEW.segment_id IS OLD.segment_id
+  )
+  BEGIN
+    SELECT RAISE(ABORT, 'work_weekly_system_item_source_immutable');
+  END;
+
+  CREATE TABLE wr_weekly_review_items (
+    id TEXT PRIMARY KEY,
+    account_id TEXT NOT NULL,
+    weekly_review_id TEXT NOT NULL,
+    system_item_id TEXT,
+    section_kind TEXT NOT NULL CHECK (section_kind IN (
+      'overview', 'progress', 'decisions', 'completed', 'in_progress',
+      'waiting_for_others', 'open_questions', 'next_week'
+    )),
+    origin TEXT NOT NULL CHECK (origin IN ('gpt', 'user_note')),
+    system_text TEXT,
+    user_text TEXT,
+    verification_state TEXT NOT NULL CHECK (verification_state IN (
+      'verified', 'qualified', 'user_authored', 'invalidated'
+    )),
+    sort_order INTEGER NOT NULL CHECK (sort_order >= 0),
+    system_version INTEGER CHECK (system_version IS NULL OR system_version > 0),
+    version INTEGER NOT NULL DEFAULT 0 CHECK (version >= 0),
+    user_edited_at TEXT,
+    hidden_at TEXT,
+    invalidated_at TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE (id, account_id, weekly_review_id),
+    UNIQUE (account_id, weekly_review_id, system_item_id),
+    FOREIGN KEY (weekly_review_id, account_id)
+      REFERENCES wr_weekly_reviews(id, account_id) ON DELETE CASCADE,
+    FOREIGN KEY (system_item_id, account_id, weekly_review_id)
+      REFERENCES wr_weekly_system_items(id, account_id, weekly_review_id) ON DELETE CASCADE,
+    CHECK (
+      (origin = 'gpt' AND system_item_id IS NOT NULL AND system_text IS NOT NULL
+        AND system_version IS NOT NULL)
+      OR
+      (origin = 'user_note' AND system_item_id IS NULL AND system_text IS NULL
+        AND user_text IS NOT NULL AND system_version IS NULL
+        AND verification_state = 'user_authored')
+    )
+  );
+
+  CREATE INDEX idx_wr_weekly_review_items_order
+    ON wr_weekly_review_items(account_id, weekly_review_id, section_kind, sort_order, id);
+
+  CREATE TABLE wr_weekly_item_sources (
+    account_id TEXT NOT NULL,
+    weekly_review_id TEXT NOT NULL,
+    item_id TEXT NOT NULL,
+    position INTEGER NOT NULL CHECK (position >= 0),
+    source_ref TEXT NOT NULL,
+    source_kind TEXT NOT NULL CHECK (source_kind IN (
+      'meeting', 'finding', 'todo', 'todo_event', 'project', 'evidence'
+    )),
+    source_entity_id TEXT NOT NULL,
+    source_version INTEGER CHECK (source_version IS NULL OR source_version >= 0),
+    meeting_id TEXT,
+    todo_id TEXT,
+    publication_id TEXT,
+    segment_id TEXT,
+    invalidated_at TEXT,
+    PRIMARY KEY (account_id, item_id, position),
+    UNIQUE (account_id, item_id, source_ref),
+    FOREIGN KEY (item_id, account_id, weekly_review_id)
+      REFERENCES wr_weekly_review_items(id, account_id, weekly_review_id) ON DELETE CASCADE
+  );
+
+  CREATE INDEX idx_wr_weekly_item_sources_entity
+    ON wr_weekly_item_sources(account_id, source_kind, source_entity_id, item_id);
+
+  CREATE TABLE wr_weekly_review_operations (
+    account_id TEXT NOT NULL,
+    operation_key TEXT NOT NULL CHECK (length(trim(operation_key)) > 0),
+    weekly_review_id TEXT NOT NULL,
+    target_id TEXT,
+    operation_type TEXT NOT NULL CHECK (operation_type IN (
+      'generate', 'regenerate', 'update_item', 'create_note', 'delete_note',
+      'reset', 'delete_review'
+    )),
+    request_fingerprint TEXT NOT NULL CHECK (length(request_fingerprint) = 64),
+    result_json TEXT NOT NULL CHECK (json_valid(result_json)),
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (account_id, operation_key),
+    FOREIGN KEY (weekly_review_id, account_id)
+      REFERENCES wr_weekly_reviews(id, account_id) ON DELETE CASCADE
+  );
+
+  CREATE TABLE wr_weekly_tombstones (
+    account_id TEXT NOT NULL,
+    weekly_review_id TEXT NOT NULL,
+    last_version INTEGER NOT NULL CHECK (last_version >= 0),
+    deleted_at TEXT NOT NULL,
+    PRIMARY KEY (account_id, weekly_review_id),
+    FOREIGN KEY (weekly_review_id, account_id)
+      REFERENCES wr_weekly_reviews(id, account_id) ON DELETE CASCADE
+  );
+
+  CREATE TABLE wr_weekly_qa_threads (
+    id TEXT PRIMARY KEY,
+    account_id TEXT NOT NULL,
+    weekly_review_id TEXT NOT NULL,
+    source_snapshot_digest TEXT NOT NULL CHECK (length(source_snapshot_digest) = 64),
+    current_run_version INTEGER NOT NULL DEFAULT 0 CHECK (current_run_version >= 0),
+    version INTEGER NOT NULL DEFAULT 0 CHECK (version >= 0),
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    cleared_at TEXT,
+    deleted_at TEXT,
+    UNIQUE (id, account_id, weekly_review_id),
+    UNIQUE (account_id, weekly_review_id),
+    FOREIGN KEY (weekly_review_id, account_id)
+      REFERENCES wr_weekly_reviews(id, account_id) ON DELETE CASCADE
+  );
+
+  CREATE TABLE wr_weekly_qa_messages (
+    id TEXT PRIMARY KEY,
+    account_id TEXT NOT NULL,
+    weekly_review_id TEXT NOT NULL,
+    thread_id TEXT NOT NULL,
+    question_message_id TEXT,
+    role TEXT NOT NULL CHECK (role IN ('user', 'assistant')),
+    body_text TEXT,
+    answer_status TEXT CHECK (answer_status IS NULL OR answer_status IN (
+      'answered', 'partially_answered', 'insufficient_evidence', 'failed', 'invalidated'
+    )),
+    source_snapshot_digest TEXT NOT NULL CHECK (length(source_snapshot_digest) = 64),
+    provider_profile TEXT,
+    prompt_version TEXT,
+    verifier_profile TEXT,
+    version INTEGER NOT NULL DEFAULT 0 CHECK (version >= 0),
+    created_at TEXT NOT NULL,
+    invalidated_at TEXT,
+    UNIQUE (id, account_id, weekly_review_id, thread_id),
+    FOREIGN KEY (thread_id, account_id, weekly_review_id)
+      REFERENCES wr_weekly_qa_threads(id, account_id, weekly_review_id) ON DELETE CASCADE,
+    CHECK ((role = 'user' AND question_message_id IS NULL AND answer_status IS NULL)
+      OR (role = 'assistant' AND question_message_id IS NOT NULL AND answer_status IS NOT NULL)),
+    CHECK (body_text IS NOT NULL OR invalidated_at IS NOT NULL)
+  );
+
+  CREATE TABLE wr_weekly_qa_runs (
+    id TEXT PRIMARY KEY,
+    account_id TEXT NOT NULL,
+    weekly_review_id TEXT NOT NULL,
+    thread_id TEXT NOT NULL,
+    question_message_id TEXT NOT NULL,
+    run_version INTEGER NOT NULL CHECK (run_version > 0),
+    source_snapshot_digest TEXT NOT NULL CHECK (length(source_snapshot_digest) = 64),
+    source_manifest_json TEXT NOT NULL CHECK (json_valid(source_manifest_json)),
+    state TEXT NOT NULL CHECK (state IN (
+      'queued', 'processing', 'verifying', 'completed', 'failed', 'superseded', 'deleted'
+    )),
+    lease_owner TEXT,
+    lease_expires_at TEXT,
+    provider_profile TEXT,
+    prompt_version TEXT,
+    verifier_profile TEXT,
+    created_at TEXT NOT NULL,
+    started_at TEXT,
+    completed_at TEXT,
+    error_code TEXT,
+    UNIQUE (id, account_id, weekly_review_id, thread_id),
+    UNIQUE (account_id, thread_id, run_version),
+    FOREIGN KEY (thread_id, account_id, weekly_review_id)
+      REFERENCES wr_weekly_qa_threads(id, account_id, weekly_review_id) ON DELETE CASCADE,
+    CHECK (
+      (state IN ('processing', 'verifying') AND lease_owner IS NOT NULL
+        AND lease_expires_at IS NOT NULL AND completed_at IS NULL)
+      OR
+      (state NOT IN ('processing', 'verifying') AND lease_owner IS NULL
+        AND lease_expires_at IS NULL)
+    )
+  );
+
+  CREATE UNIQUE INDEX idx_wr_weekly_qa_runs_one_active
+    ON wr_weekly_qa_runs(account_id, thread_id)
+    WHERE state IN ('queued', 'processing', 'verifying');
+  CREATE INDEX idx_wr_weekly_qa_runs_recovery
+    ON wr_weekly_qa_runs(state, lease_expires_at, created_at, id);
+
+  CREATE TABLE wr_weekly_qa_message_sources (
+    account_id TEXT NOT NULL,
+    weekly_review_id TEXT NOT NULL,
+    thread_id TEXT NOT NULL,
+    message_id TEXT NOT NULL,
+    position INTEGER NOT NULL CHECK (position >= 0),
+    source_ref TEXT NOT NULL,
+    source_kind TEXT NOT NULL CHECK (source_kind IN (
+      'meeting', 'finding', 'todo', 'todo_event', 'project', 'evidence'
+    )),
+    source_entity_id TEXT NOT NULL,
+    source_version INTEGER CHECK (source_version IS NULL OR source_version >= 0),
+    meeting_id TEXT,
+    todo_id TEXT,
+    publication_id TEXT,
+    segment_id TEXT,
+    invalidated_at TEXT,
+    PRIMARY KEY (account_id, message_id, position),
+    UNIQUE (account_id, message_id, source_ref),
+    FOREIGN KEY (message_id, account_id, weekly_review_id, thread_id)
+      REFERENCES wr_weekly_qa_messages(id, account_id, weekly_review_id, thread_id)
+      ON DELETE CASCADE
+  );
+
+  CREATE INDEX idx_wr_weekly_qa_sources_entity
+    ON wr_weekly_qa_message_sources(account_id, source_kind, source_entity_id, message_id);
+
+  CREATE TABLE wr_weekly_qa_operations (
+    account_id TEXT NOT NULL,
+    operation_key TEXT NOT NULL CHECK (length(trim(operation_key)) > 0),
+    weekly_review_id TEXT NOT NULL,
+    thread_id TEXT NOT NULL,
+    operation_type TEXT NOT NULL CHECK (operation_type IN ('ask', 'clear')),
+    request_fingerprint TEXT NOT NULL CHECK (length(request_fingerprint) = 64),
+    result_json TEXT NOT NULL CHECK (json_valid(result_json)),
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (account_id, operation_key),
+    FOREIGN KEY (thread_id, account_id, weekly_review_id)
+      REFERENCES wr_weekly_qa_threads(id, account_id, weekly_review_id) ON DELETE CASCADE
+  );
+`;
+
+const WORK_REVIEW_SCHEMA_V6 = `
+  ALTER TABLE wr_processing_attempts ADD COLUMN deadline_at TEXT;
+
+  CREATE TRIGGER wr_processing_attempt_deadline_immutable
+  BEFORE UPDATE OF deadline_at ON wr_processing_attempts
+  WHEN NEW.deadline_at IS NOT OLD.deadline_at
+  BEGIN
+    SELECT RAISE(ABORT, 'work_review_processing_deadline_immutable');
+  END;
+
+  CREATE TABLE wr_analysis_checkpoints (
+    account_id TEXT NOT NULL,
+    meeting_id TEXT NOT NULL,
+    publication_id TEXT NOT NULL,
+    canonical_content_digest TEXT NOT NULL CHECK (length(canonical_content_digest) = 64),
+    checkpoint_kind TEXT NOT NULL CHECK (checkpoint_kind IN (
+      'extractor_block', 'verifier_batch'
+    )),
+    logical_input_digest TEXT NOT NULL CHECK (length(logical_input_digest) = 64),
+    provider_contract_digest TEXT NOT NULL CHECK (length(provider_contract_digest) = 64),
+    output_schema_version TEXT NOT NULL CHECK (length(trim(output_schema_version)) > 0),
+    payload_json TEXT NOT NULL CHECK (json_valid(payload_json)),
+    payload_digest TEXT NOT NULL CHECK (length(payload_digest) = 64),
+    origin_attempt_version INTEGER NOT NULL CHECK (origin_attempt_version > 0),
+    attempt_stage TEXT NOT NULL DEFAULT 'meeting_analysis'
+      CHECK (attempt_stage = 'meeting_analysis'),
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (
+      account_id, meeting_id, publication_id, checkpoint_kind,
+      logical_input_digest, provider_contract_digest
+    ),
+    FOREIGN KEY (publication_id, account_id, meeting_id)
+      REFERENCES wr_canonical_publications(publication_id, account_id, meeting_id)
+      ON DELETE CASCADE,
+    FOREIGN KEY (account_id, meeting_id, attempt_stage, origin_attempt_version)
+      REFERENCES wr_processing_attempts(account_id, meeting_id, stage, attempt_version)
+      ON DELETE CASCADE
+  );
+
+  CREATE INDEX idx_wr_analysis_checkpoints_origin
+    ON wr_analysis_checkpoints(
+      account_id, meeting_id, origin_attempt_version, checkpoint_kind
+    );
+`;
+
+const WORK_REVIEW_SCHEMA_V7 = `
+  CREATE TABLE wr_analysis_checkpoints_v7 (
+    account_id TEXT NOT NULL,
+    meeting_id TEXT NOT NULL,
+    publication_id TEXT NOT NULL,
+    canonical_content_digest TEXT NOT NULL CHECK (length(canonical_content_digest) = 64),
+    checkpoint_kind TEXT NOT NULL CHECK (checkpoint_kind IN ('extractor_block', 'organization_plan', 'verifier_batch')),
+    logical_input_digest TEXT NOT NULL CHECK (length(logical_input_digest) = 64),
+    provider_contract_digest TEXT NOT NULL CHECK (length(provider_contract_digest) = 64),
+    output_schema_version TEXT NOT NULL CHECK (length(trim(output_schema_version)) > 0),
+    payload_json TEXT NOT NULL CHECK (json_valid(payload_json)),
+    payload_digest TEXT NOT NULL CHECK (length(payload_digest) = 64),
+    origin_attempt_version INTEGER NOT NULL CHECK (origin_attempt_version > 0),
+    attempt_stage TEXT NOT NULL DEFAULT 'meeting_analysis' CHECK (attempt_stage = 'meeting_analysis'),
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (account_id, meeting_id, publication_id, checkpoint_kind, logical_input_digest, provider_contract_digest),
+    FOREIGN KEY (publication_id, account_id, meeting_id)
+      REFERENCES wr_canonical_publications(publication_id, account_id, meeting_id) ON DELETE CASCADE,
+    FOREIGN KEY (account_id, meeting_id, attempt_stage, origin_attempt_version)
+      REFERENCES wr_processing_attempts(account_id, meeting_id, stage, attempt_version) ON DELETE CASCADE
+  );
+  INSERT INTO wr_analysis_checkpoints_v7 SELECT * FROM wr_analysis_checkpoints;
+  DROP TABLE wr_analysis_checkpoints;
+  ALTER TABLE wr_analysis_checkpoints_v7 RENAME TO wr_analysis_checkpoints;
+  CREATE INDEX idx_wr_analysis_checkpoints_origin
+    ON wr_analysis_checkpoints(account_id, meeting_id, origin_attempt_version, checkpoint_kind);
+
+  -- Diagnostic history; existing review tables retain publication authority.
+  CREATE TABLE wr_analysis_audits (
+    account_id TEXT NOT NULL,
+    meeting_id TEXT NOT NULL,
+    publication_id TEXT NOT NULL,
+    canonical_content_digest TEXT NOT NULL CHECK (length(canonical_content_digest) = 64),
+    attempt_version INTEGER NOT NULL CHECK (attempt_version > 0),
+    attempt_stage TEXT NOT NULL DEFAULT 'meeting_analysis' CHECK (attempt_stage = 'meeting_analysis'),
+    schema_version TEXT NOT NULL,
+    payload_json TEXT NOT NULL CHECK (json_valid(payload_json)),
+    payload_digest TEXT NOT NULL CHECK (length(payload_digest) = 64),
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (account_id, meeting_id, publication_id, attempt_version),
+    FOREIGN KEY (publication_id, account_id, meeting_id)
+      REFERENCES wr_canonical_publications(publication_id, account_id, meeting_id) ON DELETE CASCADE,
+    FOREIGN KEY (account_id, meeting_id, attempt_stage, attempt_version)
+      REFERENCES wr_processing_attempts(account_id, meeting_id, stage, attempt_version) ON DELETE CASCADE
+  );
+`;
+
+const WORK_REVIEW_SCHEMA_V8 = `
+  -- Quality belongs to its generation run; current system versions already reference that run.
+  -- Leave historical rows NULL instead of reclassifying or republishing old attempts.
+  ALTER TABLE wr_weekly_review_runs ADD COLUMN quality_assessment_json TEXT
+    CHECK (quality_assessment_json IS NULL OR json_valid(quality_assessment_json));
+`;
+
 const MIGRATIONS = [
   { version: 1, sql: WORK_REVIEW_SCHEMA_V1 },
   { version: 2, sql: WORK_REVIEW_SCHEMA_V2 },
   { version: 3, sql: WORK_REVIEW_SCHEMA_V3 },
-  { version: 4, sql: WORK_REVIEW_SCHEMA_V4 }
+  { version: 4, sql: WORK_REVIEW_SCHEMA_V4 },
+  { version: 5, sql: WORK_REVIEW_SCHEMA_V5 },
+  { version: 6, sql: WORK_REVIEW_SCHEMA_V6 },
+  { version: 7, sql: WORK_REVIEW_SCHEMA_V7 },
+  { version: 8, sql: WORK_REVIEW_SCHEMA_V8 }
 ] as const;
 
 export function migrateWorkReviewSchema(database: Database.Database) {

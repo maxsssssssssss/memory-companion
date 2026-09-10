@@ -19,6 +19,7 @@ import {
   createDailyReflectionApi,
   DailyReflectionApiError,
   type DailyReflectionApi,
+  type DailyReflectionWorkingCardMemoryLookupResponse,
   type DailyReflectionMemoryProposalCreateRequest
 } from "@/lib/client/daily-reflection-api";
 import type {
@@ -61,6 +62,7 @@ type CardExpansionStyle = CSSProperties & Readonly<{
 type CardMemoryFeedback = Readonly<{
   message: string;
   tone: "error" | "notice" | "success";
+  reasons?: string[];
 }>;
 type PendingMemoryAdmission = Readonly<{
   expectedVersion: number;
@@ -104,18 +106,42 @@ function presentationKind(kind: DailyReflectionWorkingCardKind): ProductCardKind
 }
 
 function memoryTypeForWorkingCard(
-  kind: DailyReflectionWorkingCardKind
+  kind: DailyReflectionWorkingCardKind,
+  actionClaimed = false
 ): DailyReflectionMemoryProposalCreateRequest["memoryType"] | null {
   switch (kind) {
     case "idea":
     case "insight": return "summary";
     case "question": return "question";
     case "decision": return "decision";
-    // The public Working Card DTO does not expose actionClaimed. Action Cards
-    // therefore stay fail-closed instead of inferring a commitment from kind.
     case "event": return "event";
-    case "action": return null;
+    case "action": return actionClaimed ? "commitment" : null;
   }
+}
+
+const POLICY_REASON_LABELS: Record<string, string> = {
+  card_not_saved: "卡片尚未保存或已归档、移除",
+  source_unavailable: "原始来源不可用",
+  canonical_evidence_invalid: "原话依据未通过核对",
+  action_not_claimed: "这项行动尚未由你认领",
+  existing_person_path_required: "当前不支持将这张卡片保存为人物事实",
+  subject_person_not_confirmed: "尚未确认内容对应的人物",
+  fact_epistemic_status_not_explicit: "内容并非明确陈述，不能作为事实保存",
+  summary_score_below_threshold: "未达到当时的长期记忆评估标准"
+};
+
+function proposalFeedback(proposal: NonNullable<DailyReflectionWorkingCardMemoryLookupResponse["proposal"]>): CardMemoryFeedback {
+  return {
+    message: proposal.status === "rejected"
+      ? "未通过长期记忆审核；卡片本身仍会保留。"
+      : proposal.status === "admitted"
+        ? "已接纳，正在等待完成发布；暂不可作为长期记忆读取。"
+        : proposal.status === "approved"
+          ? "已通过审核，尚未加入长期记忆。"
+          : "待审核或确认，尚未加入长期记忆。",
+    tone: "notice",
+    reasons: proposal.status === "rejected" ? proposal.reasons : []
+  };
 }
 
 function memoryConfirmationCopy(
@@ -152,11 +178,13 @@ function CardMemoryAction({
   onConfirm,
   onOpenConfirmation,
   onRemember,
-  onToggleConfirmation
+  onToggleConfirmation,
+  lookup
 }: Readonly<{
   busy: boolean;
   card: DailyReflectionWorkingCardView;
   compact?: boolean;
+  lookup?: DailyReflectionWorkingCardMemoryLookupResponse;
   confirmation?: CardMemoryConfirmation;
   feedback?: CardMemoryFeedback;
   onConfirm: (acknowledgements: DailyReflectionMemoryProposalAcknowledgement[]) => void;
@@ -167,28 +195,37 @@ function CardMemoryAction({
     selected: boolean
   ) => void;
 }>) {
+  const [confirming, setConfirming] = useState(false);
   if (card.status !== "saved") return null;
-  if (card.memoryLifecycleStatus === "active") {
+  if (card.sourceUnavailable || card.evidenceIds.length === 0) {
+    return <div className={styles.cardMemoryAction}><span>来源不可用，无法长期记住</span></div>;
+  }
+  if (card.memoryLifecycleStatus === "active" && !lookup) {
+    return <div className={styles.cardMemoryAction}>
+      <span>已接纳，打开卡片核对发布状态</span>
+      {onOpenConfirmation ? <button className={styles.textButton} onClick={onOpenConfirmation} type="button">查看长期记忆状态</button> : null}
+    </div>;
+  }
+  if (card.memoryLifecycleStatus === "active"
+    && lookup?.proposal?.status === "admitted" && lookup.publicationStatus === "published" && !lookup.revoked) {
     return <div className={styles.cardMemoryAction}><span role="status">已长期记住</span></div>;
   }
   if (card.memoryLifecycleStatus === "revocation_requested") {
     return <div className={styles.cardMemoryAction}><span role="status">正在撤销长期记忆</span></div>;
   }
-  if (card.memoryLifecycleStatus === "revoked") {
+  if (card.memoryLifecycleStatus === "revoked" || lookup?.revoked || lookup?.publicationStatus === "deleted") {
     return <div className={styles.cardMemoryAction}><span role="status">已撤销长期记忆</span></div>;
   }
-  if (card.sourceUnavailable || card.evidenceIds.length === 0) {
-    return <div className={styles.cardMemoryAction}><span>来源不可用，无法长期记住</span></div>;
-  }
-  if (card.cardKind === "action") {
+  if (card.cardKind === "action" && !lookup?.actionClaimed) {
     return (
       <div className={styles.cardMemoryAction} data-tone="notice">
         <button className={styles.secondaryButton} disabled type="button">长期记住</button>
-        <span>先在复盘中明确认领这项行动后，才能长期记住</span>
+        <span>{compact ? "打开卡片核对行动认领状态" : "先在复盘中明确认领这项行动后，才能长期记住"}</span>
+        {compact && onOpenConfirmation ? <button className={styles.textButton} onClick={onOpenConfirmation} type="button">打开卡片核对</button> : null}
       </div>
     );
   }
-  if (memoryTypeForWorkingCard(card.cardKind) === null) return null;
+  if (memoryTypeForWorkingCard(card.cardKind, lookup?.actionClaimed) === null) return null;
   const acknowledgementRequirements = confirmation?.requirements.filter(
     isAcknowledgementRequirement
   ) ?? [];
@@ -213,6 +250,7 @@ function CardMemoryAction({
         {feedback ? (
           <span role={feedback.tone === "error" ? "alert" : "status"}>
             {feedback.message}
+            {feedback.reasons?.map((reason) => <span key={reason}> {POLICY_REASON_LABELS[reason] ?? "未满足长期记忆条件"}（{reason}）</span>)}
           </span>
         ) : null}
       </div>
@@ -248,12 +286,21 @@ function CardMemoryAction({
             >{busy ? "正在长期记住…" : "确认并长期记住"}</button>
           ) : null}
         </fieldset>
+      ) : confirming ? (
+        <div className={styles.cardMemoryConfirmation}>
+          <p>确认将“{card.title}”加入长期记忆？通过审核并保存后，可在长期记忆中读取和检索；你可以撤销。</p>
+          <button className={styles.textButton} disabled={busy} onClick={() => setConfirming(false)} type="button">先只保留卡片</button>
+          <button className={styles.secondaryButton} disabled={busy} onClick={() => {
+            setConfirming(false);
+            onRemember(card);
+          }} type="button">确认长期记住</button>
+        </div>
       ) : (
         <button
           aria-label={`长期记住：${card.title}`}
           className={styles.secondaryButton}
           disabled={busy}
-          onClick={() => onRemember(card)}
+          onClick={() => setConfirming(true)}
           type="button"
         >
           {busy ? "正在长期记住…" : "长期记住"}
@@ -262,6 +309,7 @@ function CardMemoryAction({
       {feedback ? (
         <span role={feedback.tone === "error" ? "alert" : "status"}>
           {feedback.message}
+            {feedback.reasons?.map((reason) => <span key={reason}> {POLICY_REASON_LABELS[reason] ?? "未满足长期记忆条件"}（{reason}）</span>)}
         </span>
       ) : null}
     </div>
@@ -366,6 +414,7 @@ export function DailyReflectionCardLibrary({
   const [expansion, setExpansion] = useState<CardExpansion | null>(null);
   const [listBusyCardId, setListBusyCardId] = useState<string | null>(null);
   const [memoryBusyCardId, setMemoryBusyCardId] = useState<string | null>(null);
+  const [memoryLookups, setMemoryLookups] = useState<Record<string, DailyReflectionWorkingCardMemoryLookupResponse>>({});
   const [memoryFeedback, setMemoryFeedback] = useState<Record<string, CardMemoryFeedback>>({});
   const [memoryConfirmations, setMemoryConfirmations] = useState<
     Record<string, CardMemoryConfirmation>
@@ -450,6 +499,22 @@ export function DailyReflectionCardLibrary({
       setTitleDraft(result.card.title);
       setContentDraft(result.card.content);
       setEditing(false);
+      // Proposal lookup must not delay reading or editing the saved Card.
+      setDetailLoading(false);
+      try {
+        const lookup = await api.getWorkingCardMemoryProposal(cardId, controller.signal);
+        if (controller.signal.aborted || requestVersion !== detailRequestVersionRef.current) return;
+        setMemoryLookups((current) => ({ ...current, [cardId]: lookup }));
+        if (lookup.proposal && (lookup.proposal.status !== "admitted" || lookup.publicationStatus !== "published")) {
+          setMemoryFeedback((current) => ({ ...current, [cardId]: proposalFeedback(lookup.proposal!) }));
+        }
+      } catch {
+        if (controller.signal.aborted || requestVersion !== detailRequestVersionRef.current) return;
+        setMemoryFeedback((current) => ({ ...current, [cardId]: {
+          message: "长期记忆状态暂时无法读取，请重新打开卡片重试。",
+          tone: "error"
+        } }));
+      }
     } catch (cause) {
       if (controller.signal.aborted || requestVersion !== detailRequestVersionRef.current) return;
       setDetailError(cause instanceof Error ? cause.message : "卡片详情暂时无法加载。");
@@ -739,11 +804,14 @@ export function DailyReflectionCardLibrary({
     card: DailyReflectionWorkingCardView,
     acknowledgements: DailyReflectionMemoryProposalAcknowledgement[] = []
   ) => {
-    const memoryType = memoryTypeForWorkingCard(card.cardKind);
+    const memoryType = memoryTypeForWorkingCard(card.cardKind, memoryLookups[card.id]?.actionClaimed);
     if (
       memoryBusyCardIdRef.current
       || card.status !== "saved"
-      || card.memoryLifecycleStatus !== "not_admitted"
+      || (card.memoryLifecycleStatus !== "not_admitted"
+        && !(card.memoryLifecycleStatus === "active" && memoryLookups[card.id]?.publicationStatus === "unpublished"))
+      || memoryLookups[card.id]?.revoked
+      || memoryLookups[card.id]?.publicationStatus === "deleted"
       || card.sourceUnavailable
       || card.evidenceIds.length === 0
       || memoryType === null
@@ -757,22 +825,39 @@ export function DailyReflectionCardLibrary({
     });
     try {
       let pending = pendingMemoryAdmissionsRef.current.get(card.id);
+      let evaluation: Awaited<ReturnType<DailyReflectionApi["evaluateMemoryProposal"]>> | undefined;
       if (!pending) {
         const created = await api.createWorkingCardMemoryProposal(card.id, {
           expectedCardVersion: card.version,
           memoryType
         });
+        if (created.proposal.status !== "admitted") {
+          setMemoryFeedback((current) => ({ ...current, [card.id]: proposalFeedback(created.proposal) }));
+          evaluation = await api.evaluateMemoryProposal(created.proposal.id, {
+            expectedVersion: created.proposal.version
+          });
+          setMemoryFeedback((current) => ({ ...current, [card.id]: proposalFeedback(evaluation!.proposal) }));
+        }
         pending = {
-          expectedVersion: created.proposal.version,
+          expectedVersion: evaluation?.proposal.version ?? created.proposal.version,
           proposalId: created.proposal.id
         };
         pendingMemoryAdmissionsRef.current.set(card.id, pending);
       }
-      const result = await api.admitMemoryProposal(pending.proposalId, {
+      const result = evaluation && evaluation.status !== "approved"
+        ? evaluation
+        : await api.admitMemoryProposal(pending.proposalId, {
         expectedVersion: pending.expectedVersion,
         acknowledgements
       });
       if (result.status === "admitted" || result.status === "already_exists") {
+        // The existing admit endpoint returns these receipts only after publication.
+        setMemoryLookups((current) => ({ ...current, [card.id]: {
+          proposal: result.proposal,
+          publicationStatus: "published",
+          revoked: false,
+          actionClaimed: result.proposal.actionClaimed
+        } }));
         pendingMemoryAdmissionsRef.current.delete(card.id);
         setMemoryConfirmations((current) => {
           const next = { ...current };
@@ -814,8 +899,8 @@ export function DailyReflectionCardLibrary({
         setMemoryFeedback((current) => ({
           ...current,
           [card.id]: {
-            message: "这张卡片不符合长期记住的安全条件；卡片本身仍会保留。",
-            tone: "notice"
+            ...proposalFeedback(result.proposal),
+            reasons: result.reasons
           }
         }));
       } else {
@@ -848,7 +933,9 @@ export function DailyReflectionCardLibrary({
         setMemoryFeedback((current) => ({
           ...current,
           [card.id]: {
-            message: "这张卡片已经在其他页面更新，已重新加载最新内容。",
+            message: cause.code === "version_conflict"
+              ? "这张卡片已经在其他页面更新，已重新加载最新内容。"
+              : cause.message,
             tone: "error"
           }
         }));
@@ -998,7 +1085,9 @@ export function DailyReflectionCardLibrary({
               {selectedCard.status !== "removed" ? <button className={styles.secondaryButton} onClick={() => setEditing(true)} type="button">编辑卡片</button> : null}
               <CardMemoryAction
                 busy={busy || memoryBusyCardId === selectedCard.id}
+                key={selectedCard.id}
                 card={selectedCard}
+                lookup={memoryLookups[selectedCard.id]}
                 confirmation={memoryConfirmations[selectedCard.id]}
                 feedback={memoryFeedback[selectedCard.id]}
                 onConfirm={(acknowledgements) => void rememberCard(
@@ -1013,7 +1102,7 @@ export function DailyReflectionCardLibrary({
           )}
           <dl className={styles.cardLibraryDefinitionList}>
             <div><dt>创建时间</dt><dd>{formatTime(selectedCard.createdAt)}</dd></div>
-            <div><dt>长期记忆</dt><dd>{selectedCard.memoryLifecycleStatus === "active" ? "已长期记住" : selectedCard.memoryLifecycleStatus === "revocation_requested" ? "正在撤销" : selectedCard.memoryLifecycleStatus === "revoked" ? "已撤销" : "暂未长期保存"}</dd></div>
+            <div><dt>长期记忆</dt><dd>{selectedCard.memoryLifecycleStatus === "active" ? (memoryLookups[selectedCard.id]?.publicationStatus === "published" && !memoryLookups[selectedCard.id]?.revoked ? "已长期记住" : "已接纳，发布待确认") : selectedCard.memoryLifecycleStatus === "revocation_requested" ? "正在撤销" : selectedCard.memoryLifecycleStatus === "revoked" ? "已撤销" : "暂未长期保存"}</dd></div>
             <div><dt>来源</dt><dd>{selectedCard.sourceUnavailable ? "原始复盘已不可用" : selectedCard.sourceReflectionIds.map((reflectionId, index) => <Link href={reflectionSessionPath(reflectionId)} key={reflectionId}>{selectedCard.sourceReflectionIds.length === 1 ? "查看来源复盘" : `查看来源复盘 ${index + 1}`}</Link>)}</dd></div>
           </dl>
           <details className={styles.progressivePanel}>
@@ -1094,6 +1183,7 @@ export function DailyReflectionCardLibrary({
                   busy={listBusyCardId === card.id || memoryBusyCardId === card.id}
                   card={card}
                   compact
+                  lookup={memoryLookups[card.id]}
                   confirmation={memoryConfirmations[card.id]}
                   feedback={memoryFeedback[card.id]}
                   onConfirm={(acknowledgements) => void rememberCard(card, acknowledgements)}

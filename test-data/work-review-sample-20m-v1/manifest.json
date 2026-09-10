@@ -1,0 +1,105 @@
+{
+  "datasetVersion": "work-review-sample-20m-v1",
+  "title": "星桥项目试点范围评审会",
+  "generatedAt": "2026-09-03T06:46:46.169Z",
+  "synthetic": true,
+  "privacy": "All participants, organization, project, dialogue, and facts are fictional.",
+  "purpose": "Synthetic Work Review upload, Evidence, Finding, Todo, and follow-up boundary testing",
+  "audio": {
+    "file": "audio/work-review-sample-20m-v1.wav",
+    "durationSeconds": 1200,
+    "sizeBytes": 38400078,
+    "sha256": "b103b2dad70b16c0adac722dc66711ad30a3e8a00d4af9f5461275e153104cea",
+    "container": "wav",
+    "codec": "pcm_s16le",
+    "sampleRateHz": 16000,
+    "channels": 1
+  },
+  "transcript": {
+    "file": "transcript.md",
+    "utteranceCount": 60,
+    "sha256": "a946cc91c9bbf763c31959f1483816cbbba4a1b1040707ead232090f5475a9e3",
+    "timestampMethod": "Derived from each normalized utterance duration and inserted pause before section concatenation"
+  },
+  "speakers": [
+    {
+      "id": "lin_lan",
+      "name": "林岚",
+      "role": "产品负责人",
+      "voice": "Microsoft Huihui",
+      "voiceGender": "Female"
+    },
+    {
+      "id": "zhou_qi",
+      "name": "周启",
+      "role": "技术负责人",
+      "voice": "Microsoft Kangkang",
+      "voiceGender": "Male"
+    },
+    {
+      "id": "chen_nuo",
+      "name": "陈诺",
+      "role": "运营负责人",
+      "voice": "Microsoft Yaoyao",
+      "voiceGender": "Female"
+    }
+  ],
+  "generation": {
+    "method": "Windows OneCore offline TTS per utterance, FFmpeg atempo/loudnorm normalization, deterministic section concatenation",
+    "script": "generate-audio.mjs",
+    "source": "source.json",
+    "dialogue": "dialogue.json",
+    "targetDurationSeconds": 1200,
+    "sections": [
+      {
+        "sectionId": "background_and_scope",
+        "utteranceCount": 15,
+        "rawSpeechSeconds": 294.156,
+        "pauseSeconds": 15,
+        "tempo": 1.032126,
+        "durationSeconds": 300,
+        "finalSilenceGuardSeconds": 4
+      },
+      {
+        "sectionId": "options_and_disagreement",
+        "utteranceCount": 15,
+        "rawSpeechSeconds": 289.385,
+        "pauseSeconds": 15,
+        "tempo": 1.015385,
+        "durationSeconds": 300,
+        "finalSilenceGuardSeconds": 4
+      },
+      {
+        "sectionId": "decision_and_change",
+        "utteranceCount": 15,
+        "rawSpeechSeconds": 269.957,
+        "pauseSeconds": 15,
+        "tempo": 0.947218,
+        "durationSeconds": 300,
+        "finalSilenceGuardSeconds": 4
+      },
+      {
+        "sectionId": "actions_and_open_questions",
+        "utteranceCount": 15,
+        "rawSpeechSeconds": 289.548,
+        "pauseSeconds": 15,
+        "tempo": 1.015958,
+        "durationSeconds": 300,
+        "finalSilenceGuardSeconds": 4
+      }
+    ]
+  },
+  "verification": {
+    "audioTextSource": "Every spoken utterance is synthesized directly from dialogue.json text",
+    "transcriptTextSource": "Every transcript utterance is rendered from the same dialogue.json text",
+    "expectedSemanticTags": [
+      "decision_final",
+      "action_assigned",
+      "commitment_explicit",
+      "action_unassigned",
+      "deadline",
+      "unresolved_question",
+      "plan_change"
+    ]
+  }
+}

@@ -5,6 +5,7 @@ import { useState } from "react";
 import { GlobalProductEntry } from "./global-product-entry";
 import { GlobalProductEntryBoundary } from "./global-product-entry-boundary";
 import { ProductAccountMenu } from "./product-account-menu";
+import { ProductCapabilitiesProvider } from "./product-capabilities";
 import { productPreferenceKey } from "./product-preference";
 import { ProductDialog, ProductEvidence, ProductReviewCompletion, ProductState, ProductTabs } from "./product-primitives";
 import { ProductSwitcher } from "./product-switcher";
@@ -25,6 +26,27 @@ beforeEach(() => {
 afterEach(cleanup);
 
 describe("product system", () => {
+  it.each([undefined, false])("uses the server capability at the entry while honoring override %s", (override) => {
+    render(
+      <ProductCapabilitiesProvider workReviewEnabled>
+        <GlobalProductEntry
+          accountId="account_a"
+          dailyReflectionEnabled={false}
+          onLogout={vi.fn()}
+          userLabel="a@example.com"
+          workReviewEnabled={override}
+        />
+      </ProductCapabilitiesProvider>
+    );
+
+    if (override === false) {
+      expect(screen.queryByRole("link", { name: /工作复盘/u })).not.toBeInTheDocument();
+    } else {
+      expect(screen.getByRole("link", { name: /工作复盘/u })).toHaveAttribute("href", "/work-review");
+    }
+    expect(screen.queryByRole("link", { name: /日常复盘/u })).not.toBeInTheDocument();
+  });
+
   it("keeps the neutral entry on auth-only transport", async () => {
     const api = {
       getCurrentUser: vi.fn().mockResolvedValue({

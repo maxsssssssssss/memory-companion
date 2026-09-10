@@ -1,4 +1,4 @@
-import { after, NextResponse } from "next/server";
+import { after } from "next/server";
 import { z } from "zod";
 
 import { WorkReviewIdSchema } from "@/lib/domain/work-review";
@@ -7,6 +7,7 @@ import { cleanupWorkReviewUploadArtifacts } from "@/lib/server/work-review/clean
 import { getWorkReviewDatabase } from "@/lib/server/work-review/db";
 import { processWorkMeeting } from "@/lib/server/work-review/orchestrator";
 import { WorkReviewRepository } from "@/lib/server/work-review/repository";
+import { WorkProjectService } from "@/lib/server/work-review/project-service";
 import { WorkTodoRepository } from "@/lib/server/work-review/todo-repository";
 import {
   workReviewFeatureDisabled,
@@ -40,7 +41,7 @@ export async function GET(
   const flags = resolveWorkReviewFeatureFlags();
   if (!flags.enabled) return workReviewFeatureDisabled();
   const meetingId = meetingIdFrom((await params).meetingId);
-  if (!meetingId) return NextResponse.json({ error: "invalid_meeting_id" }, { status: 400 });
+  if (!meetingId) return workReviewPrivateJson({ error: "invalid_meeting_id" }, 400);
   try {
     const auth = await requireAuthContext(request);
     const database = getWorkReviewDatabase();
@@ -49,8 +50,15 @@ export async function GET(
     const todoProjections = flags.todoEnabled
       ? new WorkTodoRepository(database).listMeetingTodoProjections(auth.user.id, meetingId)
       : [];
+    const detailView = toWorkMeetingDetailView(detail);
     const response = workReviewPrivateJson({
-      ...toWorkMeetingDetailView(detail),
+      ...detailView,
+      meeting: {
+        ...detailView.meeting,
+        projects: flags.projectsEnabled
+          ? new WorkProjectService(database).listMeetingProjects(auth.user.id, meetingId)
+          : []
+      },
       todoProjections,
       linkedTodoCount: todoProjections.length
     });
@@ -87,7 +95,7 @@ export async function DELETE(
 ) {
   if (!isWorkReviewEnabled()) return workReviewFeatureDisabled();
   const meetingId = meetingIdFrom((await params).meetingId);
-  if (!meetingId) return NextResponse.json({ error: "invalid_meeting_id" }, { status: 400 });
+  if (!meetingId) return workReviewPrivateJson({ error: "invalid_meeting_id" }, 400);
   try {
     const auth = await requireAuthContext(request);
     const body = await deleteRequestBody(request);

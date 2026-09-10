@@ -113,6 +113,68 @@ export const WorkAtomicClaimTypeSchema = z.enum([
   "action_item"
 ]);
 
+// Closed, runtime-only pre-Verifier markers for high-risk semantics that are
+// not represented by WorkAtomicClaimTypeSchema. Keep this list narrow: it
+// controls whether a Claim and its canonical Evidence may be disclosed to the
+// GPT Verifier. The persisted audit authority is the server-owned evaluation
+// issue code; these markers deliberately do not expand the SQLite Claim schema.
+export const WorkClaimSemanticRiskFlagSchema = z.enum([
+  "causality"
+]);
+
+// Closed, runtime-only normalized values for structured fields whose exact
+// meaning must be verified, not inferred from a substring in Claim text. The
+// value is sent with the atomic Claim to the GPT Verifier. A server-owned hash
+// of this input is persisted with the evaluation; the raw value deliberately
+// does not expand the SQLite Claim schema.
+export const WorkClaimSemanticValueSchema = z.discriminatedUnion("kind", [
+  z.object({
+    kind: z.literal("decision_finality"),
+    value: WorkMeetingDecisionFinalitySchema
+  }).strict(),
+  z.object({
+    kind: z.literal("speaker_attribution"),
+    value: z.string().trim().min(1).max(512)
+  }).strict(),
+  z.object({
+    kind: z.literal("commitment_owner"),
+    value: z.string().trim().min(1).max(512)
+  }).strict(),
+  z.object({
+    kind: z.literal("deadline"),
+    dueAt: WorkReviewIsoDateTimeSchema.nullable(),
+    originalDueExpression: z.string().trim().min(1).max(2_000).nullable()
+  }).strict()
+]).superRefine((value, context) => {
+  if (value.kind === "deadline"
+    && value.dueAt === null
+    && value.originalDueExpression === null) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["dueAt"],
+        message: "Deadline semantic value requires dueAt or originalDueExpression"
+      });
+  }
+});
+
+function validateWorkClaimSemanticValue(
+  claim: {
+    claimType: z.infer<typeof WorkAtomicClaimTypeSchema>;
+    semanticValue?: z.infer<typeof WorkClaimSemanticValueSchema> | null;
+  },
+  context: z.RefinementCtx
+) {
+  if (claim.semanticValue !== undefined
+    && claim.semanticValue !== null
+    && claim.semanticValue.kind !== claim.claimType) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["semanticValue", "kind"],
+      message: "Claim semanticValue kind must match claimType"
+    });
+  }
+}
+
 export const WorkClaimSupportVerdictSchema = z.enum([
   "entailed",
   "partially_entailed",
@@ -211,10 +273,13 @@ export const WorkAtomicClaimSchema = z.object({
   id: WorkReviewIdSchema,
   candidateId: WorkReviewIdSchema,
   claimType: WorkAtomicClaimTypeSchema,
+  semanticRiskFlags: z.array(WorkClaimSemanticRiskFlagSchema).max(1).optional(),
+  semanticValue: WorkClaimSemanticValueSchema.nullable().optional(),
   text: z.string().trim().min(1).max(20_000),
   evidenceIds: z.array(WorkReviewIdSchema).min(1).max(64),
   createdAt: WorkReviewIsoDateTimeSchema.nullable().default(null)
 }).strict().superRefine((claim, context) => {
+  validateWorkClaimSemanticValue(claim, context);
   if (new Set(claim.evidenceIds).size !== claim.evidenceIds.length) {
     context.addIssue({
       code: z.ZodIssueCode.custom,
@@ -479,9 +544,11 @@ export const WorkExtractorCandidateStructuredDataSchema = z.object({
 export const WorkExtractorAtomicClaimDraftSchema = z.object({
   clientClaimKey: WorkReviewIdSchema,
   claimType: WorkAtomicClaimTypeSchema,
+  semanticRiskFlags: z.array(WorkClaimSemanticRiskFlagSchema).max(1).optional(),
+  semanticValue: WorkClaimSemanticValueSchema.nullable().optional(),
   text: z.string().trim().min(1).max(20_000),
   evidenceIds: z.array(WorkReviewIdSchema).min(1).max(64)
-}).strict();
+}).strict().superRefine(validateWorkClaimSemanticValue);
 
 export const WorkExtractorCandidateDraftSchema = z.object({
   clientCandidateKey: WorkReviewIdSchema,
@@ -566,6 +633,8 @@ export type WorkMeetingCandidateStatus = z.infer<typeof WorkMeetingCandidateStat
 export type WorkMeetingDecisionFinality = z.infer<typeof WorkMeetingDecisionFinalitySchema>;
 export type WorkMeetingActionBasis = z.infer<typeof WorkMeetingActionBasisSchema>;
 export type WorkAtomicClaimType = z.infer<typeof WorkAtomicClaimTypeSchema>;
+export type WorkClaimSemanticRiskFlag = z.infer<typeof WorkClaimSemanticRiskFlagSchema>;
+export type WorkClaimSemanticValue = z.infer<typeof WorkClaimSemanticValueSchema>;
 export type WorkClaimSupportVerdict = z.infer<typeof WorkClaimSupportVerdictSchema>;
 export type WorkClaimRiskLevel = z.infer<typeof WorkClaimRiskLevelSchema>;
 export type WorkClaimPublicationAction = z.infer<typeof WorkClaimPublicationActionSchema>;
