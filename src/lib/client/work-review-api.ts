@@ -512,6 +512,7 @@ export type WorkTodoKind = z.infer<typeof WorkTodoKindSchema>;
 export type WorkTodoView = z.infer<typeof WorkTodoViewSchema>;
 export type WorkMeetingDeletePolicy = z.infer<typeof WorkMeetingDeletePolicySchema>;
 export type WorkTodoDetailResponse = z.infer<typeof WorkTodoDetailResponseSchema>;
+export type WorkTodoCreationResult = z.infer<typeof WorkTodoMutationResponseSchema>;
 export type WorkTodoSourceResponse = z.infer<typeof WorkTodoSourceResponseSchema>;
 export type WorkMeetingFollowUpDraft = z.infer<typeof WorkMeetingFollowUpDraftSchema>;
 export type WorkMeetingFollowUpGetResponse = z.infer<
@@ -670,7 +671,7 @@ export interface WorkReviewApi {
     findingId: string,
     input: CreateWorkTodoFromFindingInput,
     signal?: AbortSignal
-  ): Promise<WorkTodo>;
+  ): Promise<WorkTodoCreationResult>;
   getTodo(todoId: string, signal?: AbortSignal): Promise<WorkTodoDetailResponse>;
   updateTodo(todoId: string, input: UpdateWorkTodoInput, signal?: AbortSignal): Promise<WorkTodo>;
   completeTodo(todoId: string, input: WorkTodoVersionedOperationInput, signal?: AbortSignal): Promise<WorkTodo>;
@@ -1163,7 +1164,7 @@ export function createWorkReviewApi(fetchImpl: typeof fetch = fetch): WorkReview
           signal
         }
       );
-      return (await parseResponse(response, WorkTodoMutationResponseSchema)).todo;
+      return await parseResponse(response, WorkTodoMutationResponseSchema);
     },
     async getTodo(todoId, signal) {
       const response = await sameOrigin(todoPath(todoId), { method: "GET", signal });

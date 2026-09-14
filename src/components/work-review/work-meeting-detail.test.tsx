@@ -2,6 +2,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testi
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
+  createWorkReviewApi,
   WorkReviewApiError,
   WorkMeetingDetailSchema,
   type WorkEvidenceView,
@@ -14,8 +15,144 @@ import {
 import type { WorkProject } from "@/lib/domain/work-project";
 
 import { WorkMeetingDetail as WorkMeetingDetailController, WorkMeetingDetailView } from "./work-meeting-detail";
+import { WorkFindingTodoActions } from "./work-finding-todo-actions";
+import { WorkTodoDialog } from "./work-todo-dialog";
 
 vi.mock("next/navigation", () => ({ useRouter: () => ({ replace: vi.fn() }) }));
+
+describe("Finding Todo confirmation quality", () => {
+  it.each([false, true])("keeps the real create response reuse flag %s through the client", async (reused) => {
+    const existing = workTodo();
+    const client = createWorkReviewApi(vi.fn(async () => Response.json({ todo: existing, reused }, { status: reused ? 200 : 201 })));
+    const result = await client.createTodoFromFinding("wrm_1", "finding_action", {
+      operationKey: "projection_response_test", title: existing.title, kind: "self", ownerLabel: null,
+      notes: null, currentDueDate: null, myDayDate: null, isImportant: false, ownershipOverrideConfirmed: false
+    });
+    expect(result).toEqual({ todo: existing, reused });
+  });
+  it("keeps edits when a parent rebuilds the same Finding and resets only after cancel and reopen", () => {
+    const source = finding();
+    const props = { finding: source, initialKind: "self" as const, mode: "projection" as const, onClose: vi.fn(), onSubmit: vi.fn(), open: true, today: "2026-09-14" };
+    const view = render(<WorkTodoDialog {...props} />);
+    const initialTitle = (screen.getByLabelText("标题") as HTMLInputElement).value;
+    fireEvent.change(screen.getByLabelText("标题"), { target: { value: "本次编辑标题" } });
+    fireEvent.change(screen.getByLabelText("备注"), { target: { value: "本次编辑备注" } });
+    view.rerender(<WorkTodoDialog {...props} finding={{ ...source, evidence: [...source.evidence] }} />);
+    expect(screen.getByLabelText("标题")).toHaveValue("本次编辑标题");
+    expect(screen.getByLabelText("备注")).toHaveValue("本次编辑备注");
+    view.rerender(<WorkTodoDialog {...props} open={false} />);
+    view.rerender(<WorkTodoDialog {...props} />);
+    expect(screen.getByLabelText("标题")).toHaveValue(initialTitle);
+    expect(screen.getByLabelText("备注")).toHaveValue(source.body);
+  });
+  function renderActions(source: WorkMeetingFinding, overrides: Partial<WorkReviewApi> = {}) {
+    const client = api(detail(), overrides);
+    const onOpenTodo = vi.fn();
+    const onCreated = vi.fn();
+    render(<WorkFindingTodoActions api={client} finding={source} linkedTodo={null} meetingId="wrm_1" onCreated={onCreated} onOpenTodo={onOpenTodo} projectionEnabled />);
+    return { client, onOpenTodo, onCreated };
+  }
+
+  it("shows source qualifications and leaves uncertain owner and date empty without guessing from raw date text", async () => {
+    const { client } = renderActions(finding({ body: "核对清单；负责人待确认；截止时间待确认", originalDueExpression: "下周五前" }));
+    fireEvent.click(screen.getByRole("button", { name: "设为等待他人" }));
+    expect(screen.getByLabelText("负责人或等待对象")).toHaveValue("");
+    expect(screen.getByLabelText("当前计划日期")).toHaveValue("");
+    expect(screen.getByText("来源负责人：未确认")).toBeVisible();
+    expect(screen.getByText("原始日期表述：下周五前")).toBeVisible();
+    expect(screen.getByText("来源日期：待确认，不预填计划日期")).toBeVisible();
+    fireEvent.submit(document.getElementById("work-todo-editor")!);
+    expect(await screen.findByRole("alert")).toHaveTextContent("请填写负责人或等待对象");
+    expect(client.createTodoFromFinding).not.toHaveBeenCalled();
+  });
+
+  it("keeps a confirmed owner and converts the due instant to the Work Shanghai date", () => {
+    renderActions(finding({ candidateOwner: "负责人甲", dueAt: "2026-09-04T16:30:00.000Z" }));
+    fireEvent.click(screen.getByRole("button", { name: "设为等待他人" }));
+    expect(screen.getByLabelText("负责人或等待对象")).toHaveValue("负责人甲");
+    expect(screen.getByLabelText("当前计划日期")).toHaveValue("2026-09-05");
+    expect(screen.getByText("来源负责人：负责人甲")).toBeVisible();
+  });
+
+  it("submits editable actionable values with no owner/date inference and immediately exposes the saved Todo", async () => {
+    const saved = workTodo({ title: "核对三个发布条件并记录结论", currentDueDate: null });
+    const { client, onCreated, onOpenTodo } = renderActions(finding({ actionBasis: "unowned_follow_up", candidateOwner: null, dueAt: null, originalDueExpression: "之后再确定" }), {
+      createTodoFromFinding: vi.fn().mockResolvedValue({ todo: saved, reused: false })
+    });
+    fireEvent.click(screen.getByRole("button", { name: "加入我的待办" }));
+    fireEvent.change(screen.getByLabelText("标题"), { target: { value: saved.title } });
+    fireEvent.click(screen.getByRole("button", { name: "创建待办" }));
+    await waitFor(() => expect(onCreated).toHaveBeenCalledWith(saved));
+    expect(client.createTodoFromFinding).toHaveBeenCalledWith("wrm_1", "finding_action", expect.objectContaining({ title: saved.title, ownerLabel: null, currentDueDate: null }));
+    expect(screen.queryByRole("button", { name: "加入我的待办" })).not.toBeInTheDocument();
+    expect(screen.getByText(saved.title)).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "查看待办" }));
+    expect(onOpenTodo).toHaveBeenCalledWith(saved.id);
+  });
+
+  it("discloses a reused completed Todo instead of suggesting the new draft replaced it", async () => {
+    const existing = workTodo({ title: "已保存的原待办", status: "completed" });
+    const { onOpenTodo } = renderActions(finding(), { createTodoFromFinding: vi.fn().mockResolvedValue({ todo: existing, reused: true }) });
+    fireEvent.click(screen.getByRole("button", { name: "加入我的待办" }));
+    fireEvent.change(screen.getByLabelText("标题"), { target: { value: "本次新填写的标题" } });
+    fireEvent.click(screen.getByRole("button", { name: "创建待办" }));
+    expect(await screen.findByRole("status")).toHaveTextContent("本次表单不会覆盖已有内容");
+    expect(screen.getByText("关联待办已完成")).toBeVisible();
+    expect(screen.getByText(existing.title)).toBeVisible();
+    expect(screen.queryByText("本次新填写的标题")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "查看待办" }));
+    expect(onOpenTodo).toHaveBeenCalledWith(existing.id);
+  });
+
+  it("locks duplicate submits and closing while the create result is uncertain, then retains the retry key", async () => {
+    let reject!: (reason: unknown) => void;
+    const create = vi.fn<WorkReviewApi["createTodoFromFinding"]>().mockImplementationOnce(() => new Promise((_resolve, fail) => { reject = fail; }))
+      .mockResolvedValue({ todo: workTodo(), reused: false });
+    renderActions(finding(), { createTodoFromFinding: create });
+    fireEvent.click(screen.getByRole("button", { name: "加入我的待办" }));
+    fireEvent.submit(document.getElementById("work-todo-editor")!);
+    fireEvent.submit(document.getElementById("work-todo-editor")!);
+    fireEvent.click(screen.getByRole("button", { name: "关闭" }));
+    expect(screen.getByRole("dialog")).toBeVisible();
+    expect(screen.getByLabelText("标题")).toBeDisabled();
+    expect(screen.getByLabelText("备注")).toBeDisabled();
+    expect(create).toHaveBeenCalledTimes(1);
+    await act(async () => { reject(new TypeError("lost response")); });
+    expect(await screen.findByRole("alert")).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "创建待办" }));
+    await waitFor(() => expect(create).toHaveBeenCalledTimes(2));
+    expect(create.mock.calls[1]![2]).toEqual(create.mock.calls[0]![2]);
+  });
+
+  it.each(["title", "notes"])("requires deliberate shortening of overlong source %s without silently truncating", async (field) => {
+    const long = "待".repeat(field === "title" ? 241 : 5001);
+    const { client } = renderActions(finding(field === "title" ? { title: long, body: long } : { body: long }));
+    fireEvent.click(screen.getByRole("button", { name: "加入我的待办" }));
+    expect(screen.getByLabelText(field === "title" ? "标题" : "备注")).toHaveValue(long);
+    fireEvent.submit(document.getElementById("work-todo-editor")!);
+    expect(await screen.findByRole("alert")).toHaveTextContent(field === "title" ? "标题超过240字" : "备注超过5000字");
+    expect(client.createTodoFromFinding).not.toHaveBeenCalled();
+  });
+  it("retains the original topic and the complete short action with its conditions", () => {
+    const body = "整理迁移清单并标注负责人，仅覆盖本轮已确认的三个模块。";
+    renderActions(finding({ title: "迁移安排", body }));
+    fireEvent.click(screen.getByRole("button", { name: "加入我的待办" }));
+    const title = (screen.getByLabelText("标题") as HTMLInputElement).value;
+    expect(title).toContain("迁移安排");
+    expect(title).toContain(body);
+    expect(screen.getByText("迁移安排")).toBeVisible();
+  });
+  it("does not replace an already actionable title with a short background description", () => {
+    const title = "整理迁移清单并记录三个模块的回滚条件";
+    const body = "这是本轮发布前的准备事项。";
+    renderActions(finding({ title, body }));
+    fireEvent.click(screen.getByRole("button", { name: "加入我的待办" }));
+    const value = (screen.getByLabelText("标题") as HTMLInputElement).value;
+    expect(value).toContain(title);
+    expect(value).toContain(body);
+    expect(screen.getByLabelText("备注")).toHaveValue(body);
+  });
+});
 
 afterEach(() => {
   cleanup();
@@ -303,7 +440,7 @@ describe("WorkMeetingDetailView", () => {
       candidateOwner: "Speaker 1"
     })];
     const createTodoFromFinding = vi.fn<WorkReviewApi["createTodoFromFinding"]>()
-      .mockResolvedValue(workTodo({ sourceActionBasis: "assignment_without_acceptance" }));
+      .mockResolvedValue({ todo: workTodo({ sourceActionBasis: "assignment_without_acceptance" }), reused: false });
 
     render(
       <WorkMeetingDetailView
@@ -343,12 +480,12 @@ describe("WorkMeetingDetailView", () => {
     current.candidates = [];
     current.findings = [finding()];
     const createTodoFromFinding = vi.fn<WorkReviewApi["createTodoFromFinding"]>()
-      .mockResolvedValue(workTodo({
+      .mockResolvedValue({ todo: workTodo({
         projects: [
           { id: alpha.id, name: alpha.name, status: alpha.status, version: alpha.version },
           { id: beta.id, name: beta.name, status: beta.status, version: beta.version }
         ]
-      }));
+      }), reused: false });
     const client = api(current, {
       createTodoFromFinding,
       listProjects: vi.fn().mockResolvedValue([alpha, beta])

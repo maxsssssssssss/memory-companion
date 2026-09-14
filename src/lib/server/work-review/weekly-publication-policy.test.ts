@@ -121,6 +121,86 @@ describe("Work Weekly deterministic publication policy", () => {
   });
 });
 
+describe("Work Weekly supported plan-change arrangements", () => {
+  const text = "为兼容旧客户端，本轮接口切换由整体替换改为分批迁移；出现异常时恢复原路径。";
+  function snapshotWithPlanChange() {
+    const snapshot = workWeeklyTestSnapshot();
+    const finding = snapshot.findings.find((source) => source.sourceRef === WORK_WEEKLY_TEST_REFS.decision)!;
+    finding.kind = "plan_change"; finding.body = text;
+    finding.structuredData = { decisionFinality: null, planStages: [] };
+    snapshot.evidence.find((source) => source.sourceRef === WORK_WEEKLY_TEST_REFS.evidenceDecision)!.text = text;
+    return snapshot;
+  }
+
+  it.each([WORK_WEEKLY_TEST_REFS.decision, WORK_WEEKLY_TEST_REFS.evidenceDecision])(
+    "publishes the verified arrangement and all conditions through source %s", (sourceRef) => {
+      const snapshot = snapshotWithPlanChange(); const before = JSON.stringify(snapshot);
+      const result = applyWorkWeeklyClaimPublicationPolicy({ snapshot,
+        items: item("decision", [sourceRef], text), verdicts: entailed("decision", [sourceRef]) });
+      expect(result).toHaveLength(1);
+      expect(result[0]).toMatchObject({ section: "decisions", text, sourceRefs: [sourceRef] });
+      expect(JSON.stringify(snapshot)).toBe(before);
+    }
+  );
+
+  it.each(["unsupported", "partially_entailed", "entailed"] as const)(
+    "does not override %s with missing qualification merely because the source is a plan change", (verdict) => {
+      const sourceRefs = [WORK_WEEKLY_TEST_REFS.evidenceDecision];
+      const verdicts: WorkWeeklyVerifierItem[] = entailed("decision", sourceRefs);
+      Object.assign(verdicts[0]!, { verdict, issueCodes: ["missing_qualification"] });
+      const claims = item("decision", sourceRefs, "本轮接口切换改为分批迁移。");
+      expect(applyWorkWeeklyClaimPublicationPolicy({ snapshot: snapshotWithPlanChange(), items: claims, verdicts })).toEqual([]);
+    }
+  );
+
+  it.each(["decision", "fact"] as const)("does not turn a tentative plan change into a finalized %s", (claimType) => {
+    const snapshot = snapshotWithPlanChange();
+    snapshot.findings[0]!.body = "暂拟分批迁移，是否执行仍待确认。";
+    snapshot.evidence.find((source) => source.sourceRef === WORK_WEEKLY_TEST_REFS.evidenceDecision)!.text = snapshot.findings[0]!.body;
+    const items = [atomicItem("最终决定采用分批迁移。", { section: "decisions", claims: [{
+      id: "claim_atomic", text: "最终决定采用分批迁移。", claimType, sourceRefs: [WORK_WEEKLY_TEST_REFS.evidenceDecision]
+    }] })];
+    // Even a mistaken positive verdict cannot use plan_change as formal-decision authority.
+    const trace: WorkWeeklyClaimPublicationTrace[] = [];
+    expect(applyWorkWeeklyClaimPublicationPolicy({ snapshot, items, verdicts: verdictsFor(items),
+      onClaims: (rows) => { trace.push(...rows); } })).toEqual([]);
+    expect(trace[0]?.reasonCode).toBe("decision_source_missing");
+  });
+
+  it.each(["proposal", "action_item", "discussion_topic", "open_question"] as const)(
+    "does not treat %s as a supported decision arrangement", (kind) => {
+      const snapshot = snapshotWithPlanChange(); snapshot.findings[0]!.kind = kind;
+      snapshot.findings[0]!.structuredData = { actionBasis: "assignment_without_acceptance" };
+      expect(applyWorkWeeklyClaimPublicationPolicy({ snapshot,
+        items: item("decision", [WORK_WEEKLY_TEST_REFS.evidenceDecision], text),
+        verdicts: entailed("decision", [WORK_WEEKLY_TEST_REFS.evidenceDecision]) })).toEqual([]);
+    }
+  );
+
+  it.each([WORK_WEEKLY_TEST_REFS.dated, WORK_WEEKLY_TEST_REFS.evidenceDated])(
+    "does not borrow an unrelated plan change elsewhere in the snapshot for %s", (sourceRef) => {
+      expect(applyWorkWeeklyClaimPublicationPolicy({ snapshot: snapshotWithPlanChange(),
+        items: item("decision", [sourceRef], text), verdicts: entailed("decision", [sourceRef]) })).toEqual([]);
+    }
+  );
+
+  it("requires plan-change authority in the verifier's supported subset, not just the generated references", () => {
+    expect(applyWorkWeeklyClaimPublicationPolicy({ snapshot: snapshotWithPlanChange(),
+      items: item("decision", [WORK_WEEKLY_TEST_REFS.evidenceDecision, WORK_WEEKLY_TEST_REFS.dated], text),
+      verdicts: entailed("decision", [WORK_WEEKLY_TEST_REFS.dated]) })).toEqual([]);
+  });
+
+  it("preserves explicitly tentative wording when the verifier supports that qualified statement", () => {
+    const snapshot = snapshotWithPlanChange(); const tentative = "暂拟分批迁移，是否执行仍待确认。";
+    snapshot.findings[0]!.body = tentative;
+    snapshot.evidence.find((source) => source.sourceRef === WORK_WEEKLY_TEST_REFS.evidenceDecision)!.text = tentative;
+    const result = applyWorkWeeklyClaimPublicationPolicy({ snapshot,
+      items: item("decision", [WORK_WEEKLY_TEST_REFS.evidenceDecision], tentative),
+      verdicts: entailed("decision", [WORK_WEEKLY_TEST_REFS.evidenceDecision]) });
+    expect(result[0]?.text).toBe(tentative);
+  });
+});
+
 describe("Work Weekly retention gates and stage attribution", () => {
   function compactSnapshot() {
     const snapshot = workWeeklyTestSnapshot();
@@ -219,6 +299,31 @@ describe("Work Weekly retention gates and stage attribution", () => {
     expect(synthesize).toHaveBeenCalledTimes(1); expect(verify).toHaveBeenCalledTimes(1);
     expect(stages.map((entry) => entry.stage)).toEqual(["synthesized", "verified", "published"]);
     expect(stages[2]).toMatchObject({ publicationStatus: "candidate_only", claims: [{ outcome: "published", publishedSortOrder: 0 }] });
+  });
+
+  it("retains coverage when its audited attention claim merges into the exact fact", async () => {
+    const snapshot = compactSnapshot();
+    const text = "来源记录了样本观察，效率提升尚无证据。";
+    const generated = [
+      atomicItem(text, { id: "fact", section: "open_questions" }),
+      atomicItem(text, { id: "attention", section: "next_week", itemType: "suggestion", claims: [{
+        id: "claim_attention", text, claimType: "fact", sourceRefs: [WORK_WEEKLY_TEST_REFS.dated]
+      }] })
+    ];
+    const synthesize = vi.fn(async () => generated);
+    const verify = vi.fn(async (call: Parameters<WorkWeeklyClaimVerifier["verify"]>[0]) => {
+      call.onCoverage?.(fullCoverage(["claim_attention"]));
+      return verdictsFor(generated);
+    });
+    const result = await runWorkWeeklyGenerationPipeline({ accountId: snapshot.accountId, snapshot,
+      synthesizer: { profile: workWeeklyProfile("synthesizer"), synthesize },
+      verifier: { profile: workWeeklyProfile("verifier"), verify } });
+    expect(result).toMatchObject({ status: "verified", quality_assessment: {
+      status: "passed", sourceCount: 1, coveredSourceCount: 1, partialSourceCount: 0
+    }, items: [expect.objectContaining({ section: "open_questions", text })] });
+    expect(result.items).toHaveLength(1);
+    expect(synthesize).toHaveBeenCalledTimes(1);
+    expect(verify).toHaveBeenCalledTimes(1);
   });
 
   it("delivers verified content with needs_review when another key qualification is missing", async () => {
@@ -346,6 +451,53 @@ describe("Work Weekly retention gates and stage attribution", () => {
 });
 
 describe("Work Weekly atomic content quality", () => {
+  it.each([false, true])("merges an exact fact/attention repeat with both references and trace retained (reversed=%s)", (reversed) => {
+    const text = "测试环境参数尚未收到，联调结果未知。";
+    const items = [
+      atomicItem(text, { id: "fact", section: "open_questions", claims: [{
+        id: "claim_fact", text, claimType: "fact", sourceRefs: [WORK_WEEKLY_TEST_REFS.dated]
+      }] }),
+      atomicItem(text, { id: "attention", section: "next_week", itemType: "suggestion", claims: [{
+        id: "claim_attention", text, claimType: "fact", sourceRefs: [WORK_WEEKLY_TEST_REFS.assignment]
+      }] })
+    ];
+    if (reversed) items.reverse();
+    let trace: WorkWeeklyClaimPublicationTrace[] = [];
+    const result = applyWorkWeeklyClaimPublicationPolicy({ snapshot: workWeeklyTestSnapshot(), items,
+      verdicts: verdictsFor(items), onClaims: (value) => { trace = value; } });
+    expect(result).toEqual([expect.objectContaining({ text, section: "open_questions", sortOrder: 0,
+      sourceRefs: [WORK_WEEKLY_TEST_REFS.dated, WORK_WEEKLY_TEST_REFS.assignment].sort() })]);
+    expect(trace).toHaveLength(2);
+    expect(trace.find((entry) => entry.claimId === "claim_fact"))
+      .toMatchObject({ outcome: "published", reasonCode: "accepted", publishedSortOrder: 0 });
+    expect(trace.find((entry) => entry.claimId === "claim_attention"))
+      .toMatchObject({ outcome: "merged", reasonCode: "exact_duplicate", publishedSortOrder: 0 });
+  });
+
+  it("keeps attention with a distinct gap and a separate interpretation stance", () => {
+    const fact = "已完成桌面端检查，移动端验证结果未知。";
+    const attention = "移动端验证结果未知，尚无覆盖移动端的检查记录。";
+    const items = [
+      atomicItem(fact, { id: "fact", section: "in_progress", claims: [{
+        id: "claim_fact", text: fact, claimType: "fact", sourceRefs: [WORK_WEEKLY_TEST_REFS.dated]
+      }] }),
+      atomicItem(attention, { id: "attention", section: "next_week", itemType: "suggestion", claims: [{
+        id: "claim_attention", text: attention, claimType: "fact", sourceRefs: [WORK_WEEKLY_TEST_REFS.dated]
+      }] }),
+      atomicItem(fact, { id: "interpretation", itemType: "interpretation", claims: [{
+        id: "claim_interpretation", text: fact, claimType: "fact", sourceRefs: [WORK_WEEKLY_TEST_REFS.dated]
+      }] })
+    ];
+    let trace: WorkWeeklyClaimPublicationTrace[] = [];
+    const result = applyWorkWeeklyClaimPublicationPolicy({ snapshot: workWeeklyTestSnapshot(), items,
+      verdicts: verdictsFor(items), onClaims: (value) => { trace = value; } });
+    expect(result.map((entry) => entry.text)).toEqual(expect.arrayContaining([
+      fact, `AI建议关注：${attention}`, `根据本周记录，可谨慎理解为：${fact}`
+    ]));
+    expect(result).toHaveLength(3);
+    expect(trace.every((entry) => entry.outcome === "published")).toBe(true);
+  });
+
   it("passes generation context once and does not mistake missing coverage for quality passed", async () => {
     const generated = [atomicItem("观察记录尚未验证效率提升。")];
     const synthesize = vi.fn(async () => generated);

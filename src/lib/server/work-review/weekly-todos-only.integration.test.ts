@@ -9,7 +9,7 @@ import { openWorkReviewDatabase } from "./db";
 import { WorkTodoRepository } from "./todo-repository";
 import { WorkWeeklyService } from "./weekly-service";
 import { createConfiguredWorkWeeklyRunExecutor } from "./weekly-ai-runner";
-import { buildWorkWeeklySynthesisResponseSchema, workWeeklyCompletionClaimSupported } from "./weekly-ai-provider";
+import { adaptWorkWeeklyModelResponse, workWeeklyCompletionClaimSupported } from "./weekly-ai-provider";
 
 const transport = vi.hoisted(() => ({ createClient: vi.fn(), runtimeConfig: vi.fn() }));
 vi.mock("@/lib/server/openai/client", () => ({ createOpenAIClient: transport.createClient }));
@@ -41,6 +41,7 @@ let snapshot: WorkWeeklySourceSnapshot;
 let answer: unknown;
 let claimText: string;
 let requests: WireRequest[];
+let verifierWithoutSupport: boolean;
 
 function fixtureStream(value: unknown) {
   const event = { type: "response.completed", response: {
@@ -57,8 +58,7 @@ function sourceRefs() {
 }
 
 function generated(text: string, section = "overview") {
-  return { items: [{ id: "draft", section, text: "待办系统状态变化", itemType: "evidence_backed_fact",
-    claims: [{ id: "state_change", text, claimType: "fact", sourceRefs: sourceRefs() }] }] };
+  return { items: [{ section, text, claimType: "fact", isInterpretation: false, sourceRefs: sourceRefs() }] };
 }
 
 beforeEach(() => {
@@ -79,6 +79,7 @@ beforeEach(() => {
   claimText = `待办“${title}”在系统中标记完成后重新打开，当前系统状态为未完成；这些操作不证明实际交付。`;
   answer = generated(claimText);
   requests = [];
+  verifierWithoutSupport = false;
   transport.createClient.mockReset();
   transport.runtimeConfig.mockReset().mockResolvedValue({});
   const client = { baseURL, withOptions: vi.fn(), responses: { create: vi.fn((request: WireRequest) => {
@@ -92,7 +93,8 @@ beforeEach(() => {
     expect(claim.sourceRefs).toEqual(sourceRefs());
     expect(user.items[0]!.sources.map((source) => source.sourceKind).sort()).toEqual(["todo", "todo_event", "todo_event"]);
     expect(user.verificationContract.expectedClaimIds).toEqual([claim.id]);
-    return fixtureStream({ items: [{ claimId: claim.id, verdict: "entailed", issueCodes: [], supportedSourceRefs: claim.sourceRefs }],
+    return fixtureStream({ items: [{ claimId: claim.id, verdict: verifierWithoutSupport ? "partial_entailed" : "entailed",
+      issueCodes: verifierWithoutSupport ? ["missing_qualification"] : [], supportedSourceRefs: verifierWithoutSupport ? [] : claim.sourceRefs }],
       disputes: [], coverage: sourceRefs().map((sourceRef) => ({ sourceRef, status: "covered", reasonCode: "covered", claimIds: [claim.id], matches: [] })) });
   }) } };
   client.withOptions.mockReturnValue(client);
@@ -153,7 +155,8 @@ describe("Work Weekly minimal Todo-only generation through Responses and SQLite"
     ["outside week", "待办上周在系统中标记为完成。"]
   ])("still rejects %s in completed even with a real current-week completion reference", (_reason, text) => {
     expect(workWeeklyCompletionClaimSupported(snapshot, sourceRefs(), text)).toBe(false);
-    expect(buildWorkWeeklySynthesisResponseSchema(snapshot).safeParse(generated(text, "completed")).success).toBe(false);
+    expect(() => adaptWorkWeeklyModelResponse({ snapshot, response: generated(text, "completed") }))
+      .toThrow("work_weekly_synthesizer_output_invalid");
   });
 
   it("does not let wording replace a cited current-week completion event", () => {
@@ -164,6 +167,31 @@ describe("Work Weekly minimal Todo-only generation through Responses and SQLite"
     expect(workWeeklyCompletionClaimSupported(noEvents, sourceRefs(), text)).toBe(false);
     const previousWeek = { ...snapshot, todoEvents: snapshot.todoEvents.map((event) => ({ ...event, localDate: "2026-09-13" })) };
     expect(workWeeklyCompletionClaimSupported(previousWeek, sourceRefs(), text)).toBe(false);
+  });
+
+  it.each([false, true])("never publishes zero-safe-item recovery and preserves any old version: previous=%s", async (previous) => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const initial = service.generate(accountId, { ...scope, operationKey: "generate_before_empty_verification", expectedVersion: null });
+    if (previous) {
+      expect(await run(initial.run)).toMatchObject({ state: "published" });
+      const detail = service.getDetail(accountId, initial.review.id);
+      service.updateItem(accountId, initial.review.id, detail.items[0]!.id, { expectedVersion: detail.items[0]!.version,
+        operationKey: "preserve_edit_before_empty_verification", text: "用户补充：核对系统状态，不推断实际交付。" });
+    }
+    const before = service.getDetail(accountId, initial.review.id);
+    const pending = previous ? service.regenerate(accountId, initial.review.id, {
+      expectedVersion: before.review.version, operationKey: "regenerate_without_safe_verdicts"
+    }).run : initial.run;
+    verifierWithoutSupport = true;
+    expect(await run(pending)).toMatchObject({ state: "failed", errorCode: "weekly_generation_no_safe_items" });
+    const after = service.getDetail(accountId, initial.review.id);
+    expect(after.items).toEqual(before.items);
+    expect(after.displayedGeneration).toEqual(before.displayedGeneration);
+    expect(after.review.currentSystemVersion).toBe(previous ? 1 : 0);
+    expect(after.latestGeneration).toMatchObject({ executionStatus: "failed", displayingPreviousVersion: previous,
+      errorCode: "weekly_generation_no_safe_items" });
+    expect(requests).toHaveLength(previous ? 4 : 2);
+    expect(db.pragma("foreign_key_check")).toEqual([]);
   });
 
   it.each(["missing_items", "unknown_field", "invalid_refs"] as const)(
@@ -179,7 +207,7 @@ describe("Work Weekly minimal Todo-only generation through Responses and SQLite"
       const value = generated(claimText);
       answer = failure === "missing_items" ? { results: [] }
         : failure === "unknown_field" ? { items: [{ ...value.items[0], unsupported: "SYNTHETIC_PRIVATE_VALUE" }] }
-          : { items: [{ ...value.items[0], claims: [{ ...value.items[0]!.claims[0], sourceRefs: null }] }] };
+          : { items: [{ ...value.items[0], sourceRefs: null }] };
       const log = vi.spyOn(console, "error").mockImplementation(() => undefined);
       const next = service.regenerate(accountId, initial.review.id, { expectedVersion: before.review.version,
         operationKey: `regenerate_${failure}` });

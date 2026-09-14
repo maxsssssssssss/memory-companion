@@ -10,6 +10,7 @@ import {
   WorkTodoSchema,
   WorkTodoVersionedOperationRequestSchema,
   WorkTodoViewSchema,
+  getWorkTodoFindingDefaults,
   type CreateManualWorkTodoRequest,
   type CreateWorkTodoFromFindingRequest,
   type SetWorkTodoMyDayRequest,
@@ -546,7 +547,7 @@ export class WorkTodoRepository {
         return { todo, reused: true };
       }
       const todoId = this.nextId("wrt");
-      const sourceOwnerLabel = structuredData.candidateOwner ?? structuredData.rawActorLabel;
+      const sourceDefaults = getWorkTodoFindingDefaults({ ...structuredData, body: finding.body });
       this.database.prepare(`
         INSERT INTO wr_todos (
           id, account_id, kind, status, origin, title, notes, owner_label,
@@ -569,8 +570,8 @@ export class WorkTodoRepository {
         findingId,
         finding.version,
         finding.kind,
-        sourceOwnerLabel,
-        structuredData.dueAt,
+        sourceDefaults.sourceOwnerLabel,
+        sourceDefaults.sourceDueAt,
         structuredData.originalDueExpression,
         structuredData.actionBasis,
         now,

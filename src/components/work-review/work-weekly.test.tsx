@@ -374,6 +374,36 @@ describe("Weekly generation polling recovery", () => {
   });
 });
 
+describe("Weekly supplied content semantics", () => {
+  it("preserves formal/tentative decisions, change history and past checkpoints without inferring new facts", async () => {
+    const texts = [
+      "已确定：本轮仅交付检索功能。",
+      "暂定方向：增加导出入口，评审后再决定。",
+      "排期从周三调整至周五，原测试范围保持。",
+      "联调已完成第一轮，剩余两个异常仍在排查。",
+      "截至9月10日，9月9日检查点已过，后续结论尚未确认；建议先核对检查结果。"
+    ];
+    const sections = ["decisions", "decisions", "decisions", "in_progress", "next_week"] as const;
+    const client = api({ getWeeklyReview: vi.fn().mockResolvedValue({
+      review: review(), sourceSummary: summary,
+      items: texts.map((text, index) => item({ id: `wrwi_semantics_${index}`, section: sections[index], systemText: text, sortOrder: index }))
+    }) });
+    renderWeekly(client);
+    expect(await screen.findByText(texts[0])).toBeVisible();
+    for (const text of texts) expect(screen.getByText(text)).toBeVisible();
+    expect(screen.getByRole("heading", { name: "关键决定与变化" })).toBeVisible();
+    expect(screen.getByRole("heading", { name: "仍在进行" })).toBeVisible();
+    expect(screen.getByRole("heading", { name: "AI建议关注" })).toBeVisible();
+    expect(screen.getAllByText("来源已核对")).toHaveLength(5);
+    fireEvent.click(screen.getByRole("button", { name: "复制全文" }));
+    await waitFor(() => expect(navigator.clipboard.writeText).toHaveBeenCalled());
+    const copied = vi.mocked(navigator.clipboard.writeText).mock.calls[0]![0];
+    for (const text of texts) expect(copied).toContain(text);
+    expect(copied).not.toContain("将于9月9日");
+    expect(client.generateWeeklyReview).not.toHaveBeenCalled();
+  });
+});
+
 describe("Work Review Weekly UI", () => {
   it.each(["ready", "failed", "queued"] as const)("preserves displayed partial quality and copy when the latest status is %s", async (status) => {
     const displayedGeneration: WorkWeeklyDisplayedGeneration = {

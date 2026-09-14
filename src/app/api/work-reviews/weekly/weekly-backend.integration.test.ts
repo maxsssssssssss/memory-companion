@@ -207,11 +207,11 @@ async function fixture(needsReview = false) {
     expect(payload).not.toContain("UNCITED_FIXTURE");
     switch (input.profile.role) {
       case "synthesizer": return { items: [
-        { id: "item_1", section: "progress", text: bodyText,
-          itemType: "evidence_backed_fact", claims: [claim] },
-        ...completionClaims.map((completionClaim, index) => ({
-          id: `completed_${index}`, section: "completed", text: completionClaim.text,
-          itemType: "evidence_backed_fact", claims: [completionClaim]
+        { section: "progress", text: claim.text, claimType: claim.claimType,
+          isInterpretation: false, sourceRefs: claim.sourceRefs },
+        ...completionClaims.map((completionClaim) => ({
+          section: "completed", text: completionClaim.text, claimType: completionClaim.claimType,
+          isInterpretation: false, sourceRefs: completionClaim.sourceRefs
         }))
       ] };
       case "verifier": {

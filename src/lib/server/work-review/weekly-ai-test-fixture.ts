@@ -4,8 +4,10 @@ import {
 } from "@/lib/domain/work-weekly";
 
 import type {
+  WorkWeeklyGeneratedItem,
   WorkWeeklyProviderProfile,
-  WorkWeeklyProviderRole
+  WorkWeeklyProviderRole,
+  WorkWeeklySynthesizerModelResponse
 } from "./weekly-ai-provider";
 
 const digest = (character: string) => character.repeat(64);
@@ -286,6 +288,18 @@ export function workWeeklyProfile(role: WorkWeeklyProviderRole): WorkWeeklyProvi
     promptVersion: `test_${role}_prompt_v1`,
     schemaVersion: `test_${role}_schema_v1`
   };
+}
+
+/** Explicitly re-encode historical one-claim test fixtures into the current wire
+ * contract. Summary metadata is not model content; fragmented fixtures must not
+ * silently lose their other claims. Production does not accept the old wire. */
+export function workWeeklyModelResponse(items: WorkWeeklyGeneratedItem[]): WorkWeeklySynthesizerModelResponse {
+  return { items: items.map((item) => {
+    if (item.claims.length !== 1) throw new Error("fixture_requires_one_self_contained_claim");
+    const claim = item.claims[0]!;
+    return { section: item.section, text: claim.text, claimType: claim.claimType,
+      isInterpretation: item.itemType === "interpretation", sourceRefs: [...claim.sourceRefs] };
+  }) };
 }
 
 export { refs as WORK_WEEKLY_TEST_REFS };

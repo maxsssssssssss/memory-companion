@@ -456,6 +456,30 @@ describe("WorkTodoRepository", () => {
     })).toThrow(WorkTodoNotFoundError);
   });
 
+  it("never records a speaker as the source owner when the Finding has no supported owner", () => {
+    const source = seedFinding({ actionBasis: "unowned_follow_up" });
+    const metadata = { ...source.structuredData, candidateOwner: null, rawActorLabel: "Speaker 2", dueAt: null,
+      originalDueExpression: null };
+    database.prepare("UPDATE wr_findings SET structured_data_json = ? WHERE id = ?")
+      .run(JSON.stringify(metadata), source.findingId);
+    const result = projectFinding(source, { operationKey: "speaker_is_not_owner", ownerLabel: null, currentDueDate: null });
+    expect(result.todo).toMatchObject({ ownerLabel: null, sourceOwnerLabel: null, currentDueDate: null,
+      sourceOriginalDueAt: null, sourceActionBasis: "unowned_follow_up" });
+  });
+
+  it("keeps optional source confirmation separate from a user's explicitly chosen Todo owner and date", () => {
+    const source = seedFinding({ actionBasis: "suggested_action" });
+    database.prepare("UPDATE wr_findings SET body = ? WHERE id = ?")
+      .run("建议整理清单；负责人待确认；截止时间待确认", source.findingId);
+    const result = projectFinding(source, { operationKey: "personal_follow_up", kind: "waiting_for_other",
+      ownerLabel: "用户指定的对接人", currentDueDate: "2026-09-18" });
+    expect(result.todo).toMatchObject({ ownerLabel: "用户指定的对接人", currentDueDate: "2026-09-18",
+      sourceOwnerLabel: null, sourceOriginalDueAt: null, sourceOriginalDueExpression: source.structuredData.originalDueExpression,
+      sourceActionBasis: "suggested_action" });
+    expect(database.prepare("SELECT body, structured_data_json FROM wr_findings WHERE id = ?").get(source.findingId))
+      .toEqual({ body: "建议整理清单；负责人待确认；截止时间待确认", structured_data_json: JSON.stringify(source.structuredData) });
+  });
+
   it("resolves only minimal canonical source context and reports later Finding versions", () => {
     const source = seedFinding({ kind: "commitment" });
     const projected = projectFinding(source).todo;

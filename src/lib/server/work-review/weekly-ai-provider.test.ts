@@ -84,16 +84,11 @@ describe("Work Weekly AI providers", () => {
       captured = JSON.stringify(input.requestInput);
       return {
         items: [{
-          id: "item_1",
           section: "decisions",
-          text: "模型自由文本不会直接发布",
-          itemType: "evidence_backed_fact",
-          claims: [{
-            id: "claim_1",
-            text: "选择了方案 B",
-            claimType: "decision",
-            sourceRefs: ["work:finding:outside_scope"]
-          }]
+          text: "选择了方案 B",
+          claimType: "decision",
+          isInterpretation: false,
+          sourceRefs: ["work:finding:outside_scope"]
         }]
       };
     });
@@ -105,10 +100,11 @@ describe("Work Weekly AI providers", () => {
       .rejects.toThrow("work_weekly_source_not_allowlisted");
     expect(request).toHaveBeenCalledTimes(1);
     const instruction = request.mock.calls[0][0].jsonInstruction;
-    for (const value of [...WorkWeeklySectionKindSchema.options, ...WorkWeeklyClaimTypeSchema.options,
-      "evidence_backed_fact", "interpretation", "suggestion"]) {
+    for (const value of [...WorkWeeklySectionKindSchema.options, ...WorkWeeklyClaimTypeSchema.options]) {
       expect(instruction).toContain(JSON.stringify(value));
     }
+    expect(instruction).toContain("isInterpretation");
+    expect(instruction).not.toContain('"itemType"');
     expect(captured).toContain(snapshot.inputPackDigest);
     expect(captured).toContain(WORK_WEEKLY_TEST_REFS.decision);
     expect(captured).not.toContain("Daily Reflection");
@@ -154,6 +150,40 @@ describe("Work Weekly AI providers", () => {
     for (const verdict of WorkWeeklyClaimVerdictSchema.options) {
       expect(instruction).toContain(JSON.stringify(verdict));
     }
+  });
+
+  it("keeps the selected historical observation scope in both requests regardless of the wall clock", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2040-01-15T00:00:00.000Z"));
+    try {
+      const snapshot = workWeeklyTestSnapshot();
+      const before = JSON.stringify(snapshot);
+      const source = snapshot.findings.find((finding) => finding.sourceRef === WORK_WEEKLY_TEST_REFS.dated)!;
+      const request = vi.fn(async (_input: Parameters<WorkWeeklyStructuredJsonRequest>[0]) => ({ items: [{
+        section: "open_questions", text: source.body, claimType: "fact",
+        isInterpretation: false, sourceRefs: [source.sourceRef]
+      }] }));
+      const generated = await createStructuredWorkWeeklySynthesizer({
+        profile: workWeeklyProfile("synthesizer"), requestStructuredJson: request
+      }).synthesize({ accountId: snapshot.accountId, snapshot });
+      const claims = generated.flatMap((item) => item.claims);
+      const verificationRequest = vi.fn(async (_input: Parameters<WorkWeeklyStructuredJsonRequest>[0]) => ({
+        items: claims.map((claim) => ({ claimId: claim.id, verdict: "entailed", issueCodes: [], supportedSourceRefs: claim.sourceRefs }))
+      }));
+      await createStructuredWorkWeeklyClaimVerifier({ profile: workWeeklyProfile("verifier"),
+        requestStructuredJson: verificationRequest }).verify({ accountId: snapshot.accountId, snapshot, claims, items: generated });
+      const packs = [request, verificationRequest].map((call) => {
+        const messages = call.mock.calls[0]![0].requestInput as Array<{ role: string; content: string }>;
+        return JSON.parse(messages.find((message) => message.role === "user")!.content);
+      });
+      expect(packs.map((pack) => pack.scope)).toEqual([snapshot.scope, snapshot.scope]);
+      expect(packs[0].sources.find((record: { sourceRef: string }) => record.sourceRef === source.sourceRef).value).toEqual(source);
+      expect(packs[1].items[0].sources.map((record: { sourceRef: string }) => record.sourceRef)).toEqual([source.sourceRef]);
+      expect(JSON.stringify(packs)).not.toContain("2040-01-15");
+      expect(JSON.stringify(snapshot)).toBe(before);
+      expect(request).toHaveBeenCalledTimes(1);
+      expect(verificationRequest).toHaveBeenCalledTimes(1);
+    } finally { vi.useRealTimers(); }
   });
 
   it("requires exactly one verifier verdict per claim", () => {
@@ -418,9 +448,9 @@ describe("Weekly explicit semantic coverage and usable quality", () => {
     }
     const texts = options.rejectedOnly ? ["全部联调完成。"] : ["两批样本已联调，第三批仍在排查超时。",
       ...(options.redundant ? ["全部联调完成。"] : [])];
-    const synthesis = vi.fn(async () => ({ items: texts.map((text, i) => ({
-      id: `i${i}`, section: "in_progress", itemType: "evidence_backed_fact", text,
-      claims: [{ id: `c${i}`, text, claimType: "fact", sourceRefs: [WORK_WEEKLY_TEST_REFS.dated] }]
+    const synthesis = vi.fn(async () => ({ items: texts.map((text) => ({
+      section: "in_progress", text, claimType: "fact", isInterpretation: false,
+      sourceRefs: [WORK_WEEKLY_TEST_REFS.dated]
     })) }));
     const verify = vi.fn(async (input: Parameters<WorkWeeklyStructuredJsonRequest>[0]) => {
       const messages = input.requestInput as Array<{ role: string; content: string }>;

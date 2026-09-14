@@ -23,7 +23,7 @@ import {
   type WorkWeeklyVerificationAuditDetails
 } from "./weekly-ai-provider";
 
-export const WORK_WEEKLY_PUBLICATION_POLICY_VERSION = "work_weekly_publication_v6" as const;
+export const WORK_WEEKLY_PUBLICATION_POLICY_VERSION = "work_weekly_publication_v9" as const;
 
 export type WorkWeeklyQualityAssessment = {
   status: "passed" | "needs_review" | "insufficient";
@@ -192,11 +192,15 @@ function hasDisguisedHighRiskClaim(claim: WorkWeeklyGeneratedClaim) {
   const affirmative = claim.text.replace(
     /(?:尚未|还未|并未|未|不|没有|无|是否|待)(?:明确)?(?:承诺|决定|确认|接受|完成)/gu, ""
   );
+  // Match the frequency word, not a character overlap such as 汇总 + 是否.
+  const always = /总是/u.test(affirmative) && Array.from(
+    new Intl.Segmenter("zh", { granularity: "word" }).segment(affirmative)
+  ).some(({ segment }) => segment === "总是");
   return /承诺(?:负责|完成|交付|跟进|检查|采用)|明确接受(?:负责|完成|交付)|答应负责/u.test(affirmative)
     || /(?:已|已经)(?:实际|现实)(?:履行|交付)/u.test(affirmative)
     || /截止(?:日期|时间)(?:是|为)|必须.{0,24}(?:之前|前)完成/u.test(affirmative)
     || /导致|因此|所以/u.test(affirmative)
-    || /反复|总是|从未|历史上第一次/u.test(affirmative);
+    || /反复|从未|历史上第一次/u.test(affirmative) || always;
 }
 
 function confirmedPersonSource(snapshot: WorkWeeklySourceSnapshot, refs: string[]) {
@@ -225,9 +229,14 @@ function projectClaim(input: {
     source.sourceKind === "meeting" || source.sourceKind === "project"
   )) return reject("source_not_allowed");
   if (hasDisguisedHighRiskClaim(claim)) return reject("claim_type_mismatch");
-  const hasDecisionSource = linkedFindings(snapshot, refs).some((finding) => finding.kind === "decision");
+  const claimFindings = linkedFindings(snapshot, refs);
+  const hasDecisionSource = claimFindings.some((finding) => finding.kind === "decision");
+  const hasPlanChangeSource = claimFindings.some((finding) => finding.kind === "plan_change");
   const explicitDecision = /最终决定|已经定案|已定案|(?:决定|拍板|敲定)(?:采用|上线|执行|实施|取消|停止|提供|不提供|改为)/u.test(claim.text);
-  if ((claim.claimType === "decision" || explicitDecision) && !hasDecisionSource) return reject("decision_source_missing");
+  // A verified plan change can describe an arrangement in the decision category;
+  // it is not authority for an explicit claim that a decision has been finalized.
+  if ((claim.claimType === "decision" && !hasDecisionSource && !hasPlanChangeSource)
+    || (explicitDecision && !hasDecisionSource)) return reject("decision_source_missing");
   switch (claim.claimType) {
     case "decision": {
       // Finality and necessary qualifications are semantic verifier judgments;
@@ -273,6 +282,12 @@ function projectClaim(input: {
 
 function exactTextKey(text: string) {
   return text.replace(/\s+/gu, " ").trim();
+}
+
+function exactPublicationKey(item: WorkWeeklyGeneratedItem, text: string) {
+  // An identical attention claim adds nothing to an already published fact.
+  // Interpretation has an explicit cautious stance and must retain it.
+  return `${item.itemType === "interpretation" ? "interpretation" : "fact"}:${exactTextKey(text)}`;
 }
 
 function mergeExactClaims(claims: SafeClaim[]) {
@@ -321,9 +336,11 @@ export function applyWorkWeeklyClaimPublicationPolicy(input: {
   const published: Array<WorkWeeklyPublishedItemInput & { sourceItemId: string }> = [];
   const seenFacts = new Map<string, SafeClaim>();
   const candidates: Array<{ item: WorkWeeklyGeneratedItem; claims: SafeClaim[] }> = [];
-  // Prefer a specific section over an overview repeating exactly the same fact.
+  // Prefer a specific fact, then its overview, over an identical attention claim.
+  const sectionPriority = (item: WorkWeeklyGeneratedItem) =>
+    item.section === "next_week" ? 2 : item.section === "overview" ? 1 : 0;
   const orderedItems = [...parsed.data.items].sort((a, b) =>
-    Number(a.section === "overview") - Number(b.section === "overview")
+    sectionPriority(a) - sectionPriority(b)
   );
   for (const item of orderedItems) {
     if (item.section === "next_week" && item.claims.length !== 1) {
@@ -361,7 +378,7 @@ export function applyWorkWeeklyClaimPublicationPolicy(input: {
       continue;
     }
     const safeClaims = mergeExactClaims(independent).filter((claim) => {
-      const key = `${item.section === "next_week" ? "attention" : "fact"}:${exactTextKey(claim.text)}`;
+      const key = exactPublicationKey(item, claim.text);
       const previous = seenFacts.get(key);
       if (previous) {
         previous.sourceRefs = [...new Set([...previous.sourceRefs, ...claim.sourceRefs])].sort();
@@ -401,9 +418,9 @@ export function applyWorkWeeklyClaimPublicationPolicy(input: {
   for (const entry of trace) {
     if (entry.reasonCode !== "invalid_contract") continue;
     const original = generatedClaims.find((claim) => claim.id === entry.claimId)!;
+    const originalItem = parsed.data.items.find((item) => item.id === entry.itemId)!;
     const holder = candidates.find(({ item, claims }) =>
-      (item.section === "next_week") === (entry.section === "next_week")
-      && claims.some((claim) => exactTextKey(claim.text) === exactTextKey(original.text)));
+      claims.some((claim) => exactPublicationKey(item, claim.text) === exactPublicationKey(originalItem, original.text)));
     const order = published.findIndex((item) => item.sourceItemId === holder?.item.id);
     if (order < 0 || !holder) { entry.reasonCode = "item_output_invalid"; continue; }
     entry.outcome = holder.claims.some((claim) => claim.claimId === entry.claimId) ? "published" : "merged";

@@ -19,23 +19,19 @@ import {
   createStructuredWorkWeeklySynthesizer,
   requestWorkWeeklyStructuredJson,
   resolveWorkWeeklyProviderProfile,
-  WorkWeeklySynthesizerResponseSchema
+  WorkWeeklyClaimTypeSchema,
+  WorkWeeklySynthesizerModelResponseSchema
 } from "./weekly-ai-provider";
 import { WORK_WEEKLY_TEST_REFS, workWeeklyTestSnapshot } from "./weekly-ai-test-fixture";
 
 const TOKENHUB_BASE_URL = "https://tokenhub.vision-intelligence.tech/v1";
 const finalAnswer = {
   items: [{
-    id: "item_decision",
     section: "decisions",
     text: "采用方案 B",
-    itemType: "evidence_backed_fact",
-    claims: [{
-      id: "claim_decision",
-      text: "采用方案 B",
-      claimType: "decision",
-      sourceRefs: ["work:finding:decision"]
-    }]
+    claimType: "decision",
+    isInterpretation: false,
+    sourceRefs: ["work:finding:decision"]
   }]
 };
 
@@ -78,7 +74,7 @@ function request(model = "deepseek-v4-pro") {
   });
   return requestWorkWeeklyStructuredJson({
     profile,
-    schema: WorkWeeklySynthesizerResponseSchema,
+    schema: WorkWeeklySynthesizerModelResponseSchema,
     requestInput: "Fictional local weekly source pack.",
     jsonInstruction: "Return the weekly items as JSON."
   });
@@ -90,47 +86,97 @@ beforeEach(() => {
 });
 
 describe("Work Weekly TokenHub transport", () => {
-  it("assigns unique verifier IDs without changing claims or source references", async () => {
-    const wireItems = [WORK_WEEKLY_TEST_REFS.decision, WORK_WEEKLY_TEST_REFS.proposal].map((ref, index) => ({
-      ...finalAnswer.items[0], id: "same_item", text: `来源事实 ${index + 1}`,
-      claims: [{ ...finalAnswer.items[0].claims[0], id: "same_claim", text: `原始事实 ${index + 1}`, sourceRefs: [ref] }]
-    }));
-    clientFixture(TOKENHUB_BASE_URL, [{ type: "response.completed", response: {
+  function synthesize(wires: unknown[], snapshot = workWeeklyTestSnapshot()) {
+    const fixture = clientFixture(TOKENHUB_BASE_URL, [{ type: "response.completed", response: {
       ...completedResponse, output: [{ type: "message", role: "assistant",
-        content: [{ type: "output_text", text: JSON.stringify({ items: wireItems }) }] }]
+        content: [{ type: "output_text", text: JSON.stringify({ items: wires }) }] }]
     } }]);
-    const synthesizer = createStructuredWorkWeeklySynthesizer({
+    const result = createStructuredWorkWeeklySynthesizer({
       profile: resolveWorkWeeklyProviderProfile("synthesizer", { WORK_REVIEW_WEEKLY_SYNTHESIZER_MODEL: "deepseek-v4-pro" })
-    });
-    const items = await synthesizer.synthesize({ accountId: "account_a", snapshot: workWeeklyTestSnapshot() });
-    expect(new Set(items.map((item) => item.id)).size).toBe(2);
-    expect(new Set(items.flatMap((item) => item.claims.map((claim) => claim.id))).size).toBe(2);
+    }).synthesize({ accountId: snapshot.accountId, snapshot });
+    return { fixture, result };
+  }
+
+  it("maps the five-field model contract without guessing stance or losing qualifications", async () => {
+    const snapshot = workWeeklyTestSnapshot();
+    const wires = [
+      { ...finalAnswer.items[0], section: "open_questions", claimType: "fact", isInterpretation: false,
+        text: "提议观察确认率；只有采集可行且不涉及敏感正文时考虑，没有指定负责人或日期。",
+        sourceRefs: [WORK_WEEKLY_TEST_REFS.evidenceProposal] },
+      { ...finalAnswer.items[0], section: "overview", claimType: "fact", isInterpretation: true,
+        text: "来源记录的安排仍有待观察。", sourceRefs: [WORK_WEEKLY_TEST_REFS.dated] },
+      ...[false, true].map((isInterpretation) => ({ ...finalAnswer.items[0], section: "next_week", claimType: "fact",
+        text: "记录中的日期尚无截止依据。", isInterpretation, sourceRefs: [WORK_WEEKLY_TEST_REFS.dated] }))
+    ];
+    const before = JSON.stringify({ wires, snapshot });
+    expect(WorkWeeklySynthesizerModelResponseSchema.safeParse({ items: wires }).success).toBe(true);
+    const { fixture, result } = synthesize(wires, snapshot);
+    const items = await result;
+    expect(items.map((item) => item.itemType)).toEqual(["evidence_backed_fact", "interpretation", "suggestion", "suggestion"]);
+    expect(items.map((item) => item.id)).toEqual(["item_001", "item_002", "item_003", "item_004"]);
+    expect(new Set(items.flatMap((item) => item.claims.map((claim) => claim.id))).size).toBe(4);
     items.forEach((item, index) => {
-      expect(item.text).toBe(wireItems[index].text);
-      expect(item.claims[0]).toMatchObject({ text: wireItems[index].claims[0].text,
-        claimType: wireItems[index].claims[0].claimType, sourceRefs: wireItems[index].claims[0].sourceRefs });
+      expect(item.text).toBe(wires[index].text);
+      expect(item.claims).toEqual([{ id: `claim_${String(index + 1).padStart(3, "0")}_001`,
+        text: wires[index].text, claimType: wires[index].claimType, sourceRefs: wires[index].sourceRefs }]);
     });
+    expect(JSON.stringify({ wires, snapshot })).toBe(before);
+    expect(fixture.create).toHaveBeenCalledTimes(1);
   });
 
-  it("does not repair missing, empty, oversized or non-string model IDs", async () => {
-    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
-    try {
-      for (const invalidId of [undefined, "", " ", "x".repeat(513), 123]) {
-        const item = { ...finalAnswer.items[0], claims: [{ ...finalAnswer.items[0].claims[0],
-          id: invalidId, sourceRefs: [WORK_WEEKLY_TEST_REFS.decision] }] };
-        const fixture = clientFixture(TOKENHUB_BASE_URL, [{ type: "response.completed", response: {
-          ...completedResponse, output: [{ type: "message", role: "assistant",
-            content: [{ type: "output_text", text: JSON.stringify({ items: [item] }) }] }]
-        } }]);
-        const synthesizer = createStructuredWorkWeeklySynthesizer({
-          profile: resolveWorkWeeklyProviderProfile("synthesizer", { WORK_REVIEW_WEEKLY_SYNTHESIZER_MODEL: "deepseek-v4-pro" })
-        });
-        await expect(synthesizer.synthesize({ accountId: "account_a", snapshot: workWeeklyTestSnapshot() }))
-          .rejects.toMatchObject({ code: "work_weekly_provider_schema_invalid" });
-        expect(fixture.create).toHaveBeenCalledTimes(1);
-      }
-    } finally { consoleError.mockRestore(); }
+  it.each(WorkWeeklyClaimTypeSchema.options)("preserves semantic claimType %s for the existing verifier", async (claimType) => {
+    const wire = { ...finalAnswer.items[0], section: "overview", claimType };
+    const { fixture, result } = synthesize([wire]);
+    expect((await result)[0].claims[0]).toMatchObject({ claimType, text: wire.text, sourceRefs: wire.sourceRefs });
+    expect(fixture.create).toHaveBeenCalledTimes(1);
   });
+
+  it.each([
+    "missing_boolean", "string_boolean", "null_boolean", "missing_text", "empty_text", "oversized_text",
+    "missing_claim_type", "unknown_claim_type", "unknown_section", "empty_refs", "invalid_refs",
+    "model_id", "item_type", "nested_claims", "second_summary"
+  ])("strictly rejects malformed model wire without repair: %s", async (failure) => {
+    const wire: Record<string, unknown> = { ...finalAnswer.items[0] };
+    if (failure === "missing_boolean") delete wire.isInterpretation;
+    if (failure === "string_boolean") wire.isInterpretation = "false";
+    if (failure === "null_boolean") wire.isInterpretation = null;
+    if (failure === "missing_text") delete wire.text;
+    if (failure === "empty_text") wire.text = " ";
+    if (failure === "oversized_text") wire.text = "x".repeat(20_001);
+    if (failure === "missing_claim_type") delete wire.claimType;
+    if (failure === "unknown_claim_type") wire.claimType = "proposal";
+    if (failure === "unknown_section") wire.section = "decision";
+    if (failure === "empty_refs") wire.sourceRefs = [];
+    if (failure === "invalid_refs") wire.sourceRefs = null;
+    if (failure === "model_id") wire.id = "model_item";
+    if (failure === "item_type") wire.itemType = "evidence_backed_fact";
+    if (failure === "nested_claims") wire.claims = [{ id: "c", text: "detached qualification" }];
+    if (failure === "second_summary") wire.summary = "a different claim";
+    const log = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const { fixture, result } = synthesize([wire]);
+      await expect(result).rejects.toMatchObject({ code: "work_weekly_provider_schema_invalid" });
+      expect(fixture.create).toHaveBeenCalledTimes(1);
+    } finally { log.mockRestore(); }
+  });
+
+  it.each(["duplicate_refs", "foreign_ref", "unsupported_completed", "legacy_wire"])(
+    "retains internal validation and allowlist boundaries after decoding: %s", async (failure) => {
+      let wire: Record<string, unknown> = { ...finalAnswer.items[0] };
+      if (failure === "duplicate_refs") wire.sourceRefs = [...finalAnswer.items[0].sourceRefs, ...finalAnswer.items[0].sourceRefs];
+      if (failure === "foreign_ref") wire.sourceRefs = ["work:finding:outside_scope"];
+      if (failure === "unsupported_completed") wire.section = "completed";
+      if (failure === "legacy_wire") wire = { id: "old_item", section: "decisions", text: "old summary", itemType: "evidence_backed_fact",
+        claims: [{ id: "old_claim", text: "采用方案 B", claimType: "decision", sourceRefs: [WORK_WEEKLY_TEST_REFS.decision] }] };
+      const log = vi.spyOn(console, "error").mockImplementation(() => {});
+      try {
+        const { fixture, result } = synthesize([wire]);
+        await expect(result).rejects.toMatchObject({ code: failure === "foreign_ref" ? "work_weekly_source_not_allowlisted"
+          : failure === "legacy_wire" ? "work_weekly_provider_schema_invalid" : "work_weekly_synthesizer_output_invalid" });
+        expect(fixture.create).toHaveBeenCalledTimes(1);
+      } finally { log.mockRestore(); }
+    }
+  );
 
   it("parses final SSE JSON with none reasoning and no retry for TokenHub DeepSeek Pro", async () => {
     const fixture = clientFixture(TOKENHUB_BASE_URL, [
@@ -249,7 +295,7 @@ describe("Work Weekly TokenHub transport", () => {
         profile: resolveWorkWeeklyProviderProfile("synthesizer", {
           WORK_REVIEW_WEEKLY_SYNTHESIZER_MODEL: "deepseek-v4-pro"
         }),
-        schema: WorkWeeklySynthesizerResponseSchema,
+        schema: WorkWeeklySynthesizerModelResponseSchema,
         requestInput: privateInput,
         jsonInstruction: "Return the weekly items as JSON."
       })).rejects.toMatchObject({

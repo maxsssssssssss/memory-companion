@@ -9,7 +9,7 @@ import {
   type WorkWeeklyGeneratedClaim, type WorkWeeklyGeneratedItem,
   type WorkWeeklyStructuredJsonRequest, type WorkWeeklyVerifierItem
 } from "./weekly-ai-provider";
-import { workWeeklyProfile, workWeeklyTestSnapshot } from "./weekly-ai-test-fixture";
+import { workWeeklyModelResponse, workWeeklyProfile, workWeeklyTestSnapshot } from "./weekly-ai-test-fixture";
 import { applyWorkWeeklyClaimPublicationPolicy, runWorkWeeklyGenerationPipeline } from "./weekly-publication-policy";
 import {
   answerWorkWeeklyQuestion, createStructuredWorkWeeklyQaAnswerer,
@@ -85,7 +85,7 @@ function systemText(request: Parameters<WorkWeeklyStructuredJsonRequest>[0]) {
 }
 function generation(items: Item[]) {
   const request = vi.fn<WorkWeeklyStructuredJsonRequest>(async (input) => {
-    if (input.profile.role === "synthesizer") return { items };
+    if (input.profile.role === "synthesizer") return workWeeklyModelResponse(items);
     const payload = packet<{ items: Array<{ claim: Claim }>; coverageSources: Array<{ source: { sourceRef: string }; sourceText: string }> }>(input);
     return { items: payload.items.map(({ claim }) => verdict(claim)), disputes: [],
       coverage: payload.coverageSources.map(({ source: { sourceRef }, sourceText }) => {
@@ -270,7 +270,7 @@ describe("10/11 actual prompt envelope and semantic section verdicts", () => {
     const synth = providers.request.mock.calls[0]![0];
     const verify = providers.request.mock.calls[1]![0];
     expect(synth.schema).not.toBe(WorkWeeklySynthesizerResponseSchema);
-    expect(synth.schema.safeParse({ items }).success).toBe(true);
+    expect(synth.schema.safeParse(workWeeklyModelResponse(items)).success).toBe(true);
     const fragmented = { items: [item("attention", [claim("a", "导出权限范围尚未确认。"),
       claim("b", "导出权限审批入口尚未提供。", 1)], "next_week", "导出权限")] };
     expect(WorkWeeklySynthesizerResponseSchema.safeParse(fragmented).success).toBe(true);
@@ -324,7 +324,8 @@ describe("10/11 actual prompt envelope and semantic section verdicts", () => {
   });
   it("keeps strict DTO fields and section/itemType constraints without free-text fallback", async () => {
     const sources = snapshot(exportFinding);
-    const request = vi.fn<WorkWeeklyStructuredJsonRequest>().mockResolvedValue({ items: [{ ...item("i", [claim("c", "权限未决。")]), quote: "fabricated" }] });
+    const modelResponse = workWeeklyModelResponse([item("i", [claim("c", "权限未决。")])]);
+    const request = vi.fn<WorkWeeklyStructuredJsonRequest>().mockResolvedValue({ items: [{ ...modelResponse.items[0], quote: "fabricated" }] });
     const synthesizer = createStructuredWorkWeeklySynthesizer({ profile: workWeeklyProfile("synthesizer"), requestStructuredJson: request });
     await expect(synthesizer.synthesize({ accountId: sources.accountId, snapshot: sources })).rejects.toThrow("work_weekly_synthesizer_output_invalid");
     expect(request).toHaveBeenCalledTimes(1);

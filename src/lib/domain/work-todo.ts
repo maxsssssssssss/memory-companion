@@ -43,6 +43,40 @@ export const WorkTodoNotesSchema = z.string().max(5_000);
 export const WorkTodoOwnerLabelSchema = z.string().trim().min(1).max(512);
 export const WorkTodoDateSchema = WorkReviewDateSchema;
 
+/** Defaults derived from an existing Finding, not new ownership or deadline evidence. */
+export function getWorkTodoFindingDefaults(input: {
+  title?: string;
+  body: string;
+  candidateOwner?: string | null;
+  dueAt?: string | null;
+  originalDueExpression?: string | null;
+  actionBasis?: string | null;
+}) {
+  // Neither field guarantees action semantics. Keep both complete source
+  // expressions when they fit; never replace an action title with background
+  // prose or truncate a condition to make a generated title fit.
+  const originalTitle = input.title?.trim() ?? "";
+  const body = input.body.trim();
+  const combinedTitle = [...new Set([originalTitle, body].filter(Boolean))].join("：");
+  const title = WorkTodoTitleSchema.safeParse(combinedTitle).success ? combinedTitle : originalTitle;
+  // Publication appends standalone confirmation notes using `；`. A mention
+  // inside ordinary prose is not that note and must not erase supported fields.
+  const notes = new Set(input.body.split(/[；\n]/u).map((part) => part.trim()));
+  const ownerNeedsConfirmation = notes.has("负责人待确认") || input.actionBasis === "unowned_follow_up";
+  const dueNeedsConfirmation = notes.has("截止时间待确认")
+    || (!input.dueAt && Boolean(input.originalDueExpression));
+  const owner = WorkTodoOwnerLabelSchema.safeParse(input.candidateOwner);
+  const dueAt = WorkReviewIsoDateTimeSchema.safeParse(input.dueAt);
+  const sourceOwnerLabel = !ownerNeedsConfirmation && owner.success ? owner.data : null;
+  const sourceDueAt = !dueNeedsConfirmation && dueAt.success ? dueAt.data : null;
+  const dateParts = sourceDueAt === null ? null : new Intl.DateTimeFormat("en-US", {
+    timeZone: "Asia/Shanghai", year: "numeric", month: "2-digit", day: "2-digit"
+  }).formatToParts(new Date(sourceDueAt));
+  const currentDueDate = dateParts === null ? null : ["year", "month", "day"]
+    .map((type) => dateParts.find((part) => part.type === type)!.value).join("-");
+  return { title, sourceOwnerLabel, sourceDueAt, currentDueDate, ownerNeedsConfirmation, dueNeedsConfirmation };
+}
+
 const OptionalNullableNotesSchema = z.union([WorkTodoNotesSchema, z.null()])
   .optional()
   .transform((value) => value === undefined || value === "" ? null : value);

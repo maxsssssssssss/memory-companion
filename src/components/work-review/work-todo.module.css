@@ -115,7 +115,9 @@
 
 .sourceNotice {
   display: grid;
+  min-width: 0;
   gap: 3px;
+  overflow-wrap: anywhere;
   background: var(--db-accent-soft);
   color: var(--db-text-secondary);
 }
@@ -343,6 +345,8 @@
 }
 
 .linkedTodoState > span {
+  min-width: 0;
+  overflow-wrap: anywhere;
   color: var(--db-accent);
   font-size: 12px;
   font-weight: 740;

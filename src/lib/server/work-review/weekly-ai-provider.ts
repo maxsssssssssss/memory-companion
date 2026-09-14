@@ -15,13 +15,13 @@ export const WORK_WEEKLY_VERIFIER_PROFILE_ID = "work_weekly_verifier_v1" as cons
 export const WORK_WEEKLY_QA_ANSWERER_PROFILE_ID = "work_weekly_qa_answerer_v1" as const;
 export const WORK_WEEKLY_QA_VERIFIER_PROFILE_ID = "work_weekly_qa_verifier_v1" as const;
 
-export const WORK_WEEKLY_SYNTHESIZER_PROMPT_VERSION = "work_weekly_synthesizer_prompt_v14" as const;
-export const WORK_WEEKLY_VERIFIER_PROMPT_VERSION = "work_weekly_verifier_prompt_v11" as const;
+export const WORK_WEEKLY_SYNTHESIZER_PROMPT_VERSION = "work_weekly_synthesizer_prompt_v17" as const;
+export const WORK_WEEKLY_VERIFIER_PROMPT_VERSION = "work_weekly_verifier_prompt_v13" as const;
 export const WORK_WEEKLY_QA_ANSWERER_PROMPT_VERSION = "work_weekly_qa_answerer_prompt_v1" as const;
 export const WORK_WEEKLY_QA_VERIFIER_PROMPT_VERSION = "work_weekly_qa_verifier_prompt_v1" as const;
 
-export const WORK_WEEKLY_SYNTHESIZER_SCHEMA_VERSION = "work_weekly_synthesizer_schema_v3" as const;
-export const WORK_WEEKLY_VERIFIER_SCHEMA_VERSION = "work_weekly_verifier_schema_v4" as const;
+export const WORK_WEEKLY_SYNTHESIZER_SCHEMA_VERSION = "work_weekly_synthesizer_schema_v4" as const;
+export const WORK_WEEKLY_VERIFIER_SCHEMA_VERSION = "work_weekly_verifier_schema_v5" as const;
 export const WORK_WEEKLY_QA_ANSWERER_SCHEMA_VERSION = "work_weekly_qa_answerer_schema_v1" as const;
 export const WORK_WEEKLY_QA_VERIFIER_SCHEMA_VERSION = "work_weekly_qa_verifier_schema_v1" as const;
 
@@ -88,6 +88,15 @@ export const WorkWeeklySynthesizerResponseSchema = z.object({
     context.addIssue({ code: z.ZodIssueCode.custom, message: "Generated claim IDs must be unique" });
   }
 });
+
+/** Model wire contract only. Internal items/claims and QA keep their own schema. */
+export const WorkWeeklySynthesizerModelResponseSchema = z.object({
+  items: z.array(WorkWeeklyGeneratedClaimSchema.innerType().omit({ id: true }).extend({
+    section: WorkWeeklySectionKindSchema,
+    isInterpretation: z.boolean()
+  }).strict()).max(64)
+}).strict();
+export type WorkWeeklySynthesizerModelResponse = z.infer<typeof WorkWeeklySynthesizerModelResponseSchema>;
 
 export function workWeeklyCurrentCompletionSourceRefs(snapshot: WorkWeeklySourceSnapshot) {
   return snapshot.todoEvents.filter((event) => event.eventType === "todo.completed"
@@ -647,7 +656,6 @@ export function buildWorkWeeklySynthesisPack(input: {
     inputPackDigest: snapshot.inputPackDigest,
     sourceSummary: snapshot.summary,
     generationContract: {
-      claimsPerTopic: 1,
       allowedSections: WorkWeeklySectionKindSchema.options.filter((section) =>
         section !== "completed" || workWeeklyCurrentCompletionSourceRefs(snapshot).length > 0),
       currentWeekCompletionSourceRefs: workWeeklyCurrentCompletionSourceRefs(snapshot)
@@ -660,37 +668,27 @@ export function buildWorkWeeklySynthesisPack(input: {
   } as const;
 }
 
-// These IDs join this response to its verifier input only; persistent IDs are
-// allocated by the repository. Preserve invalid fields for strict rejection.
-function normalizeWorkWeeklyGeneratedIds(value: unknown): unknown {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return value;
-  const response = value as Record<string, unknown>;
-  if (!Array.isArray(response.items) || response.items.length > 64) return value;
-  return { ...response, items: response.items.map((entry, itemIndex) => {
-    if (!entry || typeof entry !== "object" || Array.isArray(entry)) return entry;
-    const item = entry as Record<string, unknown>;
-    const itemNumber = String(itemIndex + 1).padStart(3, "0");
+/** Representation only: no source inference, semantic relabeling or old-wire fallback. */
+export function adaptWorkWeeklyModelResponse(input: { response: unknown; snapshot: WorkWeeklySourceSnapshot }) {
+  const parsed = WorkWeeklySynthesizerModelResponseSchema.safeParse(input.response);
+  if (!parsed.success) throw new WorkWeeklyProviderError("work_weekly_synthesizer_output_invalid");
+  const items = parsed.data.items.map((item, index) => {
+    const number = String(index + 1).padStart(3, "0");
     return {
-      ...item,
-      ...(workWeeklyGeneratedIdSchema.safeParse(item.id).success ? { id: `item_${itemNumber}` } : {}),
-      ...(Array.isArray(item.claims) ? { claims: item.claims.map((entry, claimIndex) => {
-        if (!entry || typeof entry !== "object" || Array.isArray(entry)) return entry;
-        const claim = entry as Record<string, unknown>;
-        return {
-          ...claim,
-          ...(workWeeklyGeneratedIdSchema.safeParse(claim.id).success
-            ? { id: `claim_${itemNumber}_${String(claimIndex + 1).padStart(3, "0")}` } : {})
-        };
-      }) } : {})
+      id: `item_${number}`, section: item.section, text: item.text,
+      itemType: item.section === "next_week" ? "suggestion"
+        : item.isInterpretation ? "interpretation" : "evidence_backed_fact",
+      claims: [{ id: `claim_${number}_001`, text: item.text, claimType: item.claimType, sourceRefs: [...item.sourceRefs] }]
     };
-  }) };
+  });
+  return validateGeneratedItems({ response: { items }, snapshot: input.snapshot });
 }
 
 function validateGeneratedItems(input: {
   response: unknown;
   snapshot: WorkWeeklySourceSnapshot;
 }) {
-  const parsed = buildWorkWeeklySynthesisResponseSchema(input.snapshot).safeParse(normalizeWorkWeeklyGeneratedIds(input.response));
+  const parsed = buildWorkWeeklySynthesisResponseSchema(input.snapshot).safeParse(input.response);
   if (!parsed.success) {
     throw new WorkWeeklyProviderError("work_weekly_synthesizer_output_invalid");
   }
@@ -768,19 +766,84 @@ export function validateWorkWeeklyVerifierOutput(input: {
   return parsed.data.items;
 }
 
+/** Generation-only wire recovery. Identity and citation boundaries are checked
+ * before a malformed verdict can be localized; coverage still uses its validator. */
+function normalizeWorkWeeklyGenerationVerdicts(value: unknown, claims: WorkWeeklyGeneratedClaim[]): unknown {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return value;
+  const envelope = value as Record<string, unknown>;
+  if (!Array.isArray(envelope.items) || envelope.items.length > 2_048
+    || envelope.items.some((item) => !item || typeof item !== "object" || Array.isArray(item))) return value;
+  const rows = envelope.items as Record<string, unknown>[];
+  const ids = rows.map((item) => WorkWeeklyVerifierItemSchema.innerType().shape.claimId.safeParse(item.claimId));
+  if (ids.some((id) => !id.success)) return value;
+  const claimIds = ids.map((id) => id.success ? id.data : "");
+  const counts = verifierIdentityCounts(claims.map((claim) => claim.id), claimIds);
+  if (counts.inputDuplicateCount) rejectWeeklyVerifierContract("work_weekly_verifier_output_invalid", "input_claim_ids", counts);
+  if (counts.actualCount !== counts.expectedCount) rejectWeeklyVerifierContract("work_weekly_verifier_output_invalid", "verdict_count", counts);
+  if (counts.duplicateCount || counts.unknownCount || counts.missingCount) {
+    rejectWeeklyVerifierContract("work_weekly_verifier_output_invalid", "verdict_claim_ids", counts);
+  }
+  const claimById = new Map(claims.map((claim) => [claim.id, claim]));
+  const unsupportedRefCount = rows.reduce((count, item, index) => count + (Array.isArray(item.supportedSourceRefs)
+    ? item.supportedSourceRefs.filter((ref) => typeof ref === "string"
+      && !claimById.get(claimIds[index]!)!.sourceRefs.includes(ref.trim())).length : 0), 0);
+  if (unsupportedRefCount) {
+    rejectWeeklyVerifierContract("work_weekly_verifier_source_not_allowed", "verdict_source_subset", { ...counts, unsupportedRefCount });
+  }
+  let normalizedAliasCount = 0; let localizedInvalidCount = 0; let missingSupportedRefsCount = 0;
+  const items = rows.map((item, index) => {
+    const knownAlias = item.verdict === "partial_entailed";
+    if (knownAlias) normalizedAliasCount++;
+    const parsed = WorkWeeklyVerifierItemSchema.safeParse(knownAlias ? { ...item, verdict: "partially_entailed" } : item);
+    const missingSupport = parsed.success && ["entailed", "partially_entailed"].includes(parsed.data.verdict)
+      && parsed.data.supportedSourceRefs.length === 0;
+    if (parsed.success && !missingSupport) return parsed.data;
+    localizedInvalidCount++;
+    if (missingSupport) missingSupportedRefsCount++;
+    const reason = missingSupport ? "verifier_missing_supported_sources" : "verifier_item_invalid";
+    const priorIssues = WorkWeeklyVerifierItemSchema.innerType().shape.issueCodes.safeParse(item.issueCodes);
+    return { claimId: claimIds[index]!, verdict: "unverifiable",
+      issueCodes: [...new Set([reason, ...(priorIssues.success ? priorIssues.data : [])])].slice(0, 32),
+      supportedSourceRefs: [] };
+  });
+  if (normalizedAliasCount || localizedInvalidCount) {
+    // Counts only; raw responses and exact per-item evidence belong in private evaluation artifacts.
+    console.error(JSON.stringify({ component: "work-weekly-verifier-contract", reason: "generation_verdict_normalization",
+      normalizedAliasCount, localizedInvalidCount, missingSupportedRefsCount }));
+  }
+  let normalizedDuplicateStatusCount = 0;
+  const coverage = Array.isArray(envelope.coverage) && envelope.coverage.length <= 2_048
+    ? envelope.coverage.map((entry: unknown) => {
+      if (!entry || typeof entry !== "object" || Array.isArray(entry)) return entry;
+      const row = entry as Record<string, unknown>;
+      // An explicit duplicate reason has one canonical status. Do not infer a
+      // reason from status alone, add citations, or bypass coverage/publication.
+      if (row.status !== "duplicate" || row.reasonCode !== "duplicate") return entry;
+      normalizedDuplicateStatusCount++;
+      return { ...row, status: "not_applicable" };
+    }) : envelope.coverage;
+  if (normalizedDuplicateStatusCount) {
+    console.error(JSON.stringify({ component: "work-weekly-verifier-contract", reason: "generation_coverage_normalization",
+      normalizedDuplicateStatusCount }));
+  }
+  return { ...envelope, items, ...(normalizedDuplicateStatusCount ? { coverage } : {}) };
+}
+
 const SYNTHESIZER_SYSTEM_PROMPT = [
   "你是 Work Weekly Synthesizer。只用当前账号/自然周/项目的 Source Pack，生成待独立核验的周回顾；不得引入用户编辑、历史回答、其他产品或一般知识，不创建Todo/Memory等记录。",
-  "sources按canonical Finding及其supportingEvidence成组。先围绕Finding.body的主要事项组织，再用同组Evidence补细节，避免只抽背景而漏当前安排。generationGuidance是现有canonical类型的解释，不是新Evidence；原话称‘决定’而canonical mode为proposal时仍按拟议事项表达。",
-  "每item恰好1个自足claim；详细条目围绕一个主题，结论与改变该结论的条件同句核验。overview可概括多个主题，每个分句分别有据，不把整体概括为已确认/已完成，也不重复详细条目清单。",
-  "保留主要事项、决定与范围取舍、变化前后、关键日期、未决依赖及有意义的后续关注；合并重复来源并保留必要引用，不以固定字数/条数凑完整。按范围读摘要：‘首轮取消某功能’可由‘本轮不交付、以后重评’精确表达，不等于永久取消需求；只有实质矛盾才说明冲突。claim.text是正式内容，item.text仅为摘要元数据。",
+  "sources按canonical Finding及其supportingEvidence成组。先围绕Finding.body的主要事项组织，再用同组Evidence补细节，避免只抽背景而漏当前安排。也可只有Todo及其事件：如实概括系统状态和变更，没有会议不补造决定，不为填满章节扩写。generationGuidance是现有canonical类型的解释，不是新Evidence；原话称‘决定’而canonical mode为proposal时仍按拟议事项表达。",
+  "每item的text是一段完整自足的待核验陈述，详细条目围绕一个主题，结论与改变该结论的条件写在一起。overview可概括多个主题，每个分句分别有据，不把整体概括为已确认/已完成，也不重复详细条目清单。",
+  "先按事项组织，再选择其主要章节；同一完整命题跨会议或正文与关注重复时只表达一次，引用合并，独有条件另保留。保留主要事项、决定与范围取舍、变化前后、关键日期、未决依赖及有意义的后续关注，不以固定字数/条数凑完整。有明确替代关系的变更，用‘原安排→当前安排＋仍有效的理由或限制’紧凑表达，不把前后方案并列成两个当前决定；正式安排与另一个暂定方案分别标明确定程度。按范围读摘要：‘首轮取消某功能’可由‘本轮不交付、以后重评’精确表达，不等于永久取消需求；只有实质矛盾才说明冲突。text是唯一正文，不另写摘要或重复包装。",
   "只保留影响所述结论的必要限定，可自然改写，不要求逐字复述。决定仍待确认就不能肯定化；不陈述发言者/认领人时无需附加归属待确认，不涉及非关键日期时无需重复日期附注。重要排期和前后变化不能因此省略。",
   "提议不是决定，分配不是承诺。proposal即使包含认领、计划日期或行动措辞，也不能直接标为decision/commitment；可以用fact如实报告某方案仍是提议，不因来源为proposal而遗漏。认领/拟安排不等于已开始/已推进。试点暂不提供不能概括为取消需求。日期不自动为deadline，先后不是因果，同会议派生多源不是独立频率。",
+  "分类对照（不是Evidence）：来源记录‘有人提议自动汇总，尚未批准’用section=open_questions、claimType=fact、isInterpretation=false，报告的是存在未批准提议这一事实；isInterpretation=true表示基于来源的谨慎解读，不能借此补新事实。回顾自身的AI关注用section=next_week，text写来源支持的具体对象和缺口；该栏始终标为AI建议，isInterpretation两种布尔值不改变其性质。",
   "任务是否已接受与日期是否确定是两个独立事实。按generationGuidance.deadlineStatus读取canonical截止附注：已接受任务仍应保留，未确认日期若重要就明确待确认，也可省略日期；不能把整个已接受任务降成提议，也不能把原日期表达写成确定期限。",
   "userConfirmedAt确认的是记录；Provider视图已按canonical待确认注记统一effectiveFinality。决定自身待确认不是无法描述，用暂定/是否定案尚待确认等表达即可；本轮范围、后续评估与恢复条件和决定一起说明。",
-  "章节按含义选择：decisions记录有据的决定、已同意的安排及变化；progress/in_progress须描述实际发生的推进或开展状态；提议和未接受分配放open_questions，缺少外部输入放waiting_for_others。不能为了填栏把计划放进展。",
+  "章节按含义选择：decisions记录有据的决定、已同意的安排及变化；progress/in_progress须描述实际发生的推进或开展状态。先区分已经发生的活动、已接受的未来任务、尚未验证的缺口：后两者自身均不是进展；同一事项有实际检查与未验范围时，保留检查范围并明确缺口，不说未验部分正在推进。提议和未接受分配放open_questions，缺少外部输入放waiting_for_others。不能为了填栏把计划放进展。",
   "completed只对应currentWeekCompletionSourceRefs中的本周todo.completed，写明在系统中标记完成，不代表现实履行。没有事件此栏为空。",
-  "next_week精选有用的关注对象及有据缺口，不派负责人、不造期限、不写催办指令；发布端添加固定AI建议关注前缀。完整回顾不要求每个open_question再写一条关注，已表达清楚的事项可以不重复；无真实缺口时可空，不固定建议条数。",
-  "以observedThrough为观察日；recordContext.meetingDate只是记录时间，活动时间按正文解释。overview概括主题和确定程度，不重复细节；每个分句只用自己的sourceRefs，不从相邻未引用记录添时间或人物。",
+  "next_week精选有用的关注对象及有据缺口，不派负责人、不造期限、不写催办指令；发布端添加固定AI建议关注前缀。完整回顾不要求每个open_question再写一条关注，已表达清楚的事项可以不重复；若关注表达另一项具体缺口或不同含义则可与事实并存，不能仅换成‘持续关注/加强沟通’重复事实。无真实缺口时可空，不固定建议条数。",
+  "栏目与关注示例（不是Evidence）：‘登录缺外部配置参数，恢复时间未知’主项放waiting_for_others；方案本身尚待讨论才是open_questions。登录参数与移动端未验证是两个独立事项，不用‘补足这些缺口’拼成一个关注。优先选择单个仍值得关注的具体缺口；正文已说清且关注没有新增含义时可不另写。",
+  "以scope.observedThrough为观察日，scope.weekStart/weekEnd为所选回顾范围，不以电脑今天解释历史回顾；recordContext.meetingDate只是记录时间，活动时间按正文解释。检查点早于观察日而没有后续结果时写原计划与结果未知，不能继续写未来等待，也不能推断逾期、未执行或已完成。overview概括主题和确定程度，不重复细节；每个分句只用自己的sourceRefs，不从相邻未引用记录添时间或人物。",
   "以下是表达示例，不是本周Evidence：来源‘暂用提醒方案，试点后根据反馈评估是否恢复，决定仍待确认’可写‘暂按该方案试点，是否定案尚待确认；试点后依据反馈再评估恢复’，不能删后半句。",
   "混合来源示例：同一主题有暂定安排和另一项提议，可用fact写‘甲安排暂定；乙仍是提议’，或分别表达，不将整个组合标成已决定。角色示例：‘组织者只安排测试和保存观察，技术结论由林工给出’，保留两个明确主语，不改成‘林工给出结论，其只负责组织’。",
   "时间示例：本周记录‘上周人工观察了两次’是历史背景，可用于说明本轮安排的依据，不是in_progress；已经过的检查日写‘原计划周二检查，暂无后续结果’，不写未来等待。",
@@ -793,9 +856,9 @@ const VERIFIER_SYSTEM_PROMPT = [
   "检查实际语义而非claimType标签：fact可以报告‘某方案仍是提议’，不表示方案已成事实或决定。来源是proposal而claim保留拟议状态时应核验为有据陈述；只有句义实际升级成已决定/已承诺才拒绝。issue应对应实际错误分句的断言及来源只支持的含义，不能只用类型名称不一致解释claim_type_mismatch。assignment_without_acceptance不是接受，Todo completed仅是系统状态；日期不是自动deadline，顺序不是causality，同会议多条派生记录不是独立frequency。",
   "任务接受与截止确认独立核验：已接受任务可以连同‘日期尚待确认’一起entailed，或不提未确认日期；把日期肯定化才是该日期分句的问题。不能因截止未确认而拒绝已有据的任务本身。拒绝后不自行改写原句或补发核对。",
   "Provider视图以effectiveFinality统一canonical注记。decision_finality_conflict检查claim是否擅自增强确定性，不是在标记来源自己待确认；claim写‘该决定是否最终尚待确认’已经正确保留这一限定，不要求改成固定用词。仍须分别检查后续评估等其他必要内容，不能由最终性正确推断整条完整。",
-  "按publicationContext.section核验：progress/in_progress需本周实际推进/截至观察日已开展的状态，只有上周发生的观察不证明现在还在开展；记录会议在本周也不改变历史活动时间。分工、未来计划或open Todo不足，不满足用section_mismatch。decisions可包含有据的已同意安排。",
+  "按publicationContext.section核验：progress/in_progress需本周实际推进/截至观察日已开展的状态，只有上周发生的观察不证明现在还在开展；记录会议在本周也不改变历史活动时间。分工、接受未来任务、尚未验证的缺口或open Todo本身都不证明活动已开展，不满足用section_mismatch。已有实际检查可以是进展，但仅支持已验范围，不证明未验部分正在开展。decisions可包含有据的已同意安排。按scope.observedThrough和所选周核对时间，不按电脑今天；已过检查点没有结果只能支持原计划与结果未知，不支持未来等待、逾期或已经履行。",
   "overview允许多个主题的简洁概括，各分句分别有据且保留必要限定即可，不仅因多主题报mixed_topics。详细条目才要求单主题；依赖另一个claim才能保留必要条件用non_atomic_claim，无关主题拼接用mixed_topics。",
-  "next_week核验具体关注对象和有据缺口，不能新增owner/deadline/承诺/指令；对象不清或缺口无据用invalid_attention_target。固定AI建议关注前缀不属于用户承诺。completed仍需当前周且不晚于observedThrough的todo.completed事件及系统标记完成语义。",
+  "publicationContext为next_week/suggestion时，核验的是回顾作者提出的关注方向：具体对象和当前缺口有sources依据、重要触发条件未改变，即可支持对该缺口的合理后续确认；原文不必逐字提出相同的未来建议。‘关注何时开始验证’不宣称已经开始，‘条件到齐后核对’不能读成无条件操作。只在其改变实际命题时要求背景限定，不因未复述所有背景拒绝；真实遗漏另在整组coverage标明。不得新增owner/deadline/用户承诺、已批准或已执行状态，也不得凭空指派任务。对象不清、泛泛沟通口号或缺口无据用invalid_attention_target。与事实不同的具体缺口可以共存，不能仅因主题相同就判无效；固定AI建议关注前缀不属于用户承诺。completed仍需当前周且不晚于observedThrough的todo.completed事件及系统标记完成语义；系统事件不能升级为现实交付。",
   "coverageSources就地列出canonical源、证据和candidateClaims的正文/章节。relationship只标明direct_record、direct_evidence、shared_evidence或todo_history关系，不证明内容完整。以源body的主要事项为目标，先取本轮entailed且无issue、支持引用仍关联的候选，再审查其联合内容；不要以单条候选是否完整决定整组status。",
   "coverage显式返回claimIds和matches，只选择真正表达该sourceText主要事项及必要限定的安全claim。每个match逐字摘出sourceText与claim.text中含义对应的短分句；先比较两个分句的主题、动作、确定性和条件，再判断其联合内容是否covered。同一Evidence可含多个不同主题，shared_evidence及其他relationship均不是语义覆盖；不得把有关联的所有claim填进claimIds。若认为partial，先检查所缺含义是否已在该组其他安全条目中。被拒冗余条目不影响已有完整表达，历史背景/共享Evidence细节却不能替代缺失的当前安排。真正部分缺失用partial，整主题缺失用omitted。",
   "重复来源可not_applicable/duplicate，并与本轮全部entailed无issue内容作语义比较；无候选或无共享Evidence也可比较，但须完整承载主要含义、没有实质差异，不能扩大逐claim引用。真正背景或周外无当前影响可background_only/outside_week，不以此掩盖当前未决事项。",
@@ -806,20 +869,14 @@ const VERIFIER_SYSTEM_PROMPT = [
 ].join("\n");
 
 export const WORK_WEEKLY_SYNTHESIZER_JSON_INSTRUCTION =
-  "输出严格 JSON {items:[{id,section,text,itemType,claims:[{id,text,claimType,sourceRefs}]}]}。" +
+  "只输出严格 JSON {items:[{section,text,claimType,isInterpretation,sourceRefs}]}，每项恰好这5个字段。" +
   `section 只能是 ${JSON.stringify(WorkWeeklySectionKindSchema.options)}；` +
-  `itemType 只能是 ${JSON.stringify(WORK_WEEKLY_ITEM_TYPES)}；` +
   `claimType 只能是 ${JSON.stringify(WorkWeeklyClaimTypeSchema.options)}。` +
-  "section、itemType、claimType是三个不同字段，禁止把section或itemType的值用于claimType。" +
-  "普通来源事实使用claimType=fact；风险、提议、解释或下周关注项也不能自创claimType。" +
-  "next_week的唯一claim.text同时写具体关注对象和已有来源支持的事实缺口，用fact或其他已列出的事实类型；item.text仅为非权威摘要，正式显示不使用它。不要在claim中重复AI建议关注前缀或把建议动作冒充事实。" +
-  "按主题合并重复信息，同一事实不必在多个section重复列出；每个claim只引用直接支持它的必要sourceRefs。" +
-  "输出紧凑JSON，省略缩进和多余空白，必须闭合全部括号并保留完整结尾。" +
-  "最多64个items，Weekly生成每个item恰好1个自足claim（最终性/条件/例外不能另拆），每个claim有1至64个不重复sourceRefs。" +
-  "section必须来自generationContract.allowedSections；completed引用仅可用currentWeekCompletionSourceRefs中的真实本周完成事件，集合为空时禁止completed。" +
-  "item与claim的id是本轮临时标记，使用非空短字符串；本地会统一编号后交给核对器。" +
-  "section=next_week当且仅当itemType=suggestion，其他section不得使用suggestion。" +
-  "id、text以及sourceRefs中的每个元素均为非空字符串；sourceRefs只能来自输入Source Pack；禁止quote或额外字段。";
+  "isInterpretation必须是true或false；普通来源陈述包括记录中的提议用false，谨慎解读用true。next_week始终是AI关注，任一布尔值都不成为用户事实或承诺。" +
+  "text为非空的完整自足陈述，必要最终性、条件和例外保留在同一正文中；不另填ID、摘要、嵌套claims或展示标签，AI关注和谨慎解读前缀由程序添加。" +
+  "最多64项，每项sourceRefs为1至64个不重复非空字符串，只能引用输入Source Pack中直接支持正文的必要来源。" +
+  "section使用generationContract.allowedSections；completed须有currentWeekCompletionSourceRefs中的本周完成事件，正文仅陈述系统标记状态。" +
+  "输出紧凑JSON并保留完整结尾；没有来源支持的栏目可空，不新增字段。";
 
 export const WORK_WEEKLY_VERIFIER_JSON_INSTRUCTION =
   "输出严格 JSON {items:[{claimId,verdict,issueCodes,supportedSourceRefs}]}。" +
@@ -877,16 +934,15 @@ export function createStructuredWorkWeeklySynthesizer(input: {
       const snapshot = assertWorkWeeklySnapshotAuthority(call);
       const response = await request({
         profile: input.profile,
-        schema: buildWorkWeeklySynthesisResponseSchema(snapshot),
+        schema: WorkWeeklySynthesizerModelResponseSchema,
         requestInput: [
           { role: "system", content: SYNTHESIZER_SYSTEM_PROMPT },
           { role: "user", content: JSON.stringify(buildWorkWeeklySynthesisPack(call)) }
         ],
         jsonInstruction: WORK_WEEKLY_SYNTHESIZER_JSON_INSTRUCTION,
-        normalize: normalizeWorkWeeklyGeneratedIds,
         signal: call.signal
       });
-      return validateGeneratedItems({ response, snapshot });
+      return adaptWorkWeeklyModelResponse({ response, snapshot });
     }
   };
 }
@@ -909,6 +965,8 @@ export function createStructuredWorkWeeklyClaimVerifier(input: {
       }
       const verificationClaim = (claim: WorkWeeklyGeneratedClaim) => call.onCoverage
         ? { id: claim.id, text: claim.text, sourceRefs: claim.sourceRefs } : claim;
+      const normalize = call.onCoverage
+        ? (value: unknown) => normalizeWorkWeeklyGenerationVerdicts(value, call.claims) : undefined;
       const response = await request({
         profile: input.profile,
         schema: call.onCoverage ? WorkWeeklyGenerationVerifierResponseSchema : WorkWeeklyVerifierResponseSchema,
@@ -958,10 +1016,13 @@ export function createStructuredWorkWeeklyClaimVerifier(input: {
           }
         ],
         jsonInstruction: call.onCoverage ? WORK_WEEKLY_GENERATION_VERIFIER_JSON_INSTRUCTION : WORK_WEEKLY_VERIFIER_JSON_INSTRUCTION,
+        normalize,
         signal: call.signal
       });
       if (call.onCoverage) {
-        const parsed = WorkWeeklyGenerationVerifierResponseSchema.safeParse(response);
+        // The production transport normalizes before strict parsing. Apply the
+        // same idempotent boundary to injected test/request implementations.
+        const parsed = WorkWeeklyGenerationVerifierResponseSchema.safeParse(normalize!(response));
         if (!parsed.success) rejectWeeklyVerifierContract("work_weekly_verifier_output_invalid", "generation_response_schema",
           { expectedVerdictCount: call.claims.length, expectedCoverageCount: workWeeklyCoverageSourceRefs(snapshot).length }, parsed.error);
         const verdicts = validateWorkWeeklyVerifierOutput({ response: { items: parsed.data.items }, claims: call.claims });

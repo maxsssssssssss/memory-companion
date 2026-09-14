@@ -7,7 +7,7 @@ import {
   type WorkWeeklyCoverageAssessment, type WorkWeeklyGeneratedClaim, type WorkWeeklyGeneratedItem,
   type WorkWeeklyStructuredJsonRequest, type WorkWeeklyVerifierItem
 } from "./weekly-ai-provider";
-import { WORK_WEEKLY_TEST_REFS as refs, workWeeklyProfile, workWeeklyTestSnapshot } from "./weekly-ai-test-fixture";
+import { WORK_WEEKLY_TEST_REFS as refs, workWeeklyModelResponse, workWeeklyProfile, workWeeklyTestSnapshot } from "./weekly-ai-test-fixture";
 import { applyWorkWeeklyClaimPublicationPolicy, runWorkWeeklyGenerationPipeline, type WorkWeeklyGenerationTrace } from "./weekly-publication-policy";
 import { createFixtureWorkWeeklyRunExecutor } from "./weekly-ai-runner";
 import { openWorkReviewDatabase } from "./db";
@@ -75,6 +75,7 @@ type FixtureOptions = {
   verdict?: (entry: WorkWeeklyVerifierItem, index: number) => WorkWeeklyVerifierItem;
   verifierResponse?: (response: { items: WorkWeeklyVerifierItem[]; disputes: DisputeWire[]; coverage: CoverageWire[] }) => unknown;
   generated?: (items: WorkWeeklyGeneratedItem[]) => WorkWeeklyGeneratedItem[];
+  modelResponse?: unknown;
   beforeSynthesize?: () => void | Promise<void>;
 };
 function providers(snapshot: WorkWeeklySourceSnapshot, options: FixtureOptions = {}) {
@@ -89,7 +90,7 @@ function providers(snapshot: WorkWeeklySourceSnapshot, options: FixtureOptions =
   const request = vi.fn<WorkWeeklyStructuredJsonRequest>(async (input) => {
     if (input.profile.role === "synthesizer") {
       await options.beforeSynthesize?.();
-      return { items: options.generated?.(generated) ?? generated };
+      return options.modelResponse ?? workWeeklyModelResponse(options.generated?.(generated) ?? generated);
     }
     if (!Array.isArray(input.requestInput)) throw new Error("Expected actual structured messages");
     const message = input.requestInput[1];
@@ -637,11 +638,13 @@ describe("independent generation-only schema at the actual structured boundary",
   it.each(["split_qualification", "no_event_completed"] as const)(
     "rejects %s at synthesis without consuming a verifier request", async (mode) => {
       const snapshot = topicSnapshot();
-      const fixture = pipeline(snapshot, { generated: (items) => items.map((item, index) => {
+      const fixture = pipeline(snapshot, mode === "split_qualification" ? {
+        // Deliberately malformed wire: conditions may not be detached into a second claim.
+        modelResponse: { items: [{ section: "next_week", text: snapshot.findings[0]!.body,
+          claimType: "fact", isInterpretation: false, sourceRefs: [snapshot.findings[0]!.sourceRef],
+          claims: [{ text: "该安排最终性未确认。" }] }] }
+      } : { generated: (items) => items.map((item, index) => {
         if (index !== 0) return item;
-        if (mode === "split_qualification") return { ...item, claims: [item.claims[0]!, {
-          ...item.claims[0]!, id: "separate_qualification", text: "该安排最终性未确认。"
-        }] };
         return { ...item, section: "completed", itemType: "evidence_backed_fact",
           claims: [{ ...item.claims[0]!, claimType: "completion", text: "会议在系统中标记完成。",
             sourceRefs: [snapshot.meetings[0]!.sourceRef] }] };
@@ -664,16 +667,15 @@ describe("independent generation-only schema at the actual structured boundary",
 
   it("still accepts a source-backed current-week Todo completion through the synthesis schema", async () => {
     const snapshot = workWeeklyTestSnapshot();
-    const response = { items: [{ id: "completed_item", section: "completed", itemType: "evidence_backed_fact",
-      text: "系统完成状态", claims: [{ id: "completed_claim", claimType: "completion",
-        text: "整理发布清单在系统中标记完成。", sourceRefs: [refs.todoCompleted] }] }] };
+    const response = { items: [{ section: "completed", isInterpretation: false, claimType: "completion",
+      text: "整理发布清单在系统中标记完成。", sourceRefs: [refs.todoCompleted] }] };
     const request = vi.fn<WorkWeeklyStructuredJsonRequest>(async (input) => {
       expect(input.schema.safeParse(response).success).toBe(true);
       return response;
     });
     const synthesizer = createStructuredWorkWeeklySynthesizer({ profile: workWeeklyProfile("synthesizer"), requestStructuredJson: request });
     const items = await synthesizer.synthesize({ accountId: snapshot.accountId, snapshot });
-    expect(items[0]?.claims[0]).toMatchObject({ text: response.items[0]!.claims[0]!.text, sourceRefs: [refs.todoCompleted] });
+    expect(items[0]?.claims[0]).toMatchObject({ text: response.items[0]!.text, sourceRefs: [refs.todoCompleted] });
     expect(request).toHaveBeenCalledTimes(1);
   });
 
@@ -750,15 +752,16 @@ describe("independent strict verifier diagnostics through the production adapter
 
   it.each([
     ["missing", "verdict_count"], ["duplicate", "verdict_claim_ids"], ["unknown", "verdict_claim_ids"],
-    ["empty_entailed", "supported_verdict_without_sources"], ["empty_partial", "supported_verdict_without_sources"],
+    ["empty_entailed", "generation_verdict_normalization"], ["empty_partial", "generation_verdict_normalization"],
     ["foreign_source", "verdict_source_subset"], ["extra_property", "generation_response_schema"],
-    ["invalid_verdict", "generation_response_schema"], ["duplicate_coverage", "coverage_source_set"],
+    ["invalid_verdict", "generation_verdict_normalization"], ["duplicate_coverage", "coverage_source_set"],
     ["unknown_coverage_claim_id", "coverage_claim_ids"]
-  ] as const)("rejects %s once and logs only static labels and numerical counts", async (mode, reason) => {
+  ] as const)("handles %s once and logs only static labels and numerical counts", async (mode, reason) => {
     const marker = "PRIVATE_FIXTURE_VALUE_NEVER_LOG";
     const log = vi.spyOn(console, "error").mockImplementation(() => undefined);
     try {
-      const fixture = pipeline(topicSnapshot(), { verifierResponse: (response) => {
+      const snapshot = topicSnapshot();
+      const fixture = pipeline(snapshot, { verifierResponse: (response) => {
         if (mode === "missing") return { ...response, items: response.items.slice(0, 1) };
         if (mode === "duplicate") return { ...response, items: [response.items[0], response.items[0]] };
         if (mode === "unknown") return { ...response, items: response.items.map((item, index) => index === 0
@@ -778,12 +781,36 @@ describe("independent strict verifier diagnostics through the production adapter
       const error = mode === "foreign_source" ? "work_weekly_verifier_source_not_allowed"
         : mode === "duplicate_coverage" || mode === "unknown_coverage_claim_id" ? "work_weekly_coverage_output_invalid"
           : "work_weekly_verifier_output_invalid";
-      await expect(fixture.run()).rejects.toThrow(error);
+      const localized = mode === "empty_entailed" || mode === "empty_partial" || mode === "invalid_verdict";
+      if (localized) {
+        const result = await fixture.run();
+        expect(result.status).toBe("needs_review");
+        expect(result.items).toHaveLength(1);
+        expect(result.items[0]).toMatchObject({ text: snapshot.findings[1]!.body,
+          sourceRefs: [snapshot.findings[1]!.sourceRef] });
+        expect(result.quality_assessment).toMatchObject({ status: "needs_review", sourceCount: 2,
+          coveredSourceCount: 1, partialSourceCount: 1, omittedSourceCount: 0, notApplicableSourceCount: 0,
+          reasonCodes: ["coverage_claim_filtered"], reviewIssues: [{
+            sourceRef: snapshot.findings[0]!.sourceRef, reasonCode: "coverage_claim_filtered"
+          }] });
+        const verified = fixture.traces.find((trace) => trace.stage === "verified");
+        expect(verified?.stage === "verified" && verified.verdicts[0]).toMatchObject({ verdict: "unverifiable",
+          issueCodes: [mode === "invalid_verdict" ? "verifier_item_invalid" : "verifier_missing_supported_sources"],
+          supportedSourceRefs: [] });
+        const published = fixture.traces.find((trace) => trace.stage === "published");
+        expect(published?.stage === "published" && published.claims[0]).toMatchObject({ outcome: "rejected",
+          reasonCode: "verifier_unverifiable", publishedSortOrder: null });
+        expect(fixture.traces.map((trace) => trace.stage)).toEqual(["synthesized", "verified", "published"]);
+      } else {
+        await expect(fixture.run()).rejects.toThrow(error);
+        expect(fixture.traces.map((trace) => trace.stage)).toEqual(["synthesized"]);
+      }
       expect(fixture.request.mock.calls.map(([input]) => input.profile.role)).toEqual(["synthesizer", "verifier"]);
-      expect(fixture.traces.map((trace) => trace.stage)).toEqual(["synthesized"]);
       expect(log).toHaveBeenCalledTimes(1);
       const diagnostic = JSON.parse(String(log.mock.calls[0]![0])) as Record<string, unknown>;
-      expect(diagnostic).toMatchObject({ component: "work-weekly-verifier-contract", errorCode: error, reason });
+      expect(diagnostic).toMatchObject({ component: "work-weekly-verifier-contract", reason,
+        ...(localized ? { normalizedAliasCount: 0, localizedInvalidCount: 1,
+          missingSupportedRefsCount: mode === "invalid_verdict" ? 0 : 1 } : { errorCode: error }) });
       for (const [key, value] of Object.entries(diagnostic)) {
         if (["component", "errorCode", "reason"].includes(key)) continue;
         if (key === "schemaIssueCounts") {
@@ -793,7 +820,6 @@ describe("independent strict verifier diagnostics through the production adapter
       if (mode === "missing") expect(diagnostic).toMatchObject({ expectedCount: 2, actualCount: 1, missingCount: 1 });
       if (mode === "duplicate") expect(diagnostic).toMatchObject({ expectedCount: 2, actualCount: 2, duplicateCount: 1, missingCount: 1 });
       if (mode === "unknown") expect(diagnostic).toMatchObject({ unknownCount: 1, missingCount: 1 });
-      if (mode.startsWith("empty_")) expect(diagnostic).toMatchObject({ emptySupportedCount: 1 });
       const serialized = JSON.stringify(log.mock.calls);
       for (const forbidden of [marker, "claim_00", "work:finding:", "导出权限", "移动页面", "Bearer", "https://"]) {
         expect(serialized).not.toContain(forbidden);

@@ -8,7 +8,7 @@ import {
   type WorkWeeklyCoverageAssessment, type WorkWeeklyGeneratedClaim, type WorkWeeklyGeneratedItem,
   type WorkWeeklyStructuredJsonRequest, type WorkWeeklyVerifierItem
 } from "./weekly-ai-provider";
-import { WORK_WEEKLY_TEST_REFS as refs, workWeeklyProfile, workWeeklyTestSnapshot } from "./weekly-ai-test-fixture";
+import { WORK_WEEKLY_TEST_REFS as refs, workWeeklyModelResponse, workWeeklyProfile, workWeeklyTestSnapshot } from "./weekly-ai-test-fixture";
 import { createFixtureWorkWeeklyRunExecutor } from "./weekly-ai-runner";
 import { runWorkWeeklyGenerationPipeline, type WorkWeeklyGenerationTrace } from "./weekly-publication-policy";
 import { answerWorkWeeklyQuestion, createStructuredWorkWeeklyQaAnswerer, createStructuredWorkWeeklyQaVerifier } from "./weekly-qa-provider";
@@ -218,7 +218,7 @@ function fixture(snapshot: Snapshot, draft: Item[], options: {
 } = {}) {
   const traces: WorkWeeklyGenerationTrace[] = [];
   const request = vi.fn<WorkWeeklyStructuredJsonRequest>(async (input) => {
-    if (input.profile.role === "synthesizer") return { items: draft };
+    if (input.profile.role === "synthesizer") return workWeeklyModelResponse(draft);
     const packet = payload<{ items: Array<{ claim: Claim; sources: Array<{ sourceRef: string }> }>;
       coverageSources: Array<{ source: { sourceRef: string }; sourceText: string; candidateClaims: CoverageCandidate[] }> }>(input);
     const expected = draft.flatMap((item) => item.claims);

@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
 import {
   WorkReviewApiError,
@@ -39,11 +39,19 @@ export function WorkFindingTodoActions({
 }>) {
   const [kind, setKind] = useState<WorkTodoKind | null>(null);
   const [error, setError] = useState<string | null>(null);
-  if (linkedTodo) {
+  const [createdTodo, setCreatedTodo] = useState<WorkTodo | null>(null);
+  const [reused, setReused] = useState(false);
+  useEffect(() => {
+    if (linkedTodo) setCreatedTodo(null);
+  }, [linkedTodo]);
+  const visibleTodo = linkedTodo ?? createdTodo;
+  if (visibleTodo) {
     return (
       <div className={styles.linkedTodoState}>
-        <span>{linkedTodo.status === "completed" ? "关联待办已完成" : "已加入待办"}</span>
-        <button className={workStyles.secondaryButton} onClick={() => onOpenTodo(linkedTodo.id)} type="button">查看待办</button>
+        <span>{visibleTodo.status === "completed" ? "关联待办已完成" : "已加入待办"}</span>
+        <span>{visibleTodo.title}</span>
+        {reused ? <p className={styles.integrityNote} role="status">已找到原待办，没有重复创建。本次表单不会覆盖已有内容；如需修改，请查看待办后编辑。</p> : null}
+        <button className={workStyles.secondaryButton} onClick={() => onOpenTodo(visibleTodo.id)} type="button">查看待办</button>
       </div>
     );
   }
@@ -67,9 +75,11 @@ export function WorkFindingTodoActions({
         onSubmit={async (input: WorkTodoDialogSubmission) => {
           setError(null);
           try {
-            const todo = await api.createTodoFromFinding(meetingId, finding.id, input);
+            const result = await api.createTodoFromFinding(meetingId, finding.id, input);
+            setCreatedTodo(result.todo);
+            setReused(result.reused);
             setKind(null);
-            onCreated(todo);
+            onCreated(result.todo);
           } catch (createError) {
             setError(createError instanceof WorkReviewApiError ? createError.message : "暂时无法从这条会议结果创建待办。");
             throw createError;
