@@ -14,10 +14,10 @@ import { WorkTodoDialog, type WorkTodoDialogSubmission } from "./work-todo-dialo
 import { WorkTodoRows, type WorkTodoRowAction } from "./work-todo-list";
 import workStyles from "./work-review.module.css";
 import styles from "./work-todo.module.css";
-import { formatWorkTodoDate, useWorkTodoOperationKeys, workReviewLocalDay } from "./work-todo-utils";
+import { formatWorkTodoDate, useWorkTodoEdit, WorkTodoEditError, useWorkTodoOperationKeys, workReviewLocalDay } from "./work-todo-utils";
 
 function todayError(error: unknown) {
-  return error instanceof WorkReviewApiError ? error.message : "暂时无法读取今天的待办，请稍后重试。";
+  return error instanceof WorkReviewApiError || error instanceof WorkTodoEditError ? error.message : "暂时无法读取今天的待办，请稍后重试。";
 }
 
 function fullDayLabel(value: string) {
@@ -63,6 +63,7 @@ export function WorkReviewToday({ api: apiOverride }: Readonly<{ api?: WorkRevie
   const [selectedTodoId, setSelectedTodoId] = useState<string | null>(null);
   const [statusNotice, setStatusNotice] = useState<string | null>(null);
   const operationKeys = useWorkTodoOperationKeys();
+  const saveEdit = useWorkTodoEdit(api, dialog?.mode === "edit" ? dialog.todo : null);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -167,7 +168,7 @@ export function WorkReviewToday({ api: apiOverride }: Readonly<{ api?: WorkRevie
           setDialogError(null);
           try {
             if (dialog?.mode === "edit") {
-              await api.updateTodo(dialog.todo.id, {
+              await saveEdit({
                 title: input.title,
                 kind: input.kind,
                 ownerLabel: input.ownerLabel,
@@ -175,9 +176,7 @@ export function WorkReviewToday({ api: apiOverride }: Readonly<{ api?: WorkRevie
                 notes: input.notes,
                 isImportant: input.isImportant,
                 myDayDate: input.myDayDate,
-                projectIds: input.projectIds,
-                expectedVersion: dialog.todo.version,
-                operationKey: input.operationKey
+                projectIds: input.projectIds
               });
             } else {
               await api.createTodo({

@@ -35,6 +35,15 @@ const draft = {
 };
 
 describe("WorkReviewApi V1-4 contracts", () => {
+  it("keeps runtime project and account fields out of the strict Todo PATCH body", async () => {
+    const fetchImpl = vi.fn(async () => Response.json({ error: "version_conflict" }, { status: 409 }));
+    const api = createWorkReviewApi(fetchImpl);
+    const extendedForm = { title: "修改标题", projectIds: [], accountId: "not_an_authority", expectedVersion: 3, operationKey: "edit_todo_test" };
+    await expect(api.updateTodo("wrt_1", extendedForm)).rejects.toThrow();
+    const call = fetchImpl.mock.calls[0] as unknown as [string, RequestInit];
+    expect(call[0]).toBe("/api/work-reviews/todos/wrt_1");
+    expect(JSON.parse(String(call[1].body))).toEqual({ title: "修改标题", expectedVersion: 3, operationKey: "edit_todo_test" });
+  });
   it("reads server-owned capacity limits and pre-generation follow-up stats", async () => {
     const fetchImpl = vi.fn(async (input: RequestInfo | URL) => {
       const path = String(input);

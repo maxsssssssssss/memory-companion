@@ -578,6 +578,12 @@ export function WorkWeeklyPageFallback() {
 }
 
 export function WorkWeeklyPage() {
+  const { user } = useWorkReview();
+  // Never carry a previous account's review or QA into a new account.
+  return <WorkWeeklyScopePage key={user.id} />;
+}
+
+function WorkWeeklyScopePage() {
   const router = useRouter();
   const pathname = usePathname();
   const searchParams = useSearchParams();
@@ -607,7 +613,9 @@ export function WorkWeeklyPage() {
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [attempt, setAttempt] = useState(0);
-  const [pollRemaining, setPollRemaining] = useState(0);
+  const [pollStep, setPollStep] = useState(0);
+  const [pollFailures, setPollFailures] = useState(0);
+  const [pageVisible, setPageVisible] = useState(true);
   const [confirmAction, setConfirmAction] = useState<ConfirmAction>(null);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editText, setEditText] = useState("");
@@ -617,11 +625,14 @@ export function WorkWeeklyPage() {
   const [activeSourceRef, setActiveSourceRef] = useState<string | null>(null);
   const operationKeysRef = useRef(new Map<string, string>());
   const editorRef = useRef<HTMLTextAreaElement>(null);
+  const detailRequestRef = useRef<AbortController | null>(null);
   const scopeKey = `${weekStart}:${timeZone ?? "pending"}:${scopeKind}:${projectId ?? "none"}`;
 
   useEffect(() => {
     setTimeZone(Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC");
   }, []);
+
+  useEffect(() => () => detailRequestRef.current?.abort(), [scopeKey]);
 
   const canonicalHref = useMemo(() => {
     const query = new URLSearchParams({ weekStart, scope: scopeKind });
@@ -638,6 +649,20 @@ export function WorkWeeklyPage() {
     if (editingId) editorRef.current?.focus();
   }, [editingId]);
 
+  useEffect(() => {
+    const onVisibility = () => {
+      const visible = document.visibilityState !== "hidden";
+      setPageVisible(visible);
+      if (visible) {
+        setPollStep(0);
+        setPollFailures(0);
+      }
+    };
+    onVisibility();
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => document.removeEventListener("visibilitychange", onVisibility);
+  }, []);
+
   const applyScopeResponse = (response: WorkWeeklyScopeResponse) => {
     setReview(response.review);
     setItems(response.items);
@@ -651,6 +676,7 @@ export function WorkWeeklyPage() {
     const controller = new AbortController();
     setLoadState("loading");
     setLoadedScopeKey(null);
+    setBusyAction(null);
     setError(null);
     setNotice(null);
     const scope = { weekStart, timeZone, scopeKind, projectId } as const;
@@ -663,7 +689,8 @@ export function WorkWeeklyPage() {
       setProjects(nextProjects);
       setLoadedScopeKey(scopeKey);
       setLoadState("ready");
-      setPollRemaining(0);
+      setPollStep(0);
+      setPollFailures(0);
     }).catch((nextError: unknown) => {
       if (controller.signal.aborted || nextError instanceof DOMException && nextError.name === "AbortError") return;
       setError(actionError(nextError));
@@ -673,7 +700,7 @@ export function WorkWeeklyPage() {
   }, [attempt, capabilities.projects, capabilities.weekly, capabilitiesStatus, projectId, scopeKey, scopeKind, timeZone, v2Api, weekStart]);
 
   useEffect(() => {
-    if (!v2Api || !review || !PROCESSING_STATUSES.has(review.status) || pollRemaining <= 0) return;
+    if (!v2Api || !review || !PROCESSING_STATUSES.has(review.status) || loadState !== "ready" || loadedScopeKey !== scopeKey || !pageVisible || pollFailures >= 3 || busyAction !== null) return;
     const controller = new AbortController();
     const timer = globalThis.setTimeout(() => {
       void v2Api.getWeeklyReviewDetail(review.id, controller.signal).then((response) => {
@@ -683,25 +710,24 @@ export function WorkWeeklyPage() {
         setSourceSummary(response.sourceSummary);
         setLatestGeneration(response.latestGeneration ?? null);
         setDisplayedGeneration(response.displayedGeneration ?? null);
-        if (PROCESSING_STATUSES.has(response.review.status) && pollRemaining > 1) {
-          setPollRemaining((value) => value - 1);
-        } else {
-          setPollRemaining(0);
-          if (PROCESSING_STATUSES.has(response.review.status)) {
-            setNotice("处理仍在继续。页面已停止自动轮询，可稍后手动刷新状态。");
-          }
-        }
+        setPollStep((value) => value + 1);
+        setPollFailures(0);
+        setError(null);
+        if (!PROCESSING_STATUSES.has(response.review.status)) setNotice(null);
       }).catch((nextError: unknown) => {
         if (controller.signal.aborted || nextError instanceof DOMException && nextError.name === "AbortError") return;
-        setPollRemaining(0);
-        setError(actionError(nextError));
+        setPollFailures((value) => value + 1);
+        if (pollFailures >= 2) {
+          setError(actionError(nextError));
+          setNotice("连续读取状态失败，自动查询已暂停。点击“刷新状态”继续查询；后台任务不会因此停止。");
+        }
       });
-    }, 1_200);
+    }, pollFailures > 0 ? 15_000 : pollStep < 5 ? 1_200 : pollStep < 10 ? 5_000 : pollStep < 20 ? 15_000 : 30_000);
     return () => {
       controller.abort();
       globalThis.clearTimeout(timer);
     };
-  }, [pollRemaining, review, v2Api]);
+  }, [busyAction, loadState, loadedScopeKey, pageVisible, pollFailures, pollStep, review, scopeKey, v2Api]);
 
   const scopeReady = loadState === "ready" && loadedScopeKey === scopeKey;
   const scopedReview = scopeReady ? review : null;
@@ -724,12 +750,15 @@ export function WorkWeeklyPage() {
     setBusyAction("generate");
     setError(null);
     setNotice(null);
+    detailRequestRef.current?.abort();
+    const controller = new AbortController();
+    detailRequestRef.current = controller;
     try {
       const response = review
         ? await v2Api.regenerateWeeklyReview(review.id, {
           expectedVersion: review.version,
           operationKey: keyForOperation(operationKeysRef, logicalKey, "weekly-regenerate")
-        })
+        }, controller.signal)
         : await v2Api.generateWeeklyReview({
           weekStart,
           timeZone,
@@ -737,18 +766,21 @@ export function WorkWeeklyPage() {
           projectId,
           expectedVersion: null,
           operationKey: keyForOperation(operationKeysRef, logicalKey, "weekly-generate")
-        });
+        }, controller.signal);
+      if (controller.signal.aborted) return;
       settleOperation(operationKeysRef, logicalKey);
       setReview(response.review);
       setSourceSummary(response.review.sourceSummary);
       setLatestGeneration(null);
-      setPollRemaining(10);
-      setNotice("已提交生成；个人补充独立保留，页面会在有限时间内检查最新状态。");
+      setPollStep(0);
+      setPollFailures(0);
+      setNotice("已提交生成；个人补充独立保留。页面会自动检查状态，等待较久时每 30 秒检查一次。");
     } catch (nextError) {
+      if (controller.signal.aborted) return;
       settleOperation(operationKeysRef, logicalKey, nextError);
       setError(actionError(nextError));
     } finally {
-      setBusyAction(null);
+      if (!controller.signal.aborted) setBusyAction(null);
     }
   };
 
@@ -759,18 +791,25 @@ export function WorkWeeklyPage() {
     }
     setBusyAction("refresh");
     setError(null);
+    detailRequestRef.current?.abort();
+    const controller = new AbortController();
+    detailRequestRef.current = controller;
     try {
-      const response = await v2Api.getWeeklyReviewDetail(review.id);
+      const response = await v2Api.getWeeklyReviewDetail(review.id, controller.signal);
+      if (controller.signal.aborted) return;
       setReview(response.review);
       setItems(response.items);
       setSourceSummary(response.sourceSummary);
       setLatestGeneration(response.latestGeneration ?? null);
       setDisplayedGeneration(response.displayedGeneration ?? null);
+      setPollStep(0);
+      setPollFailures(0);
       setNotice("已载入服务端最新状态。");
     } catch (nextError) {
+      if (controller.signal.aborted) return;
       setError(actionError(nextError));
     } finally {
-      setBusyAction(null);
+      if (!controller.signal.aborted) setBusyAction(null);
     }
   };
 

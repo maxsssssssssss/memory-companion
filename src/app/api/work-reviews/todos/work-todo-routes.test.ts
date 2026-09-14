@@ -63,6 +63,7 @@ import {
   DELETE as removeFromMyDay
 } from "./[todoId]/my-day/route";
 import { POST as reopenTodo } from "./[todoId]/reopen/route";
+import { PATCH as setTodoProjects } from "./[todoId]/projects/route";
 import { GET as getTodoSource } from "./[todoId]/source/route";
 import { GET as listTodos, POST as createTodo } from "./route";
 
@@ -309,6 +310,55 @@ afterEach(() => {
 });
 
 describe("Work Todo routes", () => {
+  it("rejects projectIds on ordinary edits without consuming the operation or changing the Todo", async () => {
+    const todo = todoRepository.createManualTodo({ accountId: "account_a", ...manualBody("strict_edit") }).todo;
+    const context = routeContext({ todoId: todo.id });
+    const patch = { expectedVersion: todo.version, operationKey: "strict_title_edit", title: "更新合成待办标题" };
+    const beforeEvents = state.database!.prepare("SELECT count(*) AS count FROM wr_todo_events").get();
+    const rejected = await updateTodo(jsonRequest("http://localhost/todo", "PATCH", {
+      ...patch, projectIds: []
+    }), context);
+    expect(rejected.status).toBe(400);
+    expect(await responseJson(rejected)).toEqual({ error: "invalid_request" });
+    expect(todoRepository.getTodo("account_a", todo.id)).toEqual(todo);
+    expect(state.database!.prepare("SELECT count(*) AS count FROM wr_todo_events").get()).toEqual(beforeEvents);
+
+    const accepted = await updateTodo(jsonRequest("http://localhost/todo", "PATCH", patch), context);
+    expect(accepted.status).toBe(200);
+    expect(await responseJson(accepted)).toMatchObject({ reused: false,
+      todo: { title: patch.title, version: todo.version + 1 } });
+    const replay = await updateTodo(jsonRequest("http://localhost/todo", "PATCH", patch), context);
+    expect(replay.status).toBe(200);
+    expect(await responseJson(replay)).toMatchObject({ reused: true,
+      todo: { title: patch.title, version: todo.version + 1 } });
+  });
+
+  it("uses the saved Todo version for project changes and keeps the saved edit if linking fails", async () => {
+    const todo = todoRepository.createManualTodo({ accountId: "account_a", ...manualBody("separate_projects") }).todo;
+    const project = new WorkProjectRepository(state.database!).createProject({
+      accountId: "account_a", operationKey: "create_edit_project", name: "合成编辑项目", description: null
+    }).project;
+    const context = routeContext({ todoId: todo.id });
+    const edited = await updateTodo(jsonRequest("http://localhost/todo", "PATCH", {
+      expectedVersion: todo.version, operationKey: "save_before_projects", title: "已保存的合成标题"
+    }), context);
+    expect(edited.status).toBe(200);
+    const saved = todoRepository.getTodo("account_a", todo.id);
+    const stale = await setTodoProjects(jsonRequest("http://localhost/todo/projects", "PATCH", {
+      expectedVersion: todo.version, operationKey: "stale_project_edit", projectIds: [project.id]
+    }), context);
+    expect(stale.status).toBe(409);
+    expect(await responseJson(stale)).toMatchObject({ currentVersion: saved.version });
+    expect(todoRepository.getTodo("account_a", todo.id)).toEqual(saved);
+    const request = { expectedVersion: saved.version, operationKey: "save_projects", projectIds: [project.id] };
+    const linked = await setTodoProjects(jsonRequest("http://localhost/todo/projects", "PATCH", request), context);
+    expect(linked.status).toBe(200);
+    expect(await responseJson(linked)).toMatchObject({ resourceVersion: saved.version + 1, changed: true, reused: false });
+    const replay = await setTodoProjects(jsonRequest("http://localhost/todo/projects", "PATCH", request), context);
+    expect(await responseJson(replay)).toMatchObject({ resourceVersion: saved.version + 1, reused: true });
+    expect(todoRepository.getTodo("account_a", todo.id)).toMatchObject({ title: saved.title, version: saved.version + 1 });
+  });
+
   it("fails closed before auth and rejects client scope/source fields", async () => {
     state.authContext = null;
     const unauthenticated = await createTodo(jsonRequest(

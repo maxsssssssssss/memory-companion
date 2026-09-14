@@ -96,7 +96,7 @@ export function workWeeklyCurrentCompletionSourceRefs(snapshot: WorkWeeklySource
 }
 
 export function workWeeklyCompletionClaimSupported(snapshot: WorkWeeklySourceSnapshot, refs: string[], text: string) {
-  return /在系统中标记完成/u.test(text)
+  return /在系统中标记(?:为)?完成/u.test(text)
     && !/(?:上周|前一周|去年|上月)/u.test(text)
     && !/(?:已|已经|因此|所以)(?:现实履行|实际交付|实际完成)/u.test(text)
     && workWeeklyCurrentCompletionSourceRefs(snapshot).some((ref) => refs.includes(ref));

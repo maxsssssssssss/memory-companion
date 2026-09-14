@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
@@ -231,7 +231,7 @@ function api(overrides: Partial<WorkReviewV2CoreApi> = {}): WorkReviewV2CoreApi 
   } as WorkReviewV2CoreApi;
 }
 
-function weeklyElement(client: WorkReviewApi, nextCapabilities: WorkReviewCapabilities = capabilities) {
+function weeklyElement(client: WorkReviewApi, nextCapabilities: WorkReviewCapabilities = capabilities, accountId = "account_1") {
   return (
     <WorkReviewContext.Provider value={{
       api: client,
@@ -239,7 +239,7 @@ function weeklyElement(client: WorkReviewApi, nextCapabilities: WorkReviewCapabi
       capabilitiesStatus: "ready",
       featureFlags,
       refreshCapabilities: vi.fn(),
-      user: { id: "account_1", email: "person@example.com", name: "Person" }
+      user: { id: accountId, email: "person@example.com", name: "Person" }
     }}>
       <WorkWeeklyPage />
     </WorkReviewContext.Provider>
@@ -262,7 +262,116 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup();
+  vi.useRealTimers();
+  vi.restoreAllMocks();
   vi.clearAllMocks();
+});
+
+describe("Weekly generation polling recovery", () => {
+  it("backs off to thirty seconds without silently stopping a ten-minute queue", async () => {
+    vi.useFakeTimers();
+    const pending = { review: review({ status: "queued" }), items: [], sourceSummary: summary };
+    const client = api({ getWeeklyReview: vi.fn().mockResolvedValue(pending), getWeeklyReviewDetail: vi.fn().mockResolvedValue(pending) });
+    await act(async () => { renderWeekly(client); });
+    for (let step = 0; step < 600; step++) await act(async () => { await vi.advanceTimersByTimeAsync(1_000); });
+    const calls = vi.mocked(client.getWeeklyReviewDetail).mock.calls.length;
+    expect(calls).toBeGreaterThan(25);
+    expect(calls).toBeLessThan(40);
+    await act(async () => { await vi.advanceTimersByTimeAsync(30_000); });
+    expect(client.getWeeklyReviewDetail).toHaveBeenCalledTimes(calls + 1);
+  });
+  it("keeps checking through queued, generating and verifying until a late ready result", async () => {
+    vi.useFakeTimers();
+    const started = Date.now();
+    const queued = review({ status: "queued", currentSystemVersion: 0 });
+    const seen = new Set<string>();
+    const client = api({
+      getWeeklyReview: vi.fn().mockResolvedValue({ review: queued, items: [], sourceSummary: summary }),
+      getWeeklyReviewDetail: vi.fn().mockImplementation(async () => {
+        const elapsed = Date.now() - started;
+        const status = elapsed < 25_000 ? "queued" : elapsed < 50_000 ? "generating" : elapsed < 80_000 ? "verifying" : "ready";
+        seen.add(status);
+        return { review: review({ status }), items: status === "ready" ? [item()] : [], sourceSummary: summary };
+      })
+    });
+    await act(async () => { renderWeekly(client); });
+    for (let step = 0; step < 110; step++) await act(async () => { await vi.advanceTimersByTimeAsync(1_000); });
+    expect([...seen]).toEqual(["queued", "generating", "verifying", "ready"]);
+    expect(screen.getByText("有效概览")).toBeVisible();
+    expect(vi.mocked(client.getWeeklyReviewDetail).mock.calls.length).toBeLessThan(20);
+  });
+
+  it.each(["scope", "account", "unmount"])("aborts an in-flight poll on %s and rejects its late response", async (change) => {
+    vi.useFakeTimers();
+    let finish!: (value: unknown) => void;
+    const client = api({
+      getWeeklyReview: vi.fn().mockResolvedValueOnce({ review: review({ status: "queued" }), items: [], sourceSummary: summary })
+        .mockResolvedValue({ review: review({ id: "wrw_2" }), items: [item({ systemText: "当前范围内容" })], sourceSummary: summary }),
+      getWeeklyReviewDetail: vi.fn().mockImplementation(() => new Promise((resolve) => { finish = resolve; }))
+    });
+    let view!: ReturnType<typeof renderWeekly>;
+    await act(async () => { view = renderWeekly(client); });
+    await act(async () => { await vi.advanceTimersByTimeAsync(1_200); });
+    const signal = vi.mocked(client.getWeeklyReviewDetail).mock.calls[0]![1]!;
+    await act(async () => {
+      if (change === "scope") {
+        navigation.search = new URLSearchParams("weekStart=2026-09-07&scope=all");
+        view.rerender(weeklyElement(client));
+      } else if (change === "account") view.rerender(weeklyElement(client, capabilities, "account_2"));
+      else view.unmount();
+    });
+    expect(signal.aborted).toBe(true);
+    await act(async () => { finish({ review: review(), items: [item({ systemText: "旧范围晚到内容" })], sourceSummary: summary }); });
+    expect(screen.queryByText("旧范围晚到内容")).not.toBeInTheDocument();
+    await act(async () => { await vi.advanceTimersByTimeAsync(60_000); });
+    expect(client.getWeeklyReviewDetail).toHaveBeenCalledTimes(1);
+  });
+
+  it("pauses hidden polling and resumes on return without an unbounded error retry loop", async () => {
+    vi.useFakeTimers();
+    const queued = review({ status: "queued" });
+    const client = api({
+      getWeeklyReview: vi.fn().mockResolvedValue({ review: queued, items: [], sourceSummary: summary }),
+      getWeeklyReviewDetail: vi.fn().mockRejectedValue(new TypeError("offline"))
+    });
+    await act(async () => { renderWeekly(client); });
+    const visibility = vi.spyOn(document, "visibilityState", "get").mockReturnValue("hidden");
+    await act(async () => { document.dispatchEvent(new Event("visibilitychange")); });
+    await act(async () => { await vi.advanceTimersByTimeAsync(60_000); });
+    expect(client.getWeeklyReviewDetail).not.toHaveBeenCalled();
+    visibility.mockReturnValue("visible");
+    await act(async () => { document.dispatchEvent(new Event("visibilitychange")); });
+    for (let step = 0; step < 60; step++) await act(async () => { await vi.advanceTimersByTimeAsync(1_000); });
+    expect(client.getWeeklyReviewDetail).toHaveBeenCalledTimes(3);
+    expect(screen.getByText(/连续读取状态失败/u)).toBeVisible();
+    await act(async () => { await vi.advanceTimersByTimeAsync(60_000); });
+    expect(client.getWeeklyReviewDetail).toHaveBeenCalledTimes(3);
+    vi.mocked(client.getWeeklyReviewDetail).mockResolvedValue({ review: queued, items: [], sourceSummary: summary });
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "刷新状态" })); });
+    await act(async () => { await vi.advanceTimersByTimeAsync(1_200); });
+    expect(client.getWeeklyReviewDetail).toHaveBeenCalledTimes(5);
+    visibility.mockRestore();
+  });
+  it("resumes a queued review on entry and observes a failure after a long queue", async () => {
+    vi.useFakeTimers();
+    const queued = review({ status: "queued", currentSystemVersion: 0 });
+    const started = Date.now();
+    const client = api({
+      getWeeklyReview: vi.fn().mockResolvedValue({ review: queued, items: [], sourceSummary: summary }),
+      getWeeklyReviewDetail: vi.fn().mockImplementation(async () => ({
+        review: { ...queued, status: Date.now() - started >= 45_000 ? "failed" : "queued" },
+        items: [], sourceSummary: summary
+      }))
+    });
+    await act(async () => { renderWeekly(client); });
+    for (let step = 0; step < 30; step++) await act(async () => { await vi.advanceTimersByTimeAsync(2_000); });
+    expect(screen.getByText("本次生成未完成")).toBeVisible();
+    expect(client.getWeeklyReviewDetail).toHaveBeenCalled();
+    const calls = vi.mocked(client.getWeeklyReviewDetail).mock.calls.length;
+    await act(async () => { await vi.advanceTimersByTimeAsync(60_000); });
+    expect(client.getWeeklyReviewDetail).toHaveBeenCalledTimes(calls);
+    expect(client.askWeeklyQa).not.toHaveBeenCalled();
+  });
 });
 
 describe("Work Review Weekly UI", () => {

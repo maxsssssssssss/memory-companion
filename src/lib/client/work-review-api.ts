@@ -572,7 +572,7 @@ export type CreateWorkTodoInput = WorkTodoDraft & Readonly<{ operationKey: strin
 export type CreateWorkTodoFromFindingInput = CreateWorkTodoInput & Readonly<{
   ownershipOverrideConfirmed: boolean;
 }>;
-export type UpdateWorkTodoInput = Partial<WorkTodoDraft> & Readonly<{
+export type UpdateWorkTodoInput = Partial<Omit<WorkTodoDraft, "projectIds">> & Readonly<{
   expectedVersion: number;
   operationKey: string;
 }>;
@@ -1170,10 +1170,11 @@ export function createWorkReviewApi(fetchImpl: typeof fetch = fetch): WorkReview
       return await parseResponse(response, WorkTodoDetailResponseSchema);
     },
     async updateTodo(todoId, input, signal) {
+      const { title, kind, notes, ownerLabel, currentDueDate, isImportant, myDayDate, expectedVersion } = input;
       const response = await sameOrigin(todoPath(todoId), {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ ...input, operationKey: requestId(input.operationKey, "invalid_operation_key") }),
+        body: JSON.stringify({ title, kind, notes, ownerLabel, currentDueDate, isImportant, myDayDate, expectedVersion, operationKey: requestId(input.operationKey, "invalid_operation_key") }),
         signal
       });
       return (await parseResponse(response, WorkTodoMutationResponseSchema)).todo;

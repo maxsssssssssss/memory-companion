@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, renderHook, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type {
@@ -8,12 +8,14 @@ import type {
   WorkTodoSourceResponse
 } from "@/lib/client/work-review-api";
 import type { WorkProject } from "@/lib/domain/work-project";
+import { createWorkReviewApi, WorkReviewApiError } from "@/lib/client/work-review-api";
+import { UpdateWorkTodoRequestSchema } from "@/lib/domain/work-todo";
 
 import { WorkReviewContext } from "./work-review-shell";
 import { WorkReviewToday } from "./work-review-today";
 import { WorkTodoDetail } from "./work-todo-detail";
 import { WorkTodoListPage } from "./work-todo-list";
-import { workReviewLocalDay } from "./work-todo-utils";
+import { useWorkTodoEdit, workReviewLocalDay } from "./work-todo-utils";
 
 afterEach(() => {
   cleanup();
@@ -159,7 +161,7 @@ function v2Methods(overrides: Partial<WorkReviewApi> = {}): Partial<WorkReviewAp
   };
 }
 
-function renderTodoListWithProjects(client: WorkReviewApi) {
+function renderTodoListWithProjects(client: WorkReviewApi, today = false) {
   return render(
     <WorkReviewContext.Provider value={{
       api: client,
@@ -169,12 +171,107 @@ function renderTodoListWithProjects(client: WorkReviewApi) {
       refreshCapabilities: vi.fn(),
       user: { id: "account_1", email: "person@example.com", name: "Person" }
     }}>
-      <WorkTodoListPage />
+      {today ? <WorkReviewToday /> : <WorkTodoListPage />}
     </WorkReviewContext.Provider>
   );
 }
 
 describe("Work Review Todo UI", () => {
+  it.each(["keep", "add", "clear"])("saves fields and %s projects using returned versions and distinct operations", async (change) => {
+    const alpha = project("wrp_alpha", "Alpha");
+    const beta = project("wrp_beta", "Beta");
+    const current = todo({ version: 4, projects: [alpha] });
+    const updated = { ...current, title: "改过的标题", version: 5 };
+    const client = api(v2Methods({
+      // The ordinary PATCH response omits relation enrichment.
+      updateTodo: vi.fn().mockResolvedValue({ ...updated, projects: undefined }),
+      setTodoProjects: vi.fn().mockResolvedValue({ resourceVersion: 6, projects: change === "clear" ? [] : [alpha, beta] })
+    }));
+    const { result } = renderHook(() => useWorkTodoEdit(client, current));
+    const ids = change === "keep" ? [alpha.id] : change === "add" ? [alpha.id, beta.id] : [];
+    await act(async () => { await result.current({ ...updated, projectIds: ids }); });
+    const fields = vi.mocked(client.updateTodo).mock.calls[0]![1];
+    expect(fields).toMatchObject({ expectedVersion: 4, title: updated.title });
+    expect(fields).not.toHaveProperty("projectIds");
+    if (change === "keep") expect(client.setTodoProjects).not.toHaveBeenCalled();
+    else {
+      const links = vi.mocked(client.setTodoProjects!).mock.calls[0]![1];
+      expect(links).toMatchObject({ expectedVersion: 5, projectIds: ids });
+      expect(links.operationKey).not.toBe(fields.operationKey);
+    }
+  });
+
+  it.each(["uncertain", "conflict"])("preserves saved fields after a %s project failure and retries only that step", async (failure) => {
+    const alpha = project("wrp_alpha", "Alpha");
+    const current = todo({ version: 4, projects: [] });
+    const updated = { ...current, title: "已保存标题", version: 5 };
+    const serverCurrent = failure === "conflict" ? { ...updated, version: 7 } : updated;
+    const client = api(v2Methods({
+      updateTodo: vi.fn().mockResolvedValue(updated),
+      getTodo: vi.fn().mockResolvedValue(detail(serverCurrent)),
+      setTodoProjects: vi.fn().mockRejectedValueOnce(failure === "uncertain" ? new TypeError("offline") : new WorkReviewApiError(409, "version_conflict"))
+        .mockResolvedValue({ resourceVersion: 8, projects: [alpha] })
+    }));
+    const { result } = renderHook(() => useWorkTodoEdit(client, current));
+    const draft = { ...updated, projectIds: [alpha.id] };
+    await expect(result.current(draft)).rejects.toThrow("待办内容已保存，项目关联尚未确认保存");
+    expect(client.getTodo).toHaveBeenCalledTimes(1);
+    expect(client.setTodoProjects).toHaveBeenCalledTimes(1);
+    await result.current(draft);
+    expect(client.updateTodo).toHaveBeenCalledTimes(1);
+    const [first, second] = vi.mocked(client.setTodoProjects!).mock.calls.map((call) => call[1]);
+    if (failure === "uncertain") expect(second).toEqual(first);
+    else {
+      expect(second.expectedVersion).toBe(7);
+      expect(second.operationKey).not.toBe(first.operationKey);
+    }
+  });
+
+  it("uses a fresh project operation after changing an uncertain payload and refreshing its version", async () => {
+    const alpha = project("wrp_alpha", "Alpha");
+    const current = todo({ projects: [] });
+    const client = api(v2Methods({
+      getTodo: vi.fn().mockResolvedValue(detail({ ...current, version: 1, projects: [alpha] })),
+      setTodoProjects: vi.fn().mockRejectedValueOnce(new TypeError("lost response"))
+        .mockResolvedValue({ resourceVersion: 2, projects: [] })
+    }));
+    const { result } = renderHook(() => useWorkTodoEdit(client, current));
+    await expect(result.current({ ...current, projectIds: [alpha.id] })).rejects.toThrow();
+    await result.current({ ...current, projectIds: [] });
+    const [first, second] = vi.mocked(client.setTodoProjects!).mock.calls.map((call) => call[1]);
+    expect(second).toMatchObject({ expectedVersion: 1, projectIds: [] });
+    expect(second.operationKey).not.toBe(first.operationKey);
+    expect(client.updateTodo).not.toHaveBeenCalled();
+  });
+  it.each(["list", "today", "meeting"])("saves a title from the project-enabled %s form through the strict PATCH and reopens it", async (surface) => {
+    let stored = todo({ projects: [], ...(surface === "meeting" ? { origin: "meeting_finding", sourceMeetingId: "wrm_1", sourceFindingId: "wrf_1", sourceFindingVersion: 1, sourceFindingKind: "action_item" } as const : {}) });
+    const bodies: unknown[] = [];
+    const transport = createWorkReviewApi(vi.fn(async (_url, init) => {
+      const body = JSON.parse(String(init?.body));
+      bodies.push(body);
+      const parsed = UpdateWorkTodoRequestSchema.safeParse(body);
+      if (!parsed.success) return Response.json({ error: "invalid_request" }, { status: 400 });
+      stored = { ...stored, title: parsed.data.title!, version: stored.version + 1 };
+      return Response.json({ todo: stored, reused: false });
+    }));
+    const client = api(v2Methods({
+      updateTodo: transport.updateTodo,
+      listTodosByProject: vi.fn().mockImplementation(async () => [stored]),
+      listTodos: vi.fn().mockImplementation(async (view) => view === "today" ? [stored] : []),
+      getTodo: vi.fn().mockImplementation(async () => detail(stored))
+    }));
+    renderTodoListWithProjects(client, surface === "today");
+    fireEvent.click(await screen.findByRole("button", { name: stored.title }));
+    fireEvent.click(await screen.findByRole("button", { name: "编辑" }));
+    fireEvent.change(screen.getByLabelText("标题"), { target: { value: "标题已修改" } });
+    fireEvent.click(screen.getByRole("button", { name: "保存修改" }));
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "编辑待办" })).not.toBeInTheDocument());
+    expect(bodies).toHaveLength(1);
+    expect(bodies[0]).not.toHaveProperty("projectIds");
+    expect(client.setTodoProjects).not.toHaveBeenCalled();
+    fireEvent.click(await screen.findByRole("button", { name: "标题已修改" }));
+    expect(await screen.findByRole("heading", { name: "标题已修改" })).toBeVisible();
+  });
   it("keeps Today explicit and offers due or overdue work without auto-adding it", async () => {
     const today = workReviewLocalDay();
     const explicit = todo({ id: "wrt_today", title: "今天明确安排", myDayDate: today });
@@ -249,12 +346,14 @@ describe("Work Review Todo UI", () => {
     const listProjects = vi.fn().mockResolvedValue([alpha, beta]);
     const createTodo = vi.fn<WorkReviewApi["createTodo"]>().mockResolvedValue(todo({ id: "wrt_created" }));
     const updateTodo = vi.fn<WorkReviewApi["updateTodo"]>().mockResolvedValue(current);
+    const setTodoProjects = vi.fn().mockResolvedValue({ resourceVersion: 1, projects: [] });
     const client = api(v2Methods({
       createTodo,
       getTodo: vi.fn().mockResolvedValue(detail(current)),
       listProjects,
       listTodosByProject,
-      updateTodo
+      updateTodo,
+      setTodoProjects
     }));
 
     renderTodoListWithProjects(client);
@@ -292,13 +391,14 @@ describe("Work Review Todo UI", () => {
     fireEvent.click(within(editDialog).getByRole("checkbox", { name: "Beta 研究" }));
     fireEvent.click(within(editDialog).getByRole("button", { name: "保存修改" }));
 
-    await waitFor(() => expect(updateTodo).toHaveBeenCalledWith(
+    await waitFor(() => expect(setTodoProjects).toHaveBeenCalledWith(
       "wrt_1",
       expect.objectContaining({
         expectedVersion: 0,
         projectIds: ["wrp_alpha", "wrp_beta"]
       })
     ));
+    expect(updateTodo).not.toHaveBeenCalled();
   });
 
   it("uses one dialog state machine for changed source and labels direct Evidence separately", async () => {

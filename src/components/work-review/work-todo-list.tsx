@@ -21,6 +21,8 @@ import workStyles from "./work-review.module.css";
 import styles from "./work-todo.module.css";
 import {
   formatWorkTodoDate,
+  useWorkTodoEdit,
+  WorkTodoEditError,
   useWorkTodoOperationKeys,
   workReviewLocalDay
 } from "./work-todo-utils";
@@ -96,7 +98,7 @@ const VIEW_ITEMS: readonly Readonly<{ id: Exclude<WorkTodoView, "today">; label:
 ];
 
 function todoError(error: unknown) {
-  return error instanceof WorkReviewApiError ? error.message : "暂时无法完成待办操作，请稍后重试。";
+  return error instanceof WorkReviewApiError || error instanceof WorkTodoEditError ? error.message : "暂时无法完成待办操作，请稍后重试。";
 }
 
 export function WorkTodoListPage({ api: apiOverride }: Readonly<{ api?: WorkReviewApi }> = {}) {
@@ -121,6 +123,7 @@ export function WorkTodoListPage({ api: apiOverride }: Readonly<{ api?: WorkRevi
   const [projectAttempt, setProjectAttempt] = useState(0);
   const [projectScope, setProjectScope] = useState<WorkProjectScopeFilter>({ kind: "all" });
   const operationKeys = useWorkTodoOperationKeys();
+  const saveEdit = useWorkTodoEdit(api, dialog?.mode === "edit" ? dialog.todo : null);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -232,7 +235,7 @@ export function WorkTodoListPage({ api: apiOverride }: Readonly<{ api?: WorkRevi
           setDialogError(null);
           try {
             if (dialog?.mode === "edit") {
-              await api.updateTodo(dialog.todo.id, {
+              await saveEdit({
                 title: input.title,
                 kind: input.kind,
                 ownerLabel: input.ownerLabel,
@@ -240,9 +243,7 @@ export function WorkTodoListPage({ api: apiOverride }: Readonly<{ api?: WorkRevi
                 notes: input.notes,
                 isImportant: input.isImportant,
                 myDayDate: input.myDayDate,
-                projectIds: input.projectIds,
-                expectedVersion: dialog.todo.version,
-                operationKey: input.operationKey
+                projectIds: input.projectIds
               });
             } else {
               await api.createTodo({
