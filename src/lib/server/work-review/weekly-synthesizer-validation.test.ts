@@ -55,16 +55,17 @@ describe("Weekly synthesis tolerates representation differences without losing e
       { text: "本周有一条待办完成记录。", sourceRefs: [refs.todo, refs.todoCompleted] }
     ].map((item) => ({ ...item, section, claimType: "fact", isInterpretation: false })) };
     const before = JSON.stringify({ snapshot, wire });
-    const items = adaptWorkWeeklyModelResponse({ snapshot, response: wire });
+    const items = wire.items.flatMap((item) => adaptWorkWeeklyModelResponse({ snapshot, response: { items: [item] } }));
     expect(items.map((item) => item.section)).toEqual(["overview", "overview", "overview"]);
     for (const [index, item] of items.entries()) {
-      expect(item).toMatchObject({ id: `item_00${index + 1}`, text: wire.items[index]!.text,
+      expect(item).toMatchObject({ id: "item_001", text: wire.items[index]!.text,
         itemType: "evidence_backed_fact", claims: [{ text: wire.items[index]!.text,
           claimType: "fact", sourceRefs: wire.items[index]!.sourceRefs }] });
     }
     expect(JSON.stringify({ snapshot, wire })).toBe(before);
     expect(diagnostic(log)).toEqual({ component: "work-weekly-synthesizer-contract", stage: "normalization",
-      reason: "todo_state_section_normalized", affectedItemCount: 3 });
+      reason: "todo_state_section_normalized", affectedItemCount: 1 });
+    expect(log).toHaveBeenCalledTimes(3);
     expect(JSON.stringify(log.mock.calls)).not.toMatch(/PRIVATE|work:todo|account_a|完成/u);
   });
 
@@ -142,7 +143,8 @@ describe("Weekly synthesis tolerates representation differences without losing e
     const snapshot = workWeeklyTestSnapshot();
     const good = "本周该待办在应用中勾选完成，现实履行仍需核对。";
     const bad = "PRIVATE_BODY：待办已经实际交付。";
-    const wire = { items: [good, bad].map((text) => response(text, [refs.todo, refs.todoCompleted]).items[0]!) };
+    const wire = { items: [response(good, [refs.todo, refs.todoCompleted]).items[0]!,
+      response(bad, [refs.todo, refs.todoCompleted, refs.evidenceCommitment]).items[0]!] };
     const request = vi.fn(async () => wire);
     const result = await runWorkWeeklyGenerationPipeline({ accountId: snapshot.accountId, snapshot,
       synthesizer: createStructuredWorkWeeklySynthesizer({ profile: workWeeklyProfile("synthesizer"), requestStructuredJson: request }),

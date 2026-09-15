@@ -160,6 +160,28 @@ describe("Work Weekly minimal Todo-only generation through Responses and SQLite"
     expect(db.pragma("foreign_key_check")).toEqual([]);
   });
 
+  it.each([false, true])("verifies the canonical timeline and persists one item despite cross-section paraphrases: reversed=%s", async (reverse) => {
+    vi.spyOn(console, "info").mockImplementation(() => {});
+    const wire = { items: [generated("本周清单先被标记完成，后重新打开。").items[0]!,
+      { ...generated("待办曾勾选完成，但后来撤销了完成状态。", "completed").items[0]!,
+        sourceRefs: sourceRefs().slice(1) }] };
+    if (reverse) wire.items.reverse();
+    answer = wire;
+    claimText = `待办“${title}”：2026-09-14在系统中标记完成 → 2026-09-14重新打开；截至2026-09-14，系统状态为未完成。系统状态不代表实际交付。`;
+    const queued = service.generate(accountId, { ...scope, operationKey: "roll_up_todo_state", expectedVersion: null });
+    expect(await run(queued.run)).toMatchObject({ state: "published" });
+    expect(requests).toHaveLength(2);
+    const verifierPack = JSON.parse(requests[1]!.input.find((message) => message.role === "user")!.content) as VerifierPack;
+    expect(verifierPack.items).toHaveLength(1);
+    expect(verifierPack.items[0]!).toMatchObject({ claim: { text: claimText, sourceRefs: sourceRefs() },
+      publicationContext: { section: "overview" } });
+    const detail = service.getDetail(accountId, queued.review.id);
+    expect(detail.latestGeneration).toMatchObject({ executionStatus: "completed", qualityStatus: "passed" });
+    expect(detail.items).toHaveLength(1);
+    expect(detail.items[0]).toMatchObject({ section: "overview", systemText: claimText, verificationState: "verified" });
+    expect(db.pragma("foreign_key_check")).toEqual([]);
+  });
+
   it("still verifies actual activity claims after recovering their section", async () => {
     vi.spyOn(console, "info").mockImplementation(() => {});
     vi.spyOn(console, "warn").mockImplementation(() => {});
