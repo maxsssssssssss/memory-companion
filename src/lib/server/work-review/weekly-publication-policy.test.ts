@@ -525,9 +525,10 @@ describe("Work Weekly atomic content quality", () => {
     expect(result[0]).toMatchObject({ text: "同一观察；同一观察仍未验证", sourceRefs: [WORK_WEEKLY_TEST_REFS.assignment, WORK_WEEKLY_TEST_REFS.dated] });
   });
 
-  it("rejects completion prose that upgrades a system event into actual delivery", () => {
+  it.each(["unsupported", "entailed"] as const)("rejects actual delivery when the verifier flags an unsupported upgrade: %s", (verdict) => {
     const items = item("completion", [WORK_WEEKLY_TEST_REFS.todoCompleted], "在系统中标记完成，因此实际交付了清单");
-    expect(applyWorkWeeklyClaimPublicationPolicy({ snapshot: workWeeklyTestSnapshot(), items, verdicts: verdictsFor(items) })).toEqual([]);
+    expect(applyWorkWeeklyClaimPublicationPolicy({ snapshot: workWeeklyTestSnapshot(), items,
+      verdicts: verdictsFor(items).map((entry) => ({ ...entry, verdict, issueCodes: ["todo_state_not_real_world_completion"] })) })).toEqual([]);
   });
 
   it("keeps an explicit disclaimer that system completion does not prove delivery", () => {

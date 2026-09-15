@@ -160,10 +160,21 @@ describe("Work Weekly TokenHub transport", () => {
     } finally { log.mockRestore(); }
   });
 
-  it.each(["duplicate_refs", "foreign_ref", "unsupported_completed", "legacy_wire"])(
+  it("normalizes repeated citations after decoding a complete SSE response", async () => {
+    const log = vi.spyOn(console, "info").mockImplementation(() => {});
+    try {
+      const wire = { ...finalAnswer.items[0], sourceRefs: [...finalAnswer.items[0].sourceRefs, ...finalAnswer.items[0].sourceRefs] };
+      const { fixture, result } = synthesize([wire]);
+      const items = await result;
+      expect(items[0]!.claims[0]!.sourceRefs).toEqual(finalAnswer.items[0].sourceRefs);
+      expect(items[0]!.claims[0]!.text).toBe(finalAnswer.items[0].text);
+      expect(fixture.create).toHaveBeenCalledTimes(1);
+    } finally { log.mockRestore(); }
+  });
+
+  it.each(["foreign_ref", "unsupported_completed", "legacy_wire"])(
     "retains internal validation and allowlist boundaries after decoding: %s", async (failure) => {
       let wire: Record<string, unknown> = { ...finalAnswer.items[0] };
-      if (failure === "duplicate_refs") wire.sourceRefs = [...finalAnswer.items[0].sourceRefs, ...finalAnswer.items[0].sourceRefs];
       if (failure === "foreign_ref") wire.sourceRefs = ["work:finding:outside_scope"];
       if (failure === "unsupported_completed") wire.section = "completed";
       if (failure === "legacy_wire") wire = { id: "old_item", section: "decisions", text: "old summary", itemType: "evidence_backed_fact",

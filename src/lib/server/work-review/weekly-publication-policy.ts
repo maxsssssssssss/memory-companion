@@ -23,7 +23,7 @@ import {
   type WorkWeeklyVerificationAuditDetails
 } from "./weekly-ai-provider";
 
-export const WORK_WEEKLY_PUBLICATION_POLICY_VERSION = "work_weekly_publication_v9" as const;
+export const WORK_WEEKLY_PUBLICATION_POLICY_VERSION = "work_weekly_publication_v10" as const;
 
 export type WorkWeeklyQualityAssessment = {
   status: "passed" | "needs_review" | "insufficient";
@@ -249,7 +249,7 @@ function projectClaim(input: {
       break;
     }
     case "completion": {
-      if (!workWeeklyCompletionClaimSupported(snapshot, refs, claim.text)) return reject("completion_not_current_week_event");
+      if (!workWeeklyCompletionClaimSupported(snapshot, refs)) return reject("completion_not_current_week_event");
       break;
     }
     case "deadline":
@@ -302,7 +302,7 @@ function mergeExactClaims(claims: SafeClaim[]) {
 }
 
 function sectionAllowsClaim(snapshot: WorkWeeklySourceSnapshot, section: WorkWeeklyGeneratedItem["section"], claim: SafeClaim) {
-  if (section === "completed") return workWeeklyCompletionClaimSupported(snapshot, claim.sourceRefs, claim.text);
+  if (section === "completed") return workWeeklyCompletionClaimSupported(snapshot, claim.sourceRefs);
   // Actual progress is checked by the verifier, independent of wording.
   return true;
 }
@@ -597,6 +597,26 @@ export async function runWorkWeeklyGenerationPipeline(input: {
   const items = applyWorkWeeklyClaimPublicationPolicy({ snapshot, items: generated, verdicts,
     onClaims: (claims) => { publicationClaims = claims; } });
   const quality_assessment = assessWorkWeeklyCoverage({ snapshot, generated, verdicts, coverage, publicationClaims });
+  if (quality_assessment.status !== "passed" || publicationClaims.some((claim) => claim.outcome === "rejected")) {
+    const rejectionReasons: Record<string, number> = {};
+    for (const claim of publicationClaims) if (claim.outcome === "rejected") {
+      rejectionReasons[claim.reasonCode] = (rejectionReasons[claim.reasonCode] ?? 0) + 1;
+    }
+    const knownIssues = new Set<string>([...WORK_WEEKLY_SAFETY_ISSUE_CODES,
+      "mixed_topics", "non_atomic_claim", "section_mismatch", "invalid_attention_target", "missing_qualification", "decision_finality_conflict"]);
+    const verifierIssueCounts: Record<string, number> = {};
+    for (const verdict of verdicts) for (const issue of verdict.issueCodes) {
+      const reason = knownIssues.has(issue) ? issue : "other";
+      verifierIssueCounts[reason] = (verifierIssueCounts[reason] ?? 0) + 1;
+    }
+    // Policy-owned categories/counts only; raw verifier issues and trace bodies stay private.
+    console.warn(JSON.stringify({ component: "work-weekly-publication", stage: "publication", qualityStatus: quality_assessment.status,
+      generatedItemCount: generated.length, publishableItemCount: items.length, rejectionReasons, verifierIssueCounts,
+      qualityReasonCodes: quality_assessment.reasonCodes,
+      sourceCount: quality_assessment.sourceCount, coveredSourceCount: quality_assessment.coveredSourceCount,
+      partialSourceCount: quality_assessment.partialSourceCount, omittedSourceCount: quality_assessment.omittedSourceCount,
+      unassessedSourceCount: quality_assessment.unassessedSourceCount }));
+  }
   await input.onTrace?.({ ...traceScope, stage: "published", publicationStatus: "candidate_only", items, claims: publicationClaims, quality_assessment });
   if (items.length === 0) return { status: "no_safe_items", items: [], outline, quality_assessment };
   if (quality_assessment.status === "insufficient") return { status: "quality_insufficient", items: [], outline, quality_assessment };

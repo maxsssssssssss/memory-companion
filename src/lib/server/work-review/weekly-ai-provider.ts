@@ -15,12 +15,12 @@ export const WORK_WEEKLY_VERIFIER_PROFILE_ID = "work_weekly_verifier_v1" as cons
 export const WORK_WEEKLY_QA_ANSWERER_PROFILE_ID = "work_weekly_qa_answerer_v1" as const;
 export const WORK_WEEKLY_QA_VERIFIER_PROFILE_ID = "work_weekly_qa_verifier_v1" as const;
 
-export const WORK_WEEKLY_SYNTHESIZER_PROMPT_VERSION = "work_weekly_synthesizer_prompt_v17" as const;
+export const WORK_WEEKLY_SYNTHESIZER_PROMPT_VERSION = "work_weekly_synthesizer_prompt_v18" as const;
 export const WORK_WEEKLY_VERIFIER_PROMPT_VERSION = "work_weekly_verifier_prompt_v13" as const;
 export const WORK_WEEKLY_QA_ANSWERER_PROMPT_VERSION = "work_weekly_qa_answerer_prompt_v1" as const;
 export const WORK_WEEKLY_QA_VERIFIER_PROMPT_VERSION = "work_weekly_qa_verifier_prompt_v1" as const;
 
-export const WORK_WEEKLY_SYNTHESIZER_SCHEMA_VERSION = "work_weekly_synthesizer_schema_v4" as const;
+export const WORK_WEEKLY_SYNTHESIZER_SCHEMA_VERSION = "work_weekly_synthesizer_schema_v5" as const;
 export const WORK_WEEKLY_VERIFIER_SCHEMA_VERSION = "work_weekly_verifier_schema_v5" as const;
 export const WORK_WEEKLY_QA_ANSWERER_SCHEMA_VERSION = "work_weekly_qa_answerer_schema_v1" as const;
 export const WORK_WEEKLY_QA_VERIFIER_SCHEMA_VERSION = "work_weekly_qa_verifier_schema_v1" as const;
@@ -104,11 +104,10 @@ export function workWeeklyCurrentCompletionSourceRefs(snapshot: WorkWeeklySource
     && event.localDate <= snapshot.scope.observedThrough).map((event) => event.sourceRef);
 }
 
-export function workWeeklyCompletionClaimSupported(snapshot: WorkWeeklySourceSnapshot, refs: string[], text: string) {
-  return /在系统中标记(?:为)?完成/u.test(text)
-    && !/(?:上周|前一周|去年|上月)/u.test(text)
-    && !/(?:已|已经|因此|所以)(?:现实履行|实际交付|实际完成)/u.test(text)
-    && workWeeklyCurrentCompletionSourceRefs(snapshot).some((ref) => refs.includes(ref));
+export function workWeeklyCompletionClaimSupported(snapshot: WorkWeeklySourceSnapshot, refs: string[]) {
+  // This is an event/observation boundary, not a prose classifier. The existing
+  // independent verifier checks system-state meaning, time and delivery claims.
+  return workWeeklyCurrentCompletionSourceRefs(snapshot).some((ref) => refs.includes(ref));
 }
 
 /** Generation-only contract. The shared item schema and QA may still carry
@@ -117,11 +116,13 @@ export function buildWorkWeeklySynthesisResponseSchema(snapshot: WorkWeeklySourc
   return WorkWeeklySynthesizerResponseSchema.superRefine((response, context) => {
     response.items.forEach((item, index) => {
       if (item.claims.length !== 1) context.addIssue({ code: z.ZodIssueCode.custom,
-        path: ["items", index, "claims"], message: "Each generated topic must be one self-contained claim" });
+        path: ["items", index, "claims"], message: "Each generated topic must be one self-contained claim",
+        params: { reason: "non_atomic_item" } });
       if (item.section === "completed" && !item.claims.every((claim) =>
-        workWeeklyCompletionClaimSupported(snapshot, claim.sourceRefs, claim.text))) {
+        workWeeklyCompletionClaimSupported(snapshot, claim.sourceRefs))) {
         context.addIssue({ code: z.ZodIssueCode.custom, path: ["items", index, "section"],
-          message: "Completed requires a current-week Todo completion event and system-state wording" });
+          message: "Completed requires a cited current-week Todo completion event",
+          params: { reason: "completion_event_missing" } });
       }
     });
   });
@@ -668,19 +669,55 @@ export function buildWorkWeeklySynthesisPack(input: {
   } as const;
 }
 
-/** Representation only: no source inference, semantic relabeling or old-wire fallback. */
+function rejectWeeklySynthesisContract(
+  code: "work_weekly_synthesizer_output_invalid" | "work_weekly_source_not_allowlisted",
+  stage: "model_schema" | "internal_validation" | "source_validation",
+  reason: "model_response_invalid" | "generated_items_invalid" | "source_not_allowlisted",
+  counts: Record<string, number | number[]>,
+  schemaError?: ZodError
+): never {
+  const fields = new Set(["items", "claims", "id", "section", "text", "itemType", "claimType", "isInterpretation", "sourceRefs"]);
+  const schemaIssueCounts: Record<string, number> = {};
+  for (const issue of schemaError?.issues ?? []) {
+    schemaIssueCounts[issue.code] = (schemaIssueCounts[issue.code] ?? 0) + 1;
+  }
+  // Only schema-owned field names, array positions and fixed reason categories.
+  // Do not serialize Zod messages/values, unknown keys, IDs, refs or model text.
+  const validationIssues = schemaError?.issues.slice(0, 10).map((issue) => ({
+    path: issue.path.map((part) => typeof part === "number" ? part : fields.has(part) ? part : "unknown_field"),
+    code: issue.code,
+    reason: issue.code === "custom" && ["non_atomic_item", "completion_event_missing"].includes(issue.params?.reason)
+      ? issue.params!.reason as string
+      : issue.code === "invalid_type" && issue.received === "undefined" ? "missing_field" : issue.code
+  }));
+  console.error(JSON.stringify({ component: "work-weekly-synthesizer-contract", errorCode: code, stage, reason, ...counts,
+    ...(schemaError ? { schemaIssueCounts, validationIssueCount: schemaError.issues.length, validationIssues,
+      validationIssuesTruncated: schemaError.issues.length > 10 } : {}) }));
+  throw new WorkWeeklyProviderError(code);
+}
+
+/** Representation only: normalize exact repeated refs, never infer sources or rewrite meaning. */
 export function adaptWorkWeeklyModelResponse(input: { response: unknown; snapshot: WorkWeeklySourceSnapshot }) {
   const parsed = WorkWeeklySynthesizerModelResponseSchema.safeParse(input.response);
-  if (!parsed.success) throw new WorkWeeklyProviderError("work_weekly_synthesizer_output_invalid");
+  if (!parsed.success) rejectWeeklySynthesisContract("work_weekly_synthesizer_output_invalid",
+    "model_schema", "model_response_invalid", {}, parsed.error);
+  let duplicateSourceRefCount = 0;
+  let affectedItemCount = 0;
   const items = parsed.data.items.map((item, index) => {
     const number = String(index + 1).padStart(3, "0");
+    const sourceRefs = [...new Set(item.sourceRefs)];
+    const repeated = item.sourceRefs.length - sourceRefs.length;
+    duplicateSourceRefCount += repeated;
+    if (repeated) affectedItemCount += 1;
     return {
       id: `item_${number}`, section: item.section, text: item.text,
       itemType: item.section === "next_week" ? "suggestion"
         : item.isInterpretation ? "interpretation" : "evidence_backed_fact",
-      claims: [{ id: `claim_${number}_001`, text: item.text, claimType: item.claimType, sourceRefs: [...item.sourceRefs] }]
+      claims: [{ id: `claim_${number}_001`, text: item.text, claimType: item.claimType, sourceRefs }]
     };
   });
+  if (duplicateSourceRefCount) console.info(JSON.stringify({ component: "work-weekly-synthesizer-contract",
+    stage: "normalization", reason: "duplicate_source_refs_removed", duplicateSourceRefCount, affectedItemCount }));
   return validateGeneratedItems({ response: { items }, snapshot: input.snapshot });
 }
 
@@ -690,13 +727,18 @@ function validateGeneratedItems(input: {
 }) {
   const parsed = buildWorkWeeklySynthesisResponseSchema(input.snapshot).safeParse(input.response);
   if (!parsed.success) {
-    throw new WorkWeeklyProviderError("work_weekly_synthesizer_output_invalid");
+    rejectWeeklySynthesisContract("work_weekly_synthesizer_output_invalid", "internal_validation", "generated_items_invalid",
+      { currentWeekCompletionEventCount: workWeeklyCurrentCompletionSourceRefs(input.snapshot).length }, parsed.error);
   }
   const allowlist = new Set(input.snapshot.allowlistedSourceRefs);
-  if (parsed.data.items.some((item) => item.claims.some((claim) =>
-    claim.sourceRefs.some((ref) => !allowlist.has(ref))
-  ))) {
-    throw new WorkWeeklyProviderError("work_weekly_source_not_allowlisted");
+  const invalidSources = parsed.data.items.map((item, index) => ({ index,
+    count: item.claims.reduce((total, claim) => total + claim.sourceRefs.filter((ref) => !allowlist.has(ref)).length, 0)
+  })).filter((item) => item.count > 0);
+  if (invalidSources.length) {
+    rejectWeeklySynthesisContract("work_weekly_source_not_allowlisted", "source_validation", "source_not_allowlisted", {
+      invalidSourceRefCount: invalidSources.reduce((total, item) => total + item.count, 0),
+      affectedItemCount: invalidSources.length, itemIndexes: invalidSources.map((item) => item.index)
+    });
   }
   return parsed.data.items;
 }
@@ -840,7 +882,7 @@ const SYNTHESIZER_SYSTEM_PROMPT = [
   "任务是否已接受与日期是否确定是两个独立事实。按generationGuidance.deadlineStatus读取canonical截止附注：已接受任务仍应保留，未确认日期若重要就明确待确认，也可省略日期；不能把整个已接受任务降成提议，也不能把原日期表达写成确定期限。",
   "userConfirmedAt确认的是记录；Provider视图已按canonical待确认注记统一effectiveFinality。决定自身待确认不是无法描述，用暂定/是否定案尚待确认等表达即可；本轮范围、后续评估与恢复条件和决定一起说明。",
   "章节按含义选择：decisions记录有据的决定、已同意的安排及变化；progress/in_progress须描述实际发生的推进或开展状态。先区分已经发生的活动、已接受的未来任务、尚未验证的缺口：后两者自身均不是进展；同一事项有实际检查与未验范围时，保留检查范围并明确缺口，不说未验部分正在推进。提议和未接受分配放open_questions，缺少外部输入放waiting_for_others。不能为了填栏把计划放进展。",
-  "completed只对应currentWeekCompletionSourceRefs中的本周todo.completed，写明在系统中标记完成，不代表现实履行。没有事件此栏为空。",
+  "completed只对应currentWeekCompletionSourceRefs中的本周todo.completed；自然表达系统状态变化即可，不要求固定措辞，不能推断现实履行或实际交付。创建时间与标记时间可不同，之后重新打开也须如实说明。没有事件此栏为空。",
   "next_week精选有用的关注对象及有据缺口，不派负责人、不造期限、不写催办指令；发布端添加固定AI建议关注前缀。完整回顾不要求每个open_question再写一条关注，已表达清楚的事项可以不重复；若关注表达另一项具体缺口或不同含义则可与事实并存，不能仅换成‘持续关注/加强沟通’重复事实。无真实缺口时可空，不固定建议条数。",
   "栏目与关注示例（不是Evidence）：‘登录缺外部配置参数，恢复时间未知’主项放waiting_for_others；方案本身尚待讨论才是open_questions。登录参数与移动端未验证是两个独立事项，不用‘补足这些缺口’拼成一个关注。优先选择单个仍值得关注的具体缺口；正文已说清且关注没有新增含义时可不另写。",
   "以scope.observedThrough为观察日，scope.weekStart/weekEnd为所选回顾范围，不以电脑今天解释历史回顾；recordContext.meetingDate只是记录时间，活动时间按正文解释。检查点早于观察日而没有后续结果时写原计划与结果未知，不能继续写未来等待，也不能推断逾期、未执行或已完成。overview概括主题和确定程度，不重复细节；每个分句只用自己的sourceRefs，不从相邻未引用记录添时间或人物。",

@@ -42,6 +42,7 @@ let answer: unknown;
 let claimText: string;
 let requests: WireRequest[];
 let verifierWithoutSupport: boolean;
+let verifierIssue: string | null;
 
 function fixtureStream(value: unknown) {
   const event = { type: "response.completed", response: {
@@ -80,6 +81,7 @@ beforeEach(() => {
   answer = generated(claimText);
   requests = [];
   verifierWithoutSupport = false;
+  verifierIssue = null;
   transport.createClient.mockReset();
   transport.runtimeConfig.mockReset().mockResolvedValue({});
   const client = { baseURL, withOptions: vi.fn(), responses: { create: vi.fn((request: WireRequest) => {
@@ -93,9 +95,12 @@ beforeEach(() => {
     expect(claim.sourceRefs).toEqual(sourceRefs());
     expect(user.items[0]!.sources.map((source) => source.sourceKind).sort()).toEqual(["todo", "todo_event", "todo_event"]);
     expect(user.verificationContract.expectedClaimIds).toEqual([claim.id]);
-    return fixtureStream({ items: [{ claimId: claim.id, verdict: verifierWithoutSupport ? "partial_entailed" : "entailed",
-      issueCodes: verifierWithoutSupport ? ["missing_qualification"] : [], supportedSourceRefs: verifierWithoutSupport ? [] : claim.sourceRefs }],
-      disputes: [], coverage: sourceRefs().map((sourceRef) => ({ sourceRef, status: "covered", reasonCode: "covered", claimIds: [claim.id], matches: [] })) });
+    return fixtureStream({ items: [{ claimId: claim.id, verdict: verifierIssue ? "contradicted" : verifierWithoutSupport ? "partial_entailed" : "entailed",
+      issueCodes: verifierIssue ? [verifierIssue] : verifierWithoutSupport ? ["missing_qualification"] : [],
+      supportedSourceRefs: verifierWithoutSupport || verifierIssue ? [] : claim.sourceRefs }],
+      disputes: verifierIssue ? [{ claimId: claim.id, issueCode: verifierIssue, claimExcerpt: claim.text, explanation: "合成核验：所述状态、时间或实际交付没有该事件支持。" }] : [],
+      coverage: sourceRefs().map((sourceRef) => ({ sourceRef, status: verifierIssue ? "omitted" : "covered",
+        reasonCode: verifierIssue ? "missing_key_content" : "covered", claimIds: verifierIssue ? [] : [claim.id], matches: [] })) });
   }) } };
   client.withOptions.mockReturnValue(client);
   transport.createClient.mockReturnValue(client as unknown as OpenAI);
@@ -139,8 +144,13 @@ describe("Work Weekly minimal Todo-only generation through Responses and SQLite"
     expect(detail.items[0]).toMatchObject({ systemText: claimText, verificationState: "verified" });
   });
 
-  it("accepts equivalent system-state wording with 标记为完成 in the completed section", async () => {
-    claimText = `待办“${title}”在系统中标记为完成后重新打开，当前系统状态为未完成；这些操作不证明实际交付。`;
+  it.each([
+    `待办“${title}”在系统中标记为完成后重新打开，当前系统状态为未完成；这些操作不证明实际交付。`,
+    `系统已把待办“${title}”标为完成，随后又重新打开；当前为未完成，实际交付另需核对。`,
+    `本周曾勾选完成待办“${title}”，随后撤销了完成状态；仅代表清单中的状态变化。`,
+    `上周创建的待办“${title}”，本周在应用内标成完成后重新打开；没有实际履行证据。`
+  ])("publishes verified system-state paraphrases through SSE and SQLite: %s", async (text) => {
+    claimText = text;
     answer = generated(claimText, "completed");
     const queued = service.generate(accountId, { ...scope, operationKey: "generate_completion_wording", expectedVersion: null });
     expect(await run(queued.run)).toMatchObject({ state: "published" });
@@ -149,24 +159,43 @@ describe("Work Weekly minimal Todo-only generation through Responses and SQLite"
   });
 
   it.each([
-    ["negated state", "待办在系统中标记为未完成。"],
-    ["real-world completion", "待办已经实际完成并交付。"],
-    ["promoted system event", "待办在系统中标记为完成，因此实际交付了任务。"],
-    ["outside week", "待办上周在系统中标记为完成。"]
-  ])("still rejects %s in completed even with a real current-week completion reference", (_reason, text) => {
-    expect(workWeeklyCompletionClaimSupported(snapshot, sourceRefs(), text)).toBe(false);
-    expect(() => adaptWorkWeeklyModelResponse({ snapshot, response: generated(text, "completed") }))
-      .toThrow("work_weekly_synthesizer_output_invalid");
+    ["contradictory current state", "待办已经完成，目前没有重新打开。", "source_does_not_support_claim"],
+    ["real-world completion", "待办已经实际完成并交付。", "todo_state_not_real_world_completion"],
+    ["promoted system event", "待办在系统中标记为完成，因此实际交付了任务。", "todo_state_not_real_world_completion"],
+    ["outside week", "待办上周在系统中标记为完成。", "source_does_not_support_claim"]
+  ])("rejects %s at semantic verification without publishing it", async (_reason, text, issue) => {
+    const log = vi.spyOn(console, "warn").mockImplementation(() => {});
+    claimText = text; verifierIssue = issue; answer = generated(text, "completed");
+    expect(workWeeklyCompletionClaimSupported(snapshot, sourceRefs())).toBe(true);
+    expect(adaptWorkWeeklyModelResponse({ snapshot, response: answer })).toHaveLength(1);
+    const queued = service.generate(accountId, { ...scope, operationKey: "verify_completion_semantics", expectedVersion: null });
+    expect(await run(queued.run)).toMatchObject({ state: "failed", errorCode: "weekly_generation_no_safe_items" });
+    expect(requests).toHaveLength(2);
+    expect(service.getDetail(accountId, queued.review.id).items).toEqual([]);
+    expect(JSON.parse(String(log.mock.calls.at(-1)![0]))).toMatchObject({ stage: "publication",
+      publishableItemCount: 0, rejectionReasons: { verifier_contradicted: 1 } });
+    expect(JSON.stringify(log.mock.calls)).not.toContain(text);
   });
 
   it("does not let wording replace a cited current-week completion event", () => {
     const text = "待办在系统中标记为完成。";
     const unrelatedRefs = [snapshot.todos[0]!.sourceRef, snapshot.todoEvents[1]!.sourceRef];
-    expect(workWeeklyCompletionClaimSupported(snapshot, unrelatedRefs, text)).toBe(false);
+    expect(workWeeklyCompletionClaimSupported(snapshot, unrelatedRefs)).toBe(false);
     const noEvents = { ...snapshot, todoEvents: [] };
-    expect(workWeeklyCompletionClaimSupported(noEvents, sourceRefs(), text)).toBe(false);
+    expect(workWeeklyCompletionClaimSupported(noEvents, sourceRefs())).toBe(false);
     const previousWeek = { ...snapshot, todoEvents: snapshot.todoEvents.map((event) => ({ ...event, localDate: "2026-09-13" })) };
-    expect(workWeeklyCompletionClaimSupported(previousWeek, sourceRefs(), text)).toBe(false);
+    expect(workWeeklyCompletionClaimSupported(previousWeek, sourceRefs())).toBe(false);
+    expect(() => adaptWorkWeeklyModelResponse({ snapshot: previousWeek, response: generated(text, "completed") }))
+      .toThrow("work_weekly_synthesizer_output_invalid");
+  });
+
+  it("publishes after duplicate citations are normalized through the actual adapter and in-memory repository", async () => {
+    vi.spyOn(console, "info").mockImplementation(() => {});
+    const wire = generated(claimText); wire.items[0]!.sourceRefs.push(...sourceRefs()); answer = wire;
+    const queued = service.generate(accountId, { ...scope, operationKey: "deduplicate_sources", expectedVersion: null });
+    expect(await run(queued.run)).toMatchObject({ state: "published" });
+    expect(requests).toHaveLength(2);
+    expect(service.getDetail(accountId, queued.review.id).items[0]).toMatchObject({ systemText: claimText });
   });
 
   it.each([false, true])("never publishes zero-safe-item recovery and preserves any old version: previous=%s", async (previous) => {
