@@ -25,6 +25,16 @@ import {
   type WorkWeeklyVerifierItem
 } from "./weekly-ai-provider";
 import { applyWorkWeeklyClaimPublicationPolicy } from "./weekly-publication-policy";
+import {
+  WorkWeeklyQaTechnicalError,
+  assertWorkWeeklyQaNotCancelled,
+  classifyWorkWeeklyQaError,
+  emitWorkWeeklyQaDiagnostic,
+  workWeeklyQaReasonCounts,
+  workWeeklyQaSchemaIssues,
+  type WorkWeeklyQaDiagnosticObserver,
+  type WorkWeeklyQaStage
+} from "./weekly-qa-diagnostics";
 
 export const WORK_WEEKLY_QA_INSUFFICIENT_ANSWER =
   "在本周已确认的工作记录中，没有找到足够依据回答这个问题。" as const;
@@ -280,6 +290,11 @@ const QA_ANSWERER_SYSTEM_PROMPT = [
   "history 仅用于理解代词和连续提问，上一轮 assistant 文本绝不是 Evidence；每个新事实都必须重新引用 sources。",
   "不得读取 Weekly 用户编辑内容、Follow-up、Pending Candidate、其他周/项目/账号或 Daily、Date、Memory、Person、generic retrieval、互联网。",
   "提议不是决定，任务分配不是承诺，Todo completed 只表示系统中标记完成，日期不自动是 deadline，先后不等于因果，单条来源不等于反复。",
+  "Source Pack 中的 confirmed Finding、Todo 当前/观察截止状态、Todo event 都可独立支持对应问题；不要求同时存在会议、Todo 或多条事件。静态 Todo 只能支持已记录状态，不能补造变更过程。",
+  "按 scope.observedThrough 描述已观察范围；windowComplete=false 时不得声称全周已经结束。Todo 重开后的观察截止状态是 open，历史 completed 不证明当前完成或现实交付。",
+  "Todo stateAtWeekEnd 是周范围观察截止状态，current 是查询时当前状态；截止状态未知时不得用 current 补造历史。用本周 events 描述已记录操作，不推断未记录的状态变更。",
+  "面向用户的中文 answer 与 claims[].text 使用一致的自然状态表述：Todo open 写作“未完成”，completed 写作“已标记完成”，仅描述系统记录，不推断实际交付。",
+  "若证据显示完成后重开，保留“曾经标记完成，随后重新打开，当前未完成”的历史与当前区别。上述中文表述只用于你叙述系统状态；用户标题、来源原文/引文中的英文照原意保留，内部字段名/枚举和 sourceRef 不翻译，不要求整段全部中文。",
   "不要返回 quote；只返回 sourceRef。来源不足时 status=insufficient_evidence，不用一般知识补造用户工作历史。"
 ].join("\n");
 
@@ -287,16 +302,39 @@ const QA_VERIFIER_SYSTEM_PROMPT = [
   "你是独立 Work Weekly QA Claim Verifier。只核验每个 claim 与它引用的当前 Source Pack sources。",
   "不得把 history、Answerer answer、其他 claim 或未引用来源当 Evidence。",
   "只有 Evidence 明确表达理由时才能支持 causality；assignment_without_acceptance 不是 commitment；Todo completed 不是现实履行；一个来源不支持频率。",
+  "记录本身可核验：confirmed Finding 不要求 Todo 配套；Todo 和 event 不要求会议配套。逐字区分当前/观察截止状态与历史操作，重新打开后的状态不能仍说已完成。",
+  "以 scope 的 observedThrough/windowComplete 和 Todo stateAtWeekEnd 核验周范围截止状态；current 仅代表查询时状态，不能填补未知历史。",
   "来源不足必须返回 unsupported、contradicted 或 unverifiable。"
 ].join("\n");
 
 export const WORK_WEEKLY_QA_ANSWERER_JSON_INSTRUCTION =
   "输出严格 JSON {status,answer,claims:[{id,text,claimType,sourceRefs}],relevantSourceRefs}。" +
-  "sourceRefs 只能来自 Source Pack；禁止 quote 字段；insufficient_evidence 时 claims 必须为空。";
+  "status 只能是 answered、partially_answered、insufficient_evidence；answer 为字符串，但发布只使用核验通过的 claim.text。" +
+  "claimType 只能是 fact、person、decision、commitment、deadline、completion、causality、frequency、temporal_order。" +
+  "普通记录/状态用 fact；完成事件用 completion 且明确是系统标记。claims 最多32项，id非空且唯一，每项text为独立完整事实，sourceRefs非空且不重复。" +
+  "sourceRefs 和 relevantSourceRefs 只能来自 Source Pack，后者不重复；禁止 quote 和额外字段；insufficient_evidence 时 claims 必须为空，其余状态必须有claim。";
 
 export const WORK_WEEKLY_QA_VERIFIER_JSON_INSTRUCTION =
   "输出严格 JSON {items:[{claimId,verdict,issueCodes,supportedSourceRefs}]}；" +
-  "每个 claim 恰好一项，supportedSourceRefs 只能是该 claim sourceRefs 子集。";
+  "verdict 只能是 entailed、partially_entailed、unsupported、contradicted、unverifiable。" +
+  "每个 claim 恰好一项且claimId逐字对应、不重复，supportedSourceRefs不重复且只能是该 claim sourceRefs 子集。" +
+  "issueCodes是字符串数组，无问题时[]；只有entailed且issueCodes为空并有supportedSourceRefs才可发布，partially_entailed不发布。禁止额外字段。";
+
+function validateQaDraft(response: unknown, sourcePack: WorkWeeklyQaSourcePack) {
+  const parsed = WorkWeeklyQaAnswerDraftSchema.safeParse(response);
+  if (!parsed.success) throw new WorkWeeklyQaTechnicalError("weekly_qa_answer_invalid", "answerer", parsed.error);
+  const draft = parsed.data;
+  if ((draft.status !== "insufficient_evidence" && draft.claims.length === 0)
+    || new Set(draft.claims.map((claim) => claim.id)).size !== draft.claims.length) {
+    throw new WorkWeeklyQaTechnicalError("weekly_qa_answer_invalid", "answerer");
+  }
+  const allowlist = new Set(sourcePack.allowlistedSourceRefs);
+  if (draft.relevantSourceRefs.some((ref) => !allowlist.has(ref))
+    || draft.claims.some((claim) => claim.sourceRefs.some((ref) => !allowlist.has(ref)))) {
+    throw new WorkWeeklyQaTechnicalError("weekly_qa_source_not_allowlisted", "answerer");
+  }
+  return draft;
+}
 
 export function createStructuredWorkWeeklyQaAnswerer(input: {
   profile: WorkWeeklyProviderProfile;
@@ -319,14 +357,7 @@ export function createStructuredWorkWeeklyQaAnswerer(input: {
         jsonInstruction: WORK_WEEKLY_QA_ANSWERER_JSON_INSTRUCTION,
         signal: call.signal
       });
-      const parsed = WorkWeeklyQaAnswerDraftSchema.safeParse(response);
-      if (!parsed.success) throw new Error("work_weekly_qa_answer_invalid");
-      const allowlist = new Set(call.sourcePack.allowlistedSourceRefs);
-      if (parsed.data.relevantSourceRefs.some((ref) => !allowlist.has(ref))
-        || parsed.data.claims.some((claim) => claim.sourceRefs.some((ref) => !allowlist.has(ref)))) {
-        throw new Error("work_weekly_qa_source_not_allowlisted");
-      }
-      return parsed.data;
+      return validateQaDraft(response, call.sourcePack);
     }
   };
 }
@@ -344,7 +375,7 @@ export function createStructuredWorkWeeklyQaVerifier(input: {
     async verify(call) {
       const packAllowlist = new Set(call.sourcePack.allowlistedSourceRefs);
       if (call.claims.some((claim) => claim.sourceRefs.some((ref) => !packAllowlist.has(ref)))) {
-        throw new Error("work_weekly_qa_source_not_allowlisted");
+        throw new WorkWeeklyQaTechnicalError("weekly_qa_source_not_allowlisted", "verifier");
       }
       const response = await request({
         profile: input.profile,
@@ -355,6 +386,7 @@ export function createStructuredWorkWeeklyQaVerifier(input: {
             role: "user",
             content: JSON.stringify({
               snapshotDigest: call.sourcePack.snapshotDigest,
+              scope: call.sourcePack.scope,
               items: call.claims.map((claim) => ({
                 claim,
                 sources: claim.sourceRefs.map((ref) => resolveWorkWeeklySourceRecord(
@@ -367,7 +399,10 @@ export function createStructuredWorkWeeklyQaVerifier(input: {
         jsonInstruction: WORK_WEEKLY_QA_VERIFIER_JSON_INSTRUCTION,
         signal: call.signal
       });
-      return validateWorkWeeklyVerifierOutput({ response, claims: call.claims });
+      // Preserve sanitized schema paths before the shared contract validator reports counts.
+      const parsed = WorkWeeklyVerifierResponseSchema.safeParse(response);
+      if (!parsed.success) throw new WorkWeeklyQaTechnicalError("weekly_qa_verifier_invalid", "verifier", parsed.error);
+      return validateWorkWeeklyVerifierOutput({ response: parsed.data, claims: call.claims });
     }
   };
 }
@@ -447,31 +482,62 @@ export async function answerWorkWeeklyQuestion(input: {
   answerer: WorkWeeklyQaAnswerer | null;
   verifier: WorkWeeklyQaVerifier | null;
   signal?: AbortSignal;
+  onDiagnostic?: WorkWeeklyQaDiagnosticObserver;
 }): Promise<WorkWeeklyQaFinalAnswer> {
-  assertWorkWeeklySnapshotAuthority(input);
-  if (isPerformanceQuestion(input.question)) {
-    return insufficient({ ...input, failureCode: "weekly_qa_performance_question_refused" });
-  }
-  const sourcePack = buildWorkWeeklyQaSourcePack(input);
-  if (sourcePack.units.length === 0) {
-    return insufficient({ ...input, failureCode: "weekly_qa_no_relevant_sources" });
-  }
-  if (!input.answerer || !input.verifier) {
-    return insufficient({ ...input, failureCode: "weekly_qa_verifier_unavailable" });
-  }
-  const answerer = input.answerer;
-  const verifier = input.verifier;
+  let stage: WorkWeeklyQaStage = "source_selection";
+  const emit = (event: Parameters<WorkWeeklyQaDiagnosticObserver>[0]) => emitWorkWeeklyQaDiagnostic(input.onDiagnostic, event);
+  const notSupported = async (reasonCode: "weekly_qa_performance_question_refused" | "weekly_qa_no_relevant_sources"
+    | "weekly_qa_answerer_insufficient" | "weekly_qa_no_safe_claims") => {
+    await emit({ stage, outcome: "insufficient_evidence", reasonCode });
+    return insufficient({ ...input, failureCode: reasonCode });
+  };
   try {
-    const draft = await answerer.answer({ sourcePack, signal: input.signal });
-    if (draft.status === "insufficient_evidence" || draft.claims.length === 0) {
-      return insufficient({ ...input, failureCode: "weekly_qa_answerer_insufficient" });
+    assertWorkWeeklyQaNotCancelled(input.signal);
+    assertWorkWeeklySnapshotAuthority(input);
+    if (isPerformanceQuestion(input.question)) {
+      return await notSupported("weekly_qa_performance_question_refused");
     }
-    const verdicts = await verifier.verify({
+    const sourcePack = buildWorkWeeklyQaSourcePack(input);
+    await emit({ stage, outcome: "succeeded", sourceUnitCount: sourcePack.units.length,
+      sourceRefCount: sourcePack.allowlistedSourceRefs.length,
+      findingUnitCount: sourcePack.units.filter((unit) => unit.sourceKind === "finding").length,
+      todoUnitCount: sourcePack.units.filter((unit) => unit.sourceKind === "todo").length });
+    if (sourcePack.units.length === 0) {
+      return await notSupported("weekly_qa_no_relevant_sources");
+    }
+    if (!input.answerer || !input.verifier) {
+      throw new WorkWeeklyQaTechnicalError("weekly_qa_provider_unavailable", stage);
+    }
+    const answerer = input.answerer;
+    const verifier = input.verifier;
+    stage = "answerer";
+    await emit({ stage, outcome: "started" });
+    assertWorkWeeklyQaNotCancelled(input.signal);
+    const draft = validateQaDraft(await answerer.answer({ sourcePack, signal: input.signal }), sourcePack);
+    assertWorkWeeklyQaNotCancelled(input.signal);
+    await emit({ stage, outcome: "succeeded", claimCount: draft.claims.length });
+    if (draft.status === "insufficient_evidence") {
+      return await notSupported("weekly_qa_answerer_insufficient");
+    }
+    stage = "verifier";
+    await emit({ stage, outcome: "started", claimCount: draft.claims.length });
+    assertWorkWeeklyQaNotCancelled(input.signal);
+    const response = await verifier.verify({
       snapshot: input.snapshot,
       sourcePack,
       claims: draft.claims,
       signal: input.signal
     });
+    assertWorkWeeklyQaNotCancelled(input.signal);
+    const parsed = WorkWeeklyVerifierResponseSchema.safeParse({ items: response });
+    if (!parsed.success) throw new WorkWeeklyQaTechnicalError("weekly_qa_verifier_invalid", stage, parsed.error);
+    const verdicts = validateWorkWeeklyVerifierOutput({ response: parsed.data, claims: draft.claims });
+    await emit({ stage, outcome: "succeeded", verdictCount: verdicts.length,
+      verdictCounts: workWeeklyQaReasonCounts(verdicts.map((verdict) => verdict.verdict)),
+      issueCounts: workWeeklyQaReasonCounts(verdicts.flatMap((verdict) => verdict.issueCodes)) });
+    stage = "publication";
+    let publicationReasons: string[] = [];
+    let publishedClaimCount = 0;
     const published = applyWorkWeeklyClaimPublicationPolicy({
       snapshot: input.snapshot,
       items: [{
@@ -481,13 +547,23 @@ export async function answerWorkWeeklyQuestion(input: {
         text: draft.answer || "QA answer",
         claims: draft.claims
       }],
-      verdicts
+      verdicts,
+      onClaims: (claims) => {
+        publicationReasons = claims.map((claim) => claim.reasonCode);
+        publishedClaimCount = claims.filter((claim) => claim.outcome === "published" || claim.outcome === "merged").length;
+      }
     });
+    if (publicationReasons.some((reason) => reason === "invalid_contract" || reason === "item_output_invalid")) {
+      throw new WorkWeeklyQaTechnicalError("weekly_qa_publication_invalid", stage);
+    }
+    await emit({ stage, outcome: "succeeded", publishedClaimCount,
+      publicationReasonCounts: workWeeklyQaReasonCounts(publicationReasons) });
     if (published.length === 0) {
-      return insufficient({ ...input, failureCode: "weekly_qa_no_safe_claims" });
+      return await notSupported("weekly_qa_no_safe_claims");
     }
     const item = published[0]!;
     const partial = draft.status === "partially_answered"
+      || publishedClaimCount < draft.claims.length
       || item.verificationState === "qualified"
       || verdicts.some((verdict) => verdict.verdict !== "entailed");
     return {
@@ -499,8 +575,10 @@ export async function answerWorkWeeklyQuestion(input: {
       verifierProfile: verifier.profile.id,
       failureCode: null
     };
-  } catch {
-    return insufficient({ ...input, failureCode: "weekly_qa_provider_or_contract_failed" });
+  } catch (error) {
+    const failure = classifyWorkWeeklyQaError(error, stage);
+    await emit({ stage, outcome: "failed", errorCode: failure.code, schemaIssues: workWeeklyQaSchemaIssues(failure) });
+    throw failure;
   }
 }
 

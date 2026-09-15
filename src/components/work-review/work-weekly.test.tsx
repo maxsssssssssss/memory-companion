@@ -404,6 +404,374 @@ describe("Weekly supplied content semantics", () => {
   });
 });
 
+describe("Weekly QA fixed query window", () => {
+  const question = () => qaMessage({ id: "wrqm_question", role: "user", text: "问题甲", answerStatus: null, sourceRefs: [] });
+  const waiting = () => ({ thread: thread(), messages: [question()] });
+  const queued = (): Awaited<ReturnType<WorkReviewV2CoreApi["askWeeklyQa"]>> => ({
+    ...waiting(), reused: false,
+    run: {
+      id: "wrqr_1", accountId: "account_1", weeklyReviewId: "wrw_1", threadId: "wrqt_1", questionMessageId: "wrqm_question",
+      runVersion: 1, state: "queued", sourceSnapshotDigest: "a".repeat(64), leaseOwner: null, leaseExpiresAt: null,
+      providerProfile: null, promptVersion: null, verifierProfile: null, createdAt: "2026-09-15T00:00:00.000Z", completedAt: null, errorCode: null
+    }
+  });
+  async function openQa(client: WorkReviewV2CoreApi) {
+    let view!: ReturnType<typeof renderWeekly>;
+    await act(async () => { view = renderWeekly(client); });
+    await act(async () => { fireEvent.click(screen.getByRole("tab", { name: "问问本周" })); });
+    return view;
+  }
+  async function advance(ms: number) { await act(async () => { await vi.advanceTimersByTimeAsync(ms); }); }
+
+  it("does not restart polling when the POST replay already contains this question's final result", async () => {
+    vi.useFakeTimers();
+    const replay = queued();
+    replay.reused = true;
+    replay.messages.push(qaMessage());
+    const client = api({ getWeeklyQa: vi.fn().mockResolvedValue(null), askWeeklyQa: vi.fn().mockResolvedValue(replay) });
+    await openQa(client);
+    await act(async () => { fireEvent.change(screen.getByLabelText("继续问这一周"), { target: { value: "问题甲" } }); fireEvent.click(screen.getByRole("button", { name: "发送问题" })); });
+    expect(screen.getByText("有来源的回答")).toBeVisible();
+    await advance(90_000);
+    expect(client.getWeeklyQa).toHaveBeenCalledTimes(1);
+    expect(client.askWeeklyQa).toHaveBeenCalledTimes(1);
+  });
+
+  it("retains a POST failure and does not silently turn it into a read success", async () => {
+    vi.useFakeTimers();
+    const client = api({ getWeeklyQa: vi.fn().mockResolvedValue(null), askWeeklyQa: vi.fn().mockRejectedValue(new WorkReviewApiError(400, "invalid_request")) });
+    await openQa(client);
+    await act(async () => { fireEvent.change(screen.getByLabelText("继续问这一周"), { target: { value: "问题甲" } }); fireEvent.click(screen.getByRole("button", { name: "发送问题" })); });
+    expect(screen.getByRole("alert")).toBeVisible();
+    expect(screen.getByLabelText("继续问这一周")).toHaveValue("问题甲");
+    await advance(90_000);
+    expect(client.getWeeklyQa).toHaveBeenCalledTimes(1);
+    expect(client.askWeeklyQa).toHaveBeenCalledTimes(1);
+  });
+
+  it("stops after a deleted review response and keeps old content unavailable", async () => {
+    vi.useFakeTimers();
+    const client = api({ getWeeklyQa: vi.fn().mockResolvedValueOnce(waiting()).mockRejectedValue(new WorkReviewApiError(404, "not_found")) });
+    await openQa(client);
+    await advance(5_000);
+    expect(screen.queryByText("问题甲")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "更新结果" })).toBeEnabled();
+    await advance(90_000);
+    expect(client.getWeeklyQa).toHaveBeenCalledTimes(2);
+  });
+
+  it("aborts a submitted request on scope change so its late acknowledgement cannot start old polling", async () => {
+    vi.useFakeTimers();
+    let finish!: (value: unknown) => void;
+    const client = api({ getWeeklyQa: vi.fn().mockResolvedValue(null), askWeeklyQa: vi.fn().mockImplementation(() => new Promise((resolve) => { finish = resolve; })) });
+    const view = await openQa(client);
+    await act(async () => { fireEvent.change(screen.getByLabelText("继续问这一周"), { target: { value: "问题甲" } }); fireEvent.click(screen.getByRole("button", { name: "发送问题" })); });
+    const signal = vi.mocked(client.askWeeklyQa).mock.calls[0]![2]!;
+    await act(async () => {
+      navigation.search = new URLSearchParams("weekStart=2026-08-24&scope=all");
+      vi.mocked(client.getWeeklyReview).mockResolvedValue({ review: review({ id: "wrw_2" }), items: [], sourceSummary: summary });
+      view.rerender(weeklyElement(client));
+    });
+    expect(signal.aborted).toBe(true);
+    await act(async () => { finish(queued()); });
+    await advance(90_000);
+    expect(screen.queryByText("问题甲")).not.toBeInTheDocument();
+    expect(vi.mocked(client.getWeeklyQa).mock.calls.filter(([id]) => id === "wrw_1")).toHaveLength(1);
+  });
+
+  it("queries every five seconds for a ninety-second wall-clock window and manual update uses GET only", async () => {
+    vi.useFakeTimers();
+    const getWeeklyQa = vi.fn<WorkReviewV2CoreApi["getWeeklyQa"]>().mockResolvedValueOnce(null).mockResolvedValue(waiting());
+    const client = api({ getWeeklyQa, askWeeklyQa: vi.fn().mockResolvedValue(queued()) });
+    await openQa(client);
+    await act(async () => {
+      fireEvent.change(screen.getByLabelText("继续问这一周"), { target: { value: "问题甲" } });
+      fireEvent.click(screen.getByRole("button", { name: "发送问题" }));
+    });
+    expect(client.askWeeklyQa).toHaveBeenCalledTimes(1);
+    expect(getWeeklyQa).toHaveBeenCalledTimes(1);
+    await advance(4_999);
+    expect(getWeeklyQa).toHaveBeenCalledTimes(1);
+    await advance(1);
+    expect(getWeeklyQa).toHaveBeenCalledTimes(2);
+    for (let tick = 0; tick < 16; tick++) await advance(5_000);
+    expect(getWeeklyQa).toHaveBeenCalledTimes(18); // Initial record read + ticks at 5..85 seconds.
+    await advance(5_000);
+    expect(screen.getByText(/本轮查询已满90秒/u)).toBeVisible();
+    expect(screen.queryByText("这轮回答没有完成。当前记录中没有可展示的回答正文。")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "更新结果" })).toBeEnabled();
+    await advance(30_000);
+    expect(getWeeklyQa).toHaveBeenCalledTimes(18);
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "更新结果" })); });
+    expect(getWeeklyQa).toHaveBeenCalledTimes(19);
+    await advance(5_000);
+    expect(getWeeklyQa).toHaveBeenCalledTimes(20);
+    expect(client.askWeeklyQa).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(["answered", "insufficient_evidence", "failed"] as const)("stops at the matching %s result without exposing failed text", async (answerStatus) => {
+    vi.useFakeTimers();
+    const client = api({ getWeeklyQa: vi.fn().mockResolvedValueOnce(waiting()).mockResolvedValue({ thread: thread(), messages: [question(), qaMessage({ answerStatus })] }) });
+    await openQa(client);
+    await advance(5_000);
+    expect(screen.getByText("这轮问答结果已更新。")).toBeVisible();
+    expect(screen.queryByText(/正在等待问答结果/u)).not.toBeInTheDocument();
+    if (answerStatus === "answered") expect(screen.getByText("有来源的回答")).toBeVisible();
+    else expect(screen.queryByText("有来源的回答")).not.toBeInTheDocument();
+    await advance(90_000);
+    expect(client.getWeeklyQa).toHaveBeenCalledTimes(2);
+    expect(client.askWeeklyQa).not.toHaveBeenCalled();
+  });
+
+  it("does not mistake an older answer snapshot for the newly submitted question", async () => {
+    vi.useFakeTimers();
+    const client = api({
+      getWeeklyQa: vi.fn().mockResolvedValueOnce(null)
+        .mockResolvedValueOnce({ thread: thread(), messages: [qaMessage({ text: "上一轮回答" })] })
+        .mockResolvedValue({ thread: thread(), messages: [question(), qaMessage({ text: "当前问题回答" })] }),
+      askWeeklyQa: vi.fn().mockResolvedValue(queued())
+    });
+    await openQa(client);
+    await act(async () => { fireEvent.change(screen.getByLabelText("继续问这一周"), { target: { value: "问题甲" } }); fireEvent.click(screen.getByRole("button", { name: "发送问题" })); });
+    await advance(5_000);
+    expect(screen.getByText("问题甲")).toBeVisible();
+    expect(screen.queryByText("上一轮回答")).not.toBeInTheDocument();
+    expect(screen.getByText(/正在等待问答结果/u)).toBeVisible();
+    await advance(5_000);
+    expect(screen.getByText("当前问题回答")).toBeVisible();
+  });
+
+  it("never overlaps a hanging GET and aborts it at the actual deadline, ignoring its late answer", async () => {
+    vi.useFakeTimers();
+    let finish!: (value: unknown) => void;
+    const client = api({ getWeeklyQa: vi.fn().mockResolvedValueOnce(waiting()).mockImplementation(() => new Promise((resolve) => { finish = resolve; })) });
+    await openQa(client);
+    await advance(5_000);
+    const signal = vi.mocked(client.getWeeklyQa).mock.calls[1]![1]!;
+    expect(screen.getByRole("button", { name: "更新结果" })).toHaveAttribute("aria-busy", "true");
+    await advance(84_999);
+    expect(client.getWeeklyQa).toHaveBeenCalledTimes(2);
+    expect(signal.aborted).toBe(false);
+    await advance(1);
+    expect(signal.aborted).toBe(true);
+    expect(screen.getByText(/本轮查询已满90秒/u)).toBeVisible();
+    await act(async () => { finish({ thread: thread(), messages: [question(), qaMessage({ text: "过期响应" })] }); });
+    expect(screen.queryByText("过期响应")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "更新结果" })).toBeEnabled();
+  });
+
+  it("pauses while hidden and reads immediately when visible again", async () => {
+    vi.useFakeTimers();
+    const client = api({ getWeeklyQa: vi.fn().mockResolvedValue(waiting()) });
+    await openQa(client);
+    const visibility = vi.spyOn(document, "visibilityState", "get").mockReturnValue("hidden");
+    await act(async () => { document.dispatchEvent(new Event("visibilitychange")); });
+    await advance(120_000);
+    expect(client.getWeeklyQa).toHaveBeenCalledTimes(1);
+    vi.mocked(client.getWeeklyQa).mockResolvedValue({ thread: thread(), messages: [question(), qaMessage()] });
+    visibility.mockReturnValue("visible");
+    await act(async () => { document.dispatchEvent(new Event("visibilitychange")); });
+    expect(client.getWeeklyQa).toHaveBeenCalledTimes(2);
+    expect(screen.getByText("有来源的回答")).toBeVisible();
+    expect(client.askWeeklyQa).not.toHaveBeenCalled();
+  });
+
+  it("reads on QA re-entry and preserves the same-scope draft", async () => {
+    vi.useFakeTimers();
+    const client = api({ getWeeklyQa: vi.fn().mockResolvedValue(null) });
+    await openQa(client);
+    await act(async () => { fireEvent.change(screen.getByLabelText("继续问这一周"), { target: { value: "保留草稿" } }); fireEvent.click(screen.getByRole("tab", { name: "本周回顾" })); });
+    await advance(60_000);
+    expect(client.getWeeklyQa).toHaveBeenCalledTimes(1);
+    vi.mocked(client.getWeeklyQa).mockResolvedValue(waiting());
+    await act(async () => { fireEvent.click(screen.getByRole("tab", { name: "问问本周" })); });
+    expect(client.getWeeklyQa).toHaveBeenCalledTimes(2);
+    expect(screen.getByLabelText("继续问这一周")).toHaveValue("保留草稿");
+    await advance(5_000);
+    expect(client.getWeeklyQa).toHaveBeenCalledTimes(3);
+  });
+
+  it.each(["week", "project", "account", "unmount"])("aborts the QA read on %s and rejects its late response", async (change) => {
+    vi.useFakeTimers();
+    let finish!: (value: unknown) => void;
+    const client = api({ getWeeklyQa: vi.fn().mockResolvedValueOnce(waiting()).mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; })).mockResolvedValue(null) });
+    const view = await openQa(client);
+    await advance(5_000);
+    const signal = vi.mocked(client.getWeeklyQa).mock.calls[1]![1]!;
+    await act(async () => {
+      if (change === "unmount") view.unmount();
+      else if (change === "account") view.rerender(weeklyElement(client, capabilities, "account_2"));
+      else {
+        navigation.search = new URLSearchParams(change === "week" ? "weekStart=2026-08-24&scope=all" : "weekStart=2026-08-31&scope=project&projectId=wrp_1");
+        vi.mocked(client.getWeeklyReview).mockResolvedValue({ review: review({ id: "wrw_2" }), items: [], sourceSummary: summary });
+        view.rerender(weeklyElement(client));
+      }
+    });
+    expect(signal.aborted).toBe(true);
+    await act(async () => { finish({ thread: thread(), messages: [question(), qaMessage({ text: "旧范围迟到答案" })] }); });
+    expect(screen.queryByText("旧范围迟到答案")).not.toBeInTheDocument();
+    expect(client.askWeeklyQa).not.toHaveBeenCalled();
+  });
+
+  it("clears with an in-flight read and never restores messages from that old response", async () => {
+    vi.useFakeTimers();
+    let finish!: (value: unknown) => void;
+    const client = api({
+      getWeeklyQa: vi.fn().mockResolvedValueOnce(waiting()).mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; })).mockResolvedValue(null),
+      clearWeeklyQa: vi.fn().mockResolvedValue(undefined)
+    });
+    await openQa(client);
+    await advance(5_000);
+    const signal = vi.mocked(client.getWeeklyQa).mock.calls[1]![1]!;
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "清空记录" })); });
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "清空问答" })); });
+    expect(signal.aborted).toBe(true);
+    expect(screen.getByText("还没有问答记录")).toBeVisible();
+    await act(async () => { finish({ thread: thread(), messages: [question(), qaMessage({ text: "清空前答案" })] }); });
+    expect(screen.queryByText("清空前答案")).not.toBeInTheDocument();
+    expect(screen.queryByText("问题甲")).not.toBeInTheDocument();
+    expect(client.clearWeeklyQa).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not hide a rejected clear operation behind a successful status GET", async () => {
+    vi.useFakeTimers();
+    const client = api({ getWeeklyQa: vi.fn().mockResolvedValue(waiting()), clearWeeklyQa: vi.fn().mockRejectedValue(new WorkReviewApiError(409, "version_conflict")) });
+    await openQa(client);
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "清空记录" })); });
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "清空问答" })); });
+    await advance(5_000);
+    expect(screen.getByRole("alert")).toHaveTextContent("内容已在其他页面更新");
+    expect(screen.getByText("问题甲")).toBeVisible();
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "更新结果" })); });
+    expect(screen.getByRole("alert")).toHaveTextContent("内容已在其他页面更新");
+    expect(client.clearWeeklyQa).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("Weekly QA source-backed status display", () => {
+  const refs = ["1", "2", "3"].map((value) => `wrs_${value.repeat(64)}`);
+  const raw = "核对匿名验收清单在本周范围内的观察截止状态为 open。\n本周系统记录中，核对匿名验收清单于合成日期被标记为 completed。\n本周系统记录中，核对匿名验收清单在标记 completed 后被重新打开为 open。";
+  const translated = raw.replace("状态为 open", "状态为未完成").replace("被标记为 completed", "被标记为已完成")
+    .replace("标记 completed 后被重新打开为 open", "标记完成后被重新打开为未完成");
+  function source(index = 0): WorkWeeklyLiveSourceResponse {
+    const state = { title: "核对匿名验收清单", kind: "self" as const, status: index === 1 ? "completed" as const : "open" as const,
+      ownerLabel: null, currentDueDate: null, completedAt: null, deletedAt: null, version: 1 };
+    return {
+      identity: { sourceRef: refs[index], sourceKind: index === 0 ? "todo" : "todo_event", sourceId: `source_${index}`,
+        version: 1, digest: "a".repeat(64), publicationId: null, segmentId: null, included: true },
+      source: index === 0
+        ? { sourceRef: refs[index], id: "todo_1", version: 1, current: state, stateAtWeekEnd: state, historyCompleteness: "exact",
+          sourceMeetingId: null, sourceFindingId: null, sourceFindingKind: null, projects: [] }
+        : { sourceRef: refs[index], id: `event_${index}`, todoId: "todo_1", eventType: index === 1 ? "todo.completed" : "todo.reopened",
+          changedFields: ["status"], occurredAt: "2026-09-14T00:00:00.000Z", localDate: "2026-09-14", oldVersion: 1, newVersion: 2,
+          stateAfter: state, historyCompleteness: "exact" }
+    };
+  }
+  const answer = () => qaMessage({ text: raw, sourceRefs: [...refs] });
+  async function open(client: WorkReviewV2CoreApi) {
+    const view = renderWeekly(client);
+    await screen.findByText("有效概览");
+    fireEvent.click(screen.getByRole("tab", { name: "问问本周" }));
+    return view;
+  }
+
+  it("renders all four v3 status words from existing source DTOs, deduplicates reads and keeps originals and source actions", async () => {
+    const pending = new Map<string, (value: WorkWeeklyLiveSourceResponse) => void>();
+    let waiting = true;
+    const getWeeklySource = vi.fn<WorkReviewV2CoreApi["getWeeklySource"]>().mockImplementation(async (_, ref) => waiting
+      ? new Promise((resolve) => { pending.set(ref, resolve); }) : source(refs.indexOf(ref)));
+    const messages = [qaMessage({ id: "question", role: "user", text: "本周核对匿名验收清单在系统中是什么状态？", answerStatus: null, sourceRefs: [] }), answer(),
+      qaMessage({ id: "second_question", role: "user", text: "再看一下系统状态", answerStatus: null, sourceRefs: [] }),
+      qaMessage({ id: "second_answer", text: `再次核对：${raw}`, sourceRefs: [...refs] })];
+    const original = structuredClone(messages);
+    const client = api({ getWeeklyQa: vi.fn().mockImplementation(async () => ({ thread: thread(), messages: structuredClone(messages) })), getWeeklySource });
+    await open(client);
+    expect(await screen.findByText(raw.replaceAll("\n", " "))).toBeVisible();
+    await waitFor(() => expect(getWeeklySource).toHaveBeenCalledTimes(3));
+    await act(async () => { waiting = false; refs.forEach((ref, index) => pending.get(ref)!(source(index))); });
+    expect(await screen.findByText(translated.replaceAll("\n", " "))).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "更新结果" }));
+    await waitFor(() => expect(client.getWeeklyQa).toHaveBeenCalledTimes(2));
+    expect(getWeeklySource).toHaveBeenCalledTimes(3);
+    expect(messages).toEqual(original);
+    fireEvent.click(screen.getAllByRole("button", { name: "来源 1" })[0]!);
+    expect(await screen.findByRole("link", { name: "打开待办" })).toBeVisible();
+    expect(getWeeklySource).toHaveBeenLastCalledWith("wrw_1", refs[0], expect.any(AbortSignal));
+  });
+
+  it("does not fetch metadata for ordinary, user, hidden, old-snapshot or failed answers", async () => {
+    const variants = [
+      qaMessage(), qaMessage({ role: "user", text: raw, answerStatus: null }),
+      answer(), { ...answer(), verifierProfile: null }, { ...answer(), invalidatedAt: "2026-09-15T00:00:00.000Z" },
+      { ...answer(), answerStatus: "failed" as const }, { ...answer(), answerStatus: "insufficient_evidence" as const },
+      { ...answer(), sourceSnapshotDigest: "b".repeat(64) }
+    ].map((message, index) => ({ ...message, id: `message_${index}`, ...(index === 2 ? { sourceRefs: [] } : {}) }));
+    const client = api({ getWeeklyQa: vi.fn().mockResolvedValue({ thread: thread(), messages: variants }) });
+    await open(client);
+    await screen.findByText("有来源的回答");
+    expect(client.getWeeklySource).not.toHaveBeenCalled();
+  });
+
+  it.each(["failure", "excluded", "mismatch"])("keeps raw text and avoids automatic retry when source metadata is %s", async (mode) => {
+    const metadata = source();
+    if (mode === "excluded") metadata.identity.included = false;
+    if (mode === "mismatch") metadata.identity.sourceRef = "wrs_other";
+    const getWeeklySource = mode === "failure" ? vi.fn().mockRejectedValue(new WorkReviewApiError(410, "source_unavailable")) : vi.fn().mockResolvedValue(metadata);
+    const client = api({ getWeeklyQa: vi.fn().mockResolvedValue({ thread: thread(), messages: [{ ...answer(), sourceRefs: [refs[0]] }] }), getWeeklySource });
+    await open(client);
+    expect(await screen.findByText(raw.replaceAll("\n", " "))).toBeVisible();
+    await waitFor(() => expect(getWeeklySource).toHaveBeenCalledTimes(1));
+    fireEvent.click(screen.getByRole("button", { name: "更新结果" }));
+    await waitFor(() => expect(client.getWeeklyQa).toHaveBeenCalledTimes(2));
+    expect(getWeeklySource).toHaveBeenCalledTimes(1);
+    expect(screen.queryByText(translated.replaceAll("\n", " "))).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "来源 1" })).toBeEnabled();
+  });
+
+  it.each(["week", "project", "account", "thread", "unmount"])("cancels metadata on %s change and ignores the late result", async (change) => {
+    let finish!: (value: WorkWeeklyLiveSourceResponse) => void;
+    const getWeeklySource = vi.fn().mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; })).mockRejectedValue(new Error("offline"));
+    const client = api({ getWeeklyQa: vi.fn().mockResolvedValue({ thread: thread(), messages: [{ ...answer(), sourceRefs: [refs[0]] }] }), getWeeklySource });
+    const view = await open(client);
+    await waitFor(() => expect(getWeeklySource).toHaveBeenCalledTimes(1));
+    const signal = getWeeklySource.mock.calls[0][2] as AbortSignal;
+    await act(async () => {
+      if (change === "unmount") view.unmount();
+      else if (change === "account") view.rerender(weeklyElement(client, capabilities, "account_2"));
+      else if (change === "thread") {
+        vi.mocked(client.getWeeklyQa).mockResolvedValue({ thread: { ...thread(), id: "thread_new" }, messages: [{ ...answer(), threadId: "thread_new", sourceRefs: [refs[0]] }] });
+        fireEvent.click(screen.getByRole("button", { name: "更新结果" }));
+      } else {
+        navigation.search = new URLSearchParams(change === "week" ? "weekStart=2026-08-24&scope=all" : "weekStart=2026-08-31&scope=project&projectId=wrp_1");
+        vi.mocked(client.getWeeklyReview).mockResolvedValue({ review: review({ id: "wrw_2" }), items: [], sourceSummary: summary });
+        view.rerender(weeklyElement(client));
+      }
+    });
+    expect(signal.aborted).toBe(true);
+    await act(async () => { finish(source()); });
+    expect(screen.queryByText(translated.replaceAll("\n", " "))).not.toBeInTheDocument();
+  });
+
+  it("bounds a hanging metadata request without blocking the raw answer or accepting its late result", async () => {
+    vi.useFakeTimers();
+    let finish!: (value: WorkWeeklyLiveSourceResponse) => void;
+    const getWeeklySource = vi.fn().mockImplementation(() => new Promise((resolve) => { finish = resolve; }));
+    const client = api({ getWeeklyQa: vi.fn().mockResolvedValue({ thread: thread(), messages: [{ ...answer(), sourceRefs: [refs[0]] }] }), getWeeklySource });
+    await act(async () => { renderWeekly(client); });
+    await act(async () => { fireEvent.click(screen.getByRole("tab", { name: "问问本周" })); });
+    const signal = getWeeklySource.mock.calls[0][2] as AbortSignal;
+    expect(screen.getByText(raw.replaceAll("\n", " "))).toBeVisible();
+    await act(async () => { await vi.advanceTimersByTimeAsync(10_000); });
+    expect(signal.aborted).toBe(true);
+    expect(screen.getByRole("button", { name: "更新结果" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "来源 1" })).toBeEnabled();
+    await act(async () => { finish(source()); });
+    expect(screen.queryByText(translated.replaceAll("\n", " "))).not.toBeInTheDocument();
+    await act(async () => { await vi.advanceTimersByTimeAsync(90_000); });
+    expect(getWeeklySource).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe("Work Review Weekly UI", () => {
   it.each(["ready", "failed", "queued"] as const)("preserves displayed partial quality and copy when the latest status is %s", async (status) => {
     const displayedGeneration: WorkWeeklyDisplayedGeneration = {
@@ -694,14 +1062,16 @@ describe("Work Review Weekly UI", () => {
   it("keeps QA persistent while suppressing unverified and invalidated answer bodies", async () => {
     const qaThread = thread();
     const messages = [
-      qaMessage({ id: "wrqm_user", role: "user", text: "这周完成了什么？", answerStatus: null, sourceRefs: [], providerProfile: null, promptVersion: null, verifierProfile: null }),
+      qaMessage({ id: "wrqm_user", role: "user", text: "待办当前状态为 open 是什么意思？", answerStatus: null, sourceRefs: [], providerProfile: null, promptVersion: null, verifierProfile: null }),
       qaMessage(),
+      qaMessage({ id: "wrqm_status", text: "待办当前系统状态为 open。待办曾被标记为 completed。" }),
       qaMessage({ id: "wrqm_unverified", text: "未经过逐条核验的回答", verifierProfile: null }),
       qaMessage({ id: "wrqm_insufficient", text: null, answerStatus: "insufficient_evidence", sourceRefs: [], verifierProfile: null }),
       qaMessage({ id: "wrqm_failed", text: "内部失败正文", answerStatus: "failed", sourceRefs: [], verifierProfile: null }),
       qaMessage({ id: "wrqm_invalid", text: "失效回答正文", answerStatus: "invalidated", invalidatedAt: "2026-09-03T09:00:00.000Z" }),
       qaMessage({ id: "wrqm_old", text: "旧版本但已核验", sourceSnapshotDigest: "b".repeat(64), sourceRefs: [] })
     ];
+    const originalMessages = structuredClone(messages);
     const sourceResponse: WorkWeeklyLiveSourceResponse = {
       identity: {
         sourceRef: "evidence:publication_1:segment_1",
@@ -723,7 +1093,7 @@ describe("Work Review Weekly UI", () => {
         endSeconds: 18,
         rawSpeakerLabel: "Speaker 1",
         timestampQuality: "provider_exact",
-        text: "这是会议中的原话。"
+        text: "这是会议中的原话。待办当前状态为 open。"
       }
     };
     const getWeeklyQa = vi.fn<WorkReviewV2CoreApi["getWeeklyQa"]>().mockResolvedValue({ thread: qaThread, messages });
@@ -735,6 +1105,9 @@ describe("Work Review Weekly UI", () => {
     fireEvent.click(screen.getByRole("tab", { name: "问问本周" }));
 
     expect(await screen.findByText("有来源的回答")).toBeVisible();
+    expect(screen.getByText("待办当前状态为 open 是什么意思？")).toBeVisible();
+    expect(screen.getByText("待办当前系统状态为 open。待办曾被标记为 completed。")).toBeVisible();
+    expect(messages).toEqual(originalMessages);
     expect(screen.queryByText("未经过逐条核验的回答")).not.toBeInTheDocument();
     expect(screen.getByText("回答正文需要通过 Weekly QA Verifier 后才会显示。")).toBeVisible();
     expect(screen.getByText("在本周已确认的工作记录中，没有找到足够依据回答这个问题。")).toBeVisible();
@@ -744,13 +1117,13 @@ describe("Work Review Weekly UI", () => {
     expect(screen.getByText("基于旧的数据版本")).toBeVisible();
 
     fireEvent.click(screen.getAllByRole("button", { name: "来源 1" })[0]!);
-    expect(await screen.findByText("这是会议中的原话。")).toBeVisible();
+    expect(await screen.findByText("这是会议中的原话。待办当前状态为 open。")).toBeVisible();
     expect(screen.getByRole("link", { name: "打开会议" })).toHaveAttribute("href", "/work-review/meetings/meeting%2F1");
     fireEvent.click(screen.getByRole("button", { name: "返回周回顾" }));
 
     fireEvent.click(screen.getByRole("button", { name: "清空记录" }));
     fireEvent.click(screen.getByRole("button", { name: "清空问答" }));
-    await waitFor(() => expect(clearWeeklyQa).toHaveBeenCalledWith("wrw_1", expect.objectContaining({ expectedVersion: 4 })));
+    await waitFor(() => expect(clearWeeklyQa).toHaveBeenCalledWith("wrw_1", expect.objectContaining({ expectedVersion: 4 }), expect.any(AbortSignal)));
   });
 
   it("gates old QA immediately while a new URL scope is loading", async () => {

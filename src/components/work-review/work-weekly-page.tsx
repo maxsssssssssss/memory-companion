@@ -38,6 +38,7 @@ import type {
 import { useWorkReview } from "./work-review-shell";
 import { asWorkReviewV2Api, workReviewOperationKey } from "./work-review-v2";
 import { WorkWeeklySourceDialog } from "./work-weekly-source-dialog";
+import { useWeeklyQaDisplayText } from "./work-weekly-qa-display";
 import styles from "./work-weekly.module.css";
 
 type LoadState = "idle" | "loading" | "ready" | "error";
@@ -277,6 +278,7 @@ type QaController = Readonly<{
   messages: WorkWeeklyQaMessage[];
   notice: string | null;
   pending: boolean;
+  refreshing: boolean;
   reload: () => void;
   setDraft: (value: string) => void;
   submit: () => Promise<void>;
@@ -300,12 +302,18 @@ function useWeeklyQa({
   const [draft, setDraft] = useState("");
   const [busy, setBusy] = useState(false);
   const [pending, setPending] = useState(false);
-  const [pollRemaining, setPollRemaining] = useState(0);
+  const [refreshing, setRefreshing] = useState(false);
+  const [visible, setVisible] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [readError, setReadError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [attempt, setAttempt] = useState(0);
   const operationKeysRef = useRef(new Map<string, string>());
-  const reviewId = review?.id ?? null;
+  const questionRef = useRef<{ threadId: string; messageId: string } | null>(null);
+  const stopReadRef = useRef<() => void>(() => {});
+  const mutationRef = useRef<AbortController | null>(null);
+  const skipInitialReadRef = useRef(false);
+  const reviewId = review?.deletedAt ? null : review?.id ?? null;
 
   useEffect(() => {
     setLoadState("idle");
@@ -314,111 +322,205 @@ function useWeeklyQa({
     setDraft("");
     setBusy(false);
     setPending(false);
-    setPollRemaining(0);
+    setRefreshing(false);
     setError(null);
+    setReadError(null);
     setNotice(null);
     operationKeysRef.current.clear();
-  }, [review?.id]);
-
-  useEffect(() => {
-    if (!active || !api || !enabled || !reviewId) return;
-    const controller = new AbortController();
-    setLoadState("loading");
-    setError(null);
-    void api.getWeeklyQa(reviewId, controller.signal).then((response) => {
-      if (controller.signal.aborted) return;
-      setThread(response?.thread ?? null);
-      setMessages(response?.messages ?? []);
-      setLoadState("ready");
-    }).catch((nextError: unknown) => {
-      if (controller.signal.aborted || nextError instanceof DOMException && nextError.name === "AbortError") return;
-      setError(actionError(nextError));
-      setLoadState("error");
-    });
-    return () => controller.abort();
-  }, [active, api, attempt, enabled, reviewId]);
-
-  useEffect(() => {
-    if (!api || !reviewId || !pending || pollRemaining <= 0) return;
-    const controller = new AbortController();
-    const timer = globalThis.setTimeout(() => {
-      void api.getWeeklyQa(reviewId, controller.signal).then((response) => {
-        if (controller.signal.aborted || !response) return;
-        setThread(response.thread);
-        setMessages(response.messages);
-        const stillWaiting = response.messages.at(-1)?.role === "user";
-        if (!stillWaiting) {
-          setPending(false);
-          setPollRemaining(0);
-          setNotice("回答已更新。每一轮事实都重新核对当前周的有效来源。");
-        } else if (pollRemaining === 1) {
-          setPending(false);
-          setPollRemaining(0);
-          setNotice("回答尚未返回。稍后可手动刷新；页面不会猜测后台处理阶段。");
-        } else {
-          setPollRemaining((value) => value - 1);
-        }
-      }).catch((nextError: unknown) => {
-        if (controller.signal.aborted || nextError instanceof DOMException && nextError.name === "AbortError") return;
-        setPending(false);
-        setPollRemaining(0);
-        setError(actionError(nextError));
-      });
-    }, 1_200);
+    questionRef.current = null;
+    skipInitialReadRef.current = false;
     return () => {
-      controller.abort();
-      globalThis.clearTimeout(timer);
+      stopReadRef.current();
+      mutationRef.current?.abort();
+      mutationRef.current = null;
     };
-  }, [api, pending, pollRemaining, reviewId]);
+  }, [api, reviewId]);
+
+  useEffect(() => {
+    const onVisibility = () => {
+      const nextVisible = document.visibilityState !== "hidden";
+      if (!nextVisible) stopReadRef.current();
+      skipInitialReadRef.current = false;
+      setVisible(nextVisible);
+    };
+    onVisibility();
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => document.removeEventListener("visibilitychange", onVisibility);
+  }, []);
+
+  useEffect(() => {
+    if (!active || !visible || !api || !enabled || !reviewId || busy) {
+      setPending(false);
+      setRefreshing(false);
+      if (!active || !visible) skipInitialReadRef.current = false;
+      return;
+    }
+    const controller = new AbortController();
+    const deadline = Date.now() + 90_000;
+    let stopped = false;
+    let inFlight = false;
+    let interval: ReturnType<typeof globalThis.setInterval>;
+    let expiry: ReturnType<typeof globalThis.setTimeout>;
+    const stop = () => {
+      stopped = true;
+      controller.abort();
+      globalThis.clearInterval(interval);
+      globalThis.clearTimeout(expiry);
+    };
+    stopReadRef.current = stop;
+    const finish = () => {
+      setPending(false);
+      setRefreshing(false);
+      stop();
+    };
+    const expire = () => {
+      finish();
+      setLoadState("ready");
+      setNotice("本轮查询已满90秒，尚未收到最终结果。可点击“更新结果”继续查询，这不表示生成失败。");
+    };
+    const read = async () => {
+      if (stopped || inFlight) return;
+      if (Date.now() >= deadline) { expire(); return; }
+      inFlight = true;
+      setRefreshing(true);
+      try {
+        const response = await api.getWeeklyQa(reviewId, controller.signal);
+        if (stopped) return;
+        if (Date.now() >= deadline) { expire(); return; }
+        if (response && response.thread.weeklyReviewId !== reviewId) return;
+        const target = questionRef.current;
+        const targetIndex = response?.messages.findIndex((message) => message.id === target?.messageId) ?? -1;
+        // An older snapshot ending in an earlier answer cannot finish this question.
+        if (target && response?.thread.id === target.threadId && !response.thread.clearedAt && targetIndex < 0) return;
+        setThread(response?.thread ?? null);
+        setMessages(response?.messages ?? []);
+        setLoadState("ready");
+        // Reading records successfully does not mean a rejected mutation succeeded.
+        setReadError(null);
+        if (!response || response.thread.clearedAt) {
+          questionRef.current = null;
+          finish();
+          return;
+        }
+        const correspondingAnswer = target && response.thread.id === target.threadId
+          ? response.messages[targetIndex + 1]
+          : null;
+        if (correspondingAnswer?.role === "assistant" && correspondingAnswer.answerStatus !== null) {
+          questionRef.current = null;
+          setNotice("这轮问答结果已更新。");
+          finish();
+          return;
+        }
+        const lastMessage = response.messages.at(-1);
+        if (!target || response.thread.id !== target.threadId) {
+          questionRef.current = lastMessage?.role === "user"
+            ? { threadId: response.thread.id, messageId: lastMessage.id }
+            : null;
+        }
+        if (questionRef.current) setPending(true);
+        else finish();
+      } catch (nextError) {
+        if (stopped || controller.signal.aborted) return;
+        setReadError(actionError(nextError));
+        setLoadState((current) => current === "loading" ? "error" : current);
+        if (nextError instanceof WorkReviewApiError && [401, 403, 404, 410].includes(nextError.status)) {
+          setMessages([]);
+          setThread(null);
+          questionRef.current = null;
+          setLoadState("error");
+          finish();
+        }
+      } finally {
+        inFlight = false;
+        if (!stopped) setRefreshing(false);
+      }
+    };
+    setLoadState((current) => current === "idle" ? "loading" : current);
+    setPending(questionRef.current !== null);
+    // Fixed wall-clock ticks; skip a tick while a previous GET is still in flight.
+    // The independent deadline also aborts a hanging GET at 90 seconds.
+    interval = globalThis.setInterval(() => void read(), 5_000);
+    expiry = globalThis.setTimeout(expire, 90_000);
+    if (!skipInitialReadRef.current) void read();
+    else if (!questionRef.current) finish();
+    skipInitialReadRef.current = false;
+    return stop;
+  }, [active, api, attempt, busy, enabled, reviewId, visible]);
 
   const submit = async () => {
-    if (!api || !review || busy || pending || !draft.trim()) return;
+    if (!api || !reviewId || !review || mutationRef.current || busy || pending || messages.at(-1)?.role === "user" || !draft.trim()) return;
     const question = draft.trim();
     const logicalKey = `weekly-qa:${review.id}:${thread?.version ?? "new"}:${question}`;
     setBusy(true);
     setError(null);
+    setReadError(null);
     setNotice(null);
+    stopReadRef.current();
+    const controller = new AbortController();
+    mutationRef.current = controller;
     try {
       const response = await api.askWeeklyQa(review.id, {
         question,
         expectedVersion: thread?.version ?? null,
         operationKey: keyForOperation(operationKeysRef, logicalKey, "weekly-qa")
-      });
+      }, controller.signal);
+      if (controller.signal.aborted) return;
       settleOperation(operationKeysRef, logicalKey);
       setThread(response.thread);
       setMessages(response.messages);
       setDraft("");
-      setPending(true);
-      setPollRemaining(8);
+      const questionIndex = response.messages.findIndex((message) => message.id === response.run.questionMessageId);
+      const answer = questionIndex >= 0 ? response.messages[questionIndex + 1] : null;
+      questionRef.current = answer?.role === "assistant" && answer.answerStatus !== null
+        ? null
+        : { threadId: response.run.threadId, messageId: response.run.questionMessageId };
+      skipInitialReadRef.current = active && document.visibilityState !== "hidden";
+      setAttempt((value) => value + 1);
     } catch (nextError) {
+      if (controller.signal.aborted) return;
+      skipInitialReadRef.current = true;
       settleOperation(operationKeysRef, logicalKey, nextError);
       setError(actionError(nextError));
     } finally {
-      setBusy(false);
+      if (!controller.signal.aborted) {
+        mutationRef.current = null;
+        setBusy(false);
+      }
     }
   };
 
   const clear = async () => {
-    if (!api || !review || !thread || busy) return;
+    if (!api || !reviewId || !review || !thread || busy || mutationRef.current) return;
     const logicalKey = `weekly-qa-clear:${review.id}:${thread.version}`;
     setBusy(true);
     setError(null);
+    setReadError(null);
     setNotice(null);
+    stopReadRef.current();
+    const controller = new AbortController();
+    mutationRef.current = controller;
     try {
       await api.clearWeeklyQa(review.id, {
         expectedVersion: thread.version,
         operationKey: keyForOperation(operationKeysRef, logicalKey, "weekly-qa-clear")
-      });
+      }, controller.signal);
+      if (controller.signal.aborted) return;
       settleOperation(operationKeysRef, logicalKey);
       setPending(false);
       setMessages([]);
+      setThread(null);
+      questionRef.current = null;
       setNotice("问答记录已清空；周回顾、会议、待办和 Evidence 没有改变。");
       setAttempt((value) => value + 1);
     } catch (nextError) {
+      if (controller.signal.aborted) return;
       settleOperation(operationKeysRef, logicalKey, nextError);
       setError(actionError(nextError));
     } finally {
-      setBusy(false);
+      if (!controller.signal.aborted) {
+        mutationRef.current = null;
+        setBusy(false);
+      }
     }
   };
 
@@ -426,13 +528,17 @@ function useWeeklyQa({
     busy,
     clear,
     draft,
-    error,
+    error: readError ?? error,
     loadState,
     messages,
     notice,
     pending,
+    refreshing,
     reload: () => {
-      setError(null);
+      if (mutationRef.current) return;
+      stopReadRef.current();
+      skipInitialReadRef.current = false;
+      setReadError(null);
       setNotice(null);
       setAttempt((value) => value + 1);
     },
@@ -443,6 +549,7 @@ function useWeeklyQa({
 }
 
 function WeeklyQaPanel({
+  api,
   enabled,
   loading,
   onReloadScope,
@@ -452,6 +559,7 @@ function WeeklyQaPanel({
   scopeLoadError,
   verifierEnabled
 }: Readonly<{
+  api: WorkReviewV2CoreApi | null;
   enabled: boolean;
   loading: boolean;
   onReloadScope: () => void;
@@ -462,6 +570,8 @@ function WeeklyQaPanel({
   verifierEnabled: boolean;
 }>) {
   const [confirmClear, setConfirmClear] = useState(false);
+  const displayText = useWeeklyQaDisplayText(api, review, qa.thread?.id, qa.messages,
+    enabled && verifierEnabled && !loading && !scopeLoadError);
   if (!enabled) {
     return <ProductState description="周回顾本身仍可查看；问答能力由服务端功能开关控制。" title="问问本周暂未开放" tone="empty" />;
   }
@@ -478,7 +588,7 @@ function WeeklyQaPanel({
     return <ProductState title="正在读取问答记录…" tone="loading" />;
   }
   if (qa.loadState === "error") {
-    return <ProductState action={<button className={styles.secondaryButton} onClick={qa.reload} type="button">重新加载</button>} description={qa.error ?? undefined} title="暂时无法读取问答记录" tone="error" />;
+    return <ProductState action={<button className={styles.secondaryButton} disabled={qa.busy || qa.refreshing} onClick={qa.reload} type="button">更新结果</button>} description={qa.error ?? undefined} title="暂时无法读取问答记录" tone="error" />;
   }
 
   const canAsk = review.status === "ready" && verifierEnabled;
@@ -494,6 +604,8 @@ function WeeklyQaPanel({
           <button className={styles.tertiaryButton} disabled={qa.busy} onClick={() => setConfirmClear(true)} type="button">清空记录</button>
         ) : null}
       </header>
+
+      <button aria-busy={qa.refreshing} className={styles.secondaryButton} disabled={qa.busy || qa.refreshing} onClick={qa.reload} type="button">更新结果</button>
 
       {!verifierEnabled ? (
         <p className={styles.verifierNotice} role="status">QA 核验暂不可用。自由文本回答已隐藏，页面只保留服务端返回的来源入口。</p>
@@ -524,7 +636,7 @@ function WeeklyQaPanel({
                 ) : suppressAssistantText ? (
                   <p>{invalidated ? "这条回答引用的来源已经失效，正文已隐藏。" : "回答正文需要通过 Weekly QA Verifier 后才会显示。"}</p>
                 ) : (
-                  <p>{message.text ?? "回答尚未返回。"}</p>
+                  <p>{message.text === null ? "回答尚未返回。" : displayText(message)}</p>
                 )}
                 {message.role === "assistant" && !invalidated ? <SourceButtons onOpenSource={onOpenSource} sourceRefs={message.sourceRefs} /> : null}
               </li>
@@ -534,8 +646,8 @@ function WeeklyQaPanel({
       ) : (
         <ProductState description="可以从一个具体问题开始；系统不会使用互联网、其他周或其他产品的内容补造答案。" title="还没有问答记录" tone="empty" />
       )}
-      {trailingQuestion ? <p className={styles.pendingBoundary}>最后一条问题尚未返回回答；刷新后的接口不会暴露精确运行阶段，请手动刷新查看最新记录。</p> : null}
-      {qa.pending ? <p className={styles.pendingBoundary} role="status">问题已提交，正在等待经过核验的回答…</p> : null}
+      {trailingQuestion ? <p className={styles.pendingBoundary}>尚未收到这轮问题的最终结果。点击“更新结果”查询已有任务，不会重新提交问题。</p> : null}
+      {qa.pending ? <p className={styles.pendingBoundary} role="status">正在等待问答结果，每5秒查询一次，本轮最多90秒。</p> : null}
 
       <div className={styles.promptSuggestions} aria-label="建议问题">
         {QA_PROMPTS.map((prompt) => <button disabled={!canAsk || qa.busy || qa.pending} key={prompt} onClick={() => qa.setDraft(prompt)} type="button">{prompt}</button>)}
@@ -552,7 +664,7 @@ function WeeklyQaPanel({
         />
         <div>
           <p>只使用当前周、当前范围和当前有效 Work Evidence。</p>
-          <button className={styles.primaryButton} disabled={!canAsk || qa.busy || qa.pending || !qa.draft.trim()} type="submit">{qa.busy ? "正在提交…" : "发送问题"}</button>
+          <button className={styles.primaryButton} disabled={!canAsk || qa.busy || qa.pending || trailingQuestion || !qa.draft.trim()} type="submit">{qa.busy ? "正在提交…" : "发送问题"}</button>
         </div>
       </form>
 
@@ -1195,7 +1307,7 @@ function WorkWeeklyScopePage() {
         ariaLabel="周回顾内容"
         items={[
           { id: "review", label: "本周回顾", panel: reviewPanel },
-          { id: "qa", label: "问问本周", panel: <WeeklyQaPanel enabled={capabilities.weeklyQa} loading={!scopeReady} onReloadScope={() => setAttempt((value) => value + 1)} onOpenSource={setActiveSourceRef} qa={qa} review={scopedReview} scopeLoadError={loadState === "error" ? error : null} verifierEnabled={capabilities.weeklyQaVerifier} /> }
+          { id: "qa", label: "问问本周", panel: <WeeklyQaPanel api={v2Api} enabled={capabilities.weeklyQa} loading={!scopeReady} onReloadScope={() => setAttempt((value) => value + 1)} onOpenSource={setActiveSourceRef} qa={qa} review={scopedReview} scopeLoadError={loadState === "error" ? error : null} verifierEnabled={capabilities.weeklyQaVerifier} /> }
         ]}
         onChange={(value) => setActiveTab(value as WeeklyTab)}
         value={activeTab}

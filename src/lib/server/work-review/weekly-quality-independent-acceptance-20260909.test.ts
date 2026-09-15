@@ -120,8 +120,9 @@ const summaryAtom = "暂定仅上线每日摘要，已完成的实时提醒代�
 
 afterAll(() => {
   expect(createOpenAIClient).not.toHaveBeenCalled();
-  mkdirSync("output", { recursive: true });
-  writeFileSync("output/work-weekly-quality-independent-20260909-synthetic-outputs.json",
+  const outputDir = process.env.WORK_WEEKLY_INDEPENDENT_OUTPUT_DIR ?? "output";
+  mkdirSync(outputDir, { recursive: true });
+  writeFileSync(`${outputDir}/work-weekly-quality-independent-20260909-synthetic-outputs.json`,
     JSON.stringify({ evidence: "anonymous offline fixture; not real model or production", cases: observed }, null, 2));
 });
 
@@ -360,7 +361,7 @@ describe("QA adjacent use of the shared atomic publication policy", () => {
   });
   it("fails closed when the QA draft cites another scope", async () => {
     const providers = qa([{ ...claim("a", "外部范围记录。"), sourceRefs: ["work:finding:outside_qa_pack"] }]);
-    expect(await ask(providers)).toMatchObject({ answerStatus: "insufficient_evidence", sourceRefs: [], failureCode: "weekly_qa_provider_or_contract_failed" });
+    await expect(ask(providers)).rejects.toMatchObject({ code: "weekly_qa_source_not_allowlisted" });
     expect(providers.request).toHaveBeenCalledTimes(1);
   });
 });

@@ -1,5 +1,5 @@
 // @vitest-environment node
-import type OpenAI from "openai";
+import OpenAI from "openai";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { StructuredJsonResponseError } from "@/lib/server/openai/structured-json";
 
@@ -20,9 +20,11 @@ import {
   requestWorkWeeklyStructuredJson,
   resolveWorkWeeklyProviderProfile,
   WorkWeeklyClaimTypeSchema,
-  WorkWeeklySynthesizerModelResponseSchema
+  WorkWeeklySynthesizerModelResponseSchema,
+  WorkWeeklyVerifierResponseSchema
 } from "./weekly-ai-provider";
 import { WORK_WEEKLY_TEST_REFS, workWeeklyTestSnapshot } from "./weekly-ai-test-fixture";
+import { WorkWeeklyQaAnswerDraftSchema, WORK_WEEKLY_QA_ANSWERER_JSON_INSTRUCTION } from "./weekly-qa-provider";
 
 const TOKENHUB_BASE_URL = "https://tokenhub.vision-intelligence.tech/v1";
 const finalAnswer = {
@@ -86,6 +88,209 @@ beforeEach(() => {
 });
 
 describe("Work Weekly TokenHub transport", () => {
+  it.each([
+    { role: "qa_answerer" as const, prefix: "WORK_REVIEW_WEEKLY_QA_ANSWERER", timeoutMs: 60_000 },
+    { role: "qa_verifier" as const, prefix: "WORK_REVIEW_WEEKLY_QA_VERIFIER", timeoutMs: 30_000 }
+  ])("carries the independent DS Pro $role override into SDK and product timers without retries", async ({ role, prefix, timeoutMs }) => {
+    const answer = role === "qa_answerer"
+      ? { status: "insufficient_evidence", answer: "没有足够依据。", claims: [], relevantSourceRefs: [] }
+      : { items: [] };
+    const transport = vi.fn(async (_url: RequestInfo | URL, _options?: RequestInit) => {
+      const event = { type: "response.completed", response: { ...completedResponse,
+        output: [{ type: "message", role: "assistant", content: [{ type: "output_text", text: JSON.stringify(answer) }] }] } };
+      return new Response(`data: ${JSON.stringify(event)}\n\n`, { headers: { "content-type": "text/event-stream" } });
+    });
+    mocks.runtimeConfig.mockResolvedValue({ openAiApiKey: "fixture-key-never-sent", openAiBaseUrl: TOKENHUB_BASE_URL });
+    mocks.createClient.mockImplementation((config) => new OpenAI({ apiKey: "fixture-key-never-sent", baseURL: TOKENHUB_BASE_URL,
+      timeout: config.timeoutMs, maxRetries: 2, fetch: transport }));
+    const timers = vi.spyOn(globalThis, "setTimeout");
+    const clientOptions = vi.spyOn(OpenAI.prototype, "withOptions");
+    try {
+      const profile = resolveWorkWeeklyProviderProfile(role, { OPENAI_QA_MODEL: "gpt-5.5",
+        [`${prefix}_MODEL`]: "deepseek-v4-pro", [`${prefix}_REASONING_EFFORT`]: "none", [`${prefix}_TIMEOUT_MS`]: String(timeoutMs) });
+      expect(profile).toMatchObject({ role, model: "deepseek-v4-pro", reasoningEffort: "none", timeoutMs, maxOutputTokens: 4_000 });
+      expect(await requestWorkWeeklyStructuredJson({ profile,
+        schema: role === "qa_answerer" ? WorkWeeklyQaAnswerDraftSchema : WorkWeeklyVerifierResponseSchema,
+        requestInput: [{ role: "user", content: "本地合成来源：保留原始文字。" }],
+        jsonInstruction: role === "qa_answerer" ? WORK_WEEKLY_QA_ANSWERER_JSON_INSTRUCTION : "输出严格 JSON {items:[]}。"
+      })).toEqual(answer);
+      expect(transport).toHaveBeenCalledTimes(1);
+      const body = JSON.parse(String(transport.mock.calls[0]![1]?.body));
+      expect(body).toMatchObject({ model: "deepseek-v4-pro", stream: true, reasoning: { effort: "none" }, max_output_tokens: 4_000 });
+      expect(body.input[0].content.includes("JSON 根对象必须包含 items 字段")).toBe(role === "qa_verifier");
+      expect(body.input[1]).toEqual({ role: "user", content: "本地合成来源：保留原始文字。" });
+      expect(mocks.createClient).toHaveBeenCalledWith(expect.objectContaining({ timeoutMs }));
+      expect(timers.mock.calls.filter(([, delay]) => delay === timeoutMs).length).toBeGreaterThanOrEqual(2);
+      expect(clientOptions).toHaveBeenCalledTimes(2);
+      expect(clientOptions.mock.calls.every(([options]) => options.maxRetries === 0)).toBe(true);
+    } finally { timers.mockRestore(); clientOptions.mockRestore(); }
+  });
+
+  describe.each(["qa_answerer", "qa_verifier"] as const)("default GPT %s endpoint", (role) => {
+    it.each([
+      "http://tokenhub.vision-intelligence.tech",
+      "https://tokenhub.vision-intelligence.tech/",
+      "http://tokenhub.vision-intelligence.tech/v1",
+      "http://tokenhub.vision-intelligence.tech/v1/",
+      TOKENHUB_BASE_URL,
+      `${TOKENHUB_BASE_URL}/`
+    ])("normalizes only the known base %s through the actual SDK", async (baseURL) => {
+      const answer = role === "qa_answerer"
+        ? { status: "insufficient_evidence", answer: "没有足够依据。", claims: [], relevantSourceRefs: [] }
+        : { items: [] };
+      const transport = vi.fn(async (_url: RequestInfo | URL, _options?: RequestInit) =>
+        new Response(JSON.stringify({ ...completedResponse, output_text: JSON.stringify(answer),
+          output: [{ type: "message", role: "assistant", content: [{ type: "output_text", text: JSON.stringify(answer) }] }] }),
+        { headers: { "content-type": "application/json" } }));
+      const client = new OpenAI({ apiKey: "fixture-key-never-sent", baseURL, fetch: transport, maxRetries: 0 });
+      const options = vi.spyOn(client, "withOptions");
+      mocks.runtimeConfig.mockResolvedValue({ openAiApiKey: "fixture-key-never-sent", openAiBaseUrl: baseURL });
+      mocks.createClient.mockReturnValue(client);
+      const profile = resolveWorkWeeklyProviderProfile(role, { OPENAI_QA_MODEL: "gpt-5.5" });
+      expect(profile).toMatchObject({ role, model: "gpt-5.5", reasoningEffort: "provider_default", timeoutMs: 30_000, maxOutputTokens: 4_000 });
+      const before = JSON.stringify(profile);
+      expect(await requestWorkWeeklyStructuredJson({ profile,
+        schema: role === "qa_answerer" ? WorkWeeklyQaAnswerDraftSchema : WorkWeeklyVerifierResponseSchema,
+        requestInput: [{ role: "user", content: "本地虚构 QA 来源" }],
+        jsonInstruction: role === "qa_answerer" ? WORK_WEEKLY_QA_ANSWERER_JSON_INSTRUCTION : "输出严格 JSON {items:[]}。"
+      })).toEqual(answer);
+      expect(transport).toHaveBeenCalledTimes(1);
+      expect(String(transport.mock.calls[0]![0])).toBe(`${TOKENHUB_BASE_URL}/responses`);
+      const body = JSON.parse(String(transport.mock.calls[0]![1]?.body));
+      expect(body).toMatchObject({ model: "gpt-5.5", max_output_tokens: 4_000 });
+      expect(body).not.toHaveProperty("stream");
+      expect(body).not.toHaveProperty("reasoning");
+      expect(body.input[0].content.includes("JSON 根对象必须包含 items 字段")).toBe(role === "qa_verifier");
+      expect(options).toHaveBeenCalledExactlyOnceWith({ baseURL: TOKENHUB_BASE_URL });
+      expect(mocks.createClient).toHaveBeenCalledWith(expect.objectContaining({ timeoutMs: 30_000 }));
+      expect(client.baseURL).toBe(baseURL);
+      expect(JSON.stringify(profile)).toBe(before);
+    });
+  });
+
+  it.each([
+    "https://api.openai.com/v1",
+    "https://openrouter.ai/api/v1",
+    "https://tokenhub.vision-intelligence.tech.example.test/v1",
+    "https://tokenhub.vision-intelligence.tech/custom/v1",
+    "http://tokenhub.vision-intelligence.tech/custom",
+    "http://tokenhub.vision-intelligence.tech:9100/v1"
+  ])("preserves the actual GPT QA SDK address for other providers or custom bases: %s", async (baseURL) => {
+    const qa = { status: "insufficient_evidence", answer: "没有足够依据。", claims: [], relevantSourceRefs: [] };
+    const transport = vi.fn(async (_url: RequestInfo | URL, _options?: RequestInit) =>
+      new Response(JSON.stringify({ ...completedResponse, output_text: JSON.stringify(qa),
+        output: [{ type: "message", role: "assistant", content: [{ type: "output_text", text: JSON.stringify(qa) }] }] }),
+      { headers: { "content-type": "application/json" } }));
+    const client = new OpenAI({ apiKey: "fixture-key-never-sent", baseURL, fetch: transport, maxRetries: 0 });
+    const options = vi.spyOn(client, "withOptions");
+    mocks.runtimeConfig.mockResolvedValue({ openAiApiKey: "fixture-key-never-sent", openAiBaseUrl: baseURL });
+    mocks.createClient.mockReturnValue(client);
+    expect(await requestWorkWeeklyStructuredJson({
+      profile: resolveWorkWeeklyProviderProfile("qa_answerer", { OPENAI_QA_MODEL: "gpt-5.5" }),
+      schema: WorkWeeklyQaAnswerDraftSchema, requestInput: "本地虚构问题", jsonInstruction: WORK_WEEKLY_QA_ANSWERER_JSON_INSTRUCTION
+    })).toEqual(qa);
+    expect(transport).toHaveBeenCalledTimes(1);
+    expect(String(transport.mock.calls[0]![0])).toBe(`${baseURL}/responses`);
+    expect(options).not.toHaveBeenCalled();
+    expect(client.baseURL).toBe(baseURL);
+  });
+
+  it.each([
+    "https://tokenhub.vision-intelligence.tech/custom/v1",
+    "https://tokenhub.vision-intelligence.tech:9100/v1",
+    "https://tokenhub.vision-intelligence.tech/v1?route=custom",
+    "https://tokenhub.vision-intelligence.tech/v1#custom"
+  ])("keeps the existing stricter DeepSeek rejection for %s", async (baseURL) => {
+    const fixture = clientFixture(baseURL);
+    await expect(request()).rejects.toMatchObject({ code: "work_weekly_tokenhub_base_url_invalid" });
+    expect(fixture.create).not.toHaveBeenCalled();
+  });
+
+  it.each(["messages", "string"])("uses the QA root without changing original %s or the shared client", async (format) => {
+    const qa = { status: "insufficient_evidence", answer: "本周没有足够依据。", claims: [], relevantSourceRefs: [] };
+    const events = [{ type: "response.completed", response: { ...completedResponse,
+      output: [{ type: "message", role: "assistant", content: [{ type: "output_text", text: JSON.stringify(qa) }] }] } }];
+    const fixture = clientFixture(TOKENHUB_BASE_URL, events);
+    const original = format === "messages" ? [{ role: "system" as const, content: "产品QA语义指令" },
+      { role: "user" as const, content: "问题与来源原文：JSON 根对象必须包含 items 字段。保留 open API 标题。" }]
+      : "问题与来源原文：JSON 根对象必须包含 items 字段。保留 open API 标题。";
+    const before = JSON.stringify(original);
+    const profile = resolveWorkWeeklyProviderProfile("qa_answerer", { WORK_REVIEW_WEEKLY_QA_ANSWERER_MODEL: "deepseek-v4-pro" });
+    expect(await requestWorkWeeklyStructuredJson({ profile, schema: WorkWeeklyQaAnswerDraftSchema,
+      requestInput: original, jsonInstruction: WORK_WEEKLY_QA_ANSWERER_JSON_INSTRUCTION })).toEqual(qa);
+    const body = fixture.create.mock.calls[0]![0];
+    const prefix = `${WORK_WEEKLY_QA_ANSWERER_JSON_INSTRUCTION}\n只输出一个合法 JSON 对象，不要输出 Markdown，不要输出解释文字。`;
+    expect(prefix).not.toContain("JSON 根对象必须包含 items 字段");
+    expect(body.input).toEqual(Array.isArray(original)
+      ? [{ role: "system", content: prefix }, ...original] : `${prefix}\n\n${original}`);
+    expect(body).toMatchObject({ stream: true, model: "deepseek-v4-pro", max_output_tokens: 4000, reasoning: { effort: "none" } });
+    expect(fixture.create.mock.calls[0]![1]).toMatchObject({ maxRetries: 0, signal: expect.any(AbortSignal) });
+    expect(JSON.stringify(original)).toBe(before); expect(fixture.parse).not.toHaveBeenCalled();
+    events[0] = { type: "response.completed", response: completedResponse };
+    expect(await request()).toEqual(finalAnswer);
+    expect(String(fixture.create.mock.calls[1]![0].input)).toContain("JSON 根对象必须包含 items 字段");
+    expect(fixture.create).toHaveBeenCalledTimes(2);
+  });
+
+  it.each(["messages", "string"])("preserves QA %s input through actual SDK client cloning and a local fetch", async (format) => {
+    const qa = { status: "insufficient_evidence", answer: "本周没有足够依据。", claims: [], relevantSourceRefs: [] };
+    let output: unknown = qa;
+    const bodies: Record<string, unknown>[] = [];
+    const transport = vi.fn(async (_url: RequestInfo | URL, options?: RequestInit) => {
+      bodies.push(JSON.parse(String(options?.body)) as Record<string, unknown>);
+      const event = { type: "response.completed", response: { ...completedResponse,
+        output: [{ type: "message", role: "assistant", content: [{ type: "output_text", text: JSON.stringify(output) }] }] } };
+      return new Response(`data: ${JSON.stringify(event)}\n\n`, { headers: { "content-type": "text/event-stream" } });
+    });
+    const client = new OpenAI({ apiKey: "fixture-key-never-sent", baseURL: TOKENHUB_BASE_URL, fetch: transport });
+    const originalCreate = client.responses.create;
+    mocks.runtimeConfig.mockResolvedValue({ openAiApiKey: "fixture-key-never-sent", openAiBaseUrl: TOKENHUB_BASE_URL });
+    mocks.createClient.mockReturnValue(client);
+    const content = "来源原文：JSON 根对象必须包含 items 字段。保留 open API 标题。";
+    const original = format === "messages" ? [{ role: "user" as const, content }] : content;
+    const before = JSON.stringify(original);
+    const profile = resolveWorkWeeklyProviderProfile("qa_answerer", { WORK_REVIEW_WEEKLY_QA_ANSWERER_MODEL: "deepseek-v4-pro" });
+    expect(await requestWorkWeeklyStructuredJson({ profile, schema: WorkWeeklyQaAnswerDraftSchema,
+      requestInput: original, jsonInstruction: WORK_WEEKLY_QA_ANSWERER_JSON_INSTRUCTION })).toEqual(qa);
+    const prefix = `${WORK_WEEKLY_QA_ANSWERER_JSON_INSTRUCTION}\n只输出一个合法 JSON 对象，不要输出 Markdown，不要输出解释文字。`;
+    expect(bodies[0]!.input).toEqual(Array.isArray(original)
+      ? [{ role: "system", content: prefix }, ...original] : `${prefix}\n\n${original}`);
+    expect(bodies[0]).toMatchObject({ stream: true, model: "deepseek-v4-pro", max_output_tokens: 4000, reasoning: { effort: "none" } });
+    expect(String(transport.mock.calls[0]![0])).toBe(`${TOKENHUB_BASE_URL}/responses`);
+    expect(transport.mock.calls[0]![1]).toMatchObject({ redirect: "error", signal: expect.any(AbortSignal) });
+    expect(JSON.stringify(original)).toBe(before);
+    expect(client.responses.create).toBe(originalCreate);
+    output = finalAnswer;
+    expect(await request()).toEqual(finalAnswer);
+    expect(String(bodies[1]!.input)).toContain("JSON 根对象必须包含 items 字段");
+    expect(transport).toHaveBeenCalledTimes(2);
+  });
+
+  it.each(["extra_items", "wrong_root"])("keeps strict QA schema rejection after removing the conflicting hint: %s", async (mode) => {
+    const value = mode === "wrong_root" ? { items: [] }
+      : { status: "insufficient_evidence", answer: "", claims: [], relevantSourceRefs: [], items: [] };
+    const fixture = clientFixture(TOKENHUB_BASE_URL, [{ type: "response.completed", response: { ...completedResponse,
+      output: [{ type: "message", role: "assistant", content: [{ type: "output_text", text: JSON.stringify(value) }] }] } }]);
+    const log = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      await expect(requestWorkWeeklyStructuredJson({ profile: resolveWorkWeeklyProviderProfile("qa_answerer", {
+        WORK_REVIEW_WEEKLY_QA_ANSWERER_MODEL: "deepseek-v4-pro" }), schema: WorkWeeklyQaAnswerDraftSchema,
+        requestInput: [{ role: "user", content: "本地虚构问题" }], jsonInstruction: WORK_WEEKLY_QA_ANSWERER_JSON_INSTRUCTION
+      })).rejects.toMatchObject({ code: "work_weekly_provider_schema_invalid" });
+      expect(fixture.create).toHaveBeenCalledTimes(1);
+    } finally { log.mockRestore(); }
+  });
+
+  it.each(["verifier", "qa_verifier"] as const)("keeps the items instruction and wire for %s", async (role) => {
+    const fixture = clientFixture(TOKENHUB_BASE_URL, [{ type: "response.completed", response: { ...completedResponse,
+      output: [{ type: "message", role: "assistant", content: [{ type: "output_text", text: '{"items":[]}' }] }] } }]);
+    const profile = resolveWorkWeeklyProviderProfile(role, { [`WORK_REVIEW_WEEKLY_${role.toUpperCase()}_MODEL`]: "deepseek-v4-pro" });
+    expect(await requestWorkWeeklyStructuredJson({ profile, schema: WorkWeeklyVerifierResponseSchema,
+      requestInput: [{ role: "user", content: "虚构Claim集合" }], jsonInstruction: "输出严格JSON {items:[]}。" })).toEqual({ items: [] });
+    expect(fixture.create.mock.calls[0]![0].input[0].content).toContain("JSON 根对象必须包含 items 字段");
+    expect(fixture.create).toHaveBeenCalledTimes(1);
+  });
+
   function synthesize(wires: unknown[], snapshot = workWeeklyTestSnapshot()) {
     const fixture = clientFixture(TOKENHUB_BASE_URL, [{ type: "response.completed", response: {
       ...completedResponse, output: [{ type: "message", role: "assistant",

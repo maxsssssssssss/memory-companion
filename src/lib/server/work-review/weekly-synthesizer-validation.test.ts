@@ -16,6 +16,21 @@ function diagnostic(log: ReturnType<typeof vi.spyOn>) {
 }
 
 describe("Weekly synthesis tolerates representation differences without losing evidence", () => {
+  it("guides only new synthesis to Chinese states and value-free ordinary edit descriptions", async () => {
+    const snapshot = workWeeklyTestSnapshot();
+    const request = vi.fn().mockResolvedValue(response("待办在系统中已完成；标题为 open API 清单。"));
+    const synthesizer = createStructuredWorkWeeklySynthesizer({ profile: workWeeklyProfile("synthesizer"), requestStructuredJson: request });
+    const items = await synthesizer.synthesize({ accountId: snapshot.accountId, snapshot });
+    expect(items[0]!.text).toBe("待办在系统中已完成；标题为 open API 清单。");
+    const messages = request.mock.calls[0]![0].requestInput as Array<{ role: string; content: string }>;
+    const instructions = messages.filter((message) => message.role === "system").map((message) => message.content).join("\n");
+    expect(instructions).toContain("open为‘未完成’，completed为‘已完成’");
+    expect(instructions).toContain("只说‘调整重要标记’或‘调整今日安排’");
+    expect(instructions).toContain("不猜是否重要、加入/移出或安排日期");
+    expect(instructions).toContain("静态Todo或单条摘要可简要概括已有状态，不制造事件");
+    expect(instructions).toContain("用户文字不作全局替换");
+  });
+
   it.each([
     "待办已在系统中标记为完成，不代表实际交付。",
     "系统已将该待办标记完成，现实履行情况仍需核对。",

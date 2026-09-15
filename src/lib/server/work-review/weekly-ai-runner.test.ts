@@ -10,6 +10,8 @@ import type {
 import type { WorkWeeklyRepository } from "./weekly-repository";
 import type { WorkWeeklyClaimVerifier } from "./weekly-ai-provider";
 import type { WorkWeeklyDiagnosticSink } from "./weekly-evaluation-diagnostics";
+import type { WorkWeeklyQaDiagnosticSink } from "./weekly-qa-diagnostics";
+import type { WorkWeeklyQaAnswerer, WorkWeeklyQaVerifier } from "./weekly-qa-provider";
 import {
   classifyWorkWeeklyGenerationRecovery,
   classifyWorkWeeklyQaRecovery,
@@ -91,6 +93,9 @@ function executor(repo: ReturnType<typeof repository>, options: {
   diagnosticSink?: WorkWeeklyDiagnosticSink;
   onSynthesize?: () => void;
   onVerify?: () => void;
+  qaDiagnosticSink?: WorkWeeklyQaDiagnosticSink;
+  qaAnswerer?: WorkWeeklyQaAnswerer | null;
+  qaVerifier?: WorkWeeklyQaVerifier | null;
 } = {}) {
   const source = workWeeklyTestSnapshot();
   const refs = new Set<string>([WORK_WEEKLY_TEST_REFS.meeting, WORK_WEEKLY_TEST_REFS.decision,
@@ -109,6 +114,7 @@ function executor(repo: ReturnType<typeof repository>, options: {
     repository: repo as unknown as WorkWeeklyRepository,
     loadSnapshot: () => source,
     diagnosticSink: options.diagnosticSink,
+    qaDiagnosticSink: options.qaDiagnosticSink ?? vi.fn(),
     synthesizer: {
       profile: workWeeklyProfile("synthesizer"),
       synthesize: vi.fn(async () => {
@@ -131,7 +137,7 @@ function executor(repo: ReturnType<typeof repository>, options: {
         return [{ claimId: "claim_decision", verdict: "entailed" as const, issueCodes: [], supportedSourceRefs: [WORK_WEEKLY_TEST_REFS.decision] }];
       })
     },
-    qaAnswerer: {
+    qaAnswerer: options.qaAnswerer !== undefined ? options.qaAnswerer : {
       profile: workWeeklyProfile("qa_answerer"),
       answer: vi.fn(async () => ({
         status: "answered" as const, answer: "模型答案",
@@ -139,7 +145,7 @@ function executor(repo: ReturnType<typeof repository>, options: {
         relevantSourceRefs: [WORK_WEEKLY_TEST_REFS.decision]
       }))
     },
-    qaVerifier: {
+    qaVerifier: options.qaVerifier !== undefined ? options.qaVerifier : {
       profile: workWeeklyProfile("qa_verifier"),
       verify: vi.fn(async () => [{ claimId: "claim_decision", verdict: "entailed" as const, issueCodes: [], supportedSourceRefs: [WORK_WEEKLY_TEST_REFS.decision] }])
     }
@@ -262,6 +268,60 @@ describe("Work Weekly AI runner contract", () => {
       sourceRefs: [WORK_WEEKLY_TEST_REFS.decision]
     }));
     expect(repo.markQaRunFailed).not.toHaveBeenCalled();
+  });
+
+  it("persists missing QA providers as a failed run instead of a completed insufficient answer", async () => {
+    const repo = repository();
+    const result = await executor(repo, { qaVerifier: null }).runQa(qaRequest());
+    expect(result).toMatchObject({ state: "failed", errorCode: "weekly_qa_provider_unavailable" });
+    expect(repo.markQaRunFailed).toHaveBeenCalledWith({ accountId: "account_a", fence: qaFence,
+      errorCode: "weekly_qa_provider_unavailable" });
+    expect(repo.publishQaAnswer).not.toHaveBeenCalled();
+  });
+
+  it("persists fixed QA technical codes with no raw error or request text in diagnostics", async () => {
+    const repo = repository();
+    const sink = vi.fn<WorkWeeklyQaDiagnosticSink>();
+    const answer = vi.fn(async () => { throw Object.assign(new Error("private body https://secret.test?api_key=secret"),
+      { code: "weekly_private_secret" }); });
+    const result = await executor(repo, { qaDiagnosticSink: sink,
+      qaAnswerer: { profile: workWeeklyProfile("qa_answerer"), answer } }).runQa(qaRequest());
+    expect(result).toMatchObject({ state: "failed", errorCode: "weekly_qa_provider_failed" });
+    expect(repo.publishQaAnswer).not.toHaveBeenCalled();
+    expect(repo.markQaRunFailed).toHaveBeenCalledWith(expect.objectContaining({ errorCode: "weekly_qa_provider_failed" }));
+    expect(answer).toHaveBeenCalledTimes(1);
+    expect(sink.mock.calls.at(-1)![0]).toMatchObject({ component: "work-weekly-qa", runVersion: 1,
+      runKey: expect.stringMatching(/^[a-f0-9]{64}$/u), stage: "persistence", outcome: "failed" });
+    expect(JSON.stringify(sink.mock.calls)).not.toMatch(/secret|private|account_a|run_qa|本周|work:finding/u);
+  });
+
+  it("persists genuine no-support QA as completed insufficient evidence", async () => {
+    const repo = repository();
+    const answer = vi.fn(async () => ({ status: "insufficient_evidence" as const, answer: "ignored", claims: [], relevantSourceRefs: [] }));
+    const result = await executor(repo, { qaAnswerer: { profile: workWeeklyProfile("qa_answerer"), answer } }).runQa(qaRequest());
+    expect(result.state).toBe("published");
+    expect(repo.publishQaAnswer).toHaveBeenCalledWith(expect.objectContaining({ answerStatus: "insufficient_evidence", sourceRefs: [] }));
+    expect(repo.markQaRunFailed).not.toHaveBeenCalled();
+  });
+
+  it("does not change a persisted QA answer when the diagnostic sink throws after publication", async () => {
+    const repo = repository();
+    const sink = vi.fn<WorkWeeklyQaDiagnosticSink>(async () => { throw new Error("private sink failure"); });
+    expect(await executor(repo, { qaDiagnosticSink: sink }).runQa(qaRequest())).toMatchObject({ state: "published" });
+    expect(repo.publishQaAnswer).toHaveBeenCalledTimes(1);
+    expect(repo.markQaRunFailed).not.toHaveBeenCalled();
+    expect(sink.mock.calls.at(-1)![0]).toMatchObject({ stage: "persistence", outcome: "published" });
+  });
+
+  it("does not publish when cancellation arrives after verification and before persistence", async () => {
+    const repo = repository();
+    const controller = new AbortController();
+    const sink = vi.fn<WorkWeeklyQaDiagnosticSink>((event) => {
+      if (event.stage === "publication") controller.abort();
+    });
+    expect(await executor(repo, { qaDiagnosticSink: sink }).runQa({ ...qaRequest(), signal: controller.signal }))
+      .toMatchObject({ state: "failed", errorCode: "weekly_qa_cancelled" });
+    expect(repo.publishQaAnswer).not.toHaveBeenCalled();
   });
 
   it("fails a persisted identity mismatch before loading sources or calling GPT", async () => {

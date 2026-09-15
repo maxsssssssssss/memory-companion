@@ -94,7 +94,8 @@ beforeEach(() => {
     const claim = user.items[0]!.claim;
     expect(claim.text).toBe(claimText);
     expect(claim.sourceRefs).toEqual(sourceRefs());
-    expect(user.items[0]!.sources.map((source) => source.sourceKind).sort()).toEqual(["todo", "todo_event", "todo_event"]);
+    expect(user.items[0]!.sources.map((source) => source.sourceKind).sort())
+      .toEqual(["todo", ...snapshot.todoEvents.map(() => "todo_event")].sort());
     expect(user.verificationContract.expectedClaimIds).toEqual([claim.id]);
     return fixtureStream({ items: [{ claimId: claim.id, verdict: verifierIssue ? "contradicted" : verifierWithoutSupport ? "partial_entailed" : "entailed",
       issueCodes: verifierIssue ? [verifierIssue] : verifierWithoutSupport ? ["missing_qualification"] : [],
@@ -179,6 +180,48 @@ describe("Work Weekly minimal Todo-only generation through Responses and SQLite"
     expect(detail.latestGeneration).toMatchObject({ executionStatus: "completed", qualityStatus: "passed" });
     expect(detail.items).toHaveLength(1);
     expect(detail.items[0]).toMatchObject({ section: "overview", systemText: claimText, verificationState: "verified" });
+    expect(db.pragma("foreign_key_check")).toEqual([]);
+  });
+
+  it.each([false, true])("rolls up ordinary repository edits and My Day events before verification: completed=%s", async (completeAgain) => {
+    const log = vi.spyOn(console, "info").mockImplementation(() => {});
+    const todoId = snapshot.todos[0]!.id;
+    now = "2026-09-14T00:03:00.000Z";
+    let todo = todoRepository.updateTodo({ accountId, todoId, expectedVersion: snapshot.todos[0]!.current.version,
+      operationKey: "edit_title_and_importance", title: "修订后的 open API 清单", isImportant: true }).todo;
+    now = "2026-09-14T00:04:00.000Z";
+    todo = todoRepository.setMyDay({ accountId, todoId, expectedVersion: todo.version,
+      operationKey: "add_today", day: "2026-09-15" }).todo;
+    now = "2026-09-14T00:05:00.000Z";
+    todo = todoRepository.removeFromMyDay({ accountId, todoId, expectedVersion: todo.version, operationKey: "remove_today" }).todo;
+    if (completeAgain) {
+      now = "2026-09-14T00:06:00.000Z";
+      todoRepository.completeTodo({ accountId, todoId, expectedVersion: todo.version, operationKey: "complete_after_edits" });
+    }
+    now = "2026-09-14T00:10:00.000Z"; snapshot = service.buildSnapshot(accountId, scope);
+    const edited = snapshot.todoEvents.find((event) => event.eventType === "todo.updated")!;
+    expect(edited.changedFields).toEqual(["title", "isImportant"]);
+    expect(edited.stateAfter).not.toHaveProperty("isImportant");
+    expect(snapshot.todoEvents.filter((event) => event.changedFields.includes("myDayDate"))).toHaveLength(2);
+    expect(snapshot.todos[0]!.current).not.toHaveProperty("myDayDate");
+    answer = { items: [generated("待办状态为open，且调整过标题。", "overview").items[0],
+      generated("待办曾完成，另有今日安排调整。", "completed").items[0]] };
+    claimText = `待办“修订后的 open API 清单”：2026-09-14在系统中标记完成 → 2026-09-14重新打开`
+      + ` → 2026-09-14调整重要标记、标题由“${title}”改为“修订后的 open API 清单”`
+      + " → 2026-09-14调整今日安排 → 2026-09-14调整今日安排"
+      + (completeAgain ? " → 2026-09-14在系统中标记完成" : "")
+      + `；截至2026-09-14，系统状态为${completeAgain ? "已完成" : "未完成"}。系统状态不代表实际交付。`;
+    const before = JSON.stringify({ snapshot, answer });
+    const queued = service.generate(accountId, { ...scope, operationKey: "ordinary_edits_rollup", expectedVersion: null });
+    expect(await run(queued.run)).toMatchObject({ state: "published" });
+    expect(requests).toHaveLength(2);
+    const detail = service.getDetail(accountId, queued.review.id);
+    expect(detail.items).toHaveLength(1);
+    expect(detail.items[0]).toMatchObject({ section: completeAgain ? "completed" : "overview", systemText: claimText, verificationState: "verified" });
+    expect(detail.items[0]!.systemText).not.toMatch(/状态为open|加入今日|移出今日|安排到2026-09-15/u);
+    expect(detail.latestGeneration).toMatchObject({ executionStatus: "completed", qualityStatus: "passed" });
+    expect(JSON.stringify({ snapshot, answer })).toBe(before);
+    expect(JSON.stringify(log.mock.calls)).not.toContain('"unsupported_event"');
     expect(db.pragma("foreign_key_check")).toEqual([]);
   });
 

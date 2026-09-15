@@ -23,6 +23,14 @@ import {
 import { runWorkWeeklyGenerationPipeline } from "./weekly-publication-policy";
 import type { WorkWeeklyDiagnosticSink, WorkWeeklyDiagnosticEvent, WorkWeeklyDiagnosticRun } from "./weekly-evaluation-diagnostics";
 import {
+  assertWorkWeeklyQaNotCancelled,
+  classifyWorkWeeklyQaError,
+  emitWorkWeeklyQaDiagnostic,
+  workWeeklyQaRunKey,
+  type WorkWeeklyQaDiagnosticObserver,
+  type WorkWeeklyQaDiagnosticSink
+} from "./weekly-qa-diagnostics";
+import {
   isWorkReviewWeeklyQaVerifierEnabled,
   isWorkReviewWeeklyVerifierEnabled
 } from "./runtime-config";
@@ -168,7 +176,8 @@ class DefaultWorkWeeklyRunExecutor implements WorkWeeklyRunExecutor {
     private readonly repository: WorkWeeklyRepository,
     private readonly loadSnapshot: SnapshotLoader,
     private readonly providers: ProviderBundle,
-    private readonly diagnosticSink?: WorkWeeklyDiagnosticSink
+    private readonly diagnosticSink?: WorkWeeklyDiagnosticSink,
+    private readonly qaDiagnosticSink?: WorkWeeklyQaDiagnosticSink
   ) {}
 
   async runGeneration(request: WorkWeeklyGenerationRunRequest): Promise<WorkWeeklyRunResult> {
@@ -354,6 +363,12 @@ class DefaultWorkWeeklyRunExecutor implements WorkWeeklyRunExecutor {
 
   async runQa(request: WorkWeeklyQaRunRequest): Promise<WorkWeeklyRunResult> {
     let fence: ReturnType<WorkWeeklyRepository["claimQaRun"]> | null = null;
+    const runKey = workWeeklyQaRunKey(request.accountId, request.runId);
+    const capture: WorkWeeklyQaDiagnosticObserver = (event) => emitWorkWeeklyQaDiagnostic(async (diagnostic) => {
+      const entry = { component: "work-weekly-qa" as const, runKey, runVersion: request.runVersion, ...diagnostic };
+      if (this.qaDiagnosticSink) await this.qaDiagnosticSink(entry);
+      else console.info(JSON.stringify(entry));
+    }, event);
     try {
       fence = this.repository.claimQaRun({
         accountId: request.accountId,
@@ -368,11 +383,12 @@ class DefaultWorkWeeklyRunExecutor implements WorkWeeklyRunExecutor {
         weeklyReviewId: request.weeklyReviewId,
         runId: request.runId,
         runVersion: request.runVersion,
-        errorCode: errorCode(error, "weekly_qa_not_claimed")
+        errorCode: "weekly_qa_not_claimed"
       };
     }
     if (!contractMatches(request, fence) || fence.threadId !== request.threadId) {
       this.failQa(request.accountId, fence, "weekly_qa_contract_mismatch");
+      await capture({ stage: "persistence", outcome: "failed", errorCode: "weekly_qa_contract_mismatch" });
       return {
         state: "failed",
         kind: "qa",
@@ -383,6 +399,7 @@ class DefaultWorkWeeklyRunExecutor implements WorkWeeklyRunExecutor {
       };
     }
     try {
+      assertWorkWeeklyQaNotCancelled(request.signal);
       const snapshot = await this.loadSnapshot({
         accountId: request.accountId,
         weeklyReviewId: request.weeklyReviewId
@@ -409,8 +426,10 @@ class DefaultWorkWeeklyRunExecutor implements WorkWeeklyRunExecutor {
         history: thread.messages as WorkWeeklyQaMessage[],
         answerer: this.providers.configurationError ? null : this.providers.qaAnswerer,
         verifier: this.providers.configurationError ? null : this.providers.qaVerifier,
-        signal: request.signal
+        signal: request.signal,
+        onDiagnostic: capture
       });
+      assertWorkWeeklyQaNotCancelled(request.signal);
       this.repository.publishQaAnswer({
         accountId: request.accountId,
         fence,
@@ -422,6 +441,8 @@ class DefaultWorkWeeklyRunExecutor implements WorkWeeklyRunExecutor {
         promptVersion: answer.promptVersion,
         verifierProfile: answer.verifierProfile
       });
+      // The optional sink is non-authoritative, including after the publication transaction commits.
+      await capture({ stage: "persistence", outcome: "published" });
       return {
         state: "published",
         kind: "qa",
@@ -430,8 +451,9 @@ class DefaultWorkWeeklyRunExecutor implements WorkWeeklyRunExecutor {
         runVersion: request.runVersion
       };
     } catch (error) {
-      const code = errorCode(error, "weekly_qa_failed");
+      const code = classifyWorkWeeklyQaError(error, "persistence").code;
       this.failQa(request.accountId, fence, code);
+      await capture({ stage: "persistence", outcome: "failed", errorCode: code });
       return {
         state: "failed",
         kind: "qa",
@@ -488,6 +510,7 @@ type ExecutorDependencies = {
   repository: WorkWeeklyRepository;
   loadSnapshot: SnapshotLoader;
   diagnosticSink?: WorkWeeklyDiagnosticSink;
+  qaDiagnosticSink?: WorkWeeklyQaDiagnosticSink;
 };
 
 /**
@@ -536,7 +559,7 @@ export function createConfiguredWorkWeeklyRunExecutor(input: ExecutorDependencie
       configurationError: errorCode(error, "weekly_provider_configuration_failed")
     };
   }
-  return new DefaultWorkWeeklyRunExecutor(input.repository, input.loadSnapshot, providers, input.diagnosticSink);
+  return new DefaultWorkWeeklyRunExecutor(input.repository, input.loadSnapshot, providers, input.diagnosticSink, input.qaDiagnosticSink);
 }
 
 /** Deterministic injected seam for focused tests only; production Runtime must use configured factory. */
@@ -552,5 +575,5 @@ export function createFixtureWorkWeeklyRunExecutor(input: ExecutorDependencies &
     qaAnswerer: input.qaAnswerer,
     qaVerifier: input.qaVerifier,
     configurationError: null
-  }, input.diagnosticSink);
+  }, input.diagnosticSink, input.qaDiagnosticSink);
 }

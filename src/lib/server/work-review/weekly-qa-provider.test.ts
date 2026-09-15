@@ -197,16 +197,14 @@ describe("Work Weekly QA", () => {
 
   it("does not call the Answerer when the independent verifier is unavailable", async () => {
     const answerer = vi.fn();
-    const answer = await answerWorkWeeklyQuestion({
+    await expect(answerWorkWeeklyQuestion({
       accountId: "account_a",
       weeklyReviewId: "weekly_a",
       snapshot: workWeeklyTestSnapshot(),
       question: "本周决定了什么？",
       answerer: { profile: workWeeklyProfile("qa_answerer"), answer: answerer },
       verifier: null
-    });
-    expect(answer.answerStatus).toBe("insufficient_evidence");
-    expect(answer.sourceRefs).toEqual([]);
+    })).rejects.toMatchObject({ code: "weekly_qa_provider_unavailable" });
     expect(answerer).not.toHaveBeenCalled();
   });
 
@@ -221,16 +219,14 @@ describe("Work Weekly QA", () => {
         relevantSourceRefs: ["work:evidence:foreign"]
       }))
     });
-    const answer = await answerWorkWeeklyQuestion({
+    await expect(answerWorkWeeklyQuestion({
       accountId: "account_a",
       weeklyReviewId: "weekly_a",
       snapshot: workWeeklyTestSnapshot(),
       question: "本周决定了什么？",
       answerer,
       verifier: { profile: workWeeklyProfile("qa_verifier"), verify: verifier }
-    });
-    expect(answer.answerStatus).toBe("insufficient_evidence");
-    expect(answer.sourceRefs).toEqual([]);
+    })).rejects.toMatchObject({ code: "weekly_qa_source_not_allowlisted" });
     expect(verifier).not.toHaveBeenCalled();
   });
 
@@ -248,16 +244,14 @@ describe("Work Weekly QA", () => {
         relevantSourceRefs: [WORK_WEEKLY_TEST_REFS.decision]
       }))
     });
-    const answer = await answerWorkWeeklyQuestion({
+    await expect(answerWorkWeeklyQuestion({
       accountId: "account_a",
       weeklyReviewId: "weekly_a",
       snapshot: workWeeklyTestSnapshot(),
       question: "本周决定了什么？",
       answerer,
       verifier: { profile: workWeeklyProfile("qa_verifier"), verify: verifier }
-    });
-    expect(answer.answerStatus).toBe("insufficient_evidence");
-    expect(answer.sourceRefs).toEqual([]);
+    })).rejects.toMatchObject({ code: "weekly_qa_answer_invalid" });
     expect(verifier).not.toHaveBeenCalled();
   });
 
