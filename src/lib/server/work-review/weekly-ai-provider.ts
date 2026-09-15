@@ -15,12 +15,12 @@ export const WORK_WEEKLY_VERIFIER_PROFILE_ID = "work_weekly_verifier_v1" as cons
 export const WORK_WEEKLY_QA_ANSWERER_PROFILE_ID = "work_weekly_qa_answerer_v1" as const;
 export const WORK_WEEKLY_QA_VERIFIER_PROFILE_ID = "work_weekly_qa_verifier_v1" as const;
 
-export const WORK_WEEKLY_SYNTHESIZER_PROMPT_VERSION = "work_weekly_synthesizer_prompt_v18" as const;
+export const WORK_WEEKLY_SYNTHESIZER_PROMPT_VERSION = "work_weekly_synthesizer_prompt_v19" as const;
 export const WORK_WEEKLY_VERIFIER_PROMPT_VERSION = "work_weekly_verifier_prompt_v13" as const;
 export const WORK_WEEKLY_QA_ANSWERER_PROMPT_VERSION = "work_weekly_qa_answerer_prompt_v1" as const;
 export const WORK_WEEKLY_QA_VERIFIER_PROMPT_VERSION = "work_weekly_qa_verifier_prompt_v1" as const;
 
-export const WORK_WEEKLY_SYNTHESIZER_SCHEMA_VERSION = "work_weekly_synthesizer_schema_v5" as const;
+export const WORK_WEEKLY_SYNTHESIZER_SCHEMA_VERSION = "work_weekly_synthesizer_schema_v6" as const;
 export const WORK_WEEKLY_VERIFIER_SCHEMA_VERSION = "work_weekly_verifier_schema_v5" as const;
 export const WORK_WEEKLY_QA_ANSWERER_SCHEMA_VERSION = "work_weekly_qa_answerer_schema_v1" as const;
 export const WORK_WEEKLY_QA_VERIFIER_SCHEMA_VERSION = "work_weekly_qa_verifier_schema_v1" as const;
@@ -696,28 +696,41 @@ function rejectWeeklySynthesisContract(
   throw new WorkWeeklyProviderError(code);
 }
 
-/** Representation only: normalize exact repeated refs, never infer sources or rewrite meaning. */
+/** Normalize citations and state-only placement before verification; preserve every factual claim. */
 export function adaptWorkWeeklyModelResponse(input: { response: unknown; snapshot: WorkWeeklySourceSnapshot }) {
   const parsed = WorkWeeklySynthesizerModelResponseSchema.safeParse(input.response);
   if (!parsed.success) rejectWeeklySynthesisContract("work_weekly_synthesizer_output_invalid",
     "model_schema", "model_response_invalid", {}, parsed.error);
   let duplicateSourceRefCount = 0;
   let affectedItemCount = 0;
+  let stateSectionCount = 0;
   const items = parsed.data.items.map((item, index) => {
     const number = String(index + 1).padStart(3, "0");
     const sourceRefs = [...new Set(item.sourceRefs)];
     const repeated = item.sourceRefs.length - sourceRefs.length;
     duplicateSourceRefCount += repeated;
     if (repeated) affectedItemCount += 1;
+    // Todo records/events describe application state, not evidence of work starting.
+    // Move a misplaced summary rather than discard it. The verifier still checks
+    // the unchanged claim, now against the section that will actually be published.
+    const stateOnlyProgress = (item.section === "progress" || item.section === "in_progress")
+      && sourceRefs.every((ref) => {
+        const kind = resolveWorkWeeklySourceRecord(input.snapshot, ref)?.sourceKind;
+        return kind === "todo" || kind === "todo_event";
+      });
+    const section = stateOnlyProgress ? "overview" : item.section;
+    if (stateOnlyProgress) stateSectionCount += 1;
     return {
-      id: `item_${number}`, section: item.section, text: item.text,
-      itemType: item.section === "next_week" ? "suggestion"
+      id: `item_${number}`, section, text: item.text,
+      itemType: section === "next_week" ? "suggestion"
         : item.isInterpretation ? "interpretation" : "evidence_backed_fact",
       claims: [{ id: `claim_${number}_001`, text: item.text, claimType: item.claimType, sourceRefs }]
     };
   });
   if (duplicateSourceRefCount) console.info(JSON.stringify({ component: "work-weekly-synthesizer-contract",
     stage: "normalization", reason: "duplicate_source_refs_removed", duplicateSourceRefCount, affectedItemCount }));
+  if (stateSectionCount) console.info(JSON.stringify({ component: "work-weekly-synthesizer-contract",
+    stage: "normalization", reason: "todo_state_section_normalized", affectedItemCount: stateSectionCount }));
   return validateGeneratedItems({ response: { items }, snapshot: input.snapshot });
 }
 
@@ -874,6 +887,7 @@ function normalizeWorkWeeklyGenerationVerdicts(value: unknown, claims: WorkWeekl
 const SYNTHESIZER_SYSTEM_PROMPT = [
   "你是 Work Weekly Synthesizer。只用当前账号/自然周/项目的 Source Pack，生成待独立核验的周回顾；不得引入用户编辑、历史回答、其他产品或一般知识，不创建Todo/Memory等记录。",
   "sources按canonical Finding及其supportingEvidence成组。先围绕Finding.body的主要事项组织，再用同组Evidence补细节，避免只抽背景而漏当前安排。也可只有Todo及其事件：如实概括系统状态和变更，没有会议不补造决定，不为填满章节扩写。generationGuidance是现有canonical类型的解释，不是新Evidence；原话称‘决定’而canonical mode为proposal时仍按拟议事项表达。",
+  "同一Todo及其事件优先合并为一条状态变化与当前状态的概述，引用支持各阶段的必要记录。例如先标记完成、随后重新打开且当前未完成，可合并放overview，不再单列重复的完成条目。只有Todo/事件支持的待办状态概述放overview；open或重新打开不表示实际工作已经开展，不放progress/in_progress。保留实际有据的日期和重要变化，不逐事件堆叠；这是组织方式，不要求固定句式。",
   "每item的text是一段完整自足的待核验陈述，详细条目围绕一个主题，结论与改变该结论的条件写在一起。overview可概括多个主题，每个分句分别有据，不把整体概括为已确认/已完成，也不重复详细条目清单。",
   "先按事项组织，再选择其主要章节；同一完整命题跨会议或正文与关注重复时只表达一次，引用合并，独有条件另保留。保留主要事项、决定与范围取舍、变化前后、关键日期、未决依赖及有意义的后续关注，不以固定字数/条数凑完整。有明确替代关系的变更，用‘原安排→当前安排＋仍有效的理由或限制’紧凑表达，不把前后方案并列成两个当前决定；正式安排与另一个暂定方案分别标明确定程度。按范围读摘要：‘首轮取消某功能’可由‘本轮不交付、以后重评’精确表达，不等于永久取消需求；只有实质矛盾才说明冲突。text是唯一正文，不另写摘要或重复包装。",
   "只保留影响所述结论的必要限定，可自然改写，不要求逐字复述。决定仍待确认就不能肯定化；不陈述发言者/认领人时无需附加归属待确认，不涉及非关键日期时无需重复日期附注。重要排期和前后变化不能因此省略。",

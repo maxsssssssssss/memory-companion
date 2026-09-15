@@ -46,6 +46,52 @@ describe("Weekly synthesis tolerates representation differences without losing e
     expect(diagnostic(log)).toMatchObject({ stage: "normalization", duplicateSourceRefCount: 2, affectedItemCount: 1 });
   });
 
+  it.each(["progress", "in_progress"])("keeps Todo state summaries visible in overview instead of %s", (section) => {
+    const log = vi.spyOn(console, "info").mockImplementation(() => {});
+    const snapshot = workWeeklyTestSnapshot();
+    const wire = { items: [
+      { text: "PRIVATE_BODY：当前待办状态为已完成。", sourceRefs: [refs.todo] },
+      { text: "The app recorded a completion marker this week.", sourceRefs: [refs.todoCompleted] },
+      { text: "本周有一条待办完成记录。", sourceRefs: [refs.todo, refs.todoCompleted] }
+    ].map((item) => ({ ...item, section, claimType: "fact", isInterpretation: false })) };
+    const before = JSON.stringify({ snapshot, wire });
+    const items = adaptWorkWeeklyModelResponse({ snapshot, response: wire });
+    expect(items.map((item) => item.section)).toEqual(["overview", "overview", "overview"]);
+    for (const [index, item] of items.entries()) {
+      expect(item).toMatchObject({ id: `item_00${index + 1}`, text: wire.items[index]!.text,
+        itemType: "evidence_backed_fact", claims: [{ text: wire.items[index]!.text,
+          claimType: "fact", sourceRefs: wire.items[index]!.sourceRefs }] });
+    }
+    expect(JSON.stringify({ snapshot, wire })).toBe(before);
+    expect(diagnostic(log)).toEqual({ component: "work-weekly-synthesizer-contract", stage: "normalization",
+      reason: "todo_state_section_normalized", affectedItemCount: 3 });
+    expect(JSON.stringify(log.mock.calls)).not.toMatch(/PRIVATE|work:todo|account_a|完成/u);
+  });
+
+  it.each(["progress", "in_progress"])("leaves Finding and Evidence %s categorization to semantic verification", (section) => {
+    const log = vi.spyOn(console, "info").mockImplementation(() => {});
+    const snapshot = workWeeklyTestSnapshot();
+    const wire = { items: [[refs.commitment], [refs.evidenceCommitment], [refs.todo, refs.evidenceCommitment]]
+      .map((sourceRefs) => ({ section, text: "会议所述清单检查活动。", claimType: "fact", isInterpretation: false, sourceRefs })) };
+    const items = adaptWorkWeeklyModelResponse({ snapshot, response: wire });
+    expect(items.map((item) => item.section)).toEqual([section, section, section]);
+    expect(items.flatMap((item) => item.claims.map((claim) => claim.sourceRefs)))
+      .toEqual(wire.items.map((item) => item.sourceRefs));
+    expect(log).not.toHaveBeenCalled();
+  });
+
+  it("does not hide unknown citations while recovering a Todo state section", () => {
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    const info = vi.spyOn(console, "info").mockImplementation(() => {});
+    const wire = response("PRIVATE_BODY", [refs.todo, "work:todo_event:PRIVATE_SOURCE"]);
+    wire.items[0]!.section = "in_progress";
+    expect(() => adaptWorkWeeklyModelResponse({ snapshot: workWeeklyTestSnapshot(), response: wire }))
+      .toThrow("work_weekly_source_not_allowlisted");
+    expect(diagnostic(error)).toMatchObject({ stage: "source_validation", invalidSourceRefCount: 1 });
+    expect(info).not.toHaveBeenCalled();
+    expect(JSON.stringify(error.mock.calls)).not.toMatch(/PRIVATE|work:todo|account_a/u);
+  });
+
   it.each(["2026-08-30", "2026-09-04", "2026-09-07"])("rejects an event outside the observed week with an actionable reason: %s", (date) => {
     const log = vi.spyOn(console, "error").mockImplementation(() => {});
     const snapshot = workWeeklyTestSnapshot(); snapshot.todoEvents[0]!.localDate = date;

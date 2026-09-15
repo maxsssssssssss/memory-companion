@@ -30,7 +30,8 @@ const env = {
 type WireRequest = { input: Array<{ role: string; content: string }>; stream: boolean; model: string };
 type VerifierPack = {
   verificationContract: { expectedClaimIds: string[]; expectedVerdictCount: number; expectedCoverageSourceRefs: string[] };
-  items: Array<{ claim: { id: string; text: string; sourceRefs: string[] }; sources: Array<{ sourceRef: string; sourceKind: string }> }>;
+  items: Array<{ claim: { id: string; text: string; sourceRefs: string[] }; sources: Array<{ sourceRef: string; sourceKind: string }>;
+    publicationContext: { section: string } }>;
 };
 
 let db: Database.Database;
@@ -142,6 +143,33 @@ describe("Work Weekly minimal Todo-only generation through Responses and SQLite"
     expect(detail.latestGeneration).toMatchObject({ executionStatus: "completed", qualityStatus: "passed" });
     expect(detail.items).toHaveLength(1);
     expect(detail.items[0]).toMatchObject({ systemText: claimText, verificationState: "verified" });
+  });
+
+  it.each(["progress", "in_progress"])("verifies and saves a recovered %s state summary as overview", async (section) => {
+    vi.spyOn(console, "info").mockImplementation(() => {});
+    answer = generated(claimText, section);
+    const queued = service.generate(accountId, { ...scope, operationKey: "normalize_todo_state_section", expectedVersion: null });
+    expect(await run(queued.run)).toMatchObject({ state: "published" });
+    expect(requests).toHaveLength(2);
+    const verifierPack = JSON.parse(requests[1]!.input.find((message) => message.role === "user")!.content) as VerifierPack;
+    expect(verifierPack.items[0]!.publicationContext.section).toBe("overview");
+    const detail = service.getDetail(accountId, queued.review.id);
+    expect(detail.latestGeneration).toMatchObject({ executionStatus: "completed", qualityStatus: "passed" });
+    expect(detail.items).toHaveLength(1);
+    expect(detail.items[0]).toMatchObject({ section: "overview", systemText: claimText, verificationState: "verified" });
+    expect(db.pragma("foreign_key_check")).toEqual([]);
+  });
+
+  it("still verifies actual activity claims after recovering their section", async () => {
+    vi.spyOn(console, "info").mockImplementation(() => {});
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    claimText = "检查人员本周已经实际开始核对清单。";
+    answer = generated(claimText, "in_progress");
+    verifierIssue = "source_does_not_support_claim";
+    const queued = service.generate(accountId, { ...scope, operationKey: "verify_activity_after_normalization", expectedVersion: null });
+    expect(await run(queued.run)).toMatchObject({ state: "failed", errorCode: "weekly_generation_no_safe_items" });
+    expect(requests).toHaveLength(2);
+    expect(service.getDetail(accountId, queued.review.id).items).toEqual([]);
   });
 
   it.each([
