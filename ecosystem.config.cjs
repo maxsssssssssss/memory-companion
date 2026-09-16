@@ -16,6 +16,8 @@ module.exports = {
       kill_timeout: 30_000,
       env: {
         NODE_ENV: "production",
+        TRANSCRIPTION_PROVIDER: "speaker-asr",
+        TRANSCRIPTION_FALLBACK_PROVIDER: "none",
         PIPELINE_EXECUTION_MODE: "queue",
         DAILY_REFLECTION_UPLOAD_ENABLED: "true",
         DAILY_REFLECTION_BROWSER_RECORDING_ENABLED: "true",
@@ -39,6 +41,8 @@ module.exports = {
       time: true,
       env: {
         NODE_ENV: "production",
+        TRANSCRIPTION_PROVIDER: "speaker-asr",
+        TRANSCRIPTION_FALLBACK_PROVIDER: "none",
         PIPELINE_EXECUTION_MODE: "queue",
         DAILY_REFLECTION_UPLOAD_ENABLED: "true",
         DAILY_REFLECTION_BROWSER_RECORDING_ENABLED: "true",

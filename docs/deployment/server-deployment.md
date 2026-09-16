@@ -182,6 +182,24 @@ Memory, Evidence, or AI Review records.
 
 ## PM2
 
+Production transcription uses `speaker-asr` without a fallback for all three
+product entry points. The versioned PM2 configuration pins these values for
+both Web and Worker:
+
+```env
+TRANSCRIPTION_PROVIDER=speaker-asr
+TRANSCRIPTION_FALLBACK_PROVIDER=none
+```
+
+Keep the production environment file and any generated PM2 configuration in
+sync with these values. Apply the configuration with `--update-env`, verify
+both running processes, and persist the updated PM2 process list. Removing the
+fallback variable is not equivalent to `none`: the resolver defaults an unset
+value to `fixture`, and Work Review rejects any configured fallback before
+calling the transcription provider. If `speaker-asr` fails, transcription now
+reports that failure instead of invoking another provider. Provider credentials
+and product audio capability secrets remain deployment-only.
+
 The PM2 configuration defines exactly two application processes:
 
 - `daily-brief`: Next.js Web on port `3200`;
