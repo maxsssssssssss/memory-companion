@@ -24,7 +24,7 @@ import { GET as getQa, POST as askQa, DELETE as clearQa } from "./[weeklyReviewI
 import { GET as getSource } from "./[weeklyReviewId]/sources/[sourceRef]/route";
 
 const state = vi.hoisted(() => ({ database: null as Database.Database | null,
-  accountId: "independent_qa_account", sequence: 0, client: vi.fn(), config: vi.fn(),
+  accountId: "independent_qa_account", sequence: 0, client: vi.fn(), config: vi.fn(), enqueue: vi.fn(),
   network: vi.fn(() => { throw new Error("offline_network_forbidden"); }) }));
 vi.mock("@/lib/server/auth/request-context", () => ({
   requireAuthContext: async () => ({ user: { id: state.accountId } }), isUnauthenticatedError: () => false
@@ -34,6 +34,9 @@ vi.mock("@/lib/server/work-review/db", async (original) => ({
 }));
 vi.mock("@/lib/server/openai/client", () => ({ createOpenAIClient: state.client }));
 vi.mock("@/lib/server/settings/provider-config", () => ({ getOpenAIClientRuntimeConfig: state.config }));
+vi.mock("@/lib/server/queue/work-weekly-qa-producer", () => ({
+  enqueueWorkWeeklyQaJob: state.enqueue
+}));
 vi.mock("node:crypto", async (original) => ({ ...await original<typeof import("node:crypto")>(),
   randomUUID: () => `00000000-0000-4000-8000-${String(++state.sequence).padStart(12, "0")}` }));
 
@@ -60,6 +63,7 @@ const time = (stamp: string) => vi.setSystemTime(new Date(stamp));
 beforeEach(() => {
   state.accountId = accountId; state.sequence = 0; requests = []; responses = [];
   state.network.mockClear(); state.client.mockReset(); state.config.mockReset().mockResolvedValue({});
+  state.enqueue.mockReset().mockResolvedValue({ jobId: "independent_offline_qa", enqueued: true });
   vi.stubGlobal("fetch", state.network);
   vi.useFakeTimers({ toFake: ["Date"] }); time("2026-09-13T01:00:00.000Z");
   for (const flag of ["WORK_REVIEW_ENABLED", "WORK_REVIEW_TODO_ENABLED", "WORK_REVIEW_PROJECTS_ENABLED",
@@ -403,6 +407,39 @@ describe("Independent QA recovery: real business APIs, SQLite, offline Responses
       observedState: "processing" })).toMatchObject({ state: "failed", errorCode: "weekly_qa_provider_outcome_unknown" });
     expect(requests).toEqual([]);
     expect(await runQa(run)).toMatchObject({ state: "not_claimed" });
+  });
+});
+
+describe("independent immediate QA dispatch", () => {
+  it("commits the exact queued run before dispatch and keeps GET read-only", async () => {
+    await apiTodo(); time("2026-09-14T02:00:00.000Z");
+    state.enqueue.mockImplementation(async (payload) => {
+      const persisted = state.database!.prepare("SELECT * FROM wr_weekly_qa_runs WHERE id = ?").get(payload.runId);
+      expect(persisted).toMatchObject({ account_id: accountId, state: "queued", weekly_review_id: payload.weeklyReviewId,
+        run_version: payload.runVersion, source_snapshot_digest: payload.sourceSnapshotDigest,
+        thread_id: payload.threadId, question_message_id: payload.questionMessageId });
+      return { jobId: "offline_dispatch", enqueued: true };
+    });
+    const { review, run } = await queued();
+    expect(state.enqueue).toHaveBeenCalledTimes(1);
+    expect(state.enqueue.mock.calls[0]![0]).toMatchObject({ version: 1, kind: "qa", accountId, runId: run.id });
+    expect((await getQa(request(), path(review.id))).status).toBe(200);
+    expect(state.enqueue).toHaveBeenCalledTimes(1);
+    expect(requests).toEqual([]);
+  });
+
+  it("returns 202 after dispatch failure and an idempotent POST reuses the same queued run", async () => {
+    await apiTodo(); time("2026-09-14T02:00:00.000Z");
+    state.enqueue.mockRejectedValue(new Error("offline_dispatch_failure"));
+    const question = `本周${title}在系统中是什么状态？`;
+    const { review, run } = await queued(question);
+    const again = await askQa(request("POST", { question, expectedVersion: null, operationKey: "ask" }), path(review.id));
+    expect(again.status).toBe(200);
+    expect(await again.json()).toMatchObject({ reused: true, run: { id: run.id, state: "queued" } });
+    expect(service.runtimeRepository().listRecoverableQaRuns("2026-09-14T02:00:00.000Z", 16))
+      .toEqual([expect.objectContaining({ id: run.id, state: "queued" })]);
+    expect(state.enqueue.mock.calls.map(([payload]) => payload.runId)).toEqual([run.id, run.id]);
+    expect(requests).toEqual([]);
   });
 });
 

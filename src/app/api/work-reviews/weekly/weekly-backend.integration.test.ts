@@ -33,6 +33,9 @@ vi.mock("@/lib/server/work-review/db", async (original) => ({
   getWorkReviewDatabase: () => state.database!
 }));
 vi.mock("@/lib/server/openai/client", () => ({ createOpenAIClient: state.network }));
+vi.mock("@/lib/server/queue/work-weekly-qa-producer", () => ({
+  enqueueWorkWeeklyQaJob: vi.fn(async () => ({ jobId: "fixture", enqueued: true }))
+}));
 vi.mock("node:crypto", async (original) => ({
   ...await original<typeof import("node:crypto")>(),
   randomUUID: () => `00000000-0000-4000-8000-${String(++state.sequence).padStart(12, "0")}`

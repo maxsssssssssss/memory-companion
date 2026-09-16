@@ -344,9 +344,13 @@ export async function startWorkWeeklyRuntime(
       if (job.name === WORK_WEEKLY_QA_QUEUE_JOB_NAME) {
         const payload = WorkWeeklyQaQueuePayloadSchema.parse(job.data);
         const expectedJobId = buildWorkWeeklyQueueJobId(payload);
-        if (job.id !== expectedJobId || !admittedJobIds.delete(expectedJobId)) {
+        if (job.id !== expectedJobId) {
           return { status: "stale_skipped", kind: "qa" };
         }
+        admittedJobIds.delete(expectedJobId);
+        // QA can arrive immediately after POST, before any recovery scan.
+        // The runner atomically checks queued state + the complete payload
+        // against SQLite. Memory admission cannot authorize a stale replay.
         if (!currentFlags.weeklyQaEnabled) {
           return { status: "disabled", kind: "qa" };
         }

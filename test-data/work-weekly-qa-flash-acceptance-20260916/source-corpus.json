@@ -1,0 +1,528 @@
+{
+  "datasetVersion": "weekly-flash-independent-20260916",
+  "syntheticOnly": true,
+  "allPeopleFactsAndDatesFictional": true,
+  "scope": {
+    "weekStart": "2026-09-14",
+    "weekEnd": "2026-09-20",
+    "observedThrough": "2026-09-16",
+    "timeZone": "Asia/Shanghai",
+    "scopeKind": "all",
+    "projectId": null,
+    "windowComplete": false
+  },
+  "observedAt": "2026-09-16T03:00:00.000Z",
+  "meeting": {
+    "id": "synthetic_meeting",
+    "title": "星桥试点开放条件复核会",
+    "meetingDate": "2026-09-14"
+  },
+  "segments": [
+    {
+      "id": "seg_1",
+      "speaker": "synthetic_speaker_1",
+      "startSeconds": 0,
+      "endSeconds": 18,
+      "text": "首轮采用方案乙，提供来源链接、分类确认和基础数量仪表盘。",
+      "synthetic": true
+    },
+    {
+      "id": "seg_2",
+      "speaker": "synthetic_speaker_1",
+      "startSeconds": 20,
+      "endSeconds": 38,
+      "text": "高级搜索和跨项目统计不在首轮交付范围。",
+      "synthetic": true
+    },
+    {
+      "id": "seg_3",
+      "speaker": "synthetic_speaker_2",
+      "startSeconds": 40,
+      "endSeconds": 58,
+      "text": "首轮不提供周报导出功能。",
+      "synthetic": true
+    },
+    {
+      "id": "seg_4",
+      "speaker": "synthetic_speaker_2",
+      "startSeconds": 60,
+      "endSeconds": 78,
+      "text": "试点期间由协调员甲临时手工整理两次，手工整理不等于导出功能已经完成。",
+      "synthetic": true
+    },
+    {
+      "id": "seg_5",
+      "speaker": "synthetic_speaker_3",
+      "startSeconds": 80,
+      "endSeconds": 98,
+      "text": "首轮只发送每日摘要。",
+      "synthetic": true
+    },
+    {
+      "id": "seg_6",
+      "speaker": "synthetic_speaker_3",
+      "startSeconds": 100,
+      "endSeconds": 118,
+      "text": "实时提醒与个人切换开关均延后，当前没有新的交付日期。",
+      "synthetic": true
+    },
+    {
+      "id": "seg_7",
+      "speaker": "synthetic_speaker_1",
+      "startSeconds": 120,
+      "endSeconds": 138,
+      "text": "会议最终将星桥试点目标开放日从九月十八日调整为九月二十二日。",
+      "synthetic": true
+    },
+    {
+      "id": "seg_8",
+      "speaker": "synthetic_speaker_1",
+      "startSeconds": 140,
+      "endSeconds": 158,
+      "text": "开放前必须通过沙盒身份映射和权限冒烟检查；日期安排不表示检查已经通过。",
+      "synthetic": true
+    },
+    {
+      "id": "seg_9",
+      "speaker": "synthetic_speaker_2",
+      "startSeconds": 160,
+      "endSeconds": 178,
+      "text": "界面及引导文案在九月十九日冻结，培训由九月十七日改为九月二十一日下午。",
+      "synthetic": true
+    },
+    {
+      "id": "seg_10",
+      "speaker": "synthetic_speaker_2",
+      "startSeconds": 180,
+      "endSeconds": 198,
+      "text": "冻结后仅允许修复阻断性缺陷，不再新增首轮范围。",
+      "synthetic": true
+    },
+    {
+      "id": "seg_11",
+      "speaker": "synthetic_speaker_3",
+      "startSeconds": 200,
+      "endSeconds": 218,
+      "text": "协调员甲明确认领沙盒账号跟进，九月十七日中午前确认账号交付时间。",
+      "synthetic": true
+    },
+    {
+      "id": "seg_12",
+      "speaker": "synthetic_speaker_3",
+      "startSeconds": 220,
+      "endSeconds": 238,
+      "text": "目前只有本地临时账号通过，正式沙盒身份映射尚不能认定通过。",
+      "synthetic": true
+    },
+    {
+      "id": "seg_13",
+      "speaker": "synthetic_speaker_1",
+      "startSeconds": 240,
+      "endSeconds": 258,
+      "text": "工程成员乙明确认领九月十七日提供联调接口和字段说明，九月十八日补齐权限与审计日志测试。",
+      "synthetic": true
+    },
+    {
+      "id": "seg_14",
+      "speaker": "synthetic_speaker_1",
+      "startSeconds": 260,
+      "endSeconds": 278,
+      "text": "如果仍没有正式沙盒账号，只能标注本地测试通过，不能写成试点环境验证通过。",
+      "synthetic": true
+    },
+    {
+      "id": "seg_15",
+      "speaker": "synthetic_speaker_2",
+      "startSeconds": 280,
+      "endSeconds": 298,
+      "text": "运营成员丙明确认领培训材料，九月十八日给初稿，九月十九日按冻结界面更新终稿，九月二十一日下午组织培训。",
+      "synthetic": true
+    },
+    {
+      "id": "seg_16",
+      "speaker": "synthetic_speaker_2",
+      "startSeconds": 300,
+      "endSeconds": 318,
+      "text": "系统中把材料检查标记完成不等于培训已经举行，也不等于参与者已经理解规则。",
+      "synthetic": true
+    },
+    {
+      "id": "seg_17",
+      "speaker": "synthetic_speaker_3",
+      "startSeconds": 320,
+      "endSeconds": 338,
+      "text": "最终确认开放前必须检查登录、来源回看、修正和越权访问；工程成员乙负责技术检查。",
+      "synthetic": true
+    },
+    {
+      "id": "seg_18",
+      "speaker": "synthetic_speaker_3",
+      "startSeconds": 340,
+      "endSeconds": 358,
+      "text": "若发现权限泄露或内容错配，就阻断开放，不能用页面能打开代替检查通过。",
+      "synthetic": true
+    },
+    {
+      "id": "seg_19",
+      "speaker": "synthetic_speaker_1",
+      "startSeconds": 360,
+      "endSeconds": 378,
+      "text": "首轮主要指标确定为交接确认率、理解度问卷和阻断性缺陷数量。",
+      "synthetic": true
+    },
+    {
+      "id": "seg_20",
+      "speaker": "synthetic_speaker_1",
+      "startSeconds": 380,
+      "endSeconds": 398,
+      "text": "来源链接打开率仅在匿名埋点及账号隔离检查通过时加入分析，不预设效率已经提升。",
+      "synthetic": true
+    },
+    {
+      "id": "seg_21",
+      "speaker": "synthetic_speaker_2",
+      "startSeconds": 400,
+      "endSeconds": 418,
+      "text": "日常支持轮值仍未认领，需要另行确认响应频率和升级方式。",
+      "synthetic": true
+    },
+    {
+      "id": "seg_22",
+      "speaker": "synthetic_speaker_2",
+      "startSeconds": 420,
+      "endSeconds": 438,
+      "text": "工程成员乙只答应严重技术问题时协助定位，没有接受日常值班负责人角色。",
+      "synthetic": true
+    },
+    {
+      "id": "seg_23",
+      "speaker": "synthetic_speaker_3",
+      "startSeconds": 440,
+      "endSeconds": 458,
+      "text": "移动端适配是否属于试点开放条件仍待专项评审。",
+      "synthetic": true
+    },
+    {
+      "id": "seg_24",
+      "speaker": "synthetic_speaker_3",
+      "startSeconds": 460,
+      "endSeconds": 478,
+      "text": "本周没有人承诺完成移动端适配，不能把评审日期解释为完成期限。",
+      "synthetic": true
+    },
+    {
+      "id": "seg_25",
+      "speaker": "synthetic_speaker_1",
+      "startSeconds": 480,
+      "endSeconds": 498,
+      "text": "工程成员乙认领九月二十日前准备关闭试点入口的开关和回退说明。",
+      "synthetic": true
+    },
+    {
+      "id": "seg_26",
+      "speaker": "synthetic_speaker_1",
+      "startSeconds": 500,
+      "endSeconds": 518,
+      "text": "触发权限泄露或内容错配时停止新访问，并保留必要排查日志，不扩大日志中的正文收集。",
+      "synthetic": true
+    }
+  ],
+  "findings": [
+    {
+      "id": "finding_scope",
+      "kind": "decision",
+      "title": "首轮采用方案乙",
+      "body": "首轮采用方案乙，提供来源链接、分类确认和基础数量仪表盘。 高级搜索和跨项目统计不在首轮交付范围。",
+      "confirmed": true,
+      "confirmedAt": "2026-09-14T04:00:00.000Z",
+      "evidenceIds": [
+        "seg_1",
+        "seg_2"
+      ],
+      "structuredData": {
+        "decisionFinality": "final"
+      }
+    },
+    {
+      "id": "finding_export",
+      "kind": "decision",
+      "title": "首轮不提供周报导出",
+      "body": "首轮不提供周报导出功能。 试点期间由协调员甲临时手工整理两次，手工整理不等于导出功能已经完成。",
+      "confirmed": true,
+      "confirmedAt": "2026-09-14T04:00:00.000Z",
+      "evidenceIds": [
+        "seg_3",
+        "seg_4"
+      ],
+      "structuredData": {
+        "decisionFinality": "final"
+      }
+    },
+    {
+      "id": "finding_digest",
+      "kind": "decision",
+      "title": "首轮只发送每日摘要",
+      "body": "首轮只发送每日摘要。 实时提醒与个人切换开关均延后，当前没有新的交付日期。",
+      "confirmed": true,
+      "confirmedAt": "2026-09-14T04:00:00.000Z",
+      "evidenceIds": [
+        "seg_5",
+        "seg_6"
+      ],
+      "structuredData": {
+        "decisionFinality": "final"
+      }
+    },
+    {
+      "id": "finding_release",
+      "kind": "decision",
+      "title": "试点目标开放日调整为九月二十二日",
+      "body": "会议最终将星桥试点目标开放日从九月十八日调整为九月二十二日。 开放前必须通过沙盒身份映射和权限冒烟检查；日期安排不表示检查已经通过。",
+      "confirmed": true,
+      "confirmedAt": "2026-09-14T04:00:00.000Z",
+      "evidenceIds": [
+        "seg_7",
+        "seg_8"
+      ],
+      "structuredData": {
+        "decisionFinality": "final"
+      }
+    },
+    {
+      "id": "finding_freeze",
+      "kind": "plan_change",
+      "title": "界面冻结与培训顺延",
+      "body": "界面及引导文案在九月十九日冻结，培训由九月十七日改为九月二十一日下午。 冻结后仅允许修复阻断性缺陷，不再新增首轮范围。",
+      "confirmed": true,
+      "confirmedAt": "2026-09-14T04:00:00.000Z",
+      "evidenceIds": [
+        "seg_9",
+        "seg_10"
+      ],
+      "structuredData": {
+        "decisionFinality": null,
+        "planStages": [
+          { "content": "培训原定九月十七日。", "status": "revised", "evidenceIds": ["seg_9"] },
+          { "content": "培训调整为九月二十一日下午，界面及引导文案在九月十九日冻结。", "status": "current", "evidenceIds": ["seg_9", "seg_10"] }
+        ]
+      }
+    },
+    {
+      "id": "finding_sandbox",
+      "kind": "commitment",
+      "title": "跟进沙盒账号并重新核对身份映射",
+      "body": "协调员甲明确认领沙盒账号跟进，九月十七日中午前确认账号交付时间。 目前只有本地临时账号通过，正式沙盒身份映射尚不能认定通过。",
+      "confirmed": true,
+      "confirmedAt": "2026-09-14T04:00:00.000Z",
+      "evidenceIds": [
+        "seg_11",
+        "seg_12"
+      ],
+      "structuredData": {
+        "decisionFinality": null
+      }
+    },
+    {
+      "id": "finding_backend",
+      "kind": "commitment",
+      "title": "接口联调和权限测试分阶段交付",
+      "body": "工程成员乙明确认领九月十七日提供联调接口和字段说明，九月十八日补齐权限与审计日志测试。 如果仍没有正式沙盒账号，只能标注本地测试通过，不能写成试点环境验证通过。",
+      "confirmed": true,
+      "confirmedAt": "2026-09-14T04:00:00.000Z",
+      "evidenceIds": [
+        "seg_13",
+        "seg_14"
+      ],
+      "structuredData": {
+        "decisionFinality": null
+      }
+    },
+    {
+      "id": "finding_training",
+      "kind": "commitment",
+      "title": "培训材料保留初稿终稿及培训阶段",
+      "body": "运营成员丙明确认领培训材料，九月十八日给初稿，九月十九日按冻结界面更新终稿，九月二十一日下午组织培训。 系统中把材料检查标记完成不等于培训已经举行，也不等于参与者已经理解规则。",
+      "confirmed": true,
+      "confirmedAt": "2026-09-14T04:00:00.000Z",
+      "evidenceIds": [
+        "seg_15",
+        "seg_16"
+      ],
+      "structuredData": {
+        "decisionFinality": null
+      }
+    },
+    {
+      "id": "finding_acceptance",
+      "kind": "decision",
+      "title": "权限检查是开放前提",
+      "body": "最终确认开放前必须检查登录、来源回看、修正和越权访问；工程成员乙负责技术检查。 若发现权限泄露或内容错配，就阻断开放，不能用页面能打开代替检查通过。",
+      "confirmed": true,
+      "confirmedAt": "2026-09-14T04:00:00.000Z",
+      "evidenceIds": [
+        "seg_17",
+        "seg_18"
+      ],
+      "structuredData": {
+        "decisionFinality": "final"
+      }
+    },
+    {
+      "id": "finding_metrics",
+      "kind": "decision",
+      "title": "首轮指标及埋点条件",
+      "body": "首轮主要指标确定为交接确认率、理解度问卷和阻断性缺陷数量。 来源链接打开率仅在匿名埋点及账号隔离检查通过时加入分析，不预设效率已经提升。",
+      "confirmed": true,
+      "confirmedAt": "2026-09-14T04:00:00.000Z",
+      "evidenceIds": [
+        "seg_19",
+        "seg_20"
+      ],
+      "structuredData": {
+        "decisionFinality": "final"
+      }
+    },
+    {
+      "id": "finding_support",
+      "kind": "open_question",
+      "title": "日常支持轮值仍未认领",
+      "body": "日常支持轮值仍未认领，需要另行确认响应频率和升级方式。 工程成员乙只答应严重技术问题时协助定位，没有接受日常值班负责人角色。",
+      "confirmed": true,
+      "confirmedAt": "2026-09-14T04:00:00.000Z",
+      "evidenceIds": [
+        "seg_21",
+        "seg_22"
+      ],
+      "structuredData": {
+        "decisionFinality": null
+      }
+    },
+    {
+      "id": "finding_mobile",
+      "kind": "open_question",
+      "title": "移动端是否属于开放条件仍未决定",
+      "body": "移动端适配是否属于试点开放条件仍待专项评审。 本周没有人承诺完成移动端适配，不能把评审日期解释为完成期限。",
+      "confirmed": true,
+      "confirmedAt": "2026-09-14T04:00:00.000Z",
+      "evidenceIds": [
+        "seg_23",
+        "seg_24"
+      ],
+      "structuredData": {
+        "decisionFinality": null
+      }
+    },
+    {
+      "id": "finding_rollback",
+      "kind": "commitment",
+      "title": "准备回退开关和说明",
+      "body": "工程成员乙认领九月二十日前准备关闭试点入口的开关和回退说明。 触发权限泄露或内容错配时停止新访问，并保留必要排查日志，不扩大日志中的正文收集。",
+      "confirmed": true,
+      "confirmedAt": "2026-09-14T04:00:00.000Z",
+      "evidenceIds": [
+        "seg_25",
+        "seg_26"
+      ],
+      "structuredData": {
+        "decisionFinality": null
+      }
+    }
+  ],
+  "todos": [
+    {
+      "id": "todo_sandbox",
+      "title": "核对沙盒身份映射",
+      "kind": "self",
+      "events": [
+        {
+          "at": "2026-09-14T05:00:00.000Z",
+          "action": "created",
+          "status": "open",
+          "title": "核对沙盒身份映射",
+          "ownerLabel": null,
+          "dueDate": "2026-09-18"
+        },
+        {
+          "at": "2026-09-14T06:00:00.000Z",
+          "action": "owner_updated",
+          "status": "open",
+          "title": "核对沙盒身份映射",
+          "ownerLabel": "协调员甲",
+          "dueDate": "2026-09-18"
+        },
+        {
+          "at": "2026-09-15T02:00:00.000Z",
+          "action": "due_date_updated",
+          "status": "open",
+          "title": "核对沙盒身份映射",
+          "ownerLabel": "协调员甲",
+          "dueDate": "2026-09-17"
+        },
+        {
+          "at": "2026-09-16T01:00:00.000Z",
+          "action": "completed",
+          "status": "completed",
+          "title": "核对沙盒身份映射",
+          "ownerLabel": "协调员甲",
+          "dueDate": "2026-09-17"
+        },
+        {
+          "at": "2026-09-16T02:00:00.000Z",
+          "action": "reopened",
+          "status": "open",
+          "title": "核对沙盒身份映射",
+          "ownerLabel": "协调员甲",
+          "dueDate": "2026-09-17"
+        }
+      ]
+    },
+    {
+      "id": "todo_training_check",
+      "title": "核对培训材料中的状态说明",
+      "kind": "self",
+      "events": [
+        {
+          "at": "2026-09-14T05:10:00.000Z",
+          "action": "created",
+          "status": "open",
+          "title": "检查培训材料",
+          "ownerLabel": null,
+          "dueDate": null
+        },
+        {
+          "at": "2026-09-15T01:00:00.000Z",
+          "action": "title_updated",
+          "status": "open",
+          "title": "核对培训材料中的状态说明",
+          "ownerLabel": null,
+          "dueDate": null
+        },
+        {
+          "at": "2026-09-15T01:20:00.000Z",
+          "action": "due_date_updated",
+          "status": "open",
+          "title": "核对培训材料中的状态说明",
+          "ownerLabel": null,
+          "dueDate": "2026-09-18"
+        },
+        {
+          "at": "2026-09-15T01:40:00.000Z",
+          "action": "owner_updated",
+          "status": "open",
+          "title": "核对培训材料中的状态说明",
+          "ownerLabel": "运营成员丙",
+          "dueDate": "2026-09-18"
+        },
+        {
+          "at": "2026-09-16T02:10:00.000Z",
+          "action": "completed",
+          "status": "completed",
+          "title": "核对培训材料中的状态说明",
+          "ownerLabel": "运营成员丙",
+          "dueDate": "2026-09-18"
+        }
+      ]
+    }
+  ],
+  "question": "按照本周已确认的记录，星桥现在能否开放试点？请直接说明当前决定、还缺的关键条件，以及两项系统待办的下一步。"
+}

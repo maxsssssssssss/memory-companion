@@ -21,6 +21,7 @@ import {
   validateWorkWeeklyVerifierOutput,
   type WorkWeeklyGeneratedClaim,
   type WorkWeeklyProviderProfile,
+  type WorkWeeklyProviderUsage,
   type WorkWeeklyStructuredJsonRequest,
   type WorkWeeklyVerifierItem
 } from "./weekly-ai-provider";
@@ -272,8 +273,11 @@ export function buildWorkWeeklyQaSourcePack(input: {
 
 export interface WorkWeeklyQaAnswerer {
   readonly profile: WorkWeeklyProviderProfile;
-  answer(input: { sourcePack: WorkWeeklyQaSourcePack; signal?: AbortSignal }): Promise<WorkWeeklyQaAnswerDraft>;
+  answer(input: { sourcePack: WorkWeeklyQaSourcePack; signal?: AbortSignal;
+    onMetrics?: (metrics: WorkWeeklyQaRequestMetrics) => void }): Promise<WorkWeeklyQaAnswerDraft>;
 }
+
+type WorkWeeklyQaRequestMetrics = WorkWeeklyProviderUsage & { inputBytes?: number };
 
 export interface WorkWeeklyQaVerifier {
   readonly profile: WorkWeeklyProviderProfile;
@@ -282,11 +286,15 @@ export interface WorkWeeklyQaVerifier {
     sourcePack: WorkWeeklyQaSourcePack;
     claims: WorkWeeklyGeneratedClaim[];
     signal?: AbortSignal;
+    onMetrics?: (metrics: WorkWeeklyQaRequestMetrics) => void;
   }): Promise<WorkWeeklyVerifierItem[]>;
 }
 
 const QA_ANSWERER_SYSTEM_PROMPT = [
   "你是 Work Weekly QA Answerer。只能回答当前 Source Pack 所属账号、自然周和项目范围的问题。",
+  "先给简短结论，再用少量必要要点回答本题，不逐条复述全部来源。背景、观察日或本周尚未结束等限制仅在影响本题判断时说明，避免重复前置条件。claims[].text就是最终正文：每项是自足的自然短段落，必要时用列表；不写核验过程或内部术语，不为填满格式扩写，复杂问题可按实际需要展开。",
+  "区分条件、未知与已知事实：如果发生某情况时才适用的安排，不证明该情况已经发生；尚未验证或不能认定通过，也不证明资源缺失或验证失败。保留原条件，不把可能原因写成现状。",
+  "用户问下一步时，按待办标题、事件及明确相关的安排提取已有动作和必要前提，并引用对应来源，不能只复述状态。未完成不表示已开始；没有后续动作依据就说明记录未给出，不另造负责人、期限或执行结果。",
   "history 仅用于理解代词和连续提问，上一轮 assistant 文本绝不是 Evidence；每个新事实都必须重新引用 sources。",
   "不得读取 Weekly 用户编辑内容、Follow-up、Pending Candidate、其他周/项目/账号或 Daily、Date、Memory、Person、generic retrieval、互联网。",
   "提议不是决定，任务分配不是承诺，Todo completed 只表示系统中标记完成，日期不自动是 deadline，先后不等于因果，单条来源不等于反复。",
@@ -294,12 +302,14 @@ const QA_ANSWERER_SYSTEM_PROMPT = [
   "按 scope.observedThrough 描述已观察范围；windowComplete=false 时不得声称全周已经结束。Todo 重开后的观察截止状态是 open，历史 completed 不证明当前完成或现实交付。",
   "Todo stateAtWeekEnd 是周范围观察截止状态，current 是查询时当前状态；截止状态未知时不得用 current 补造历史。用本周 events 描述已记录操作，不推断未记录的状态变更。",
   "面向用户的中文 answer 与 claims[].text 使用一致的自然状态表述：Todo open 写作“未完成”，completed 写作“已标记完成”，仅描述系统记录，不推断实际交付。",
-  "若证据显示完成后重开，保留“曾经标记完成，随后重新打开，当前未完成”的历史与当前区别。上述中文表述只用于你叙述系统状态；用户标题、来源原文/引文中的英文照原意保留，内部字段名/枚举和 sourceRef 不翻译，不要求整段全部中文。",
+  "若证据显示完成后重开，自然说明先前标记与当前未完成的区别，不要求固定句式。同一事项的必要条件放在同一段；仅在问题涉及实际交付时简要区分系统状态与现实结果，不在每条后重复免责声明。用户标题和来源英文照原意保留，字段名/sourceRef不翻译。",
   "不要返回 quote；只返回 sourceRef。来源不足时 status=insufficient_evidence，不用一般知识补造用户工作历史。"
 ].join("\n");
 
 const QA_VERIFIER_SYSTEM_PROMPT = [
   "你是独立 Work Weekly QA Claim Verifier。只核验每个 claim 与它引用的当前 Source Pack sources。",
+  "sources按sourceRef集中去重；每个claim只能使用其sourceRefs对应的记录。比较实际含义，接受忠实概括、自然改写和结论在前的段落，不要求固定句式或逐条重复系统状态免责声明。改变结论的必要条件仍须保留在同一claim。",
+  "逐个分句核对断言强度：条件句不证明前提成立，未验证或尚不能认定通过不证明资源缺失、已经失败或已经通过；来源只给条件/未知而claim肯定现状时，不得entailed，应标unsupported或partially_entailed。动作已有记录不证明前提已满足或动作已执行。",
   "不得把 history、Answerer answer、其他 claim 或未引用来源当 Evidence。",
   "只有 Evidence 明确表达理由时才能支持 causality；assignment_without_acceptance 不是 commitment；Todo completed 不是现实履行；一个来源不支持频率。",
   "记录本身可核验：confirmed Finding 不要求 Todo 配套；Todo 和 event 不要求会议配套。逐字区分当前/观察截止状态与历史操作，重新打开后的状态不能仍说已完成。",
@@ -309,7 +319,7 @@ const QA_VERIFIER_SYSTEM_PROMPT = [
 
 export const WORK_WEEKLY_QA_ANSWERER_JSON_INSTRUCTION =
   "输出严格 JSON {status,answer,claims:[{id,text,claimType,sourceRefs}],relevantSourceRefs}。" +
-  "status 只能是 answered、partially_answered、insufficient_evidence；answer 为字符串，但发布只使用核验通过的 claim.text。" +
+  "status 只能是 answered、partially_answered、insufficient_evidence；answer填空字符串，正文只写在claims[].text，发布只使用核验通过的claim.text，不重复生成两份回答。" +
   "claimType 只能是 fact、person、decision、commitment、deadline、completion、causality、frequency、temporal_order。" +
   "普通记录/状态用 fact；完成事件用 completion 且明确是系统标记。claims 最多32项，id非空且唯一，每项text为独立完整事实，sourceRefs非空且不重复。" +
   "sourceRefs 和 relevantSourceRefs 只能来自 Source Pack，后者不重复；禁止 quote 和额外字段；insufficient_evidence 时 claims 必须为空，其余状态必须有claim。";
@@ -347,15 +357,23 @@ export function createStructuredWorkWeeklyQaAnswerer(input: {
   return {
     profile: input.profile,
     async answer(call) {
+      // Ranking metadata and digests stay authoritative locally; all selected
+      // canonical values, scope, history and exact citation allowlist stay on wire.
+      const content = JSON.stringify({ question: call.sourcePack.question, scope: call.sourcePack.scope,
+        history: call.sourcePack.history,
+        units: call.sourcePack.units.map(({ sourceKind, value }) => ({ sourceKind, value })),
+        allowlistedSourceRefs: call.sourcePack.allowlistedSourceRefs });
+      call.onMetrics?.({ inputBytes: Buffer.byteLength(content, "utf8") });
       const response = await request({
         profile: input.profile,
         schema: WorkWeeklyQaAnswerDraftSchema,
         requestInput: [
           { role: "system", content: QA_ANSWERER_SYSTEM_PROMPT },
-          { role: "user", content: JSON.stringify(call.sourcePack) }
+          { role: "user", content }
         ],
         jsonInstruction: WORK_WEEKLY_QA_ANSWERER_JSON_INSTRUCTION,
-        signal: call.signal
+        signal: call.signal,
+        onUsage: call.onMetrics
       });
       return validateQaDraft(response, call.sourcePack);
     }
@@ -377,6 +395,11 @@ export function createStructuredWorkWeeklyQaVerifier(input: {
       if (call.claims.some((claim) => claim.sourceRefs.some((ref) => !packAllowlist.has(ref)))) {
         throw new WorkWeeklyQaTechnicalError("weekly_qa_source_not_allowlisted", "verifier");
       }
+      const content = JSON.stringify({ scope: call.sourcePack.scope,
+        items: call.claims.map((claim) => ({ claim })),
+        sources: [...new Set(call.claims.flatMap((claim) => claim.sourceRefs))]
+          .map((ref) => resolveWorkWeeklySourceRecord(call.snapshot, ref)) });
+      call.onMetrics?.({ inputBytes: Buffer.byteLength(content, "utf8") });
       const response = await request({
         profile: input.profile,
         schema: WorkWeeklyVerifierResponseSchema,
@@ -384,20 +407,12 @@ export function createStructuredWorkWeeklyQaVerifier(input: {
           { role: "system", content: QA_VERIFIER_SYSTEM_PROMPT },
           {
             role: "user",
-            content: JSON.stringify({
-              snapshotDigest: call.sourcePack.snapshotDigest,
-              scope: call.sourcePack.scope,
-              items: call.claims.map((claim) => ({
-                claim,
-                sources: claim.sourceRefs.map((ref) => resolveWorkWeeklySourceRecord(
-                  call.snapshot, ref
-                ))
-              }))
-            })
+            content
           }
         ],
         jsonInstruction: WORK_WEEKLY_QA_VERIFIER_JSON_INSTRUCTION,
-        signal: call.signal
+        signal: call.signal,
+        onUsage: call.onMetrics
       });
       // Preserve sanitized schema paths before the shared contract validator reports counts.
       const parsed = WorkWeeklyVerifierResponseSchema.safeParse(response);
@@ -485,7 +500,26 @@ export async function answerWorkWeeklyQuestion(input: {
   onDiagnostic?: WorkWeeklyQaDiagnosticObserver;
 }): Promise<WorkWeeklyQaFinalAnswer> {
   let stage: WorkWeeklyQaStage = "source_selection";
-  const emit = (event: Parameters<WorkWeeklyQaDiagnosticObserver>[0]) => emitWorkWeeklyQaDiagnostic(input.onDiagnostic, event);
+  const startedAt = performance.now();
+  let stageStartedAt = startedAt;
+  let metrics: WorkWeeklyQaRequestMetrics = {};
+  const captureMetrics = (next: WorkWeeklyQaRequestMetrics) => {
+    for (const key of ["inputBytes", "inputTokens", "outputTokens", "reasoningTokens"] as const) {
+      const value = next[key];
+      if (Number.isSafeInteger(value) && value! >= 0) metrics[key] = value;
+    }
+  };
+  const emit = (event: Parameters<WorkWeeklyQaDiagnosticObserver>[0]) => {
+    const profile = stage === "answerer" ? input.answerer?.profile : stage === "verifier" ? input.verifier?.profile : null;
+    return emitWorkWeeklyQaDiagnostic(input.onDiagnostic, {
+      elapsedMs: Math.round(performance.now() - stageStartedAt),
+      totalElapsedMs: Math.round(performance.now() - startedAt),
+      ...(profile ? { role: stage === "answerer" ? "qa_answerer" as const : "qa_verifier" as const,
+        model: (["deepseek-v4-flash", "deepseek-v4-pro", "gpt-5.5"] as const).find((model) => model === profile.model) ?? "other",
+        effectiveTimeoutMs: profile.timeoutMs, maxOutputTokens: profile.maxOutputTokens, ...metrics } : {}),
+      ...event
+    });
+  };
   const notSupported = async (reasonCode: "weekly_qa_performance_question_refused" | "weekly_qa_no_relevant_sources"
     | "weekly_qa_answerer_insufficient" | "weekly_qa_no_safe_claims") => {
     await emit({ stage, outcome: "insufficient_evidence", reasonCode });
@@ -499,6 +533,8 @@ export async function answerWorkWeeklyQuestion(input: {
     }
     const sourcePack = buildWorkWeeklyQaSourcePack(input);
     await emit({ stage, outcome: "succeeded", sourceUnitCount: sourcePack.units.length,
+      sourcePackBytes: Buffer.byteLength(JSON.stringify(sourcePack), "utf8"),
+      historyBytes: Buffer.byteLength(JSON.stringify(sourcePack.history), "utf8"),
       sourceRefCount: sourcePack.allowlistedSourceRefs.length,
       findingUnitCount: sourcePack.units.filter((unit) => unit.sourceKind === "finding").length,
       todoUnitCount: sourcePack.units.filter((unit) => unit.sourceKind === "todo").length });
@@ -511,22 +547,26 @@ export async function answerWorkWeeklyQuestion(input: {
     const answerer = input.answerer;
     const verifier = input.verifier;
     stage = "answerer";
+    stageStartedAt = performance.now();
     await emit({ stage, outcome: "started" });
     assertWorkWeeklyQaNotCancelled(input.signal);
-    const draft = validateQaDraft(await answerer.answer({ sourcePack, signal: input.signal }), sourcePack);
+    const draft = validateQaDraft(await answerer.answer({ sourcePack, signal: input.signal, onMetrics: captureMetrics }), sourcePack);
     assertWorkWeeklyQaNotCancelled(input.signal);
     await emit({ stage, outcome: "succeeded", claimCount: draft.claims.length });
     if (draft.status === "insufficient_evidence") {
       return await notSupported("weekly_qa_answerer_insufficient");
     }
     stage = "verifier";
+    stageStartedAt = performance.now();
+    metrics = {};
     await emit({ stage, outcome: "started", claimCount: draft.claims.length });
     assertWorkWeeklyQaNotCancelled(input.signal);
     const response = await verifier.verify({
       snapshot: input.snapshot,
       sourcePack,
       claims: draft.claims,
-      signal: input.signal
+      signal: input.signal,
+      onMetrics: captureMetrics
     });
     assertWorkWeeklyQaNotCancelled(input.signal);
     const parsed = WorkWeeklyVerifierResponseSchema.safeParse({ items: response });
@@ -536,8 +576,10 @@ export async function answerWorkWeeklyQuestion(input: {
       verdictCounts: workWeeklyQaReasonCounts(verdicts.map((verdict) => verdict.verdict)),
       issueCounts: workWeeklyQaReasonCounts(verdicts.flatMap((verdict) => verdict.issueCodes)) });
     stage = "publication";
+    stageStartedAt = performance.now();
     let publicationReasons: string[] = [];
     let publishedClaimCount = 0;
+    let publishedClaimIds = new Set<string>();
     const published = applyWorkWeeklyClaimPublicationPolicy({
       snapshot: input.snapshot,
       items: [{
@@ -551,6 +593,7 @@ export async function answerWorkWeeklyQuestion(input: {
       onClaims: (claims) => {
         publicationReasons = claims.map((claim) => claim.reasonCode);
         publishedClaimCount = claims.filter((claim) => claim.outcome === "published" || claim.outcome === "merged").length;
+        publishedClaimIds = new Set(claims.filter((claim) => claim.outcome === "published").map((claim) => claim.claimId));
       }
     });
     if (publicationReasons.some((reason) => reason === "invalid_contract" || reason === "item_output_invalid")) {
@@ -562,13 +605,17 @@ export async function answerWorkWeeklyQuestion(input: {
       return await notSupported("weekly_qa_no_safe_claims");
     }
     const item = published[0]!;
+    const paragraphs = draft.claims.filter((claim) => publishedClaimIds.has(claim.id)).map((claim) => claim.text);
+    // Format only the policy's exact surviving text. Related-claim suppression,
+    // duplicate merging and the verified citation union remain the policy's work.
+    const answer = paragraphs.join("；") === item.text ? paragraphs.join("\n\n") : item.text;
     const partial = draft.status === "partially_answered"
       || publishedClaimCount < draft.claims.length
       || item.verificationState === "qualified"
       || verdicts.some((verdict) => verdict.verdict !== "entailed");
     return {
       answerStatus: partial ? "partially_answered" : "answered",
-      answer: item.text,
+      answer,
       sourceRefs: item.sourceRefs,
       providerProfile: answerer.profile.id,
       promptVersion: answerer.profile.promptVersion,

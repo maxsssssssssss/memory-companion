@@ -33,6 +33,7 @@ import {
   WORK_EXTRACTOR_MAX_WIRE_ITEMS,
   WorkExtractorWireEnvelopeSchema,
   WorkExtractorWireResponseSchema,
+  WorkExtractorValidationSummarySchema,
   WorkMeetingAnalysisProviderError,
   WorkVerifierWireEnvelopeSchema,
   WorkVerifierWireResponseSchema,
@@ -363,6 +364,7 @@ describe("Work Meeting analysis providers", () => {
       reason: string;
       issues: Array<{ path: string; code: string }>;
     }> = [];
+    const onItemsValidated = vi.fn();
 
     await expect(extractor.extract({
       accountId: "account_1",
@@ -370,6 +372,7 @@ describe("Work Meeting analysis providers", () => {
       publicationId: "publication_1",
       canonicalDigest: "a".repeat(64),
       window: buildWorkMeetingTranscriptWindows(segments)[0],
+      onItemsValidated,
       onItemDiscarded: (discard) => discards.push(discard)
     })).resolves.toMatchObject([{
       clientCandidateKey: "wire_candidate_1",
@@ -400,6 +403,27 @@ describe("Work Meeting analysis providers", () => {
     const serializedDiscards = JSON.stringify(discards);
     expect(serializedDiscards).not.toContain(privateSchemaMarker);
     expect(serializedDiscards).not.toContain(privateEvidenceMarker);
+    expect(onItemsValidated).toHaveBeenCalledExactlyOnceWith({ returned: 3, retained: 1, discarded: 2,
+      result: "partially_retained", reasons: { schema_invalid: 1, evidence_not_allowed: 1 } });
+    expect(JSON.stringify(onItemsValidated.mock.calls)).not.toContain(privateSchemaMarker);
+    expect(JSON.stringify(onItemsValidated.mock.calls)).not.toContain(privateEvidenceMarker);
+  });
+
+  it("distinguishes a raw empty response from all items discarded without inventing a fatal error", () => {
+    const rawEmpty = vi.fn(), discarded = vi.fn();
+    const response = { items: [{ kind: "commitment", coreText: "PRIVATE_TEXT" },
+      { kind: "proposal", coreText: "PRIVATE_TEXT", evidenceSegmentIds: ["outside"] }] };
+    expect(validateWorkExtractorWireItems({ response: { items: [] }, allowedSegments: segments,
+      onItemsValidated: rawEmpty })).toEqual({ items: [] });
+    expect(validateWorkExtractorWireItems({ response, allowedSegments: segments,
+      onItemsValidated: discarded })).toEqual({ items: [] });
+    expect(rawEmpty).toHaveBeenCalledExactlyOnceWith({ returned: 0, retained: 0, discarded: 0,
+      result: "provider_empty", reasons: {} });
+    expect(discarded).toHaveBeenCalledExactlyOnceWith({ returned: 2, retained: 0, discarded: 2,
+      result: "all_discarded", reasons: { schema_invalid: 1, evidence_not_allowed: 1 } });
+    expect(JSON.stringify(discarded.mock.calls)).not.toContain("PRIVATE_TEXT");
+    expect(WorkExtractorValidationSummarySchema.safeParse({ ...discarded.mock.calls[0][0], result: "provider_empty" }).success).toBe(false);
+    expect(WorkExtractorValidationSummarySchema.safeParse({ ...discarded.mock.calls[0][0], reasons: {} }).success).toBe(false);
   });
 
   it("drops a relationship whose referenced Commitment item was discarded", () => {
@@ -891,7 +915,7 @@ describe("Work Meeting analysis providers", () => {
     }));
   });
 
-  it("preserves optional semantics but routes only core high-risk Claims", () => {
+  it("preserves and routes emitted optional semantics with core high-risk Claims", () => {
     const canonical = canonicalizeWorkExtractorClientKeys({
       items: [{
         kind: "decision",
@@ -977,7 +1001,11 @@ describe("Work Meeting analysis providers", () => {
     );
     expect(routedTypes).toEqual([
       "decision_existence",
+      "decision_finality",
+      "speaker_attribution",
+      "deadline",
       "commitment_existence",
+      "commitment_owner",
       "action_item",
       "commitment_existence",
       "plan_change"

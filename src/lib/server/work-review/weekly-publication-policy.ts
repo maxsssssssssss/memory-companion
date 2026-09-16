@@ -23,7 +23,7 @@ import {
   type WorkWeeklyVerificationAuditDetails
 } from "./weekly-ai-provider";
 
-export const WORK_WEEKLY_PUBLICATION_POLICY_VERSION = "work_weekly_publication_v10" as const;
+export const WORK_WEEKLY_PUBLICATION_POLICY_VERSION = "work_weekly_publication_v11" as const;
 
 export type WorkWeeklyQualityAssessment = {
   status: "passed" | "needs_review" | "insufficient";
@@ -189,7 +189,12 @@ function hasDisguisedHighRiskClaim(claim: WorkWeeklyGeneratedClaim) {
   // clauses by keyword; their complete meaning is independently verified.
   if (claim.claimType !== "fact" && claim.claimType !== "person"
     && claim.claimType !== "temporal_order") return false;
+  // A verified absence of an actor's commitment is not an affirmative
+  // commitment. Remove only that predicate, keeping later affirmative clauses
+  // and direct double negations available to the conservative backstop.
   const affirmative = claim.text.replace(
+    /(?<!不是|并非|不能说)(?:无人|没有(?:任何)?人)(?:明确)?承诺/gu, ""
+  ).replace(
     /(?:尚未|还未|并未|未|不|没有|无|是否|待)(?:明确)?(?:承诺|决定|确认|接受|完成)/gu, ""
   );
   // Match the frequency word, not a character overlap such as 汇总 + 是否.

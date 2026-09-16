@@ -89,14 +89,17 @@ beforeEach(() => {
 
 describe("Work Weekly TokenHub transport", () => {
   it.each([
-    { role: "qa_answerer" as const, prefix: "WORK_REVIEW_WEEKLY_QA_ANSWERER", timeoutMs: 60_000 },
-    { role: "qa_verifier" as const, prefix: "WORK_REVIEW_WEEKLY_QA_VERIFIER", timeoutMs: 30_000 }
-  ])("carries the independent DS Pro $role override into SDK and product timers without retries", async ({ role, prefix, timeoutMs }) => {
+    { role: "qa_answerer" as const, prefix: "WORK_REVIEW_WEEKLY_QA_ANSWERER", timeoutMs: 60_000, model: "deepseek-v4-pro" },
+    { role: "qa_verifier" as const, prefix: "WORK_REVIEW_WEEKLY_QA_VERIFIER", timeoutMs: 30_000, model: "deepseek-v4-pro" },
+    { role: "qa_answerer" as const, prefix: "WORK_REVIEW_WEEKLY_QA_ANSWERER", timeoutMs: 30_000, model: "deepseek-v4-flash" },
+    { role: "qa_verifier" as const, prefix: "WORK_REVIEW_WEEKLY_QA_VERIFIER", timeoutMs: 30_000, model: "deepseek-v4-flash" }
+  ])("carries $model $role into SDK and product timers without retries", async ({ role, prefix, timeoutMs, model }) => {
     const answer = role === "qa_answerer"
       ? { status: "insufficient_evidence", answer: "没有足够依据。", claims: [], relevantSourceRefs: [] }
       : { items: [] };
     const transport = vi.fn(async (_url: RequestInfo | URL, _options?: RequestInit) => {
       const event = { type: "response.completed", response: { ...completedResponse,
+        usage: { input_tokens: 512, output_tokens: 100, output_tokens_details: { reasoning_tokens: 0 } },
         output: [{ type: "message", role: "assistant", content: [{ type: "output_text", text: JSON.stringify(answer) }] }] } };
       return new Response(`data: ${JSON.stringify(event)}\n\n`, { headers: { "content-type": "text/event-stream" } });
     });
@@ -107,16 +110,19 @@ describe("Work Weekly TokenHub transport", () => {
     const clientOptions = vi.spyOn(OpenAI.prototype, "withOptions");
     try {
       const profile = resolveWorkWeeklyProviderProfile(role, { OPENAI_QA_MODEL: "gpt-5.5",
-        [`${prefix}_MODEL`]: "deepseek-v4-pro", [`${prefix}_REASONING_EFFORT`]: "none", [`${prefix}_TIMEOUT_MS`]: String(timeoutMs) });
-      expect(profile).toMatchObject({ role, model: "deepseek-v4-pro", reasoningEffort: "none", timeoutMs, maxOutputTokens: 4_000 });
+        [`${prefix}_MODEL`]: model, [`${prefix}_REASONING_EFFORT`]: "none", [`${prefix}_TIMEOUT_MS`]: String(timeoutMs) });
+      expect(profile).toMatchObject({ role, model, reasoningEffort: "none", timeoutMs, maxOutputTokens: 4_000 });
+      const onUsage = vi.fn();
       expect(await requestWorkWeeklyStructuredJson({ profile,
+        onUsage,
         schema: role === "qa_answerer" ? WorkWeeklyQaAnswerDraftSchema : WorkWeeklyVerifierResponseSchema,
         requestInput: [{ role: "user", content: "本地合成来源：保留原始文字。" }],
         jsonInstruction: role === "qa_answerer" ? WORK_WEEKLY_QA_ANSWERER_JSON_INSTRUCTION : "输出严格 JSON {items:[]}。"
       })).toEqual(answer);
       expect(transport).toHaveBeenCalledTimes(1);
       const body = JSON.parse(String(transport.mock.calls[0]![1]?.body));
-      expect(body).toMatchObject({ model: "deepseek-v4-pro", stream: true, reasoning: { effort: "none" }, max_output_tokens: 4_000 });
+      expect(body).toMatchObject({ model, stream: true, reasoning: { effort: "none" }, max_output_tokens: 4_000 });
+      expect(onUsage).toHaveBeenCalledWith({ inputTokens: 512, outputTokens: 100, reasoningTokens: 0 });
       expect(body.input[0].content.includes("JSON 根对象必须包含 items 字段")).toBe(role === "qa_verifier");
       expect(body.input[1]).toEqual({ role: "user", content: "本地合成来源：保留原始文字。" });
       expect(mocks.createClient).toHaveBeenCalledWith(expect.objectContaining({ timeoutMs }));

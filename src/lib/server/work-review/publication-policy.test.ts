@@ -15,6 +15,7 @@ import {
   workClaimGptVerificationReasons,
   WORK_MEETING_CAUSALITY_ROUTING_ISSUE_CODE,
   WORK_MEETING_NON_GPT_ISSUE_CODE,
+  WORK_MEETING_VERIFIER_CAPACITY_ISSUE_CODE,
   WORK_MEETING_SEMANTIC_VALUE_AUDIT_ISSUE_CODE_PREFIX,
   WORK_MEETING_SEMANTIC_SAFETY_ISSUE_CODES,
   WORK_MEETING_SEMANTIC_SAFETY_RULES
@@ -53,14 +54,77 @@ function evaluation(
 }
 
 describe("Work Meeting publication policy", () => {
-  it("routes only core high-risk semantics and explicit causality to the GPT Verifier", () => {
+  it.each(["commitment_owner", "deadline", "decision_finality", "speaker_attribution"] as const)(
+    "records capacity-skipped %s as unverified and clears its value without suppressing the core", type => {
+      const kind = type === "decision_finality" ? "decision" : "commitment";
+      const core = claim("core", kind === "decision" ? "decision_existence" : "commitment_existence");
+      const value: WorkClaimSemanticValue = type === "deadline" ? { kind: "deadline", dueAt: null, originalDueExpression: "周五" }
+        : type === "decision_finality" ? { kind: "decision_finality", value: "final" } : { kind: type, value: "甲" };
+      const optional = claim("optional", type, [], value);
+      const field = ({ commitment_owner: "candidateOwner", deadline: "originalDueExpression", decision_finality: "decisionFinality", speaker_attribution: "rawActorLabel" } as const)[type];
+      const result = evaluateWorkCandidatePublication({ kind, verifierEnabled: true, claims: [core, optional],
+        structuredData: WorkMeetingCandidateStructuredDataSchema.parse({ [field]: type === "deadline" ? "周五" : type === "decision_finality" ? "final" : "甲" }),
+        evaluations: [evaluation(core.id), { claimId: optional.id, supportVerdict: "unverifiable",
+          issueCodes: [WORK_MEETING_VERIFIER_CAPACITY_ISSUE_CODE], supportedEvidenceIds: [] }] });
+      expect(result.publicationAction).toBe("show_as_candidate");
+      expect(result.displayClaimIds).toEqual([core.id]);
+      expect(result.structuredData[field]).toBe(type === "decision_finality" ? "unclear" : null);
+      expect(result.reasonCodes).toContain(`${type}_capacity_not_checked`);
+      expect(result.reasonCodes).not.toContain(`${type}_evidence_insufficient`);
+      expect(result.reasonCodes).not.toContain(`${type}_verification_failed`);
+      expect(result.displayNotes.join(" ")).toContain("因核验容量不足未核验");
+      expect(evaluateWorkClaimPublication({ claimType: type, supportVerdict: "entailed",
+        issueCodes: [WORK_MEETING_VERIFIER_CAPACITY_ISSUE_CODE] }).publicationAction).toBe("suppress");
+    });
+
+  it.each([
+    ["not_checked", [WORK_MEETING_NON_GPT_ISSUE_CODE], "负责人未核验，待确认"],
+    ["evidence_insufficient", [], "负责人依据不足，待确认"],
+    ["verification_failed", ["verifier_result_missing"], "负责人核验未完成，待确认"]
+  ] as const)("keeps supported training stages while distinguishing optional owner %s", (reason, issues, note) => {
+    const core = { ...claim("core", "commitment_existence"), text: "周四交培训材料初稿、周五修订终稿，下周一开展培训" };
+    const owner = claim("owner", "commitment_owner", [], { kind: "commitment_owner", value: "陈宁" });
+    const result = evaluateWorkCandidatePublication({ kind: "commitment", verifierEnabled: true,
+      structuredData: WorkMeetingCandidateStructuredDataSchema.parse({ candidateOwner: "陈宁" }),
+      claims: [core, owner], evaluations: [evaluation(core.id), {
+        claimId: owner.id, supportVerdict: "unverifiable", issueCodes: [...issues], supportedEvidenceIds: [] }] });
+    expect(result.publicationAction).toBe("show_as_candidate");
+    expect(result.displayClaimIds).toEqual([core.id]);
+    expect(result.reasonCodes).toContain(`commitment_owner_${reason}`);
+    expect(result.displayNotes).toContain(note);
+    if (reason !== "not_checked") expect(result.structuredData.candidateOwner).toBeNull();
+    // A mocked verdict exercises control flow, not model interpretation of stages.
+    const unsafe = evaluateWorkCandidatePublication({ kind: "commitment", verifierEnabled: true,
+      structuredData: WorkMeetingCandidateStructuredDataSchema.parse({}), claims: [core],
+      evaluations: [{ ...evaluation(core.id), supportVerdict: "unsupported",
+        supportedEvidenceIds: [], issueCodes: ["independent_items_conflated"] }] });
+    expect(unsafe.publicationAction).toBe("suppress");
+  });
+
+  it("downgrades uncertain finality without hiding an established decision", () => {
+    const core = claim("core", "decision_existence");
+    const finality = claim("final", "decision_finality", [], { kind: "decision_finality", value: "final" });
+    const result = evaluateWorkCandidatePublication({ kind: "decision", verifierEnabled: true,
+      structuredData: WorkMeetingCandidateStructuredDataSchema.parse({ decisionFinality: "final" }),
+      claims: [core, finality], evaluations: [evaluation(core.id), evaluation(finality.id, "unverifiable")] });
+    expect(result.publicationAction).toBe("show_as_candidate");
+    expect(result.structuredData.decisionFinality).toBe("unclear");
+    expect(result.displayClaimIds).toEqual([core.id]);
+    expect(result.displayNotes).toContain("决定是否最终依据不足，待确认");
+  });
+
+  it("routes core high-risk semantics, emitted attributes and explicit causality to the GPT Verifier", () => {
     const highRiskCases = [
       [claim("decision_exists", "decision_existence"), "decision"],
       [claim("commitment", "commitment_existence"), "commitment"],
       [claim("action", "action_item"), "action_item"],
       [claim("plan", "plan_change"), "plan_change"],
       [claim("resolution", "question_resolution"), "question_resolution"],
-      [claim("causal", "proposal", ["causality"]), "causality"]
+      [claim("causal", "proposal", ["causality"]), "causality"],
+      [claim("finality", "decision_finality"), "decision_finality"],
+      [claim("speaker", "speaker_attribution"), "speaker_attribution"],
+      [claim("owner", "commitment_owner"), "commitment_owner"],
+      [claim("date", "deadline"), "deadline"]
     ] as const;
     for (const [atomicClaim, reason] of highRiskCases) {
       expect(requiresWorkClaimGptVerification(atomicClaim)).toBe(true);
@@ -70,11 +134,7 @@ describe("Work Meeting publication policy", () => {
     for (const claimType of [
       "topic",
       "proposal",
-      "open_question",
-      "decision_finality",
-      "speaker_attribution",
-      "commitment_owner",
-      "deadline"
+      "open_question"
     ] as const) {
       const atomicClaim = claim(`low_${claimType}`, claimType);
       expect(requiresWorkClaimGptVerification(atomicClaim)).toBe(false);
@@ -106,7 +166,7 @@ describe("Work Meeting publication policy", () => {
         claimType,
         supportVerdict: "unverifiable",
         issueCodes: [WORK_MEETING_NON_GPT_ISSUE_CODE]
-      }).publicationAction).toBe("show_as_question");
+      }).publicationAction).toBe("suppress");
     }
     expect(evaluateWorkClaimPublication({
       claimType: "decision_existence",
@@ -419,7 +479,7 @@ describe("Work Meeting publication policy", () => {
     const decision = evaluateWorkCandidatePublication(input);
     expect(decision).toMatchObject({ publicationAction: "show_as_candidate", confirmationRequired: true,
       structuredData: { dueAt: null, originalDueExpression: expression }, displayClaimIds: [core.id] });
-    expect(decision.displayNotes).toContain("截止时间待确认");
+    expect(decision.displayNotes).toContain("截止时间未核验，待确认");
     expect(JSON.stringify(input)).toBe(before);
   });
 
@@ -652,7 +712,7 @@ describe("Work Meeting publication policy", () => {
     expect(decision.structuredData.decisionFinality).toBe("final");
     expect(decision.reasonCodes).toContain("decision_finality_pending_confirmation");
     expect(decision.displayClaimIds).toEqual(["claim_exists"]);
-    expect(decision.displayNotes).toContain("决定是否最终待确认");
+    expect(decision.displayNotes).toContain("决定是否最终未核验，待确认");
   });
 
   it("clears unsupported owner but retains an unverifiable due value for user confirmation", () => {
@@ -704,8 +764,8 @@ describe("Work Meeting publication policy", () => {
     });
     expect(decision.displayClaimIds).toEqual(["claim_commitment"]);
     expect(decision.displayNotes).toEqual(expect.arrayContaining([
-      "负责人待确认",
-      "截止时间待确认"
+      "负责人依据不足，待确认",
+      "截止时间未核验，待确认"
     ]));
   });
 

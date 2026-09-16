@@ -4,7 +4,8 @@ import { applyWorkMeetingOrganization, applyVerifiedWorkMeetingDuplicates, build
   createWorkMeetingDeduplicator, decodeWorkMeetingOrganizationPlan } from "./candidate-deduplication";
 import type { AssembledWorkMeetingCandidate } from "./candidate-normalization";
 import type { WorkStructuredJsonRequest } from "./analysis-provider";
-import { selectWorkCandidatesForGptVerification } from "./candidate-normalization";
+import { buildWorkMeetingVerifierInput, selectWorkCandidatesForGptVerification } from "./candidate-normalization";
+import { evaluateWorkCandidatePublication } from "./publication-policy";
 import { buildWorkDuplicateCoverageRequests, validateWorkDuplicateCoverageOutput, type WorkDuplicateRelation } from "./duplicate-coverage";
 
 function candidate(id: string, text = id): AssembledWorkMeetingCandidate {
@@ -37,6 +38,31 @@ function applyWithCompleteCoverageFixture(candidates: ReturnType<typeof eligible
 }
 
 describe("Work Meeting global organization", () => {
+  it("passes proposed same-item context to attributes for verification without approving unrelated names", () => {
+    const c = candidate("a", "培训材料初稿、修订和讲解");
+    c.structuredData.candidateOwner = "陈宁";
+    c.claims.push({ ...c.claims[0], id: "owner_a", claimType: "commitment_owner", text: "陈宁负责培训材料",
+      semanticValue: { kind: "commitment_owner", value: "陈宁" } });
+    const canonical = [...segments([c]), { ...segments([c])[0], id: "recap", text: "培训材料的三个阶段均已认领，转写未区分发言者。" },
+      { ...segments([c])[0], id: "unrelated", text: "陈宁负责另一份试点名单。" }];
+    const result = applyWorkMeetingOrganization([c], { evidence: [{ item: 1, evidenceSegmentIds: ["recap"] }] }, canonical);
+    const candidates = selectWorkCandidatesForGptVerification({ candidates: result.candidates, segments: canonical });
+    const input = buildWorkMeetingVerifierInput({ candidates, segments: canonical, accountId: "account_a",
+      meetingId: "meeting_a", publicationId: "publication_a", canonicalDigest: "a".repeat(64) });
+    expect(input.claims).toHaveLength(2);
+    for (const claim of input.claims) expect(claim.evidenceIds).toEqual(["recap", "s_a"]);
+    expect(JSON.stringify(input)).not.toContain("unrelated");
+    const assembled = result.candidates[0];
+    const publication = evaluateWorkCandidatePublication({ kind: assembled.kind, structuredData: { ...assembled.structuredData, planStages: [] },
+      claims: assembled.claims, verifierEnabled: true, canonicalSegments: canonical,
+      evaluations: assembled.claims.map(claim => ({ claimId: claim.id,
+        supportVerdict: claim.claimType === "commitment_owner" ? "unverifiable" : "entailed",
+        issueCodes: [], supportedEvidenceIds: claim.claimType === "commitment_owner" ? [] : claim.evidenceIds })) });
+    expect(publication.publicationAction).toBe("show_as_candidate");
+    expect(publication.structuredData.candidateOwner).toBeNull();
+    expect(publication.displayClaimIds).toEqual([assembled.claims.find(claim => claim.claimType === "commitment_existence")!.id]);
+  });
+
   it("combines one delivery's details, preserves conditions and originals, and creates stable new Claim IDs", () => {
     const input = [candidate("a", "实现接口，权限异常则停止"), candidate("b", "同一接口补三组匿名测试数据"), candidate("c", "独立交付回退脚本")];
     const original = structuredClone(input);

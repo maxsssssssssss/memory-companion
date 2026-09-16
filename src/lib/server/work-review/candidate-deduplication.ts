@@ -9,7 +9,7 @@ import type { WorkReviewAnalysisProviderProfile } from "./runtime-config";
 export { applyWorkDuplicateCoverage as applyVerifiedWorkMeetingDuplicates } from "./duplicate-coverage";
 
 // Reuse the existing Provider stage/budget slot, now before verification.
-export const WORK_MEETING_DEDUPLICATOR_PROMPT_VERSION = "work_meeting_organizer_v3";
+export const WORK_MEETING_DEDUPLICATOR_PROMPT_VERSION = "work_meeting_organizer_v4";
 export const WORK_MEETING_DEDUPLICATOR_SCHEMA_VERSION = "work_meeting_organization_v3";
 export const WORK_MEETING_DEDUPLICATOR_TIMEOUT_MS = 90_000;
 const MAX_CANDIDATES = 128;
@@ -73,6 +73,7 @@ const SYSTEM_PROMPT = [
   "duplicates每行[重复项C引用,覆盖项C引用,...]：所有实质内容被同kind覆盖项完整保留才能删除。必须逐项保留主语、状态、条件、范围、例外和日期；仅主题相近不是覆盖，有任一独有实质细节就保留。覆盖项不可是另一个重复项，禁止链/循环。后端还会等覆盖项通过现有发布核验才删除；未通过则保留重复项。",
   "evidence每行[候选C引用,新增原文E引用,...]，仅补尚未在该项e中、支持该项已有正文的同一事项原文。不要重复列已有引用；没有新增依据就输出[]。全场出现姓名不支持该项归属；必须是该事项明确归属/接受的证据。不能借其他事项或将请求补成接受。转写含糊不能补猜词，不能借合并掩盖条件或待完成状态。",
   "priority按实质重要性排列整理后保留项（group只列一个成员作为代表）：当前采纳结果及其关键条件、明确交付、阻断依赖、未认领工作和关键未决问题优先；重复/总括/背景/一般协助靠后。让主要结果各有代表，详细交付优先于总括；不按kind、时间顺序、关键词或篇幅排序。",
+  "补充的同一事项Evidence会同时交给该事项的核心和属性Claim核验，并不直接证明归属。优先查找已有明确具名接受/会末总结，不能凭整场出现某人姓名补证。培训材料的初稿、终稿、实施日期可为同一交付的阶段；培训、参与名单、账号开通等不同交付即使同主题也各自保留，不能互相当重复覆盖。部门角色按原文保留，不猜测同音词。",
   "20仅是后续展示上限，不是目标条数。未指定源项仍保留；不要为了20合并不同成果，不从context生成未提取事项。",
   "只输出无缩进JSON，四个数组都必填：{\"duplicates\":[[\"C3\",\"C4\",\"C5\"]],\"groups\":[[\"C1\",\"C2\"]],\"evidence\":[[\"C4\",\"E7\",\"E8\"]],\"priority\":[\"C1\",\"C4\",\"C5\"]}。示例仅说明格式，不是实际计划；只能使用输入实际存在的引用。每行group最多8项，duplicate最多8个覆盖项，evidence最多16段；无关系用空数组。不输出理由或正文。"
 ].join("\n");
@@ -227,8 +228,11 @@ export function applyWorkMeetingOrganization(candidates: AssembledWorkMeetingCan
     if (ids.length === source.claims[0].evidenceIds.length) continue;
     acceptedPlan.evidence.push({ item: row.item, evidenceSegmentIds: unique(row.evidenceSegmentIds).sort() });
     const id = stableId("work_candidate", { source: source.id, evidenceIds: ids });
-    working[row.item - 1] = { ...source, id, evidenceIds, claims: source.claims.map((claim, i) => ({ ...claim,
-      id: stableId("work_claim", { candidate: id, source: claim.id }), candidateId: id, ...(i === 0 ? { evidenceIds: ids } : {}) })) };
+    working[row.item - 1] = { ...source, id, evidenceIds, claims: source.claims.map((claim) => ({ ...claim,
+      id: stableId("work_claim", { candidate: id, source: claim.id }), candidateId: id,
+      // These proposed same-item excerpts are input context, not an approval.
+      // Each exact attribute must still pass its own Claim verification.
+      evidenceIds: unique([...claim.evidenceIds, ...row.evidenceSegmentIds]).sort() })) };
   }
   const parsedDuplicates = plan.duplicates.map(row => Duplicate.safeParse(row));
   const eligibleDuplicates = parsedDuplicates.flatMap((parsed, index) => {

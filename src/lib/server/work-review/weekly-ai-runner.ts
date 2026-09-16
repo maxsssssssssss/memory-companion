@@ -362,6 +362,8 @@ class DefaultWorkWeeklyRunExecutor implements WorkWeeklyRunExecutor {
   }
 
   async runQa(request: WorkWeeklyQaRunRequest): Promise<WorkWeeklyRunResult> {
+    const startedAt = performance.now();
+    const startedWallMs = Date.now();
     let fence: ReturnType<WorkWeeklyRepository["claimQaRun"]> | null = null;
     const runKey = workWeeklyQaRunKey(request.accountId, request.runId);
     const capture: WorkWeeklyQaDiagnosticObserver = (event) => emitWorkWeeklyQaDiagnostic(async (diagnostic) => {
@@ -374,7 +376,8 @@ class DefaultWorkWeeklyRunExecutor implements WorkWeeklyRunExecutor {
         accountId: request.accountId,
         runId: request.runId,
         leaseOwner: request.leaseOwner,
-        leaseMs: request.leaseMs
+        leaseMs: request.leaseMs,
+        expectedQueuedRun: request
       });
     } catch (error) {
       return {
@@ -418,18 +421,22 @@ class DefaultWorkWeeklyRunExecutor implements WorkWeeklyRunExecutor {
       if (!question?.text) {
         throw Object.assign(new Error("weekly_qa_question_missing"), { code: "weekly_qa_question_missing" });
       }
+      await capture({ stage: "source_load", outcome: "succeeded",
+        elapsedMs: Math.round(performance.now() - startedAt),
+        queueWaitMs: Math.max(0, startedWallMs - Date.parse(question.createdAt)) });
       const answer = await answerWorkWeeklyQuestion({
         accountId: request.accountId,
         weeklyReviewId: request.weeklyReviewId,
         snapshot,
         question: question.text,
-        history: thread.messages as WorkWeeklyQaMessage[],
+        history: thread.messages.filter((message) => message.id !== question.id) as WorkWeeklyQaMessage[],
         answerer: this.providers.configurationError ? null : this.providers.qaAnswerer,
         verifier: this.providers.configurationError ? null : this.providers.qaVerifier,
         signal: request.signal,
         onDiagnostic: capture
       });
       assertWorkWeeklyQaNotCancelled(request.signal);
+      const saveStartedAt = performance.now();
       this.repository.publishQaAnswer({
         accountId: request.accountId,
         fence,
@@ -442,7 +449,8 @@ class DefaultWorkWeeklyRunExecutor implements WorkWeeklyRunExecutor {
         verifierProfile: answer.verifierProfile
       });
       // The optional sink is non-authoritative, including after the publication transaction commits.
-      await capture({ stage: "persistence", outcome: "published" });
+      await capture({ stage: "persistence", outcome: "published", elapsedMs: Math.round(performance.now() - saveStartedAt),
+        totalElapsedMs: Math.round(performance.now() - startedAt) });
       return {
         state: "published",
         kind: "qa",
@@ -453,7 +461,8 @@ class DefaultWorkWeeklyRunExecutor implements WorkWeeklyRunExecutor {
     } catch (error) {
       const code = classifyWorkWeeklyQaError(error, "persistence").code;
       this.failQa(request.accountId, fence, code);
-      await capture({ stage: "persistence", outcome: "failed", errorCode: code });
+      await capture({ stage: "persistence", outcome: "failed", errorCode: code,
+        totalElapsedMs: Math.round(performance.now() - startedAt) });
       return {
         state: "failed",
         kind: "qa",

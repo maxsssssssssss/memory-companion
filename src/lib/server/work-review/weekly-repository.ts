@@ -1517,13 +1517,24 @@ export class WorkWeeklyRepository {
     return run.immediate();
   }
 
-  claimQaRun(input: { accountId: string; runId: string; leaseOwner: string; leaseMs: number }) {
+  claimQaRun(input: { accountId: string; runId: string; leaseOwner: string; leaseMs: number;
+    expectedQueuedRun?: { weeklyReviewId: string; runVersion: number; sourceSnapshotDigest: string;
+      threadId: string; questionMessageId: string } }) {
     const now = this.now();
     const leaseExpiresAt = new Date(Date.parse(now) + input.leaseMs).toISOString();
     const run = this.database.transaction(() => {
       const row = this.database.prepare(`SELECT * FROM wr_weekly_qa_runs WHERE account_id = ? AND id = ?`)
         .get(input.accountId, input.runId) as QaRunRow | undefined;
       if (!row) throw new WorkWeeklyQaNotFoundError();
+      const expected = input.expectedQueuedRun;
+      // Transport receipts and prior scans cannot authorize a Provider replay.
+      // Validate the fresh queued state and every payload field in this same
+      // IMMEDIATE transaction; unknown-outcome termination can still reclaim.
+      if (expected && (row.state !== "queued" || row.weekly_review_id !== expected.weeklyReviewId
+        || row.run_version !== expected.runVersion || row.source_snapshot_digest !== expected.sourceSnapshotDigest
+        || row.thread_id !== expected.threadId || row.question_message_id !== expected.questionMessageId)) {
+        throw new WorkWeeklyLeaseLostError();
+      }
       this.requireReviewRow(input.accountId, row.weekly_review_id);
       const result = this.database.prepare(`
         UPDATE wr_weekly_qa_runs SET state = 'processing', lease_owner = ?,

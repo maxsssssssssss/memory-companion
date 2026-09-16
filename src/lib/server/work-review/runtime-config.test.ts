@@ -338,7 +338,7 @@ describe("Work Review runtime config", () => {
       reasoningEffort: "minimal",
       timeoutMs: 2_000,
       maxOutputTokens: 4_000,
-      promptVersion: "work_meeting_extractor_v14",
+      promptVersion: "work_meeting_extractor_v15",
       schemaVersion: "work_meeting_candidates_v7"
     });
     expect(config.verifier).toMatchObject({
@@ -347,7 +347,7 @@ describe("Work Review runtime config", () => {
       reasoningEffort: "high",
       timeoutMs: 3_000,
       maxOutputTokens: 3_000,
-      promptVersion: "work_meeting_verifier_v12",
+      promptVersion: "work_meeting_verifier_v13",
       schemaVersion: "work_meeting_claim_evaluations_v3"
     });
   });

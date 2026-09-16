@@ -16,6 +16,7 @@ import {
   estimateWorkVerifierClaimPayloadCharacters,
   partitionWorkMeetingCandidateReviewCapacity,
   partitionWorkCandidatesForVerification,
+  planWorkCandidatesForVerification,
   selectWorkCandidatesForGptVerification,
   WORK_VERIFIER_MAX_CLAIMS_PER_BATCH,
   WORK_VERIFIER_MAX_BATCHES,
@@ -78,6 +79,86 @@ function assemble(
 }
 
 describe("Work Meeting candidate normalization", () => {
+  it("defers optional attributes rather than required cores at either capacity limit", () => {
+    const canonical = [segment(0), segment(1, "unknown", "长属性依据".repeat(3000))];
+    const draft = candidate({ clientCandidateKey: "payload", evidenceIds: canonical.map(s => s.id), claims: [
+      { clientClaimKey: "core", claimType: "commitment_existence", text: "认领独立交付", evidenceIds: ["segment_0"] },
+      { clientClaimKey: "owner", claimType: "commitment_owner", text: "甲认领", evidenceIds: ["segment_1"],
+        semanticValue: { kind: "commitment_owner", value: "甲" } }
+    ] });
+    const candidates = assemble([{ windowIndex: 0, candidates: [draft] }], canonical);
+    const core = candidates[0].claims.find(c => c.claimType === "commitment_existence")!;
+    const owner = candidates[0].claims.find(c => c.claimType === "commitment_owner")!;
+    const plan = planWorkCandidatesForVerification({ candidates, segments: canonical });
+    expect(plan.batches.flatMap(b => b.flatMap(c => c.claims.map(claim => claim.id)))).toEqual([core.id]);
+    expect(plan.deferredClaimIds).toEqual([owner.id]);
+    const oversizedCore = { ...core, evidenceIds: ["segment_1"] };
+    expect(planWorkCandidatesForVerification({ candidates: [{ ...candidates[0], claims: [oversizedCore, owner] }],
+      segments: canonical })).toMatchObject({ batches: [[{ claims: [oversizedCore] }]], deferredClaimIds: [owner.id] });
+    expect(() => planWorkCandidatesForVerification({ candidates: [{ ...candidates[0], claims: [core, { ...owner, evidenceIds: ["foreign"] }] }],
+      segments: canonical })).toThrow("work_verifier_input_evidence_outside_canonical_publication");
+
+    const compact = [segment(0)];
+    const drafts = Array.from({ length: 18 }, (_, i) => candidate({ clientCandidateKey: `item_${i}`, evidenceIds: ["segment_0"],
+      claims: [...Array.from({ length: 4 }, (_, j) => ({ clientClaimKey: `core_${i}_${j}`,
+        claimType: "commitment_existence" as const, text: `独立事项${i}阶段${j}`, evidenceIds: ["segment_0"] })),
+      { clientClaimKey: `owner_${i}`, claimType: "commitment_owner", text: `参与者${i}`,
+        semanticValue: { kind: "commitment_owner", value: `参与者${i}` }, evidenceIds: ["segment_0"] }] }));
+    const dense = assemble([{ windowIndex: 0, candidates: drafts }], compact).map(c => ({ ...c,
+      claims: c.claims.flatMap(claim => claim.claimType === "commitment_existence"
+        ? Array.from({ length: 4 }, (_, i) => ({ ...claim, id: `${claim.id}_${i}` })) : [claim]) }));
+    const required = dense.map(c => ({ ...c, claims: c.claims.filter(claim => claim.claimType !== "commitment_owner") }));
+    expect(partitionWorkCandidatesForVerification({ candidates: required, segments: compact })).toHaveLength(3);
+    expect(() => partitionWorkCandidatesForVerification({ candidates: dense, segments: compact })).toThrow("work_verifier_batch_budget_exceeded");
+    const densePlan = planWorkCandidatesForVerification({ candidates: dense, segments: compact });
+    expect(densePlan.batches).toHaveLength(3);
+    expect(densePlan.deferredClaimIds).toHaveLength(18);
+    expect(densePlan.batches.flatMap(b => b.flatMap(c => c.claims))).toHaveLength(72);
+    const extraCore = { ...required[0].claims[0], id: "extra_core" };
+    expect(() => planWorkCandidatesForVerification({ candidates: [{ ...required[0], claims: [...required[0].claims, extraCore] }, ...required.slice(1)],
+      segments: compact })).toThrow("work_verifier_batch_budget_exceeded");
+  });
+
+  it("does not collapse separate owners of identically worded tasks before verification", () => {
+    const drafts = ["甲", "乙"].map((owner, i) => {
+      const draft = candidate({ clientCandidateKey: `owner_${i}`, evidenceIds: ["segment_0"] });
+      draft.structuredData.candidateOwner = owner;
+      return draft;
+    });
+    expect(assemble([{ windowIndex: 0, candidates: drafts }])).toHaveLength(2);
+  });
+
+  it("keeps fourteen cores and all emitted attributes in bounded same-candidate batches", () => {
+    const canonical = Array.from({ length: 14 }, (_, i) => segment(i, "unknown", `事项 ${i} 已明确接受，周五完成。`));
+    const drafts = canonical.map((s, i) => candidate({ clientCandidateKey: `item_${i}`, evidenceIds: [s.id],
+      claims: [
+        { clientClaimKey: `core_${i}`, claimType: "commitment_existence", text: `完成独立交付 ${i}`, evidenceIds: [s.id] },
+        ...(i < 9 ? [{ clientClaimKey: `owner_${i}`, claimType: "commitment_owner" as const,
+          semanticValue: { kind: "commitment_owner" as const, value: `参与者 ${i}` }, text: `参与者 ${i} 认领`, evidenceIds: [s.id] }] : []),
+        ...(i < 8 ? [{ clientClaimKey: `due_${i}`, claimType: "deadline" as const,
+          semanticValue: { kind: "deadline" as const, dueAt: null, originalDueExpression: "周五" }, text: "周五完成", evidenceIds: [s.id] }] : []),
+        ...(i < 2 ? [{ clientClaimKey: `final_${i}`, claimType: "decision_finality" as const,
+          semanticValue: { kind: "decision_finality" as const, value: "final" as const }, text: "最终决定", evidenceIds: [s.id] }] : []),
+        { clientClaimKey: `speaker_${i}`, claimType: "speaker_attribution", text: `发言者 ${i}`,
+          semanticValue: { kind: "speaker_attribution", value: `发言者 ${i}` }, evidenceIds: [s.id] }
+      ] }));
+    const candidates = selectWorkCandidatesForGptVerification({ candidates: assemble([{ windowIndex: 0, candidates: drafts }], canonical), segments: canonical });
+    const batches = partitionWorkCandidatesForVerification({ candidates, segments: canonical });
+    expect(batches.length).toBeLessThanOrEqual(3);
+    const claims = candidates.flatMap(c => c.claims);
+    expect(claims).toHaveLength(47);
+    expect(batches.flatMap(batch => batch.flatMap(c => c.claims.map(claim => claim.id))).sort()).toEqual(claims.map(c => c.id).sort());
+    for (const batch of batches) {
+      const input = buildWorkMeetingVerifierInput({ accountId: "account_1", meetingId: "meeting_1",
+        publicationId: "publication_1", canonicalDigest: "a".repeat(64), candidates: batch, segments: canonical });
+      expect(input.claims.length).toBeLessThanOrEqual(24);
+      expect(JSON.stringify(buildWorkMeetingVerifierProviderPayload(input)).length).toBeLessThanOrEqual(12_000);
+      for (const c of batch) expect(c.claims).toEqual(candidates.find(original => original.id === c.id)!.claims);
+    }
+    expect(() => partitionWorkCandidatesForVerification({ candidates, segments: canonical, maxBatches: 1 }))
+      .toThrow();
+  });
+
   it("keeps independent commitments separate despite sharing a speaker and Segment", () => {
     const drafts = ["完成培训材料", "完成培训材料，并确认参与名单与范围"].map((text, index) =>
       candidate({ clientCandidateKey: `scope_${index}`, evidenceIds: ["segment_0"],
@@ -311,16 +392,17 @@ describe("Work Meeting candidate normalization", () => {
     expect(assembled[0].evidenceIds).toEqual(["segment_1", "segment_2"]);
   });
 
-  it("does not lose a shorter condition when local similarity combines overlapping core claims", () => {
+  it("retains distinct conditions separately until the AI organizer verifies their common delivery", () => {
     const core = "完成隔离检查和测试说明并提交本次交付结果，覆盖正常路径和错误路径，保留状态及排查日志";
     const first = candidate({ clientCandidateKey: "long_core", evidenceIds: ["segment_1"], claims: [{
       clientClaimKey: "long", claimType: "commitment_existence", text: `${core}，增加三组测试和运行文档`, evidenceIds: ["segment_1"] }] });
     const second = candidate({ clientCandidateKey: "short_core", evidenceIds: ["segment_1"], claims: [{
       clientClaimKey: "short", claimType: "commitment_existence", text: `${core}，异常则取消`, evidenceIds: ["segment_1"] }] });
     const result = assemble([{ windowIndex: 0, candidates: [first] }, { windowIndex: 1, candidates: [second] }]);
-    expect(result).toHaveLength(1);
-    expect(result[0].claims[0].text).toContain("增加三组测试和运行文档");
-    expect(result[0].claims[0].text).toContain("异常则取消");
+    expect(result).toHaveLength(2);
+    expect(result.flatMap(c => c.claims.map(claim => claim.text))).toEqual([
+      first.claims[0].text, second.claims[0].text
+    ]);
   });
 
   it("consolidates discussion fragments by core Claim despite optional field conflicts", () => {
@@ -605,6 +687,8 @@ describe("Work Meeting candidate normalization", () => {
     expect(selected[0].kind).toBe("discussion_topic");
     expect(selected[0].claims.map((claim) => claim.id)).toEqual(expectedClaimIds);
     expect(selected[0].claims).toEqual([
+      expect.objectContaining({ claimType: "commitment_owner" }),
+      expect.objectContaining({ claimType: "deadline" }),
       expect.objectContaining({ claimType: "proposal", semanticRiskFlags: ["causality"] })
     ]);
 
@@ -618,15 +702,13 @@ describe("Work Meeting candidate normalization", () => {
     });
     const payload = buildWorkMeetingVerifierProviderPayload(verifierInput);
     expect((verifierInput.segments as Array<{ id: string }>).map((item) => item.id)).toEqual([
-      "segment_3"
+      "segment_1", "segment_2", "segment_3"
     ]);
-    expect(Object.keys(payload.evidenceById)).toEqual(["segment_3"]);
-    expect(payload.items).toHaveLength(1);
+    expect(Object.keys(payload.evidenceById)).toEqual(["segment_1", "segment_2", "segment_3"]);
+    expect(payload.items).toHaveLength(3);
     expect(payload.items.find((item) => item.claimType === "proposal"))
       .toMatchObject({ semanticRiskFlags: ["causality"] });
     expect(JSON.stringify(payload)).not.toContain("segment_0");
-    expect(JSON.stringify(payload)).not.toContain("segment_1");
-    expect(JSON.stringify(payload)).not.toContain("segment_2");
     expect(JSON.stringify(payload)).not.toContain("segment_4");
   });
 

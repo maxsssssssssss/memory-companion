@@ -69,6 +69,7 @@ export type WorkMeetingExtractorInput = {
   window: WorkMeetingTranscriptWindow;
   schemaRepair?: WorkExtractorSchemaRepair;
   onItemDiscarded?: (discard: WorkExtractorItemDiscard) => void;
+  onItemsValidated?: (summary: WorkExtractorValidationSummary) => void;
   signal?: AbortSignal;
 };
 
@@ -90,6 +91,22 @@ export type WorkExtractorItemDiscard = {
   issues: Array<{ path: string; code: string }>;
   issuesTruncated: boolean;
 };
+
+export const WorkExtractorValidationSummarySchema = z.object({
+  returned: z.number().int().min(0).max(20),
+  retained: z.number().int().min(0).max(20),
+  discarded: z.number().int().min(0).max(20),
+  result: z.enum(["provider_empty", "all_discarded", "partially_retained", "retained"]),
+  reasons: z.record(z.enum(["schema_invalid", "evidence_not_allowed", "evidence_closure_invalid", "duplicate_item", "relationship_invalid"]), z.number().int().positive())
+}).strict().superRefine((value, context) => {
+  const expected = value.returned === 0 ? "provider_empty" : value.retained === 0 ? "all_discarded"
+    : value.discarded > 0 ? "partially_retained" : "retained";
+  if (value.returned !== value.retained + value.discarded || value.result !== expected
+    || Object.values(value.reasons).reduce((sum, count) => sum + count, 0) !== value.discarded) {
+    context.addIssue({ code: "custom", message: "extractor_validation_counts_invalid" });
+  }
+});
+export type WorkExtractorValidationSummary = z.infer<typeof WorkExtractorValidationSummarySchema>;
 
 export type WorkMeetingVerifierInput = {
   accountId: string;
@@ -700,6 +717,7 @@ const WORK_MEETING_REVIEW_UNIT_RULES = [
   "核对同一事项的接受、范围和条件：明确认领加上后续同一事项的细节可以共同支持承诺。临时、限次数或附条件的明确接受仍是承诺，不能仅因不是长期或无条件接受就视为 tentative。不得删掉重要限制使承诺扩大。",
   "共同采纳的方案范围或指标组合可以是一项决定；为同一交付物提供实现、测试和说明可以是一项承诺。语句有列举、多个日期或可拆成更细任务，不等于混合了不成立的事实。",
   "同一交付物的收集输入、核对确认、移除不满足范围/质量要求的部分，是一个交付的阶段与验收条件；每个阶段引用自己的依据即可共同成立。重复出现同一认领及不同阶段日期不构成共同承担，不得仅因此判 independent_items_conflated。不同交付物仍分别审核。",
+  "同一引导/培训交付的材料初稿、按冻结版本修订的终稿和实际培训场次，是同一接受范围的不同阶段；只要各阶段有证据，可共同表达，多个日期不是 independent_items_conflated。不要把参与名单、账号开通等独立交付混入。此原则也适用于其他交付物的初稿、修订和交付阶段。",
   "例如：明确接受完成权限接口及隔离测试，涉及敏感内容则取消，是一个带验收要求和退出条件的承诺；应急方案包含停用开关、恢复说明及触发时保留排查日志，也可以作为一个事项。",
   "独立事项应分别表达，尤其是不同人的认领；但只有合并造成未经支持的共同承担、错误决定状态或扩大接受范围时，才构成 independent_items_conflated。甲接受培训、乙接受名单，不能合并成甲接受培训和名单。",
   "同一事项的步骤与不同业务结果要区分：培训材料与参与范围是不同结果，不能仅因连续出现两个‘我认领’就用‘同时认领’连写成共享主体；ASR可能把换人发言合在同一Segment。没有明确同一承担者的证据时，应分别保留核心认领。",
@@ -715,6 +733,7 @@ const EXTRACTOR_SYSTEM_PROMPT = [
   "触发条件、否定、例外、适用范围、待完成/已完成状态都属于coreText的核心含义，不能只放在可选actor/deadline/finality里，也不能在压缩中删除或改变。条件成立才操作，不得简写为无条件执行；阶段承诺不能写成已经完成。",
   "Canonical是唯一原文。疑似转写错字若影响条件、状态、否定或范围，不能按常识恢复成一个确定词语；即使猜法通顺也不可以。保留原文疑似片段并在coreText就近写明‘原文“…”含糊，待确认’，其余有依据的事项照常提取，保留完整条件句及其他限制。不能只在文末加待确认却把猜出的含义写成事实，不改Canonical。",
   "coreText 使用中性事项文案，不写 speaker_N、具体承担者姓名或第一人称；认领是否存在与承担者身份是两件事。需要身份时只放 actor 字段，不能在 coreText 偷带归属。",
+  "负责部门和角色也不能按常识换写：原文运营与工程不能概括为产品与工程；无法确定角色就省略归属或就近标记含糊。可引用同一事项前后明确具名的接受或会末总结来支持actor，但其它事项出现同一姓名不算依据。",
   "方案编号或名称出现ASR同音、前后不一致时，不要猜测或纠正名称。若具体采纳范围明确，coreText 直接写已采纳的具体范围并引用明确决定的段落；不能因为名称不清就漏掉决定，也不要把猜出的方案名写成事实。",
   "已认领者的泛称同样属于归属：coreText 也不要写‘由主持方/运营侧/技术负责人/我/我们负责’。例如‘由我临时整理两次汇总’只提取‘临时整理两次汇总’，不能猜成主持方负责。‘需要找到政策负责人’这类未来事项要求可以保留，因为它没有断言谁已经认领。",
   "普通 discussion_topic、proposal、open_question 默认只输出 kind、coreText、evidenceSegmentIds；只有确实出现的高风险说话人归属或截止时间才增加 actor/deadline。",
@@ -734,6 +753,8 @@ const EXTRACTOR_SYSTEM_PROMPT = [
 ].join("\n");
 
 const VERIFIER_SYSTEM_PROMPT = [
+  "candidateId仅用于识别同一事项的核心与可选字段，不是证据。先独立判断核心认领/决定，再逐项判断owner、speaker、deadline、finality；属性不明只拒绝该属性，不牵连未断言该属性的核心。每个Claim仍只能用自己的evidenceIds，不可借同批其他事项的姓名或日期。",
+  "commitment_owner需要该具体事项的明确接受及身份联系；同一事项明确具名的上下文或总结可支持，ASR同段混人和第一人称不能延续前一姓名。speaker_attribution不能只凭speaker标签映射真人。deadline必须是该事项的约定时间，保留原话中的阶段与前后限制，不猜年份或时区。decision_finality核对同一事项最后明确采纳及限制，试点/临时范围明确采纳也可为final，不等于长期制度。",
   "输入带evidenceFields时，evidenceById的每个值按evidenceFields列顺序排列，所有原文、时间和发言标签完整保留。coverageSubjects按引用共享候选正文；duplicateCoverage.original和coveredBy只引用该表的明确成员。textFromClaimId引用items中该Claim的原始text，facts中的{claimId}复用该Claim的claimType/text/evidenceIds；这些仅是无损存储引用，不扩大任何Evidence allowlist或覆盖关系。",
   "duplicateCoverage是少量拟删除关系的独立覆盖问题：原项original的全部实质含义是否被明确列出的coveredBy集合共同完整保留。先看原项，再逐一对照指定覆盖项，最后核对各自Evidence。items为真不等于覆盖关系成立。",
   "complete要求动作、每个阶段、日期、条件、否定、例外、范围限制、主语和状态全部保留，允许等价改写，不要求逐字相同。任一独有细节未覆盖则partial，无法判断或Evidence不足则uncertain；两者均保留原项。",
@@ -1424,6 +1445,7 @@ export function validateWorkExtractorWireItems(input: {
   response: unknown;
   allowedSegments: unknown[];
   onItemDiscarded?: (discard: WorkExtractorItemDiscard) => void;
+  onItemsValidated?: (summary: WorkExtractorValidationSummary) => void;
 }): WorkExtractorResponse {
   const envelope = WorkExtractorWireEnvelopeSchema.safeParse(
     normalizeWorkExtractorWireResponse(input.response)
@@ -1437,6 +1459,7 @@ export function validateWorkExtractorWireItems(input: {
   }
   const allowedEvidence = new Set(canonicalSegments(input.allowedSegments).map((segment) => segment.id));
   const discarded = new Set<number>();
+  const reasons: WorkExtractorValidationSummary["reasons"] = {};
   const reportDiscard = (
     sourceIndex: number,
     reason: WorkExtractorItemDiscardReason,
@@ -1445,6 +1468,7 @@ export function validateWorkExtractorWireItems(input: {
   ) => {
     if (discarded.has(sourceIndex)) return;
     discarded.add(sourceIndex);
+    reasons[reason] = (reasons[reason] ?? 0) + 1;
     input.onItemDiscarded?.({
       itemIndex: sourceIndex + 1,
       reason,
@@ -1518,8 +1542,7 @@ export function validateWorkExtractorWireItems(input: {
     candidate.clientCandidateKey,
     candidate
   ]));
-  return {
-    items: localValidItems.filter((candidate) => {
+  const items = localValidItems.filter((candidate) => {
       const relatedId = candidate.structuredData.relatedCommitmentCandidateId;
       if (relatedId === null || localValidById.get(relatedId)?.kind === "commitment") return true;
       const match = /^wire_candidate_(\d+)$/u.exec(candidate.clientCandidateKey);
@@ -1529,8 +1552,15 @@ export function validateWorkExtractorWireItems(input: {
         code: "invalid_relationship"
       }]);
       return false;
-    })
-  };
+    });
+  input.onItemsValidated?.(WorkExtractorValidationSummarySchema.parse({
+    returned: normalizedRoot.items.length, retained: items.length, discarded: discarded.size, reasons,
+    result: normalizedRoot.items.length === 0 ? "provider_empty" : items.length === 0 ? "all_discarded"
+      : discarded.size > 0 ? "partially_retained" : "retained"
+  }));
+  // Keep valid siblings from other windows reviewable. The caller persists
+  // the distinction between a genuine empty response and discarded coverage.
+  return { items };
 }
 
 export function materializeWorkExtractorCandidate(input: {
@@ -1798,6 +1828,7 @@ export function buildWorkMeetingVerifierProviderPayload(input: WorkMeetingVerifi
     evidenceById,
     items: input.claims.map((claim) => ({
       claimId: claim.id,
+      candidateId: claim.candidateId,
       claimType: claim.claimType,
       semanticRiskFlags: claim.semanticRiskFlags ?? [],
       semanticValue: claim.semanticValue ?? null,
@@ -1861,7 +1892,8 @@ export function createStructuredWorkMeetingExtractor(input: {
       return validateWorkExtractorWireItems({
         response,
         allowedSegments: request.window.segments,
-        onItemDiscarded: request.onItemDiscarded
+        onItemDiscarded: request.onItemDiscarded,
+        onItemsValidated: request.onItemsValidated
       }).items;
     }
   };

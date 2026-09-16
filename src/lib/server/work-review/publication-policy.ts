@@ -56,6 +56,7 @@ export const WORK_MEETING_NON_GPT_ISSUE_CODE = "verifier_not_required_non_high_r
 // this never rescues unsupported or contradicted core meaning.
 export const WORK_MEETING_CANONICAL_WORDING_UNCLEAR = "canonical_wording_unclear";
 export const WORK_MEETING_NON_GPT_PROFILE = "not_invoked_non_high_risk";
+export const WORK_MEETING_VERIFIER_CAPACITY_ISSUE_CODE = "verifier_capacity_not_checked";
 export const WORK_MEETING_CAUSALITY_ROUTING_ISSUE_CODE = "gpt_verifier_routed_causality";
 export const WORK_MEETING_SEMANTIC_VALUE_AUDIT_ISSUE_CODE_PREFIX =
   "gpt_verifier_input_semantic_value_sha256_";
@@ -89,6 +90,12 @@ const HIGH_RISK_CLAIMS = new Set<WorkAtomicClaimType>([
 const MEDIUM_RISK_CLAIMS = new Set<WorkAtomicClaimType>([
   "question_resolution"
 ]);
+const OPTIONAL_CLAIMS = new Set<WorkAtomicClaimType>([
+  "decision_finality", "speaker_attribution", "commitment_owner", "deadline"
+]);
+export function isWorkOptionalAttributeClaim(claim: Pick<WorkAtomicClaim, "claimType" | "semanticRiskFlags">) {
+  return OPTIONAL_CLAIMS.has(claim.claimType) && !claim.semanticRiskFlags?.includes("causality");
+}
 
 const REQUIRED_CLAIMS: Record<WorkMeetingCandidateKind, WorkAtomicClaimType[]> = {
   discussion_topic: ["topic"],
@@ -124,6 +131,10 @@ export type WorkClaimGptVerificationReason =
   | "action_item"
   | "plan_change"
   | "question_resolution"
+  | "decision_finality"
+  | "speaker_attribution"
+  | "commitment_owner"
+  | "deadline"
   | "causality";
 
 export function workClaimGptVerificationReasons(
@@ -140,6 +151,9 @@ export function workClaimGptVerificationReasons(
     reasons.push("plan_change");
   } else if (claim.claimType === "question_resolution") {
     reasons.push("question_resolution");
+  } else if (claim.claimType === "decision_finality" || claim.claimType === "speaker_attribution"
+    || claim.claimType === "commitment_owner" || claim.claimType === "deadline") {
+    reasons.push(claim.claimType);
   }
   if (claim.semanticRiskFlags?.includes("causality")) reasons.push("causality");
   return reasons;
@@ -350,7 +364,8 @@ export function evaluateWorkCandidatePublication(input: {
   // Failure to establish an optional resolution must leave the question open,
   // including when the Verifier is disabled.
   const hasGptRequiredClaim = input.claims.some((claim) =>
-    claim.claimType !== "question_resolution" && requiresWorkClaimGptVerification(claim)
+    claim.claimType !== "question_resolution" && !OPTIONAL_CLAIMS.has(claim.claimType)
+      && requiresWorkClaimGptVerification(claim)
   );
   const highRiskCandidateKind = input.kind === "decision"
     || input.kind === "commitment"
@@ -432,8 +447,21 @@ export function evaluateWorkCandidatePublication(input: {
     for (const claim of matchingClaims) {
       const evaluation = evaluationByClaimId.get(claim.id);
       if (!evaluation) {
+        reasonCodes.add(`${claimType}_not_checked`);
         pending = true;
         continue;
+      }
+      if (evaluation.issueCodes.includes(WORK_MEETING_VERIFIER_CAPACITY_ISSUE_CODE)) {
+        reasonCodes.add(`${claimType}_not_checked`);
+        reasonCodes.add(`${claimType}_capacity_not_checked`);
+      } else if (evaluation.issueCodes.includes(WORK_MEETING_NON_GPT_ISSUE_CODE)
+        || evaluation.issueCodes.includes("verifier_disabled")) {
+        reasonCodes.add(`${claimType}_not_checked`);
+      } else if (evaluation.issueCodes.some(code => !SEMANTIC_SAFETY_ISSUE_CODES.has(code)
+        && code !== WORK_MEETING_CANONICAL_WORDING_UNCLEAR && !isAllowedInternalIssueCode(code))) {
+        reasonCodes.add(`${claimType}_verification_failed`);
+      } else if (evaluation.supportVerdict !== "entailed") {
+        reasonCodes.add(`${claimType}_evidence_insufficient`);
       }
       const hasUnsafeIssue = evaluation.issueCodes.some((code) =>
         SEMANTIC_SAFETY_ISSUE_CODES.has(code) || !isAllowedInternalIssueCode(code)
@@ -454,6 +482,13 @@ export function evaluateWorkCandidatePublication(input: {
     }
     return pending ? "pending" as const : "confirmed" as const;
   };
+  const optionalNote = (claimType: WorkAtomicClaimType, label: string) => {
+    if (reasonCodes.has(`${claimType}_capacity_not_checked`)) return `${label}因核验容量不足未核验，待确认`;
+    if (reasonCodes.has(`${claimType}_verification_failed`)) return `${label}核验未完成，待确认`;
+    if (reasonCodes.has(`${claimType}_evidence_insufficient`)) return `${label}依据不足，待确认`;
+    if (reasonCodes.has(`${claimType}_not_checked`)) return `${label}未核验，待确认`;
+    return `${label}待确认`;
+  };
 
   if (input.kind !== "decision" && structuredData.decisionFinality !== null) {
     structuredData.decisionFinality = null;
@@ -467,10 +502,11 @@ export function evaluateWorkCandidatePublication(input: {
     if (status === "rejected") {
       structuredData.decisionFinality = "unclear";
       reasonCodes.add("decision_finality_not_supported");
-      displayNotes.add("决定是否最终待确认");
+      displayNotes.add(optionalNote("decision_finality", "决定是否最终"));
     } else if (status === "pending") {
       reasonCodes.add("decision_finality_pending_confirmation");
-      displayNotes.add("决定是否最终待确认");
+      if (reasonCodes.has("decision_finality_evidence_insufficient")) structuredData.decisionFinality = "unclear";
+      displayNotes.add(optionalNote("decision_finality", "决定是否最终"));
     }
   }
   if (input.kind !== "plan_change" && structuredData.planStages.length > 0) {
@@ -510,10 +546,11 @@ export function evaluateWorkCandidatePublication(input: {
     if (status === "rejected") {
       structuredData.rawActorLabel = null;
       reasonCodes.add("raw_actor_not_supported");
-      displayNotes.add("发言归属待确认");
+      displayNotes.add(optionalNote("speaker_attribution", "发言归属"));
     } else if (status === "pending") {
       reasonCodes.add("raw_actor_pending_confirmation");
-      displayNotes.add("发言归属待确认");
+      if (reasonCodes.has("speaker_attribution_evidence_insufficient")) structuredData.rawActorLabel = null;
+      displayNotes.add(optionalNote("speaker_attribution", "发言归属"));
     }
   }
   if (structuredData.candidateOwner !== null) {
@@ -524,10 +561,11 @@ export function evaluateWorkCandidatePublication(input: {
     if (status === "rejected") {
       structuredData.candidateOwner = null;
       reasonCodes.add("candidate_owner_not_supported");
-      displayNotes.add("负责人待确认");
+      displayNotes.add(optionalNote("commitment_owner", "负责人"));
     } else if (status === "pending") {
       reasonCodes.add("candidate_owner_pending_confirmation");
-      displayNotes.add("负责人待确认");
+      if (reasonCodes.has("commitment_owner_evidence_insufficient")) structuredData.candidateOwner = null;
+      displayNotes.add(optionalNote("commitment_owner", "负责人"));
     }
   }
   if (structuredData.dueAt !== null || structuredData.originalDueExpression !== null) {
@@ -540,7 +578,7 @@ export function evaluateWorkCandidatePublication(input: {
       structuredData.dueAt = null;
       structuredData.originalDueExpression = null;
       reasonCodes.add("deadline_not_supported");
-      displayNotes.add("截止时间待确认");
+      displayNotes.add(optionalNote("deadline", "截止时间"));
     } else if (status === "pending") {
       // Non-GPT metadata has no verified absolute instant. A syntactically
       // valid ISO string is not evidence for a year, midnight, or timezone.
@@ -551,7 +589,7 @@ export function evaluateWorkCandidatePublication(input: {
         original: structuredData.originalDueExpression
       });
       reasonCodes.add("deadline_pending_confirmation");
-      displayNotes.add("截止时间待确认");
+      displayNotes.add(optionalNote("deadline", "截止时间"));
     }
   }
   if (input.kind !== "commitment" && input.kind !== "action_item"
