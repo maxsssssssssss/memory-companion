@@ -436,6 +436,7 @@ function processorFingerprint(input: {
   maxRetries: number;
   retryDelayMs: number;
   recoveryConcurrency: number;
+  fallbackDisabled: boolean;
 }) {
   return fingerprintAnalysisInput({
     kind: "daily_brief",
@@ -455,6 +456,9 @@ function processorFingerprint(input: {
     maxRetries: input.maxRetries,
     retryDelayMs: input.retryDelayMs,
     recoveryConcurrency: input.recoveryConcurrency,
+    // Preserve existing fingerprints when fallback is enabled; disabled runs
+    // must not reuse a checkpoint containing earlier rule-generated output.
+    ...(input.fallbackDisabled ? { fallbackProvider: "none" } : {}),
     sdkMaxRetries: SDK_MAX_RETRIES
   });
 }
@@ -483,6 +487,7 @@ export const openaiExtractionProvider: ExtractionProvider = {
     const maxRetries = resolveDailyBriefMaxRetries();
     const retryDelayMs = resolveDailyBriefRetryDelayMs();
     const recoveryConcurrency = resolveDailyBriefRecoveryConcurrency();
+    const fallbackDisabled = process.env.EXTRACTION_FALLBACK_PROVIDER?.trim().toLowerCase() === "none";
     const outputTokenLimit = resolveMaxOutputTokens();
     const attemptsByChunk = new Map<number, DailyBriefAttemptAudit[]>();
     const totalDeadlineController = new AbortController();
@@ -498,7 +503,8 @@ export const openaiExtractionProvider: ExtractionProvider = {
       totalTimeoutMs,
       maxRetries,
       retryDelayMs,
-      recoveryConcurrency
+      recoveryConcurrency,
+      fallbackDisabled
     });
 
     try {
@@ -669,6 +675,7 @@ export const openaiExtractionProvider: ExtractionProvider = {
           totalDeadlineController.signal.aborted
         ).failureCode,
         fallbackChunk: async (chunk, error) => {
+          if (fallbackDisabled) throw error;
           const classification = safeClassification(
             error,
             totalDeadlineController.signal.aborted

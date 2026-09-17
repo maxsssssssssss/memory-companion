@@ -380,15 +380,15 @@ function responseMetadata(response: ResponseTextCandidate, safeLabelsOnly = fals
   };
 }
 
-export function jsonOnlyInstruction(instruction: string) {
+export function jsonOnlyInstruction(instruction: string, rootField: "items" | "results" = "items") {
   return (
     `${instruction}\n` +
-    "只输出一个合法 JSON 对象，不要输出 Markdown，不要输出解释文字。JSON 根对象必须包含 items 字段。"
+    `只输出一个合法 JSON 对象，不要输出 Markdown，不要输出解释文字。JSON 根对象必须包含 ${rootField} 字段。`
   );
 }
 
-function withJsonInstruction(input: ResponseInput, instruction: string): ResponseInput {
-  const jsonInstruction = jsonOnlyInstruction(instruction);
+function withJsonInstruction(input: ResponseInput, instruction: string, rootField?: "items" | "results"): ResponseInput {
+  const jsonInstruction = jsonOnlyInstruction(instruction, rootField);
 
   if (Array.isArray(input)) {
     return [
@@ -410,6 +410,8 @@ export async function parseStructuredJsonResponse<TSchema extends z.ZodTypeAny>(
   schema: TSchema;
   requestInput: ResponseInput;
   jsonInstruction: string;
+  /** Legacy callers use items; the Memory relevance contract uses results. */
+  jsonRootField?: "items" | "results";
   mode?: StructuredJsonResponseMode;
   /** JSON mode only; accept the terminal completed response, never accumulated deltas. */
   stream?: boolean;
@@ -455,7 +457,7 @@ export async function parseStructuredJsonResponse<TSchema extends z.ZodTypeAny>(
     };
     const request = {
       model: input.model,
-      input: withJsonInstruction(input.requestInput, input.jsonInstruction),
+      input: withJsonInstruction(input.requestInput, input.jsonInstruction, input.jsonRootField),
       ...outputLimit,
       ...reasoning
     };

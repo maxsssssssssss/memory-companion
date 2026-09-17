@@ -1445,6 +1445,7 @@ describe("Daily Reflection workflow API", () => {
     const history = await listDailyReflections(new Request("http://localhost/api/daily-reflections"));
     expect((await history.json()).reflections.find((item: { id: string }) => item.id === body.reflectionId)).toMatchObject(expected);
     const detail = await getDailyReflection(new Request("http://localhost/api/daily-reflections/detail"), { params: Promise.resolve({ reflectionId: body.reflectionId }) });
+    if (!detail) throw new Error("expected upload failure detail response");
     expect(await detail.json()).toMatchObject(expected);
     const original = resolveDailyReflectionAuthoritativeDurationMock.getMockImplementation()!;
     resolveDailyReflectionAuthoritativeDurationMock.mockImplementationOnce(async (...args) => {
@@ -1471,6 +1472,7 @@ describe("Daily Reflection workflow API", () => {
       expect(replay.status).toBe(409);
       expect(resolveDailyReflectionAuthoritativeDurationMock).toHaveBeenCalledTimes(1);
       const deleted = await deleteDailyReflection(new Request("http://localhost/api/daily-reflections/detail", { method: "DELETE" }), { params: Promise.resolve({ reflectionId: body.reflectionId }) });
+      if (!deleted) throw new Error("expected upload failure deletion response");
       expect(deleted.status).toBe(204);
       expect(repository.getUploadRecovery(accountId, body.reflectionId)).toEqual({ uploadState: "terminated", uploadFailure: null });
       expect(afterMock).not.toHaveBeenCalled();

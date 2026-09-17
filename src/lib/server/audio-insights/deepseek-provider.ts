@@ -8,6 +8,7 @@ import {
 } from "@/lib/server/openai/structured-json";
 
 import type { AudioInsightProvider } from "./provider";
+import { requestTokenHubDeepseekFlashJson, TOKENHUB_DEEPSEEK_FLASH_BASE_URL } from "@/lib/server/openai/tokenhub-deepseek-flash";
 
 import type { TranscriptSegment } from "@/lib/domain/types";
 
@@ -74,7 +75,7 @@ function readPositiveIntEnv(name: string, fallback: number) {
 }
 
 function resolveBaseUrl() {
-  return (readStringEnv("DEEPSEEK_BASE_URL") ?? DEFAULT_BASE_URL).replace(/\/+$/, "");
+  return (readStringEnv("AUDIO_INSIGHT_BASE_URL") ?? readStringEnv("DEEPSEEK_BASE_URL") ?? DEFAULT_BASE_URL).replace(/\/+$/, "");
 }
 
 function resolveTimeoutMs() {
@@ -192,6 +193,7 @@ function defaultClientFactory(config: DeepseekClientConfig): DeepseekClient {
 
 export function createDeepseekAudioInsightProvider(deps: {
   clientFactory?: (config: DeepseekClientConfig) => DeepseekClient;
+  fetch?: typeof globalThis.fetch;
   now?: () => number;
   logger?: Logger;
 } = {}): AudioInsightProvider {
@@ -227,20 +229,21 @@ export function createDeepseekAudioInsightProvider(deps: {
         return [];
       }
 
-      const apiKey = readStringEnv("DEEPSEEK_API_KEY");
+      const baseURL = resolveBaseUrl();
+      const tokenHub = Boolean(readStringEnv("AUDIO_INSIGHT_BASE_URL")) && baseURL === TOKENHUB_DEEPSEEK_FLASH_BASE_URL;
+      const apiKey = readStringEnv(tokenHub ? "OPENAI_API_KEY" : "DEEPSEEK_API_KEY");
       if (!apiKey) {
         return fail("missing_api_key");
       }
-      const baseURL = resolveBaseUrl();
-      if (baseURL !== DEFAULT_BASE_URL) {
+      if (baseURL !== DEFAULT_BASE_URL && !tokenHub) {
         return fail("invalid_base_url");
       }
-      if (!allowedModels.has(model) || model.includes("/")) {
+      if (!allowedModels.has(model) || model.includes("/") || (tokenHub && model !== "deepseek-v4-flash")) {
         return fail("invalid_model");
       }
 
       try {
-        const client = clientFactory({
+        const client = tokenHub ? null : clientFactory({
           apiKey,
           baseURL,
           timeout: resolveTimeoutMs(),
@@ -265,14 +268,18 @@ export function createDeepseekAudioInsightProvider(deps: {
           ),
           thinking: { type: "disabled" }
         };
-        const response = options?.signal
-          ? await (client.chat.completions.create as (
+        const response = tokenHub ? { choices: [{ finish_reason: "stop", message: { content: await requestTokenHubDeepseekFlashJson({
+          apiKey, timeoutMs: resolveTimeoutMs(), maxOutputTokens: request.max_tokens,
+          messages: [{ role: "system", content: prompt.system }, { role: "user", content: prompt.user }],
+          signal: options?.signal, fetch: deps.fetch
+        }) } }] } : options?.signal
+          ? await (client!.chat.completions.create as (
               request: Record<string, unknown>,
               options: { signal: AbortSignal }
             ) => ReturnType<DeepseekClient["chat"]["completions"]["create"]>)(request, {
               signal: options.signal
             })
-          : await client.chat.completions.create(request);
+          : await client!.chat.completions.create(request);
         const choice = response.choices?.[0];
         finishReason = choice?.finish_reason ?? "unknown";
         const content = responseContentText(choice?.message?.content);

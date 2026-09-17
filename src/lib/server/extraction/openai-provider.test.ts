@@ -42,6 +42,7 @@ import {
   openaiExtractionProvider,
   resolveDailyBriefCheckpointLeaseMs
 } from "./openai-provider";
+import { ruleExtractionProvider } from "./rule-provider";
 
 let tempDir: string | undefined;
 
@@ -96,6 +97,44 @@ function extractedItem(sourceSegmentIds: string[]) {
 }
 
 describe("openai extraction provider", () => {
+  it.each(["invalid_json", "network_error"])("does not replace %s with rule output when fallback is none", async (failure) => {
+    vi.stubEnv("EXTRACTION_FALLBACK_PROVIDER", "none");
+    vi.stubEnv("EXTRACTION_RESPONSE_MODE", "json");
+    vi.stubEnv("EXTRACTION_MAX_RETRIES", "0");
+    const rule = vi.spyOn(ruleExtractionProvider, "extract");
+    const onProgress = vi.fn();
+    if (failure === "invalid_json") createMock.mockResolvedValue({ output_text: "not-json" });
+    else createMock.mockRejectedValue(new Error("fetch failed"));
+    try {
+      await expect(openaiExtractionProvider.extract("upload_test", segments, { onProgress })).rejects.toThrow();
+      expect(createMock).toHaveBeenCalledTimes(1);
+      expect(rule).not.toHaveBeenCalled();
+      expect(onProgress).not.toHaveBeenCalledWith(expect.objectContaining({ phase: "chunk_fallback" }));
+    } finally {
+      rule.mockRestore();
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it("does not reuse a rule fallback checkpoint after fallback is disabled", async () => {
+    tempDir = await mkdtemp(join(tmpdir(), "daily-brief-fallback-policy-"));
+    const store = new JsonAnalysisChunkCheckpointStore(new JsonStore(tempDir));
+    const analysisCheckpoint = { store, userId: "user_1", recordingDate: "2026-09-17", staleAfterMs: 60_000 };
+    vi.stubEnv("EXTRACTION_RESPONSE_MODE", "json");
+    vi.stubEnv("EXTRACTION_MAX_RETRIES", "0");
+    vi.stubEnv("EXTRACTION_FALLBACK_PROVIDER", "rule");
+    createMock.mockResolvedValue({ output_text: "not-json" });
+    try {
+      await expect(openaiExtractionProvider.extract("upload_test", segments, { analysisCheckpoint })).resolves.toHaveLength(3);
+      expect(createMock).toHaveBeenCalledTimes(1);
+      vi.stubEnv("EXTRACTION_FALLBACK_PROVIDER", "none");
+      await expect(openaiExtractionProvider.extract("upload_test", segments, { analysisCheckpoint })).rejects.toThrow();
+      expect(createMock).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
   const originalApiKey = process.env.OPENAI_API_KEY;
   const originalTimeout = process.env.OPENAI_REQUEST_TIMEOUT_MS;
   const originalMaxRetries = process.env.OPENAI_MAX_RETRIES;

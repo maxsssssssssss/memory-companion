@@ -9,12 +9,13 @@ import {
   type DailyReflectionThinkingSource,
   type ThinkingMode
 } from "@/lib/domain/daily-reflection-thinking";
-import { createOpenAIClient } from "@/lib/server/openai/client";
-import { getOpenAIClientRuntimeConfig } from "@/lib/server/settings/provider-config";
 import type { JsonStore } from "@/lib/server/storage/json-store";
-import { requestQaAnswerText, type QaWireApi } from "@/lib/server/retrieval/qa-provider";
+import {
+  createThinkingTokenHubClient,
+  requestThinkingTokenHubText,
+  THINKING_MODEL
+} from "./thinking-tokenhub-transport";
 
-const DEFAULT_MODEL = "gpt-5.5";
 const DEFAULT_TIMEOUT_MS = 45_000;
 const DEFAULT_MAX_ATTEMPTS = 2;
 
@@ -68,38 +69,16 @@ type ProviderDependencies = {
   environment?: NodeJS.ProcessEnv;
   timeoutMs?: number;
   maxAttempts?: number;
+  fetch?: typeof globalThis.fetch;
   clientFactory?: (store: JsonStore) => Promise<OpenAI>;
   requestText?: (
     client: OpenAI,
     model: string,
     systemPrompt: string,
     userPrompt: string,
-    wireApi: QaWireApi,
     signal: AbortSignal
   ) => Promise<string>;
 };
-
-function nonEmpty(value: string | undefined) {
-  const normalized = value?.trim();
-  return normalized ? normalized : undefined;
-}
-
-export function resolveDailyReflectionThinkingModel(
-  environment: Readonly<Record<string, string | undefined>> = process.env
-) {
-  return nonEmpty(environment.OPENAI_QA_MODEL)
-    ?? nonEmpty(environment.OPENAI_TEXT_MODEL)
-    ?? DEFAULT_MODEL;
-}
-
-function resolveThinkingWireApi(
-  environment: Readonly<Record<string, string | undefined>>
-): QaWireApi {
-  const value = (environment.OPENAI_QA_WIRE_API ?? environment.OPENAI_WIRE_API ?? "")
-    .trim()
-    .toLowerCase();
-  return value === "responses" ? "responses" : "chat";
-}
 
 function historyForPrompt(
   history: DailyReflectionThinkingMessage[],
@@ -312,35 +291,26 @@ function abortedReason(signal: AbortSignal) {
     : new DOMException("Thinking request aborted", "AbortError");
 }
 
-export class OpenAiThinkingConversationProvider implements ThinkingConversationProvider {
-  readonly model: string;
+export class TokenHubThinkingConversationProvider implements ThinkingConversationProvider {
+  readonly model = THINKING_MODEL;
   private readonly timeoutMs: number;
   private readonly maxAttempts: number;
   private readonly environment: NodeJS.ProcessEnv;
-  private readonly wireApi: QaWireApi;
   private readonly clientFactory: NonNullable<ProviderDependencies["clientFactory"]>;
   private readonly requestText: NonNullable<ProviderDependencies["requestText"]>;
 
   constructor(dependencies: ProviderDependencies = {}) {
     this.environment = dependencies.environment ?? process.env;
-    this.model = resolveDailyReflectionThinkingModel(this.environment);
-    this.wireApi = resolveThinkingWireApi(this.environment);
     this.timeoutMs = Math.max(1, Math.min(dependencies.timeoutMs ?? DEFAULT_TIMEOUT_MS, 120_000));
     this.maxAttempts = Math.max(1, Math.min(dependencies.maxAttempts ?? DEFAULT_MAX_ATTEMPTS, 2));
-    this.clientFactory = dependencies.clientFactory ?? (async (store) => (
-      createOpenAIClient(await getOpenAIClientRuntimeConfig(store))
+    this.clientFactory = dependencies.clientFactory ?? (async () => (
+      createThinkingTokenHubClient({
+        environment: this.environment,
+        timeoutMs: this.timeoutMs,
+        fetch: dependencies.fetch
+      })
     ));
-    this.requestText = dependencies.requestText ?? (async (
-      client,
-      model,
-      systemPrompt,
-      userPrompt,
-      wireApi,
-      signal
-    ) => requestQaAnswerText(client, model, systemPrompt, userPrompt, {
-      wireApi,
-      signal
-    }));
+    this.requestText = dependencies.requestText ?? requestThinkingTokenHubText;
   }
 
   async generate(input: DailyReflectionThinkingProviderInput) {
@@ -363,7 +333,6 @@ export class OpenAiThinkingConversationProvider implements ThinkingConversationP
           this.model,
           systemPrompt,
           userPrompt,
-          this.wireApi,
           request.signal
         );
         if (request.signal.aborted) throw abortedReason(request.signal);
@@ -382,5 +351,5 @@ export class OpenAiThinkingConversationProvider implements ThinkingConversationP
 }
 
 export function getThinkingConversationProvider() {
-  return new OpenAiThinkingConversationProvider();
+  return new TokenHubThinkingConversationProvider();
 }

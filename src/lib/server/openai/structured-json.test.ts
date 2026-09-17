@@ -2,7 +2,7 @@
 import OpenAI from "openai";
 import { z } from "zod";
 import { describe, expect, it, vi } from "vitest";
-import { parseJsonObjectFromModelText, parseStructuredJsonResponse } from "./structured-json";
+import { jsonOnlyInstruction, parseJsonObjectFromModelText, parseStructuredJsonResponse } from "./structured-json";
 
 const Schema = z.object({ items: z.array(z.object({ value: z.string() })) });
 
@@ -53,6 +53,27 @@ const streamingInput = {
   model: "test-model", name: "test_schema", schema: Schema,
   requestInput: "input", jsonInstruction: "Return JSON.", mode: "json" as const, stream: true
 };
+
+describe("JSON root field instruction", () => {
+  it("preserves the legacy items instruction exactly", () => {
+    expect(jsonOnlyInstruction("Return JSON.")).toBe("Return JSON.\n只输出一个合法 JSON 对象，不要输出 Markdown，不要输出解释文字。JSON 根对象必须包含 items 字段。");
+  });
+
+  it.each(["text", "messages"])("uses the results contract in the actual %s request", async (kind) => {
+    const fixture = streamingClient([completedEvent({ output: [
+      { type: "message", role: "assistant", content: [{ type: "output_text", text: '{"results":[]}' }] }
+    ] })]);
+    const result = await parseStructuredJsonResponse({ ...streamingInput, client: fixture.client,
+      schema: z.object({ results: z.array(z.unknown()) }).strict(), jsonRootField: "results",
+      requestInput: kind === "text" ? "input" : [{ role: "user", content: "input" }]
+    });
+    expect(result).toEqual({ results: [] });
+    const request = fixture.create.mock.calls[0]![0];
+    expect(JSON.stringify(request.input)).toContain("JSON 根对象必须包含 results 字段。");
+    expect(JSON.stringify(request.input)).not.toContain("JSON 根对象必须包含 items 字段。");
+    expect(fixture.create).toHaveBeenCalledTimes(1);
+  });
+});
 
 describe("evaluation answer text observation", () => {
   it.each([
