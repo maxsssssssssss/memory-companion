@@ -15,12 +15,19 @@ const artifacts = process.env.REFLECTION_DURATION_ARTIFACTS!;
 const dataDir = process.env.APP_DATA_DIR!;
 const fixtureUrl = process.env.REFLECTION_DURATION_FIXTURE!;
 const baseUrl = process.env.REFLECTION_DURATION_BASE_URL!;
-const databasePath = join(dataDir, "daily-reflection.sqlite");
+const missingEnvironment = [
+  "REFLECTION_DURATION_MEDIA", "REFLECTION_DURATION_ARTIFACTS", "APP_DATA_DIR",
+  "REFLECTION_DURATION_FIXTURE", "REFLECTION_DURATION_BASE_URL"
+].filter(name => !process.env[name]?.trim());
+const configured = missingEnvironment.length === 0;
+const databasePath = configured ? join(dataDir, "daily-reflection.sqlite") : "";
 const hash = (bytes: Buffer) => createHash("sha256").update(bytes).digest("hex");
 type Sample = { id: string; file: string; nominalMs: number | null; expectedInvalid: boolean; noAudio: boolean; sha256: string };
 type Submission = { fields: Record<string, string>; file: string; bytes: number; hash: string };
 type Backup = { operationKey: string; hash: string; bytes: number; inputAdapter?: string; sourceOrigin: string; recordingDate: string };
-const samples = (JSON.parse(await readFile(join(media, "manifest.json"), "utf8")) as { cases: Sample[] }).cases;
+const samples = configured
+  ? (JSON.parse(await readFile(join(media, "manifest.json"), "utf8")) as { cases: Sample[] }).cases
+  : [];
 
 test.use({ actionTimeout: 20000, navigationTimeout: 45000 });
 async function register(api: APIRequestContext, label: string) {
@@ -146,6 +153,9 @@ const recovery = (page: Page) => page.getByRole("complementary", { name: "这次
 async function screenshot(page: Page, name: string) { await page.screenshot({ path: join(artifacts, `${name}.png`), fullPage: true }); }
 async function saveEvidence(name: string, value: unknown) { await writeFile(join(artifacts, `${name}.json`), JSON.stringify(value, null, 2)); }
 
+if (!configured) {
+  test.skip(`Duration acceptance requires dedicated fixture environment: ${missingEnvironment.join(", ")}`, () => {});
+} else {
 test.afterEach(async ({ request }) => {
   await control(request, "probe-restore"); await control(request, "release-ai");
 });
@@ -433,3 +443,4 @@ test("UI transport fixture: active lease and unknown are not guessed terminal; p
   await screenshot(page, "state-permission-without-failure");
 });
 });
+}
