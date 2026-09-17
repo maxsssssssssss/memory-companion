@@ -1,4 +1,7 @@
 import { z } from "zod";
+import { DailyReflectionUploadFailureSchema } from "./daily-reflection-upload-failure";
+export { DailyReflectionUploadFailureSchema, DailyReflectionUploadFailureCodeSchema } from "./daily-reflection-upload-failure";
+export type { DailyReflectionUploadFailure, DailyReflectionUploadFailureCode } from "./daily-reflection-upload-failure";
 
 import {
   CandidateKindSchema,
@@ -406,7 +409,8 @@ export const DailyReflectionOperationLookupResponseSchema = z.discriminatedUnion
     jobId: DailyReflectionIdSchema,
     contentHash: z.string().regex(/^[a-f0-9]{64}$/u),
     status: DailyReflectionStatusSchema,
-    uploadState: DailyReflectionOperationUploadStateSchema
+    uploadState: DailyReflectionOperationUploadStateSchema,
+    uploadFailure: DailyReflectionUploadFailureSchema.nullable().optional()
   }).strict()
 ]);
 
@@ -433,6 +437,8 @@ export const DailyReflectionCandidateRevocationResponseSchema = z.object({
 }).strict();
 
 export const DailyReflectionHistoryItemSchema = z.object({
+  uploadState: DailyReflectionOperationUploadStateSchema.nullable().optional(),
+  uploadFailure: DailyReflectionUploadFailureSchema.nullable().optional(),
   id: DailyReflectionIdSchema,
   status: DailyReflectionStatusSchema.exclude(["deleted"]),
   inputMethod: z.enum(["file_upload", "browser_recording"]),
@@ -471,6 +477,8 @@ function addIssue(
 }
 
 export const DailyReflectionDetailResponseSchema = z.object({
+  uploadState: DailyReflectionOperationUploadStateSchema.nullable().optional(),
+  uploadFailure: DailyReflectionUploadFailureSchema.nullable().optional(),
   reflection: DailyReflectionSchema,
   processingPlan: ProcessingPlanSchema.nullable(),
   job: DailyReflectionJobViewSchema.nullable(),

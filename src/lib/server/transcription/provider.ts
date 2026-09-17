@@ -1,4 +1,5 @@
 import type { TranscriptSegment } from "@/lib/domain/types";
+import type { AudioChunkPlannerInput } from "./chunks/audio-planner";
 import { fixtureTranscriptionProvider } from "./fixture-provider";
 import { openaiTranscriptionProvider } from "./openai-provider";
 import { speakerAsrTranscriptionProvider } from "./speaker-asr-provider";
@@ -13,6 +14,7 @@ export type TranscriptionInput = {
   filePath: string;
   mimeType: string;
   audioAccessPolicy?: AudioAccessPolicy;
+  authoritativeAudio?: AudioChunkPlannerInput["authoritativeAudio"];
 };
 
 export type TranscriptionProvider = {

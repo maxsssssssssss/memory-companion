@@ -26,6 +26,8 @@ export type StoredDailyReflectionUpload = AudioUpload & {
   effectiveDurationMs?: DailyReflectionDurationResolution["effectiveDurationMs"];
   clientReportedDurationMs?: DailyReflectionDurationResolution["clientReportedDurationMs"];
   durationSource?: DailyReflectionDurationResolution["durationSource"];
+  /** Server probe metadata; original bytes remain unchanged. */
+  requiresAudioExtraction?: true;
   processingProfile?: ProcessingProfile;
   errorCode?: string;
   errorMessage?: string;

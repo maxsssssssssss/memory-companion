@@ -1,6 +1,6 @@
 import type Database from "better-sqlite3";
 
-export const DAILY_REFLECTION_SCHEMA_VERSION = 14;
+export const DAILY_REFLECTION_SCHEMA_VERSION = 15;
 
 // Version one intentionally represents the pre-provenance workflow shape.
 // Version two adds source_origin with a fail-closed legacy backfill and the
@@ -1355,6 +1355,36 @@ const DAILY_REFLECTION_SCHEMA_V14 = `
   END;
 `;
 
+// Only the immutable extension's duration provenance changes. Existing rows,
+// keys, foreign keys and the immutable trigger are preserved transactionally.
+const DAILY_REFLECTION_SCHEMA_V15 = `
+  DROP TRIGGER dr_processing_plans_v2_immutable;
+  ALTER TABLE dr_processing_plans_v2 RENAME TO dr_processing_plans_v2_before_v15;
+  CREATE TABLE dr_processing_plans_v2 (
+    account_id TEXT NOT NULL,
+    reflection_id TEXT NOT NULL,
+    plan_version INTEGER NOT NULL CHECK (plan_version = 2),
+    input_adapter TEXT NOT NULL CHECK (input_adapter IN ('file_picker', 'browser_recorder', 'toy_sync')),
+    capture_purpose TEXT NOT NULL CHECK (capture_purpose = 'inspiration_capture'),
+    effective_duration_ms INTEGER NOT NULL CHECK (effective_duration_ms > 0),
+    duration_source TEXT NOT NULL CHECK (duration_source IN ('server_ffprobe', 'server_ffmpeg_decode')),
+    candidate_limit INTEGER NOT NULL CHECK (candidate_limit BETWEEN 1 AND 7),
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (account_id, reflection_id),
+    FOREIGN KEY (account_id, reflection_id)
+      REFERENCES dr_processing_plans(account_id, reflection_id) ON DELETE CASCADE,
+    FOREIGN KEY (account_id, reflection_id)
+      REFERENCES dr_v2_reflection_inputs(account_id, reflection_id) ON DELETE CASCADE
+  );
+  INSERT INTO dr_processing_plans_v2 SELECT * FROM dr_processing_plans_v2_before_v15;
+  DROP TABLE dr_processing_plans_v2_before_v15;
+  CREATE TRIGGER dr_processing_plans_v2_immutable
+  BEFORE UPDATE ON dr_processing_plans_v2
+  BEGIN
+    SELECT RAISE(ABORT, 'daily_reflection_v2_plan_immutable');
+  END;
+`;
+
 const MIGRATIONS = [
   { version: 1, sql: DAILY_REFLECTION_SCHEMA_V1 },
   { version: 2, sql: DAILY_REFLECTION_SCHEMA_V2 },
@@ -1369,7 +1399,8 @@ const MIGRATIONS = [
   { version: 11, sql: DAILY_REFLECTION_SCHEMA_V11 },
   { version: 12, sql: DAILY_REFLECTION_SCHEMA_V12 },
   { version: 13, sql: DAILY_REFLECTION_SCHEMA_V13 },
-  { version: 14, sql: DAILY_REFLECTION_SCHEMA_V14 }
+  { version: 14, sql: DAILY_REFLECTION_SCHEMA_V14 },
+  { version: 15, sql: DAILY_REFLECTION_SCHEMA_V15 }
 ] as const;
 
 function tableHasColumn(

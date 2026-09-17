@@ -33,6 +33,13 @@ export type AudioChunkPlannerInput = {
   mimeType: string;
   chunkDurationSeconds?: number;
   strategy?: AudioChunkPlanningStrategy;
+  /** Internal only: bound Daily Reflection plan plus canonical audio metadata.
+   * Never populate this from HTTP fields or client-reported duration. */
+  authoritativeAudio?: {
+    uploadId: string;
+    effectiveDurationMs: number;
+    extractFirstAudioTrack: boolean;
+  };
 };
 
 export type AudioChunkPlannerDependencies = {
@@ -42,6 +49,7 @@ export type AudioChunkPlannerDependencies = {
     outputDirectory: string;
     chunkDurationSeconds: number;
     ranges: AudioChunkRange[];
+    selectFirstAudioTrack?: boolean;
   }) => Promise<string[]>;
   now?: () => string;
 };
@@ -107,6 +115,7 @@ export async function splitAudioWithFfmpeg(input: {
   outputDirectory: string;
   chunkDurationSeconds: number;
   ranges: AudioChunkRange[];
+  selectFirstAudioTrack?: boolean;
 }) {
   await rm(input.outputDirectory, { recursive: true, force: true });
   await mkdir(input.outputDirectory, { recursive: true });
@@ -123,11 +132,11 @@ export async function splitAudioWithFfmpeg(input: {
       "error",
       "-i",
       input.filePath,
+      ...(input.selectFirstAudioTrack ? ["-map", "0:a:0"] : []),
       "-vn",
       "-f",
       "segment",
-      "-segment_times",
-      segmentTimes,
+      ...(segmentTimes ? ["-segment_times", segmentTimes] : ["-segment_time", String(input.chunkDurationSeconds)]),
       "-reset_timestamps",
       "1",
       "-ac",
@@ -251,19 +260,26 @@ export async function planAudioChunks(
   const now = dependencies.now ?? (() => new Date().toISOString());
   const chunkDurationSeconds = input.chunkDurationSeconds ?? readChunkDurationSeconds();
   const strategy = input.strategy ?? new FixedDurationAudioChunkStrategy(chunkDurationSeconds);
-  const durationSeconds = await probe(input.filePath);
+  const authoritative = input.authoritativeAudio;
+  if (authoritative && (authoritative.uploadId !== input.uploadId
+    || !Number.isSafeInteger(authoritative.effectiveDurationMs) || authoritative.effectiveDurationMs <= 0)) {
+    throw new Error("invalid_authoritative_audio_plan");
+  }
+  const durationSeconds = authoritative ? authoritative.effectiveDurationMs / 1000 : await probe(input.filePath);
   const ranges = strategy.plan(durationSeconds);
   const createdAt = now();
 
   let chunkPaths: string[];
-  if (ranges.length === 1) {
+  const useOriginal = ranges.length === 1 && !authoritative?.extractFirstAudioTrack;
+  if (useOriginal) {
     chunkPaths = [input.filePath];
   } else {
     chunkPaths = await splitAudio({
       filePath: input.filePath,
       outputDirectory: join(dirname(input.filePath), `${input.uploadId}-chunks`),
       chunkDurationSeconds,
-      ranges
+      ranges,
+      ...(authoritative ? { selectFirstAudioTrack: true } : {})
     });
     if (chunkPaths.length !== ranges.length) {
       await Promise.all(chunkPaths.map((filePath) => rm(filePath, { force: true })));
@@ -279,7 +295,7 @@ export async function planAudioChunks(
     endSeconds: range.endSeconds,
     durationSeconds: roundTime(range.endSeconds - range.startSeconds),
     source: {
-      type: ranges.length === 1 ? "uploaded_audio" : "generated_chunk",
+      type: useOriginal ? "uploaded_audio" : "generated_chunk",
       path: chunkPaths[index]
     },
     status: "created",
@@ -288,7 +304,7 @@ export async function planAudioChunks(
     updatedAt: createdAt,
     metadata: {
       strategy: strategy.name,
-      mimeType: ranges.length === 1 ? input.mimeType : "audio/mpeg",
+      mimeType: useOriginal ? input.mimeType : "audio/mpeg",
       originalMimeType: input.mimeType
     }
   }));

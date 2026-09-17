@@ -261,6 +261,7 @@ describe("Work Weekly AI runner contract", () => {
   it("publishes a verified QA answer against the exact thread/question fence", async () => {
     const repo = repository();
     const result = await executor(repo).runQa(qaRequest());
+    expect(repo.claimQaRun).toHaveBeenCalledWith(expect.objectContaining({ expectedQueuedRun: qaRequest() }));
     expect(result.state).toBe("published");
     expect(repo.publishQaAnswer).toHaveBeenCalledWith(expect.objectContaining({
       accountId: "account_a", fence: qaFence,

@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { ZodError } from "zod";
 
-export type WorkWeeklyQaStage = "source_selection" | "answerer" | "verifier" | "publication" | "persistence";
+export type WorkWeeklyQaStage = "source_load" | "source_selection" | "answerer" | "verifier" | "publication" | "persistence";
 
 const ERROR_CODES = [
   "weekly_qa_provider_unavailable", "weekly_qa_answer_invalid", "weekly_qa_source_not_allowlisted",
@@ -108,6 +108,19 @@ export type WorkWeeklyQaDiagnostic = {
   issueCounts?: Record<string, number>;
   publicationReasonCounts?: Record<string, number>;
   schemaIssues?: Array<{ code: string; path: string }>;
+  role?: "qa_answerer" | "qa_verifier";
+  model?: "deepseek-v4-flash" | "deepseek-v4-pro" | "gpt-5.5" | "other";
+  effectiveTimeoutMs?: number;
+  maxOutputTokens?: number;
+  elapsedMs?: number;
+  totalElapsedMs?: number;
+  queueWaitMs?: number;
+  inputBytes?: number;
+  sourcePackBytes?: number;
+  historyBytes?: number;
+  inputTokens?: number;
+  outputTokens?: number;
+  reasoningTokens?: number;
 };
 export type WorkWeeklyQaDiagnosticObserver = (event: WorkWeeklyQaDiagnostic) => void | Promise<void>;
 export type WorkWeeklyQaDiagnosticSink = (event: WorkWeeklyQaDiagnostic & {

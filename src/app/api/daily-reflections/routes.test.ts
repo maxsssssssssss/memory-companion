@@ -217,6 +217,7 @@ function postRequest(input: {
   }
   form.set("idempotencyKey", input.idempotencyKey);
   return {
+    signal: new AbortController().signal,
     formData: vi.fn().mockResolvedValue(form)
   } as unknown as Request;
 }
@@ -781,7 +782,7 @@ beforeEach(async () => {
       results
     }).results;
   });
-  resolveDailyReflectionAuthoritativeDurationMock.mockImplementation(async (input: {
+  resolveDailyReflectionAuthoritativeDurationMock.mockReset().mockImplementation(async (input: {
     inputMethod: "file_upload" | "browser_recording";
     inputAdapter?: "file_picker" | "browser_recorder" | "toy_sync";
     clientReportedDurationMs?: number | null;
@@ -866,7 +867,8 @@ describe("Daily Reflection workflow API", () => {
       jobId: created.jobId,
       contentHash: created.contentHash,
       status: "uploading",
-      uploadState: "accepted"
+      uploadState: "accepted",
+      uploadFailure: null
     });
     expect(found.headers.get("Cache-Control")).toBe("private, no-store");
 
@@ -972,7 +974,7 @@ describe("Daily Reflection workflow API", () => {
       if (phase === "projection") await expect(access(upload.filePath)).resolves.toBeUndefined();
       clock = "2026-08-13T08:03:00.000Z";
     } finally { unblock(); }
-    expect((await pending).status).toBe(phase === "projection" ? 202 : 503);
+    expect((await pending).status).toBe(phase === "projection" ? 409 : 503);
     await expect(access(upload.filePath)).rejects.toThrow();
     expect(repository.getOperationLookupV2(accountId, operationKey)).toMatchObject({ uploadState: "unresolved" });
     expect(repository.getExecutionLease(accountId, receipt.reflectionId)).toMatchObject({ attemptVersion: 1 });
@@ -1033,7 +1035,7 @@ describe("Daily Reflection workflow API", () => {
     afterMock.mockClear();
     const replay = await postDailyReflection(postRequest({ idempotencyKey: "lookup-unresolved" }));
     expect(replay.status).toBe(409);
-    expect(await replay.json()).toMatchObject({ persistencePending: true, error: "daily_reflection_upload_outcome_unresolved" });
+    expect(await replay.json()).toMatchObject({ persistencePending: true, error: "daily_reflection_upload_lease_lost" });
     expect(afterMock).not.toHaveBeenCalled();
     repository.deletePublishedAsset(accountId, created.reflectionId, "upload");
     database.prepare("UPDATE dr_reflections SET status = 'failed', error_code = 'unknown_failure' WHERE id = ?")
@@ -1069,7 +1071,7 @@ describe("Daily Reflection workflow API", () => {
     const operationKey = `lookup-dispatch-${action}`;
     const response = await postDailyReflection(postRequest({ idempotencyKey: operationKey }));
     expect(response.status).toBe(409);
-    expect(await response.json()).toEqual({ error: "daily_reflection_recovery_terminated" });
+    expect(await response.json()).toEqual({ error: "daily_reflection_recovery_terminated", uploadState: "terminated", uploadFailure: null });
     expect(repository.getOperationLookupV2(accountId, operationKey)).toMatchObject({ uploadState: "terminated" });
   });
 
@@ -1252,7 +1254,11 @@ describe("Daily Reflection workflow API", () => {
       filePath: expect.stringContaining(body.uploadId),
       inputMethod: "browser_recording",
       inputAdapter: "browser_recorder",
-      clientReportedDurationMs: 300_000
+      clientReportedDurationMs: 300_000,
+      signal: expect.any(AbortSignal),
+      budgetMs: 110_000,
+      assertWritable: expect.any(Function),
+      onDiagnostic: expect.any(Function)
     });
     expect(afterMock).toHaveBeenCalledTimes(1);
 
@@ -1403,7 +1409,7 @@ describe("Daily Reflection workflow API", () => {
       .toMatchObject({
         status: "uploading",
         uploadId: failedBody.uploadId,
-        errorCode: null
+        errorCode: "daily_reflection_duration_probe_failed"
       });
 
     const replay = await postDailyReflection(request());
@@ -1421,6 +1427,72 @@ describe("Daily Reflection workflow API", () => {
       clientReportedDurationMs: 60_000
     });
     expect(afterMock).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    "daily_reflection_duration_probe_timeout", "daily_reflection_duration_decode_timeout",
+    "daily_reflection_duration_tool_unavailable"
+  ] as const)("persists %s in operation/history/detail and clears it only on a new claim", async (code) => {
+    const operationKey = `save-failure-${code}`;
+    resolveDailyReflectionAuthoritativeDurationMock.mockRejectedValueOnce(new DailyReflectionDurationProbeError(code));
+    const failed = await postDailyReflection(postRequest({ idempotencyKey: operationKey }));
+    expect(failed.status).toBe(503);
+    const body = await failed.json();
+    const expected = { uploadState: "reupload_allowed", uploadFailure: { code, retryable: true } };
+    expect(body).toMatchObject(expected);
+    expect(repository.getProcessingPlan(accountId, body.reflectionId)).toBeNull();
+    expect(repository.getOperationLookupV2(accountId, operationKey)).toMatchObject(expected);
+    const history = await listDailyReflections(new Request("http://localhost/api/daily-reflections"));
+    expect((await history.json()).reflections.find((item: { id: string }) => item.id === body.reflectionId)).toMatchObject(expected);
+    const detail = await getDailyReflection(new Request("http://localhost/api/daily-reflections/detail"), { params: Promise.resolve({ reflectionId: body.reflectionId }) });
+    expect(await detail.json()).toMatchObject(expected);
+    const original = resolveDailyReflectionAuthoritativeDurationMock.getMockImplementation()!;
+    resolveDailyReflectionAuthoritativeDurationMock.mockImplementationOnce(async (...args) => {
+      expect(repository.getUploadRecovery(accountId, body.reflectionId)).toEqual({ uploadState: "still_persisting", uploadFailure: null });
+      expect(repository.getReflection(accountId, body.reflectionId).errorCode).toBeNull();
+      return original(...args);
+    });
+    const replay = await postDailyReflection(postRequest({ idempotencyKey: operationKey }));
+    expect(replay.status).toBe(200);
+    expect(repository.getUploadRecovery(accountId, body.reflectionId)).toEqual({ uploadState: "accepted", uploadFailure: null });
+  });
+
+  it.each(["daily_reflection_audio_no_track", "daily_reflection_audio_invalid", "daily_reflection_audio_codec_unsupported"] as const)(
+    "persists nonretryable %s without a plan and permits deletion without revival", async (code) => {
+      const operationKey = `invalid-save-${code}`;
+      resolveDailyReflectionAuthoritativeDurationMock.mockRejectedValueOnce(new DailyReflectionDurationProbeError(code));
+      const failed = await postDailyReflection(postRequest({ idempotencyKey: operationKey }));
+      expect(failed.status).toBe(400);
+      const body = await failed.json();
+      expect(body).toMatchObject({ retryable: false, uploadState: "unresolved", uploadFailure: { code, retryable: false } });
+      expect(repository.getReflection(accountId, body.reflectionId).status).toBe("failed");
+      expect(repository.getProcessingPlan(accountId, body.reflectionId)).toBeNull();
+      const replay = await postDailyReflection(postRequest({ idempotencyKey: operationKey }));
+      expect(replay.status).toBe(409);
+      expect(resolveDailyReflectionAuthoritativeDurationMock).toHaveBeenCalledTimes(1);
+      const deleted = await deleteDailyReflection(new Request("http://localhost/api/daily-reflections/detail", { method: "DELETE" }), { params: Promise.resolve({ reflectionId: body.reflectionId }) });
+      expect(deleted.status).toBe(204);
+      expect(repository.getUploadRecovery(accountId, body.reflectionId)).toEqual({ uploadState: "terminated", uploadFailure: null });
+      expect(afterMock).not.toHaveBeenCalled();
+    }
+  );
+
+  it("does not publish a plan when the request aborts during duration resolution", async () => {
+    const controller = new AbortController();
+    const request = postRequest({ idempotencyKey: "aborted-probe" });
+    Object.defineProperty(request, "signal", { value: controller.signal });
+    const original = resolveDailyReflectionAuthoritativeDurationMock.getMockImplementation()!;
+    resolveDailyReflectionAuthoritativeDurationMock.mockImplementationOnce(async (...args) => {
+      controller.abort();
+      return original(...args);
+    });
+    const response = await postDailyReflection(request);
+    expect(response.status).toBe(503);
+    const body = await response.json();
+    expect(body.uploadFailure).toEqual({ code: "daily_reflection_upload_interrupted", retryable: true });
+    expect(repository.getProcessingPlan(accountId, body.reflectionId)).toBeNull();
+    expect(repository.getUploadRecovery(accountId, body.reflectionId).uploadState).toBe("reupload_allowed");
+    expect(afterMock).not.toHaveBeenCalled();
   });
 
   it("keeps a pre-plan browser storage failure replayable", async () => {
@@ -1666,7 +1738,7 @@ describe("Daily Reflection workflow API", () => {
       error_code: string | null;
     };
     expect(row).toMatchObject({
-      status: "failed",
+      status: "uploading",
       error_code: expect.stringMatching(/^daily_reflection_/u)
     });
     await expect(store.listIds("uploads")).resolves.toEqual([]);
@@ -1675,7 +1747,7 @@ describe("Daily Reflection workflow API", () => {
     expect(afterMock).not.toHaveBeenCalled();
 
     expect(repository.getOperationLookupV2(accountId, "persist-compensation")).toMatchObject({
-      status: "failed", uploadState: "reupload_allowed"
+      status: "uploading", uploadState: "reupload_allowed"
     });
     const replay = await postDailyReflection(postRequest({
       idempotencyKey: "persist-compensation",
@@ -2146,7 +2218,11 @@ describe("Daily Reflection workflow API", () => {
       filePath: expect.stringContaining(body.uploadId),
       inputMethod: "file_upload",
       inputAdapter: "toy_sync",
-      clientReportedDurationMs: null
+      clientReportedDurationMs: null,
+      signal: expect.any(AbortSignal),
+      budgetMs: 110_000,
+      assertWritable: expect.any(Function),
+      onDiagnostic: expect.any(Function)
     });
     expect(resolveDailyReflectionAuthoritativeDurationMock).toHaveBeenCalledTimes(1);
   });

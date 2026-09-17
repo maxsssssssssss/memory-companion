@@ -106,6 +106,35 @@ function snapshotWithIndependentMeetingSource() {
 }
 
 describe("WorkWeeklyRepository", () => {
+  it.each(["duplicate", "processing", "verifying", "completed", "failed", "superseded", "deleted",
+    "accountId", "weeklyReviewId", "runVersion", "sourceSnapshotDigest", "threadId", "questionMessageId"])(
+    "atomically admits QA only once with exact queued identity: %s", (variant) => {
+      const db = database();
+      const source = snapshot();
+      const repository = new WorkWeeklyRepository(db, { now: () => "2026-09-07T00:00:00.000Z", currentSnapshotBuilder: () => source });
+      const queued = repository.queueGeneration({ accountId: "account_a", snapshot: source, operationKey: "generate_admission", expectedVersion: null, kind: "generate" });
+      const fence = repository.claimGenerationRun({ accountId: "account_a", runId: queued.run.id, leaseOwner: "fixture", leaseMs: 60_000 });
+      const ready = repository.publishSystemVersion({ accountId: "account_a", fence, currentSnapshot: source,
+        items: [{ section: "decisions", text: "Fixture", sourceRefs: source.allowlistedSourceRefs, verificationState: "verified", sortOrder: 0 }], synthesizerProfile: "fixture", verifierProfile: null });
+      const question = repository.queueQuestion({ accountId: "account_a", reviewId: ready.review.id, snapshot: source,
+        question: "本周？", operationKey: "ask_admission", expectedVersion: null });
+      const expected = { weeklyReviewId: question.run.weeklyReviewId, runVersion: question.run.runVersion,
+        sourceSnapshotDigest: question.run.sourceSnapshotDigest, threadId: question.run.threadId, questionMessageId: question.run.questionMessageId };
+      const claim = { accountId: "account_a", runId: question.run.id, leaseOwner: "worker_a", leaseMs: 60_000, expectedQueuedRun: expected };
+      if (variant === "duplicate") {
+        expect(repository.claimQaRun(claim).runId).toBe(question.run.id);
+      } else if (["processing", "verifying", "completed", "failed", "superseded", "deleted"].includes(variant)) {
+        const active = variant === "processing" || variant === "verifying";
+        db.prepare("UPDATE wr_weekly_qa_runs SET state = ?, lease_owner = ?, lease_expires_at = ? WHERE id = ?")
+          .run(variant, active ? "old_worker" : null, active ? "2026-09-01T00:00:00.000Z" : null, question.run.id);
+      } else if (variant === "accountId") claim.accountId = "account_b";
+      else Object.assign(expected, { [variant]: variant === "runVersion" ? 99 : "mismatched" });
+      expect(() => repository.claimQaRun(claim)).toThrow();
+      // A forged transport hint must not consume or fail the valid queued run.
+      if (["accountId", "weeklyReviewId", "runVersion", "sourceSnapshotDigest", "threadId", "questionMessageId"].includes(variant)) {
+        expect(db.prepare("SELECT state FROM wr_weekly_qa_runs WHERE id = ?").get(question.run.id)).toEqual({ state: "queued" });
+      }
+    });
   it.each(["passed", "needs_review"] as const)("persists %s across reopening, a later failure and explicit reset", (status) => {
     const directory = mkdtempSync(join(tmpdir(), "wr-weekly-quality-"));
     const filePath = join(directory, "fixture.sqlite");

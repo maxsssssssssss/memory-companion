@@ -10,6 +10,7 @@ import { applyWorkMeetingOrganization, applyVerifiedWorkMeetingDuplicates, WorkM
 import { assembleWorkMeetingCandidates, attachWorkQuestionResolutionClaims, buildWorkCandidatePublicationProjection, partitionWorkMeetingCandidateReviewCapacity } from "./candidate-normalization";
 import { buildWorkDuplicateCoverageRequests, validateWorkDuplicateCoverageOutput,
   WorkDuplicateCoverageEvaluationSchema, WorkDuplicateDecisionSchema } from "./duplicate-coverage";
+import { WorkExtractorValidationSummarySchema } from "./analysis-provider";
 
 export const WORK_MEETING_ANALYSIS_AUDIT_VERSION = "work_meeting_analysis_audit_v1";
 const Ids = z.array(WorkReviewIdSchema).max(2048);
@@ -37,6 +38,11 @@ const Evaluated = z.object({
 }).strict();
 export const WorkMeetingAnalysisAuditSchema = z.object({
   version: z.literal(WORK_MEETING_ANALYSIS_AUDIT_VERSION),
+  extraction: z.array(z.object({
+    windowIndex: z.number().int().nonnegative(), segmentCount: z.number().int().positive(),
+    model: z.string(), promptVersion: z.string(), schemaVersion: z.string(),
+    validation: WorkExtractorValidationSummarySchema.nullable()
+  }).strict()).optional(),
   batches: z.array(z.object({ windowIndex: z.number().int().nonnegative(), candidates: z.array(WorkExtractorCandidateDraftSchema) }).strict()),
   sources: z.array(Assembled), organized: z.array(Assembled), evaluated: z.array(Evaluated),
   organization: WorkMeetingOrganizationCheckpointSchema,
@@ -73,6 +79,13 @@ export function validateWorkMeetingAnalysisAudit(input: {
     publicationId: input.publicationId, canonicalDigest: input.canonicalDigest,
     segments: input.segments, batches: audit.batches }), audit.sources));
   const unique = (ids: string[]) => new Set(ids).size === ids.length;
+  if (audit.extraction) {
+    assert(audit.extraction.length === audit.batches.length && unique(audit.extraction.map(item => String(item.windowIndex))));
+    for (const item of audit.extraction) {
+      const batch = audit.batches.find(batch => batch.windowIndex === item.windowIndex);
+      assert(Boolean(batch) && (!item.validation || item.validation.retained === batch!.candidates.length));
+    }
+  }
   const closure = (ids: string[], parent: Set<string> = allowed) => assert(ids.length > 0 && unique(ids) && ids.every(id => parent.has(id)));
   for (const c of [...audit.batches.flatMap(b => b.candidates), ...audit.sources, ...audit.organized]) {
     closure(c.evidenceIds);

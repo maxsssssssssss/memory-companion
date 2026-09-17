@@ -7,6 +7,7 @@ import type { WorkExtractorCandidateDraft } from "@/lib/domain/work-review";
 import type { JsonStore } from "@/lib/server/storage/json-store";
 
 import {
+  createStructuredWorkMeetingExtractor,
   WorkMeetingAnalysisProviderError,
   type WorkMeetingExtractor,
   type WorkMeetingVerifier
@@ -150,6 +151,122 @@ function extractedDecision(segmentId: string): WorkExtractorCandidateDraft {
 }
 
 describe("processWorkMeeting", () => {
+  it.each([false, true])("keeps affordable cores reviewable when optional attributes exceed three verifier batches (optional request fails: %s)", async optionalFails => {
+    const meeting = seedSourceAudio();
+    const drafts = Array.from({ length: 20 }, (_, i) => {
+      const draft = extractedDiscussion("segment_0");
+      draft.clientCandidateKey = `delivery_${i}`;
+      draft.kind = "commitment";
+      draft.title = draft.body = `完成独立交付 ${i}`;
+      draft.structuredData.candidateOwner = `参与者${i}`;
+      draft.structuredData.rawActorLabel = "speaker_1";
+      draft.structuredData.originalDueExpression = "周五";
+      draft.claims = [
+        { clientClaimKey: `core_${i}`, claimType: "commitment_existence", text: draft.title, evidenceIds: ["segment_0"] },
+        { clientClaimKey: `owner_${i}`, claimType: "commitment_owner", text: `参与者${i}认领`, evidenceIds: ["segment_0"],
+          semanticValue: { kind: "commitment_owner", value: `参与者${i}` } },
+        { clientClaimKey: `due_${i}`, claimType: "deadline", text: "周五完成", evidenceIds: ["segment_0"],
+          semanticValue: { kind: "deadline", dueAt: null, originalDueExpression: "周五" } },
+        { clientClaimKey: `speaker_${i}`, claimType: "speaker_attribution", text: "speaker_1 发言", evidenceIds: ["segment_0"],
+          semanticValue: { kind: "speaker_attribution", value: "speaker_1" } }
+      ];
+      return draft;
+    });
+    const profile = { profileId: "fixture", provider: "fixture" as const, model: "fixture", reasoningEffort: "none" as const,
+      timeoutMs: 1000, maxOutputTokens: 6000, promptVersion: WORK_MEETING_EXTRACTOR_PROMPT_VERSION,
+      schemaVersion: WORK_MEETING_EXTRACTOR_SCHEMA_VERSION };
+    const verify = vi.fn<WorkMeetingVerifier["verify"]>(async ({ claims }) => {
+      if (optionalFails && claims.every(c => c.claimType !== "commitment_existence")) {
+        throw new WorkMeetingAnalysisProviderError("work_analysis_provider_timeout", "Fixture optional timeout");
+      }
+      return { items: claims.map(c => ({ claimId: c.id, supportVerdict: "entailed", issueCodes: [], supportedEvidenceIds: c.evidenceIds })), coverage: [] };
+    });
+    const result = await processWorkMeeting({ accountId: "account_a", meetingId: meeting.id, store: {} as JsonStore,
+      uploadsRootDir: "C:\\test-data\\uploads" }, { repository,
+      transcriber: async () => [{ id: "segment_0", uploadId: meeting.sourceUploadId, startSeconds: 0, endSeconds: 4,
+        speaker: "speaker_1", text: "逐一认领独立交付，周五完成。", confidence: 0.9, sceneLabels: [], valueLabels: [] }],
+      probeDurationSeconds: async () => 5, cleanupRawAudio: async () => undefined,
+      createAnalysisProviders: () => ({ extractor: { profile, extract: async () => drafts },
+        verifier: { profile: { ...profile, promptVersion: WORK_MEETING_VERIFIER_PROMPT_VERSION,
+          schemaVersion: WORK_MEETING_VERIFIER_SCHEMA_VERSION }, verify } }),
+      resolveFeatureFlags: () => ({ enabled: true, uploadEnabled: true, analysisEnabled: true, verifierEnabled: true,
+        todoEnabled: false, todoMeetingProjectionEnabled: false, followUpEnabled: false, recoveryEnabled: false }) });
+    expect(repository.getMeetingDetail("account_a", meeting.id).meeting.errorCode).toBeNull();
+    expect(result.analysisReady).toBe(true);
+    const audit = repository.readAnalysisAudit("account_a", meeting.id)!;
+    expect(audit.primaryIds).toHaveLength(20);
+    expect(audit.evaluated.flatMap(c => c.claims)).toHaveLength(80);
+    expect(verify).toHaveBeenCalledTimes(3);
+    expect(verify.mock.calls.flatMap(([input]) => input.claims)).toHaveLength(72);
+    const evaluated = audit.evaluated.flatMap(c => c.claims);
+    expect(evaluated.filter(c => c.claimType === "commitment_existence").every(c => c.evaluation.supportVerdict === "entailed")).toBe(true);
+    const skipped = evaluated.filter(c => c.evaluation.issueCodes.includes("verifier_capacity_not_checked"));
+    expect(skipped).toHaveLength(8);
+    expect(skipped.every(c => c.evaluation.supportVerdict === "unverifiable" && c.evaluation.supportedEvidenceIds.length === 0)).toBe(true);
+    expect(skipped.every(c => c.evaluation.verifierProfile === "not_invoked_capacity"
+      && !c.evaluation.issueCodes.includes("verifier_result_missing"))).toBe(true);
+    for (const candidate of audit.evaluated) {
+      const unverified = candidate.claims.filter(c => c.evaluation.issueCodes.includes("verifier_capacity_not_checked"));
+      if (unverified.some(c => c.claimType === "commitment_owner")) expect(candidate.structuredData.candidateOwner).toBeNull();
+      if (unverified.some(c => c.claimType === "deadline")) expect(candidate.structuredData.originalDueExpression).toBeNull();
+      if (unverified.some(c => c.claimType === "speaker_attribution")) expect(candidate.structuredData.rawActorLabel).toBeNull();
+    }
+    expect(verify.mock.calls.flatMap(([input]) => input.claims).filter(c => c.claimType === "commitment_owner").length).toBeGreaterThan(0);
+    const failed = evaluated.filter(c => c.evaluation.issueCodes.includes("verifier_optional_request_failed"));
+    if (optionalFails) {
+      expect(failed.length).toBeGreaterThan(0);
+      expect(failed.every(c => c.evaluation.supportVerdict === "unverifiable" && c.evaluation.supportedEvidenceIds.length === 0)).toBe(true);
+    } else expect(failed).toEqual([]);
+    expect(repository.getMeetingDetail("account_a", meeting.id).findings).toEqual([]);
+    expect(database.pragma("foreign_key_check")).toEqual([]);
+  });
+
+  it.each(["provider_empty", "all_discarded"] as const)("preserves a valid sibling window and persists %s diagnostics", async resultKind => {
+    const meeting = seedSourceAudio();
+    const log = vi.spyOn(console, "info").mockImplementation(() => undefined);
+    try {
+      const source = ["PRIVATE_CANONICAL_TEXT" + "含糊原文".repeat(330), "决定按当前计划推进。" + "会议背景".repeat(330)]
+        .map((text, i) => ({ id: `segment_${i}`, uploadId: meeting.sourceUploadId, startSeconds: i * 10,
+          endSeconds: i * 10 + 9, speaker: "unknown", text, confidence: 0.9, sceneLabels: [], valueLabels: [] }));
+      let calls = 0;
+      const extractor = createStructuredWorkMeetingExtractor({ profile: { profileId: "fixture", provider: "openai-compatible-structured-json", model: "fixture",
+        reasoningEffort: "none", timeoutMs: 1000, maxOutputTokens: 6000,
+        promptVersion: WORK_MEETING_EXTRACTOR_PROMPT_VERSION, schemaVersion: WORK_MEETING_EXTRACTOR_SCHEMA_VERSION },
+        requestStructuredJson: async () => ++calls === 1
+          ? { items: resultKind === "provider_empty" ? [] : [{ kind: "decision", coreText: "PRIVATE_INVALID_TEXT" }] }
+          : { items: [{ kind: "decision", coreText: "决定按当前计划推进", evidenceSegmentIds: ["segment_1"],
+            decisionFinality: { value: "final", text: "最终决定", evidenceSegmentIds: ["segment_1"] } }] } });
+      const verify = vi.fn<WorkMeetingVerifier["verify"]>(async ({ claims }) => ({ items: claims.map(c => ({
+        claimId: c.id, supportVerdict: "entailed", issueCodes: [], supportedEvidenceIds: c.evidenceIds })), coverage: [] }));
+      const result = await processWorkMeeting({ accountId: "account_a", meetingId: meeting.id,
+        store: {} as JsonStore, uploadsRootDir: "C:\\test-data\\uploads" }, {
+        repository, transcriber: async () => source, probeDurationSeconds: async () => 20,
+        cleanupRawAudio: async () => undefined, resolveAnalysisConcurrency: () => 1,
+        resolveExtractorExecutionPolicy: () => extractorExecutionPolicy(),
+        createAnalysisProviders: () => ({ extractor, verifier: { profile: { ...extractor.profile,
+          promptVersion: WORK_MEETING_VERIFIER_PROMPT_VERSION, schemaVersion: WORK_MEETING_VERIFIER_SCHEMA_VERSION }, verify } }),
+        resolveFeatureFlags: () => ({ enabled: true, uploadEnabled: true, analysisEnabled: true, verifierEnabled: true,
+          todoEnabled: false, todoMeetingProjectionEnabled: false, followUpEnabled: false, recoveryEnabled: false })
+      });
+      expect(result.analysisReady).toBe(true);
+      expect(calls).toBe(2);
+      expect(verify).toHaveBeenCalledTimes(1);
+      const audit = repository.readAnalysisAudit("account_a", meeting.id)!;
+      expect(audit.extraction).toHaveLength(2);
+      expect(audit.extraction![0].validation).toMatchObject({ result: resultKind, retained: 0,
+        returned: resultKind === "provider_empty" ? 0 : 1, discarded: resultKind === "provider_empty" ? 0 : 1 });
+      expect(audit.extraction![1].validation).toMatchObject({ result: "retained", returned: 1, retained: 1, discarded: 0 });
+      expect(audit.primaryIds).toHaveLength(1);
+      expect(repository.getMeetingDetail("account_a", meeting.id).findings).toEqual([]);
+      expect(() => repository.readAnalysisAudit("account_b", meeting.id)).toThrow();
+      const logs = JSON.stringify(log.mock.calls);
+      expect(logs).toContain(`extractor_validation=${resultKind}`);
+      expect(logs).not.toContain("PRIVATE_CANONICAL_TEXT");
+      expect(logs).not.toContain("PRIVATE_INVALID_TEXT");
+      expect(database.pragma("foreign_key_check")).toEqual([]);
+    } finally { log.mockRestore(); }
+  });
+
   it.each(["日", "号"])("publishes the supported core and source date with %s, without an invented year", async (daySuffix) => {
     const meeting = seedSourceAudio();
     const date = `9月11${daySuffix}前`;
@@ -187,10 +304,11 @@ describe("processWorkMeeting", () => {
       profile: { ...extractor.profile, promptVersion: WORK_MEETING_VERIFIER_PROMPT_VERSION,
         schemaVersion: WORK_MEETING_VERIFIER_SCHEMA_VERSION },
       async verify({ claims }) {
-        expect(claims.some((claim) => claim.claimType === "deadline")).toBe(false);
+        expect(claims.some((claim) => claim.claimType === "deadline")).toBe(true);
         // Explicit fixture verdicts exercise publication, not model semantics.
         return { items: claims.map((claim) => ({ claimId: claim.id,
-          supportVerdict: claim.text.includes("轮值") ? "unsupported" as const : "entailed" as const,
+          supportVerdict: claim.text.includes("轮值") ? "unsupported" as const
+            : claim.claimType === "deadline" ? "partially_entailed" as const : "entailed" as const,
           issueCodes: claim.text.includes("轮值") ? ["proposal_promoted_to_decision"] : [],
           supportedEvidenceIds: claim.text.includes("轮值") ? [] : claim.evidenceIds })), coverage: [] };
       }
@@ -1745,7 +1863,7 @@ describe("processWorkMeeting", () => {
         promptVersion: WORK_MEETING_EXTRACTOR_PROMPT_VERSION,
         schemaVersion: "work_meeting_candidates_v7"
       },
-      extract: vi.fn(async ({ window }) => {
+      extract: vi.fn(async ({ window, onItemsValidated }) => {
         extractorCallWindows.push([...window.evidenceIds]);
         if (extractorCallWindows.length === 2) {
           throw new WorkMeetingAnalysisProviderError(
@@ -1753,6 +1871,7 @@ describe("processWorkMeeting", () => {
             "Extractor request was rejected"
           );
         }
+        onItemsValidated?.({ returned: 0, retained: 0, discarded: 0, result: "provider_empty", reasons: {} });
         return [];
       })
     };
@@ -1816,6 +1935,9 @@ describe("processWorkMeeting", () => {
       FROM wr_analysis_checkpoints
       GROUP BY checkpoint_kind
     `).all()).toEqual([{ checkpoint_kind: "extractor_block", count: 1 }]);
+    const saved = database.prepare("SELECT payload_json FROM wr_analysis_checkpoints WHERE checkpoint_kind = 'extractor_block'")
+      .get() as { payload_json: string };
+    expect(JSON.parse(saved.payload_json).groups[0].validation).toMatchObject({ result: "provider_empty", returned: 0 });
 
     // Model, prompt and schema stay identical: changing just the provider must
     // invalidate the old checkpoint instead of reusing a different route's work.
@@ -1827,6 +1949,8 @@ describe("processWorkMeeting", () => {
     });
 
     expect(secondResult).toMatchObject({ transcriptReady: true, analysisReady: true, busy: false });
+    expect(repository.readAnalysisAudit("account_a", meeting.id)!.extraction!.map(block => block.validation?.result))
+      .toEqual(["provider_empty", "provider_empty"]);
     expect(extractor.extract).toHaveBeenCalledTimes(providerChanged ? 4 : 3);
     expect(extractorCallWindows.map((ids) => JSON.stringify(ids)).filter((ids) => ids === completedWindow))
       .toHaveLength(providerChanged ? 2 : 1);
@@ -2793,15 +2917,16 @@ describe("processWorkMeeting", () => {
     });
     expect(ownerEvaluation).toMatchObject({
       supportVerdict: "unverifiable",
-      verifierProfile: WORK_MEETING_NON_GPT_PROFILE,
-      verifierPromptVersion: WORK_MEETING_NON_GPT_PROFILE,
-      publicationAction: "show_as_question"
+      verifierProfile: "verifier_disabled",
+      verifierPromptVersion: "verifier_disabled",
+      issueCodes: ["verifier_disabled"],
+      publicationAction: "suppress"
     });
     expect(detail.findings).toEqual([]);
     expect((database.prepare("SELECT COUNT(*) AS count FROM wr_todos").get() as { count: number }).count)
       .toBe(0);
     const view = toWorkMeetingDetailView(detail);
-    expect(view.meeting.verifierMode).toBe("not_applicable");
+    expect(view.meeting.verifierMode).toBe("disabled");
     expect(view.candidates).toHaveLength(1);
   });
 
@@ -2980,19 +3105,25 @@ describe("processWorkMeeting", () => {
     expect(verifierInputs[0]?.claims.map((claim) => claim.claimType).sort()).toEqual([
       "action_item",
       "commitment_existence",
+      "commitment_owner",
+      "deadline",
       "decision_existence",
       "plan_change",
-      "proposal"
+      "proposal",
+      "speaker_attribution"
     ]);
     expect(verifierInputs[0]?.claims.find((claim) => claim.claimType === "proposal"))
       .toMatchObject({ semanticRiskFlags: ["causality"] });
-    expect(verifierInputs[0]?.claims).toHaveLength(5);
+    expect(verifierInputs[0]?.claims).toHaveLength(8);
     expect(verifierInputs[0]?.segmentIds).toEqual([
-      "segment_1", "segment_2", "segment_3", "segment_7", "segment_8"
+      "segment_1", "segment_2", "segment_3", "segment_4", "segment_5", "segment_6", "segment_7", "segment_8"
     ]);
     const detail = repository.getMeetingDetail("account_a", meeting.id);
     const claimById = new Map(detail.claims.map((claim) => [claim.id, claim]));
     const highRiskClaimTypes = new Set([
+      "commitment_owner",
+      "deadline",
+      "speaker_attribution",
       "decision_existence",
       "commitment_existence",
       "action_item",
@@ -3011,10 +3142,7 @@ describe("processWorkMeeting", () => {
     );
     expect(nonGptEvaluations.map((evaluation) => claimById.get(evaluation.claimId)?.claimType).sort())
       .toEqual([
-        "commitment_owner",
-        "deadline",
         "open_question",
-        "speaker_attribution",
         "topic"
       ]);
     expect(nonGptEvaluations.every((evaluation) =>
@@ -3025,7 +3153,7 @@ describe("processWorkMeeting", () => {
     const gptEvaluations = detail.evaluations.filter((evaluation) =>
       !evaluation.issueCodes.includes(WORK_MEETING_NON_GPT_ISSUE_CODE)
     );
-    expect(gptEvaluations).toHaveLength(5);
+    expect(gptEvaluations).toHaveLength(8);
     expect(gptEvaluations.every((evaluation) =>
       evaluation.verifierProfile === "work-meeting-verifier-test"
       && evaluation.verifierPromptVersion === WORK_MEETING_VERIFIER_PROMPT_VERSION
@@ -3040,8 +3168,8 @@ describe("processWorkMeeting", () => {
         structuredData: expect.objectContaining({
           rawActorLabel: null,
           candidateOwner: "Speaker 2",
-          dueAt: null,
-          originalDueExpression: null
+          dueAt: "2026-09-08T00:00:00.000Z",
+          originalDueExpression: "下周二"
         })
       })
     ]);
@@ -3256,7 +3384,7 @@ describe("processWorkMeeting", () => {
     });
 
     expect(result).toMatchObject({ transcriptReady: true, analysisReady: true, busy: false });
-    expect(verifierBatchClaimIds.map((batch) => batch.length)).toEqual([24, 1]);
+    expect(verifierBatchClaimIds.map((batch) => batch.length)).toEqual([20, 5]);
     expect(new Set(verifierBatchClaimIds.flat()).size).toBe(25);
     const detail = repository.getMeetingDetail("account_a", meeting.id);
     expect(detail.meeting.analysisStatus).toBe("review_ready");

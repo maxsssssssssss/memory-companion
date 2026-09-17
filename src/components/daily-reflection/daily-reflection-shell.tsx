@@ -3,6 +3,8 @@
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { ReflectionRecordingRecovery } from "./reflection-recording-recovery";
+import { activeUploadFailure, reflectionUploadLabel } from "./reflection-upload-status";
+import { reflectionUploadFailureMessage } from "@/lib/client/daily-reflection-api";
 import {
   type FormEvent,
   type KeyboardEvent as ReactKeyboardEvent,
@@ -266,6 +268,7 @@ function historyStatusLabel(status: DailyReflectionHistoryItem["status"]) {
 }
 
 function historyCountCopy(item: DailyReflectionHistoryItem) {
+  if (activeUploadFailure(item.uploadState, item.uploadFailure)) return reflectionUploadFailureMessage(item.uploadFailure!);
   if (item.status === "completed") {
     return `记住 ${item.rememberedCount} · 未保存 ${item.notSavedCount}`;
   }
@@ -312,12 +315,14 @@ function safeErrorMessage(message: string | null | undefined) {
 }
 
 function processingCopy(detail: DailyReflectionDetailResponse | null, state: DailyReflectionSessionValue["state"]) {
+  const uploadLabel = reflectionUploadLabel(detail?.uploadState, detail?.uploadFailure, detail?.reflection.status);
+  if (uploadLabel) return uploadLabel;
   const status = detail?.reflection.status;
   if (
     status === "created"
     || status === "uploading"
     || state === "uploading"
-  ) return "正在接收录音";
+  ) return detail?.uploadState === "accepted" ? "录音已保存，等待整理" : "录音保存尚未确认";
   if (status === "transcribing") return "正在转成文字";
   if (status === "extracting") return "正在整理重点";
   if (status === "review_pending" || state === "review_pending") return "等你看看";
@@ -337,6 +342,9 @@ function processingCopy(detail: DailyReflectionDetailResponse | null, state: Dai
 }
 
 function isProcessing(detail: DailyReflectionDetailResponse | null, state: DailyReflectionSessionValue["state"]) {
+  if (activeUploadFailure(detail?.uploadState, detail?.uploadFailure)) return false;
+  if (detail && (detail.reflection.status === "created" || detail.reflection.status === "uploading")
+    && detail.uploadState !== "still_persisting" && detail.uploadState !== "accepted") return false;
   const status = detail?.reflection.status;
   return state === "uploading"
     || status === "created"
@@ -1123,7 +1131,7 @@ function DailyReflectionHistory({ session }: DailyReflectionHistoryProps) {
               >
                 <span className={styles.historyCardTop}>
                   <b>{item.recordingDate ?? item.createdAt.slice(0, 10)}</b>
-                  <span>{historyStatusLabel(item.status)}</span>
+                  <span>{reflectionUploadLabel(item.uploadState, item.uploadFailure, item.status) ?? historyStatusLabel(item.status)}</span>
                 </span>
                 <span className={styles.historySource}>{item.sourceStatement}</span>
                 <span className={styles.historyMeta}>
@@ -1502,6 +1510,7 @@ export function DailyReflectionShellContent({
 
   const busy = session.operation !== "idle";
   const detail = session.detail;
+  const uploadFailure = activeUploadFailure(detail?.uploadState, detail?.uploadFailure);
   const processing = isProcessing(detail, session.state);
   const showRecord = Boolean(detail || session.reflectionId)
     || session.state === "uploading"
@@ -2189,9 +2198,7 @@ export function DailyReflectionShellContent({
   const userLabel = session.auth.user.name?.trim() || session.auth.user.email;
   const status = detail?.reflection.status;
   const progress = detail?.job?.progress;
-  const isIndeterminateUpload = session.operation === "uploading"
-    || session.state === "uploading"
-    || status === "uploading";
+  const isIndeterminateUpload = !uploadFailure && (session.operation === "uploading" || detail?.uploadState === "still_persisting");
   const recordFileName = detail?.upload?.originalName
     ?? session.selectedFile?.name
     ?? file?.name
@@ -2500,7 +2507,7 @@ export function DailyReflectionShellContent({
                       ? "这次复盘"
                       : processingCopy(detail, session.state)}</h2>
                 </div>
-                <span className={styles.statusBadge}>{status === "review_pending"
+                <span className={styles.statusBadge}>{uploadFailure ? "保存失败" : detail?.uploadState === "still_persisting" ? "保存中" : detail?.uploadState === "unresolved" || detail?.uploadState === "reupload_allowed" || (status === "created" || status === "uploading") && detail?.uploadState !== "accepted" ? "尚未确认" : status === "review_pending"
                   ? "等你看看"
                   : status === "confirmation_ready" || status === "admitting"
                     ? "正在保存"
@@ -2527,7 +2534,7 @@ export function DailyReflectionShellContent({
 
               {isIndeterminateUpload ? (
                 <div className={styles.progressBlock} role="status">
-                  <div className={styles.progressTop}><span>正在接收录音</span><span>请稍候</span></div>
+                  <div className={styles.progressTop}><span>{detail?.uploadState === "still_persisting" ? "服务器正在保存录音" : "正在上传录音"}</span><span>请稍候</span></div>
                   <div className={`${styles.progressTrack} ${styles.indeterminateTrack}`} aria-label="正在上传，暂无百分比"><span /></div>
                 </div>
               ) : null}
@@ -2540,7 +2547,9 @@ export function DailyReflectionShellContent({
                 </div>
               ) : null}
 
-              {status === "failed" || session.state === "failed" || session.state === "error" ? (
+              {uploadFailure ? <p className={styles.inlineError} role="alert">{reflectionUploadFailureMessage(uploadFailure)} 排查代码：{uploadFailure.code} · 记录编号：{session.reflectionId}</p> : null}
+              {uploadFailure && !session.recordingRecovery ? <p>此浏览器没有可恢复的原音频副本。请先删除失败记录，再重新选择原文件或录制；页面不会自动重传。</p> : null}
+              {!uploadFailure && (status === "failed" || session.state === "failed" || session.state === "error") ? (
                 <p className={styles.inlineError} role="alert">
                   {safeErrorMessage(detail?.reflection.errorCode ?? session.errorMessage)}
                 </p>
@@ -2558,7 +2567,8 @@ export function DailyReflectionShellContent({
               ) : null}
 
               <div className={styles.statusActions}>
-                {status === "failed" || session.state === "failed" ? (
+                {uploadFailure && !session.recordingRecovery ? <button className={styles.dangerButton} disabled={busy} onClick={() => setDeleteConfirmation(true)} type="button">删除失败记录</button> : null}
+                {!uploadFailure && (status === "failed" || session.state === "failed") ? (
                   <button className={styles.secondaryButton} disabled={busy} onClick={() => void session.retry()} type="button">
                     {session.operation === "retrying" ? "正在重试…" : "重试整理"}
                   </button>

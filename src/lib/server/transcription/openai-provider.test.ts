@@ -497,7 +497,7 @@ describe("openai transcription provider", () => {
     );
   });
 
-  it("chunks long OpenRouter audio before sending STT requests", async () => {
+  it.each([false, true])("chunks long OpenRouter audio using the correct duration authority (bound=%s)", async (bound) => {
     const input = {
       uploadId: "upload_long",
       mimeType: "audio/mpeg",
@@ -546,10 +546,17 @@ describe("openai transcription provider", () => {
       }
     );
 
-    const mergeResult = await transcribeOpenRouterToMergeResult(input, "openai/gpt-4o-transcribe");
+    const mergeResult = await transcribeOpenRouterToMergeResult({ ...input,
+      ...(bound ? { authoritativeAudio: { uploadId: input.uploadId, effectiveDurationMs: 120000, extractFirstAudioTrack: true } } : {})
+    }, "openai/gpt-4o-transcribe");
     const segments = mergeResult.segments;
 
-    expect(execFileMock).toHaveBeenCalledWith("ffprobe", expect.any(Array), expect.any(Function));
+    if (bound) {
+      expect(execFileMock.mock.calls.some(([command]) => command === "ffprobe")).toBe(false);
+      expect(execFileMock).toHaveBeenCalledWith("ffmpeg", expect.arrayContaining(["-map", "0:a:0"]), expect.any(Function));
+    } else {
+      expect(execFileMock).toHaveBeenCalledWith("ffprobe", expect.any(Array), expect.any(Function));
+    }
     expect(execFileMock).toHaveBeenCalledWith("ffmpeg", expect.any(Array), expect.any(Function));
     expect(fetchMock).toHaveBeenCalledTimes(2);
     expect(segments).toEqual([
@@ -578,6 +585,33 @@ describe("openai transcription provider", () => {
       originalSegmentId: "upload_long_seg_1",
       speakerIdScope: "chunk"
     });
+  });
+
+  it("extracts only the selected audio for native OpenAI and cleans the derived file", async () => {
+    let derivedPath = "";
+    execFileMock.mockImplementation((command: string, args: string[], callback: (error: Error | null, stdout: string, stderr: string) => void) => {
+      if (command !== "ffmpeg") throw new Error("must not re-probe bound duration");
+      derivedPath = args.at(-1)!.replace("%05d", "00000");
+      void writeFile(derivedPath, "selected-audio").then(() => callback(null, "", ""));
+    });
+    transcribeMock.mockResolvedValue({ segments: [{ start: 0, end: 2, text: "synthetic", speaker: "speaker_1" }] });
+    let sentAudio: { text: string; type: string } | undefined;
+    directFetchMock.mockImplementationOnce(async (url: string, init: RequestInit) => {
+      // A real fetch consumes the file before returning its response. Read it
+      // here, while the derived file still exists, rather than after cleanup.
+      const form = await new Request(url, init).formData();
+      const file = form.get("file") as File;
+      sentAudio = { text: await file.text(), type: file.type };
+      return new Response(JSON.stringify({ text: "synthetic", segments: [{ start: 0, end: 2, text: "synthetic", speaker: "speaker_1" }] }),
+        { status: 200, headers: { "Content-Type": "application/json" } });
+    });
+    await openaiTranscriptionProvider.transcribe({ ...inputTemplate, filePath: tempAudioPath!,
+      authoritativeAudio: { uploadId: inputTemplate.uploadId, effectiveDurationMs: 2000, extractFirstAudioTrack: true }
+    });
+    expect(execFileMock).toHaveBeenCalledTimes(1);
+    expect(execFileMock).toHaveBeenCalledWith("ffmpeg", expect.arrayContaining(["-map", "0:a:0"]), expect.any(Function));
+    expect(sentAudio).toEqual({ text: "selected-audio", type: "audio/mpeg" });
+    await expect(import("node:fs/promises").then(({ access }) => access(derivedPath))).rejects.toThrow();
   });
 
   it("caps legacy OpenRouter STT chunk config and sends compressed mp3 chunks", async () => {

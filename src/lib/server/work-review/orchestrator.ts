@@ -18,6 +18,8 @@ import {
   validateWorkMeetingVerifierResult,
   validateWorkExtractorOutput,
   WorkMeetingAnalysisProviderError,
+  WorkExtractorValidationSummarySchema,
+  type WorkExtractorValidationSummary,
   type WorkMeetingExtractor,
   type WorkMeetingVerifier,
   type WorkExtractorSchemaRepair
@@ -28,7 +30,7 @@ import {
   buildWorkCandidatePublicationProjection,
   WorkMeetingAnalysisLimitError,
   partitionWorkMeetingCandidateReviewCapacity,
-  partitionWorkCandidatesForVerification,
+  planWorkCandidatesForVerification,
   packWorkDuplicateCoverageForVerification,
   selectWorkCandidatesForGptVerification
 } from "./candidate-normalization";
@@ -48,10 +50,12 @@ import { buildWorkDuplicateCoverageRequests, type WorkDuplicateCoverageEvaluatio
 import { getWorkReviewDatabase } from "./db";
 import {
   evaluateWorkClaimPublication,
+  isWorkOptionalAttributeClaim,
   riskLevelForWorkClaim,
   WORK_MEETING_CAUSALITY_ROUTING_ISSUE_CODE,
   WORK_MEETING_NON_GPT_ISSUE_CODE,
   WORK_MEETING_NON_GPT_PROFILE,
+  WORK_MEETING_VERIFIER_CAPACITY_ISSUE_CODE,
   WORK_MEETING_SEMANTIC_VALUE_AUDIT_ISSUE_CODE_PREFIX
 } from "./publication-policy";
 import {
@@ -364,6 +368,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 type WorkExtractorCheckpointGroup = {
   evidenceIds: string[];
   candidates: WorkExtractorCandidateDraft[];
+  validation?: WorkExtractorValidationSummary;
 };
 
 function validateWorkExtractorCheckpointPayload(input: {
@@ -395,7 +400,12 @@ function validateWorkExtractorCheckpointPayload(input: {
       response: { items: rawGroup.candidates },
       allowedSegments
     }).items;
-    return { evidenceIds, candidates };
+    const validation = rawGroup.validation === undefined ? undefined
+      : WorkExtractorValidationSummarySchema.parse(rawGroup.validation);
+    if (validation && validation.retained !== candidates.length) {
+      throw new Error("work_analysis_checkpoint_extractor_counts_invalid");
+    }
+    return { evidenceIds, candidates, ...(validation ? { validation } : {}) };
   });
   if (canonicalOffset !== input.window.segments.length) {
     throw new Error("work_analysis_checkpoint_extractor_closure_invalid");
@@ -918,6 +928,7 @@ async function analyzeIfEnabled(input: {
         ) => {
           let callNumber = 0;
           let stageCallNumber = 0;
+          let validation: WorkExtractorValidationSummary | undefined;
           const startedAt = Date.now();
           try {
             const candidates = await runBoundedWorkAnalysisProviderCall({
@@ -953,6 +964,10 @@ async function analyzeIfEnabled(input: {
                       `[work-review] stage=meeting_analysis extractor_item=discarded initial_window=${window.index + 1}/${window.count} item_index=${discard.itemIndex} reason=${discard.reason} issues=${issueSummary || "none"} issues_truncated=${discard.issuesTruncated}`
                     );
                   },
+                  onItemsValidated: (summary) => {
+                    validation = WorkExtractorValidationSummarySchema.parse(summary);
+                    console.info(`[work-review] stage=meeting_analysis extractor_validation=${summary.result} initial_window=${window.index + 1}/${window.count} segments=${targetWindow.segments.length} estimated_input_tokens=${targetWindow.estimatedInputTokens} returned=${summary.returned} retained=${summary.retained} discarded=${summary.discarded} reasons=${JSON.stringify(summary.reasons)} model=${encodeURIComponent(providers.extractor.profile.model)} prompt=${encodeURIComponent(providers.extractor.profile.promptVersion)} schema=${encodeURIComponent(providers.extractor.profile.schemaVersion)}`);
+                  },
                   signal: boundedSignal
                 });
                 if (boundedSignal.aborted) {
@@ -976,7 +991,7 @@ async function analyzeIfEnabled(input: {
             console.info(
               `[work-review] stage=meeting_analysis extractor_call=${callNumber}/${analysisExecutionState.maxCalls} budget_stage=${budgetStage} stage_call=${stageCallNumber}/${analysisExecutionState.stageMaxCalls[budgetStage]} state=completed elapsed_ms=${Math.max(0, Date.now() - startedAt)} candidates=${candidates.length}`
             );
-            return candidates;
+            return { candidates, ...(validation ? { validation } : {}) };
           } catch (error) {
             console.warn(
               `[work-review] stage=meeting_analysis extractor_call=${callNumber || "blocked"}/${analysisExecutionState.maxCalls} budget_stage=${budgetStage} state=failed elapsed_ms=${Math.max(0, Date.now() - startedAt)} error_class=${safeWorkExtractorErrorClass(error)}`
@@ -988,16 +1003,16 @@ async function analyzeIfEnabled(input: {
           targetWindow: typeof window,
           recoveryCheckpointInput?: ReturnType<typeof legacyRecoveryCheckpointInput>
         ): Promise<WorkExtractorCheckpointGroup> => {
-          let candidates: WorkExtractorCandidateDraft[];
+          let result: { candidates: WorkExtractorCandidateDraft[]; validation?: WorkExtractorValidationSummary };
           try {
-            candidates = await extract(targetWindow, "extractor");
+            result = await extract(targetWindow, "extractor");
           } catch (error) {
             const recoveryAction = workExtractorRecoveryAction(error);
             if (recoveryAction === "fail") throw error;
             console.warn(
               `[work-review] stage=meeting_analysis recovery=${recoveryAction} attempt=1/1 window=${window.index + 1}/${window.count} segments=${targetWindow.segments.length}`
             );
-            candidates = await extract(
+            result = await extract(
               targetWindow,
               "recovery",
               recoveryAction === "json_repair"
@@ -1007,7 +1022,7 @@ async function analyzeIfEnabled(input: {
           }
           const group = {
             evidenceIds: targetWindow.evidenceIds,
-            candidates
+            ...result
           };
           if (recoveryCheckpointInput) {
             input.repository.saveAnalysisCheckpoint({
@@ -1080,6 +1095,8 @@ async function analyzeIfEnabled(input: {
       windowIndex,
       candidates: batch.candidates
     }));
+    const extractionSummaries = batchGroups.flat().flatMap(group => group.validation ? [group.validation] : []);
+    console.info(`[work-review] stage=meeting_analysis extraction_coverage=reported blocks=${batches.length} observed_blocks=${extractionSummaries.length} provider_empty=${extractionSummaries.filter(s => s.result === "provider_empty").length} all_discarded=${extractionSummaries.filter(s => s.result === "all_discarded").length} partially_retained=${extractionSummaries.filter(s => s.result === "partially_retained").length}`);
     assertWorkAnalysisDeadline(analysisExecutionState);
     const assembledCandidates = assembleWorkMeetingCandidates({
       accountId: input.request.accountId,
@@ -1152,7 +1169,7 @@ async function analyzeIfEnabled(input: {
             // Optional organization must not turn an otherwise affordable
             // verification graph into a meeting-wide capacity failure.
             const proposedCandidates = attachWorkQuestionResolutionClaims({ candidates: proposed.candidates, segments: input.publication.segments });
-            partitionWorkCandidatesForVerification({ candidates: selectWorkCandidatesForGptVerification({
+            planWorkCandidatesForVerification({ candidates: selectWorkCandidatesForGptVerification({
               candidates: proposedCandidates, segments: input.publication.segments
             }), segments: input.publication.segments });
             organization = proposed;
@@ -1207,24 +1224,33 @@ async function analyzeIfEnabled(input: {
     });
     const gptClaims = gptCandidates.flatMap((candidate) => candidate.claims);
     const gptClaimIds = new Set(gptClaims.map((claim) => claim.id));
+    const verifierBatchBudget = Math.min(analysisExecutionState.stageMaxCalls.verifier,
+      Math.max(0, analysisExecutionState.maxCalls - analysisExecutionState.callCount));
+    if (verifierAvailable && verifierBatchBudget === 0 && gptClaims.some(claim => !isWorkOptionalAttributeClaim(claim))) {
+      throw new WorkAnalysisExecutionLimitError("work_analysis_call_budget_exhausted", "Work Meeting verifier Provider call budget was exhausted");
+    }
+    const verificationPlan = verifierAvailable && verifierBatchBudget > 0 ? planWorkCandidatesForVerification({ candidates: gptCandidates,
+      segments: input.publication.segments, maxBatches: verifierBatchBudget })
+      : { batches: [], deferredClaimIds: verifierAvailable ? gptClaims.map(claim => claim.id) : [] };
+    const capacityDeferredIds = new Set(verificationPlan.deferredClaimIds);
+    const optionalRequestFailedIds = new Set<string>();
+    const scheduledGptClaims = verificationPlan.batches.flatMap(batch => batch.flatMap(candidate => candidate.claims));
+    console.info(`[work-review] stage=meeting_analysis verifier_capacity scheduled_claims=${scheduledGptClaims.length} optional_not_checked=${capacityDeferredIds.size} reason=capacity batches=${verificationPlan.batches.length}/${analysisExecutionState.stageMaxCalls.verifier}`);
     let gptVerifierDrafts: WorkVerifierClaimDraft[] = [];
     const coverageRequests = buildWorkDuplicateCoverageRequests({ candidates, duplicates: organization.duplicates,
       scope: { accountId: input.request.accountId, meetingId: input.request.meetingId,
         publicationId: input.publication.publicationId, canonicalDigest: input.publication.contentDigest },
       segments: input.publication.segments });
     let coverageEvaluations: WorkDuplicateCoverageEvaluation[] = coverageRequests.map(r => ({
-      relationId: r.relationId, verdict: "uncertain", reason: "verifier_unavailable", supportedEvidenceIds: []
+      relationId: r.relationId, verdict: "uncertain", reason: verifierAvailable && verifierBatchBudget === 0 ? "capacity" : "verifier_unavailable", supportedEvidenceIds: []
     }));
-    if (verifierAvailable && (gptClaims.length > 0 || coverageRequests.length > 0)) {
-      const verifierBatches = partitionWorkCandidatesForVerification({
-        candidates: gptCandidates,
-        segments: input.publication.segments
-      });
+    if (verifierAvailable && verifierBatchBudget > 0 && (gptClaims.length > 0 || coverageRequests.length > 0)) {
+      const verifierBatches = verificationPlan.batches;
       const packed = packWorkDuplicateCoverageForVerification({
         base: { accountId: input.request.accountId, meetingId: input.request.meetingId,
           publicationId: input.publication.publicationId, canonicalDigest: input.publication.contentDigest,
           segments: input.publication.segments, timestampQualityBySegmentId },
-        batches: verifierBatches, requests: coverageRequests, maxBatches: analysisExecutionState.stageMaxCalls.verifier
+        batches: verifierBatches, requests: coverageRequests, maxBatches: verifierBatchBudget
       });
       coverageEvaluations = packed.unchecked;
       analysisProgressTotal += packed.inputs.length;
@@ -1304,7 +1330,21 @@ async function analyzeIfEnabled(input: {
               });
             }
           });
-          const result = verifierInput.duplicateCoverage?.length
+          const optionalOnly = verifierInput.claims.every(isWorkOptionalAttributeClaim);
+          let optionalRequestFailed = false;
+          const result = optionalOnly
+            ? await runVerifierProviderCall("verifier").catch(error => {
+              // Optional-only batches cannot invalidate completed required
+              // Claims. Cancellation, deadline and storage/fencing still escape.
+              if (signal.aborted || !(error instanceof WorkMeetingAnalysisProviderError)) throw error;
+              optionalRequestFailed = true;
+              verifierInput.claims.forEach(claim => optionalRequestFailedIds.add(claim.id));
+              console.warn(`[work-review] stage=meeting_analysis optional_verifier=failed claims=${verifierInput.claims.length} reason=${error.code}`);
+              return { items: [],
+              coverage: (verifierInput.duplicateCoverage ?? []).map(r => ({ relationId: r.relationId,
+                verdict: "uncertain" as const, reason: "request_failed" as const, supportedEvidenceIds: [] })) };
+            })
+            : verifierInput.duplicateCoverage?.length
             ? await runVerifierProviderCall("verifier").catch(error => {
               // An optional-only failure can retain its originals. Required
               // Claim failure still obeys the existing atomic-publication gate.
@@ -1321,13 +1361,10 @@ async function analyzeIfEnabled(input: {
               );
             }
           });
-          input.repository.saveAnalysisCheckpoint({
-            ...verifierCheckpointInput,
-            payload: result
-          });
-          console.info(
-            `[work-review] stage=meeting_analysis checkpoint=saved kind=verifier_batch claims=${verifierInput.claims.length}`
-          );
+          if (!optionalRequestFailed) {
+            input.repository.saveAnalysisCheckpoint({ ...verifierCheckpointInput, payload: result });
+            console.info(`[work-review] stage=meeting_analysis checkpoint=saved kind=verifier_batch claims=${verifierInput.claims.length}`);
+          }
           input.repository.renewProcessingLease({
             accountId: input.request.accountId,
             meetingId: input.request.meetingId,
@@ -1348,7 +1385,7 @@ async function analyzeIfEnabled(input: {
       coverageEvaluations.push(...verifierBatchResults.flatMap(r => r.coverage));
       gptVerifierDrafts = validateAggregatedWorkVerifierOutput({
         response: { items: gptVerifierDrafts },
-        claims: gptClaims,
+        claims: scheduledGptClaims,
         allowedSegments: input.publication.segments,
         requireComplete: false
       }).items;
@@ -1359,6 +1396,12 @@ async function analyzeIfEnabled(input: {
       evaluation
     ]));
     const verifierDrafts: WorkVerifierClaimDraft[] = allClaims.map((claim) => {
+      if (capacityDeferredIds.has(claim.id)) return {
+        claimId: claim.id, supportVerdict: "unverifiable", issueCodes: [WORK_MEETING_VERIFIER_CAPACITY_ISSUE_CODE], supportedEvidenceIds: []
+      };
+      if (optionalRequestFailedIds.has(claim.id)) return {
+        claimId: claim.id, supportVerdict: "unverifiable", issueCodes: ["verifier_optional_request_failed"], supportedEvidenceIds: []
+      };
       if (!gptClaimIds.has(claim.id)) {
         return {
           claimId: claim.id,
@@ -1435,12 +1478,13 @@ async function analyzeIfEnabled(input: {
           issueCodes: verification.issueCodes
         });
         const nonGptPath = verification.issueCodes.includes(WORK_MEETING_NON_GPT_ISSUE_CODE);
-        const verifierProfile = nonGptPath
+        const capacityNotChecked = verification.issueCodes.includes(WORK_MEETING_VERIFIER_CAPACITY_ISSUE_CODE);
+        const verifierProfile = capacityNotChecked ? "not_invoked_capacity" : nonGptPath
           ? WORK_MEETING_NON_GPT_PROFILE
           : verifierAvailable
             ? providers.verifier!.profile.profileId
             : "verifier_disabled";
-        const verifierPromptVersion = nonGptPath
+        const verifierPromptVersion = capacityNotChecked ? "not_invoked_capacity" : nonGptPath
           ? WORK_MEETING_NON_GPT_PROFILE
           : verifierAvailable
             ? providers.verifier!.profile.promptVersion
@@ -1508,6 +1552,11 @@ async function analyzeIfEnabled(input: {
       candidates: persistedCandidates,
       analysisAudit: {
         version: WORK_MEETING_ANALYSIS_AUDIT_VERSION, batches, sources: assembledCandidates,
+        extraction: batchGroups.flat().map((group, windowIndex) => ({
+          windowIndex, segmentCount: group.evidenceIds.length,
+          model: providers.extractor.profile.model, promptVersion: providers.extractor.profile.promptVersion,
+          schemaVersion: providers.extractor.profile.schemaVersion, validation: group.validation ?? null
+        })),
         organized: candidates, evaluated: evaluatedCandidates, organization: organizationCheckpoint,
         sourceToResult: organization.sourceToResult, removed: deduplicated.removed, priorityIds,
         coverageEvaluations, duplicateDecisions: deduplicated.decisions, ranking: reviewCapacity.ranking,

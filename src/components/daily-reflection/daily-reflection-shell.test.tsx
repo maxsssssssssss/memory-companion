@@ -369,6 +369,8 @@ function session(
     resumeRecording: vi.fn(async () => undefined),
     retryRecordingUpload: vi.fn(async () => undefined),
     setRecordingRecoverySource: vi.fn(async () => undefined),
+    setRecordingRecoveryFile: vi.fn(async () => undefined),
+    cancelRecordingUpload: vi.fn(async () => undefined),
     discardRecordingDraft: vi.fn(async () => undefined),
     updateCandidate: vi.fn(async () => undefined),
     updateCandidates: vi.fn(async () => undefined),
@@ -1370,6 +1372,20 @@ describe("DailyReflectionShellContent", () => {
     expect(screen.queryByRole("button", { name: "取消整理" })).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "重试整理" }));
     expect(retry).toHaveBeenCalledTimes(1);
+  });
+
+  it("shows a persisted save failure on direct detail return without fake upload progress or processing retry", () => {
+    const failedDetail = detail({ reflection: { ...detail().reflection, status: "uploading" },
+      uploadState: "reupload_allowed", uploadFailure: { code: "daily_reflection_duration_probe_timeout", retryable: true },
+      processingPlan: null, job: null, upload: null, segments: [], candidates: [] });
+    render(<DailyReflectionShellContent session={session({ state: "uploading", reflectionId: "reflection-1", detail: failedDetail })} />);
+    expect(screen.getByText("保存失败")).toBeVisible();
+    expect(screen.getByRole("alert")).toHaveTextContent("daily_reflection_duration_probe_timeout");
+    expect(screen.getByRole("alert")).toHaveTextContent("reflection-1");
+    expect(screen.getByText(/此浏览器没有可恢复的原音频副本/u)).toBeVisible();
+    expect(screen.getByRole("button", { name: "删除失败记录" })).toBeVisible();
+    expect(screen.queryByRole("button", { name: "重试整理" })).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("正在上传，暂无百分比")).not.toBeInTheDocument();
   });
 
   it("keeps the transcript available and offers retry or a manual card after candidate generation fails", () => {

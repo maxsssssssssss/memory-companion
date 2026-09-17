@@ -49,6 +49,30 @@ function verdictsFor(items: WorkWeeklyGeneratedItem[], issueCodes: string[] = []
 }
 
 describe("Work Weekly deterministic publication policy", () => {
+  it.each(["无人承诺", "没有人承诺", "没有任何人明确承诺"])("retains a verified open question with absent commitment: %s", (absence) => {
+    const snapshot = workWeeklyTestSnapshot();
+    const mobile = snapshot.findings.find((finding) => finding.sourceRef === WORK_WEEKLY_TEST_REFS.proposal)!;
+    const support = snapshot.findings.find((finding) => finding.sourceRef === WORK_WEEKLY_TEST_REFS.assignment)!;
+    Object.assign(mobile, { kind: "open_question", structuredData: {}, body: "移动端适配是否属于试点开放条件仍待专项评审。本周没有人承诺完成移动端适配。" });
+    Object.assign(support, { kind: "open_question", structuredData: {}, body: "日常支持轮值仍未认领，需要另行确认响应频率和升级方式。" });
+    const text = `仍待定的条件还有两项：移动端适配是否属于试点开放条件需专项评审，本周${absence}完成移动端适配；日常支持轮值仍未认领，需另行确认响应频率和升级方式。`;
+    const sourceRefs = [mobile.sourceRef, support.sourceRef];
+    const items = [atomicItem(text, { claims: [{ id: "unresolved", text, claimType: "fact", sourceRefs }] })];
+    expect(applyWorkWeeklyClaimPublicationPolicy({ snapshot, items, verdicts: verdictsFor(items) }))
+      .toEqual([expect.objectContaining({ text, sourceRefs: [...sourceRefs].sort() })]);
+    expect(applyWorkWeeklyClaimPublicationPolicy({ snapshot, items, verdicts: verdictsFor(items, ["unsupported_claim"]) })).toEqual([]);
+  });
+
+  it.each([
+    "本周有人承诺完成移动端适配。",
+    "本周并非无人承诺完成移动端适配。",
+    "本周不是没有人明确承诺完成移动端适配。",
+    "不能说无人承诺完成移动端适配。",
+    "本周无人承诺完成移动端适配；Alex 承诺负责日常轮值。"
+  ])("keeps affirmative, mixed and double-negative commitment claims behind the type backstop: %s", (text) => {
+    const items = [atomicItem(text, { claims: [{ id: "claim_atomic", text, claimType: "fact", sourceRefs: [WORK_WEEKLY_TEST_REFS.assignment] }] })];
+    expect(applyWorkWeeklyClaimPublicationPolicy({ snapshot: workWeeklyTestSnapshot(), items, verdicts: verdictsFor(items) })).toEqual([]);
+  });
   it("publishes exactly the fully verified atomic decision and system completion", () => {
     const snapshot = workWeeklyTestSnapshot();
     const decision = applyWorkWeeklyClaimPublicationPolicy({

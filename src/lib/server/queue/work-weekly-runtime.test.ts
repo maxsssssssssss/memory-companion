@@ -253,6 +253,19 @@ function runtimeHarness(input: {
 }
 
 describe("Work Weekly Queue Runtime", () => {
+  it("passes a freshly dispatched QA job to the queued-only runner without waiting for recovery", async () => {
+    const harness = runtimeHarness();
+    const runtime = await startWorkWeeklyRuntime({ env: {}, config, dependencies: harness.dependencies });
+    const run = qaRun();
+    const data = { version: 1 as const, kind: "qa" as const, accountId: run.accountId, weeklyReviewId: run.weeklyReviewId,
+      runId: run.id, runVersion: run.runVersion, sourceSnapshotDigest: run.sourceSnapshotDigest,
+      threadId: run.threadId, questionMessageId: run.questionMessageId };
+    expect(harness.add).not.toHaveBeenCalled();
+    expect(await harness.processor()({ name: WORK_WEEKLY_QA_QUEUE_JOB_NAME, id: buildWorkWeeklyQueueJobId(data), data }))
+      .toEqual({ status: "published", kind: "qa" });
+    expect(harness.runQa).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ observedState: "queued", runId: run.id, questionMessageId: run.questionMessageId }));
+    await runtime?.close();
+  });
   it("forwards only explicitly injected diagnostics through the existing service factory", async () => {
     const harness = runtimeHarness();
     const diagnosticSink = vi.fn(async () => undefined);

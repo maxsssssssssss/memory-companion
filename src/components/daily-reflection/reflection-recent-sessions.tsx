@@ -4,6 +4,8 @@ import Link from "next/link";
 import { useEffect } from "react";
 import { useReflectionApp } from "./reflection-app-shell";
 import { ReflectionRecordingRecovery } from "./reflection-recording-recovery";
+import { reflectionUploadLabel, activeUploadFailure } from "./reflection-upload-status";
+import { reflectionUploadFailureMessage } from "@/lib/client/daily-reflection-api";
 import { reflectionSessionPath } from "./reflection-product";
 import styles from "./daily-reflection.module.css";
 
@@ -31,7 +33,8 @@ export function ReflectionRecentSessions() {
       {session.history.map((item) => <li key={item.id}>
         <Link href={reflectionSessionPath(item.id)}>
           <strong>{item.recordingDate ?? item.createdAt.slice(0, 10)} 的复盘</strong>
-          <span>{STATUS_LABELS[item.status] ?? "正在处理"}</span>
+          <span>{reflectionUploadLabel(item.uploadState, item.uploadFailure, item.status) ?? STATUS_LABELS[item.status] ?? "正在处理"}</span>
+          {activeUploadFailure(item.uploadState, item.uploadFailure) ? <small>{reflectionUploadFailureMessage(item.uploadFailure!)} 排查代码：{item.uploadFailure!.code}</small> : null}
         </Link>
       </li>)}
     </ul>

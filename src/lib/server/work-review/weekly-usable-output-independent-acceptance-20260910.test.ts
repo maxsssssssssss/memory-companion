@@ -451,7 +451,7 @@ describe("independent useful Weekly output through the real local publication pa
       snapshot, question: "试用范围里，提醒口径和数据政策现在有什么结论？",
       answerer: createStructuredWorkWeeklyQaAnswerer({ profile: workWeeklyProfile("qa_answerer"), requestStructuredJson: request }),
       verifier: createStructuredWorkWeeklyQaVerifier({ profile: workWeeklyProfile("qa_verifier"), requestStructuredJson: request }) });
-    expect(answer).toMatchObject({ answerStatus: "answered", answer: claims.map((claim) => claim.text).join("；"), failureCode: null });
+    expect(answer).toMatchObject({ answerStatus: "answered", answer: claims.map((claim) => claim.text).join("\n\n"), failureCode: null });
     expect(answer.sourceRefs).toEqual(claims.flatMap((claim) => claim.sourceRefs).sort());
     expect(request).toHaveBeenCalledTimes(2);
   });

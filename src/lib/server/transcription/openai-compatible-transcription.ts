@@ -1,5 +1,5 @@
 import { openAsBlob } from "node:fs";
-import { basename } from "node:path";
+import { basename, toNamespacedPath } from "node:path";
 
 const DEFAULT_OPENAI_TRANSCRIPTION_URL = "https://api.openai.com/v1/audio/transcriptions";
 const MAX_CONFIGURED_RETRIES = 10;
@@ -287,7 +287,9 @@ export async function requestOpenAICompatibleTranscription(
   const url = normalizeOpenAITranscriptionUrl(input.baseUrl);
   const path = safePath(url);
   const fetchImpl = input.fetchImpl ?? fetch;
-  const blob = await openAsBlob(input.filePath, { type: input.mimeType });
+  // Unlike ordinary fs reads, file-backed Blobs need the extended path form
+  // for deeply nested Windows uploads. Other platforms keep the same path.
+  const blob = await openAsBlob(toNamespacedPath(input.filePath), { type: input.mimeType });
 
   for (let attempt = 1; attempt <= input.maxRetries + 1; attempt += 1) {
     const form = new FormData();

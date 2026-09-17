@@ -126,6 +126,19 @@ function testIdentityResolver(input: {
 }
 
 describe("chunked audio transcription orchestration", () => {
+  it("preserves the server-bound audio contract through the ASR planner", async () => {
+    const planner = vi.fn(async () => chunks(1));
+    const authoritativeAudio = { uploadId: "upload_30m", effectiveDurationMs: 300000, extractFirstAudioTrack: true };
+    await transcribeSpeakerAsrAudioInChunks({
+      uploadId: "upload_30m", filePath: "C:/tmp/source.webm", mimeType: "audio/webm",
+      store: testStore(), identityPolicy: "skip", authoritativeAudio
+    }, {
+      planner, adapter: successfulAdapter(), checkpoints: checkpoints(), cleanupChunks: async () => undefined,
+      schedulerOptions: { maxRetries: 0, attemptTimeoutMs: 1000, now: () => timestamp }
+    });
+    expect(planner).toHaveBeenCalledWith(expect.objectContaining({ authoritativeAudio }));
+  });
+
   it("simulates a 30-minute upload as six chunks and returns the legacy TranscriptSegment shape", async () => {
     const planned = chunks(6);
     const planner = vi.fn(async () => planned);

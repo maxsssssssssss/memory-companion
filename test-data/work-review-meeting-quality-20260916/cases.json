@@ -1,0 +1,324 @@
+{
+  "syntheticOnly": true,
+  "version": "meeting-independent-20260916",
+  "standardFixture": "test-data/work-review-sample-20m-v1",
+  "cases": [
+    {
+      "id": "standard_9_must_5_must_not",
+      "kind": "clean_synthetic",
+      "input": {
+        "path": "test-data/work-review-sample-20m-v1/transcript.md"
+      },
+      "scoreOnly": {
+        "path": "test-data/work-review-sample-20m-v1/expected-results.json"
+      },
+      "note": "Gold is scoring-only; never included in product input."
+    },
+    {
+      "id": "asr_cross_person_training_roster",
+      "kind": "explicit_synthetic_asr_corruption",
+      "input": {
+        "segments": [
+          {
+            "id": "asr_mixed_037_038",
+            "speaker": "speaker_2",
+            "text": "我明确认领试点引导清单和培训材料，内容会解释三种信息状态、来源链接和用户修正方式。九月十日先给初稿，九月十九日根据冻结界面更新最终版，培训安排在九月二十一日下午。 我认领试点参与范围确认。九月六日前，我会向两个虚构小组的协调人确认二十四名参与者名单、试点规则和反馈渠道；如果人数变化，会在当天记录原因，不静默扩大范围。"
+          }
+        ]
+      },
+      "scoreOnly": {
+        "must": [
+          "training and participant roster remain distinct actions",
+          "mixed segment cannot establish one verified owner for both",
+          "unknown speaker attribution stays unknown"
+        ],
+        "mustNot": [
+          "restore person names from clean gold",
+          "merge both assignments solely because one ASR label covers the segment"
+        ]
+      }
+    },
+    {
+      "id": "asr_homophone_names",
+      "kind": "explicit_synthetic_asr_corruption",
+      "input": {
+        "segments": [
+          {
+            "id": "homophone_intro",
+            "speaker": "speaker_1",
+            "text": "下面请周琪说明接口安排。承诺再补充培训。"
+          },
+          {
+            "id": "u_034",
+            "text": "我明确认领来源链接和分类确认的后端工作，包括接口字段、权限过滤和审计日志。我的交付不是只写完代码，而是提供相应单元测试和接口测试，确保未授权用户拿不到受限备注。",
+            "speaker": "speaker_2",
+            "synthetic": true
+          },
+          {
+            "id": "u_036",
+            "text": "我承诺九月八日下班前提供可联调接口和字段说明，九月九日补齐权限与审计日志测试。如果沙盒账号届时仍未拿到，我会把测试结果标为本地通过，不会写成试点环境通过。",
+            "speaker": "speaker_2",
+            "synthetic": true
+          },
+          {
+            "id": "u_037",
+            "text": "我明确认领试点引导清单和培训材料，内容会解释三种信息状态、来源链接和用户修正方式。九月十日先给初稿，九月十九日根据冻结界面更新最终版，培训安排在九月二十一日下午。",
+            "speaker": "speaker_3",
+            "synthetic": true
+          }
+        ]
+      },
+      "scoreOnly": {
+        "must": [
+          "retain task and deadline content actually supported",
+          "names remain as transcribed or uncertain without identity repair"
+        ],
+        "mustNot": [
+          "infer 周启 or 陈诺 from clean gold",
+          "treat 承诺 as confirmed person identity"
+        ]
+      }
+    },
+    {
+      "id": "independent_training_roster",
+      "kind": "clean_synthetic_excerpt",
+      "input": {
+        "segments": [
+          {
+            "id": "u_037",
+            "text": "我明确认领试点引导清单和培训材料，内容会解释三种信息状态、来源链接和用户修正方式。九月十日先给初稿，九月十九日根据冻结界面更新最终版，培训安排在九月二十一日下午。",
+            "speaker": "chen_nuo",
+            "synthetic": true
+          },
+          {
+            "id": "u_038",
+            "text": "我认领试点参与范围确认。九月六日前，我会向两个虚构小组的协调人确认二十四名参与者名单、试点规则和反馈渠道；如果人数变化，会在当天记录原因，不静默扩大范围。",
+            "speaker": "lin_lan",
+            "synthetic": true
+          }
+        ]
+      },
+      "scoreOnly": {
+        "must": [
+          "training/materials and participant roster remain independent",
+          "each ownership claim uses its own evidence"
+        ],
+        "mustNot": [
+          "same topic means same owner or same task"
+        ]
+      }
+    },
+    {
+      "id": "training_three_delivery_stages",
+      "kind": "clean_synthetic_excerpt",
+      "input": {
+        "segments": [
+          {
+            "id": "u_037",
+            "text": "我明确认领试点引导清单和培训材料，内容会解释三种信息状态、来源链接和用户修正方式。九月十日先给初稿，九月十九日根据冻结界面更新最终版，培训安排在九月二十一日下午。",
+            "speaker": "chen_nuo",
+            "synthetic": true
+          }
+        ]
+      },
+      "scoreOnly": {
+        "must": [
+          "draft September 10",
+          "final September 19 after UI freeze",
+          "training September 21 afternoon"
+        ],
+        "mustNot": [
+          "collapse the three dates into a single deadline",
+          "drop intermediate deliverables when consolidating"
+        ]
+      }
+    },
+    {
+      "id": "extractor_raw_empty",
+      "kind": "offline_transport_fixture",
+      "input": {
+        "segments": [
+          {
+            "id": "u_024",
+            "text": "好，形成第一个决定：首轮试点不提供周报导出，原因是权限规则未定，不能用便利性换取越权风险。陈诺只在本轮试点中手工整理两次周报，之后是否继续要重新评估。",
+            "speaker": "lin_lan",
+            "synthetic": true
+          }
+        ],
+        "injectedResponse": {
+          "items": []
+        }
+      },
+      "scoreOnly": {
+        "rawReturnedCount": 0,
+        "itemDiscardedCount": 0,
+        "finalRetainedCount": 0,
+        "must": [
+          "diagnostics distinguish raw empty output from all items rejected"
+        ]
+      }
+    },
+    {
+      "id": "extractor_all_items_discarded",
+      "kind": "offline_transport_fixture",
+      "input": {
+        "segments": [
+          {
+            "id": "u_024",
+            "text": "好，形成第一个决定：首轮试点不提供周报导出，原因是权限规则未定，不能用便利性换取越权风险。陈诺只在本轮试点中手工整理两次周报，之后是否继续要重新评估。",
+            "speaker": "lin_lan",
+            "synthetic": true
+          }
+        ],
+        "injectedResponse": {
+          "items": [
+            {
+              "kind": "decision",
+              "coreText": "首轮不提供周报导出。",
+              "decisionFinality": { "value": "final", "text": "首轮不提供周报导出。", "evidenceSegmentIds": ["outside_current_window"] },
+              "evidenceSegmentIds": [
+                "outside_current_window"
+              ]
+            },
+            {
+              "kind": "unsupported_fixture_kind",
+              "coreText": "非法类型的合成项。",
+              "evidenceSegmentIds": [
+                "u_024"
+              ]
+            }
+          ]
+        }
+      },
+      "scoreOnly": {
+        "rawReturnedCount": 2,
+        "itemDiscardedCount": 2,
+        "finalRetainedCount": 0,
+        "must": [
+          "record bounded per-item discard reasons",
+          "do not label this as original empty output"
+        ]
+      }
+    },
+    {
+      "id": "distinct_delivery_actions",
+      "kind": "clean_synthetic_excerpt",
+      "input": {
+        "segments": [
+          {
+            "id": "u_034",
+            "text": "我明确认领来源链接和分类确认的后端工作，包括接口字段、权限过滤和审计日志。我的交付不是只写完代码，而是提供相应单元测试和接口测试，确保未授权用户拿不到受限备注。",
+            "speaker": "zhou_qi",
+            "synthetic": true
+          },
+          {
+            "id": "u_036",
+            "text": "我承诺九月八日下班前提供可联调接口和字段说明，九月九日补齐权限与审计日志测试。如果沙盒账号届时仍未拿到，我会把测试结果标为本地通过，不会写成试点环境通过。",
+            "speaker": "zhou_qi",
+            "synthetic": true
+          },
+          {
+            "id": "u_037",
+            "text": "我明确认领试点引导清单和培训材料，内容会解释三种信息状态、来源链接和用户修正方式。九月十日先给初稿，九月十九日根据冻结界面更新最终版，培训安排在九月二十一日下午。",
+            "speaker": "chen_nuo",
+            "synthetic": true
+          },
+          {
+            "id": "u_038",
+            "text": "我认领试点参与范围确认。九月六日前，我会向两个虚构小组的协调人确认二十四名参与者名单、试点规则和反馈渠道；如果人数变化，会在当天记录原因，不静默扩大范围。",
+            "speaker": "lin_lan",
+            "synthetic": true
+          },
+          {
+            "id": "u_044",
+            "text": "我认领技术冒烟测试，九月十六日完成一轮，覆盖登录、创建交接、来源回看、修正和越权访问。若出现严重权限问题，我会明确建议阻断发布，不以界面能打开作为通过标准。",
+            "speaker": "zhou_qi",
+            "synthetic": true
+          },
+          {
+            "id": "u_045",
+            "text": "那我认领人员和场次安排，九月十四日前确认四名虚构试用者参加九月十六日的冒烟测试，并使用统一记录模板。技术结论由周启给出，我只负责组织和保存观察结果。",
+            "speaker": "chen_nuo",
+            "synthetic": true
+          },
+          {
+            "id": "u_050",
+            "text": "我认领来源链接打开事件的最小埋点和账号隔离测试，九月十一日前完成。如果评审发现会记录正文或其他敏感内容，我会放弃该指标，而不是为了数据完整强行上线。",
+            "speaker": "zhou_qi",
+            "synthetic": true
+          },
+          {
+            "id": "u_054",
+            "text": "对于发布回退，我可以明确认领技术方案。九月十五日前准备关闭星桥试点入口的开关和回退说明；如果出现权限泄露或交接内容错配，将立即停止新访问，同时保留必要日志供排查。",
+            "speaker": "zhou_qi",
+            "synthetic": true
+          },
+          {
+            "id": "u_056",
+            "text": "沙盒账号跟进由我认领，九月七日中午前向虚构基础服务组确认交付时间。如果九月十二日仍不可用，我会召集一次是否延期的判断会，但现在不预先承诺一定延期或一定照常发布。",
+            "speaker": "lin_lan",
+            "synthetic": true
+          }
+        ]
+      },
+      "scoreOnly": {
+        "must": [
+          "backend/interface and tests",
+          "training/materials",
+          "participant roster",
+          "technical smoke test",
+          "smoke participants and session arrangement",
+          "telemetry with privacy condition",
+          "rollback plan",
+          "sandbox followup"
+        ],
+        "mustNot": [
+          "deduplicate independent tasks because project or owner matches",
+          "promote local verification into pilot environment verification"
+        ]
+      }
+    },
+    {
+      "id": "emitted_fields_have_verification",
+      "kind": "offline_contract_check",
+      "input": {
+        "segments": [
+          {
+            "id": "u_033",
+            "text": "同意调整。第三个决定：正式试点开放日由九月十八日改为九月二十二日；九月十九日冻结首轮界面和引导文案；九月二十一日进行培训。除阻断性缺陷外，冻结后不再增加范围。",
+            "speaker": "lin_lan",
+            "synthetic": true
+          },
+          {
+            "id": "u_036",
+            "text": "我承诺九月八日下班前提供可联调接口和字段说明，九月九日补齐权限与审计日志测试。如果沙盒账号届时仍未拿到，我会把测试结果标为本地通过，不会写成试点环境通过。",
+            "speaker": "zhou_qi",
+            "synthetic": true
+          },
+          {
+            "id": "u_037",
+            "text": "我明确认领试点引导清单和培训材料，内容会解释三种信息状态、来源链接和用户修正方式。九月十日先给初稿，九月十九日根据冻结界面更新最终版，培训安排在九月二十一日下午。",
+            "speaker": "chen_nuo",
+            "synthetic": true
+          },
+          {
+            "id": "u_038",
+            "text": "我认领试点参与范围确认。九月六日前，我会向两个虚构小组的协调人确认二十四名参与者名单、试点规则和反馈渠道；如果人数变化，会在当天记录原因，不静默扩大范围。",
+            "speaker": "lin_lan",
+            "synthetic": true
+          }
+        ]
+      },
+      "scoreOnly": {
+        "must": [
+          "owner deadline finality speaker claims emitted by extractor enter the same bounded verifier batches as core claims",
+          "record verified fields separately from skipped fields"
+        ],
+        "mustNot": [
+          "treat skipped metadata as verified",
+          "increase the three verifier batch ceiling or fifteen-call total budget"
+        ]
+      }
+    }
+  ]
+}

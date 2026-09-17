@@ -18,8 +18,8 @@ export const WORK_WEEKLY_QA_VERIFIER_PROFILE_ID = "work_weekly_qa_verifier_v1" a
 
 export const WORK_WEEKLY_SYNTHESIZER_PROMPT_VERSION = "work_weekly_synthesizer_prompt_v21" as const;
 export const WORK_WEEKLY_VERIFIER_PROMPT_VERSION = "work_weekly_verifier_prompt_v13" as const;
-export const WORK_WEEKLY_QA_ANSWERER_PROMPT_VERSION = "work_weekly_qa_answerer_prompt_v3" as const;
-export const WORK_WEEKLY_QA_VERIFIER_PROMPT_VERSION = "work_weekly_qa_verifier_prompt_v2" as const;
+export const WORK_WEEKLY_QA_ANSWERER_PROMPT_VERSION = "work_weekly_qa_answerer_prompt_v6" as const;
+export const WORK_WEEKLY_QA_VERIFIER_PROMPT_VERSION = "work_weekly_qa_verifier_prompt_v4" as const;
 
 export const WORK_WEEKLY_SYNTHESIZER_SCHEMA_VERSION = "work_weekly_synthesizer_schema_v6" as const;
 export const WORK_WEEKLY_VERIFIER_SCHEMA_VERSION = "work_weekly_verifier_schema_v5" as const;
@@ -378,7 +378,8 @@ export function resolveWorkWeeklyProviderProfile(
     throw new WorkWeeklyProviderError("work_weekly_provider_config_invalid");
   }
   if (effort === "none"
-    && (providerValue !== "openai_compatible" || model !== "deepseek-v4-pro")) {
+    && (providerValue !== "openai_compatible" || !(model === "deepseek-v4-pro"
+      || (model === "deepseek-v4-flash" && (role === "qa_answerer" || role === "qa_verifier"))))) {
     throw new WorkWeeklyProviderError("work_weekly_provider_config_invalid");
   }
   return {
@@ -398,6 +399,12 @@ export function resolveWorkWeeklyProviderProfile(
   };
 }
 
+export type WorkWeeklyProviderUsage = {
+  inputTokens?: number;
+  outputTokens?: number;
+  reasoningTokens?: number;
+};
+
 export type WorkWeeklyStructuredJsonRequest = (input: {
   profile: WorkWeeklyProviderProfile;
   schema: z.ZodTypeAny;
@@ -405,6 +412,7 @@ export type WorkWeeklyStructuredJsonRequest = (input: {
   jsonInstruction: string;
   normalize?: (value: unknown) => unknown;
   signal?: AbortSignal;
+  onUsage?: (usage: WorkWeeklyProviderUsage) => void;
 }) => Promise<unknown>;
 
 function timeoutSignal(parent: AbortSignal | undefined, timeoutMs: number) {
@@ -433,7 +441,9 @@ export const requestWorkWeeklyStructuredJson: WorkWeeklyStructuredJsonRequest = 
   const baseClient = createOpenAIClient({ ...runtime, timeoutMs: input.profile.timeoutMs });
   const endpoint = new URL(baseClient.baseURL);
   const tokenHubDeepSeek = endpoint.hostname === "tokenhub.vision-intelligence.tech"
-    && input.profile.model === "deepseek-v4-pro";
+    && (input.profile.model === "deepseek-v4-pro"
+      || (input.profile.model === "deepseek-v4-flash"
+        && (input.profile.role === "qa_answerer" || input.profile.role === "qa_verifier")));
   const usesKnownTokenHubBase = endpoint.hostname === "tokenhub.vision-intelligence.tech"
     && ["http:", "https:"].includes(endpoint.protocol)
     && !endpoint.username && !endpoint.password && !endpoint.port && !endpoint.search && !endpoint.hash
@@ -503,6 +513,12 @@ export const requestWorkWeeklyStructuredJson: WorkWeeklyStructuredJsonRequest = 
         ...(tokenHubDeepSeek ? { timeout: input.profile.timeoutMs, maxRetries: 0 } : {})
       },
       onDiagnostics(diagnostics) {
+        const usage: WorkWeeklyProviderUsage = {};
+        for (const key of ["inputTokens", "outputTokens", "reasoningTokens"] as const) {
+          const value = diagnostics[key];
+          if (Number.isSafeInteger(value) && value! >= 0) usage[key] = value;
+        }
+        try { input.onUsage?.(usage); } catch { /* Metrics cannot change publication. */ }
         if (diagnostics.parseResult === "failed" || diagnostics.validationResult === "failed"
           || diagnostics.providerErrorCode || diagnostics.responseStatus === "incomplete") {
           console.error(JSON.stringify({

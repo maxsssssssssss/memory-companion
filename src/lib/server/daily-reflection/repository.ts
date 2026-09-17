@@ -6,6 +6,7 @@ import type {
   DailyReflectionOperationUploadState
 } from "@/lib/domain/daily-reflection-api";
 import { AudioUploadSchema } from "@/lib/domain/types";
+import { dailyReflectionUploadFailure, DailyReflectionUploadFailureSchema, type DailyReflectionUploadFailure } from "@/lib/domain/daily-reflection-upload-failure";
 
 import {
   CandidateSchema,
@@ -20,6 +21,7 @@ import {
   DAILY_REFLECTION_PROCESSING_PLAN_V2_VERSION,
   DailyReflectionAdmissionOperationSchema,
   DailyReflectionIdSchema,
+  DailyReflectionDurationSourceSchema,
   DailyReflectionSchema,
   DailyReflectionStatusSchema,
   PendingCandidateInputSchema,
@@ -144,7 +146,7 @@ type ProcessingPlanV2Row = {
   input_adapter: "file_picker" | "browser_recorder" | "toy_sync";
   capture_purpose: "inspiration_capture";
   effective_duration_ms: number;
-  duration_source: "server_ffprobe";
+  duration_source: "server_ffprobe" | "server_ffmpeg_decode";
   candidate_limit: number;
   created_at: string;
 };
@@ -397,7 +399,7 @@ const BindUploadV2InputSchema = z.object({
   inputAdapter: DailyReflectionV2InputAdapterSchema,
   processingProfile: ProcessingProfileSchema,
   effectiveDurationMs: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
-  durationSource: z.literal("server_ffprobe"),
+  durationSource: DailyReflectionDurationSourceSchema,
   candidateLimit: z.number().int().min(1).max(DAILY_REFLECTION_FULL_CANDIDATE_LIMIT),
   leaseOwner: z.string().trim().min(1).max(512),
   attemptVersion: z.number().int().positive()
@@ -2318,6 +2320,7 @@ export class DailyReflectionRepository {
         accountId, reflectionId: reflection.id, assetKind: "upload"
       });
       const upload = AudioUploadSchema.safeParse(rawUpload);
+      const failure = dailyReflectionUploadFailure(reflection.errorCode);
       const staging = reflection.status === "created" || reflection.status === "uploading"
         || (reflection.status === "failed"
           && reflection.errorCode === "daily_reflection_upload_persist_failed");
@@ -2338,12 +2341,12 @@ export class DailyReflectionRepository {
         && plan?.uploadId === receipt.uploadId
         && plan.reflectionId === reflection.id
         && !(staging && lease)
-        && reflection.errorCode !== "daily_reflection_upload_persist_failed"
+        && !failure
         && reflection.errorCode !== "daily_reflection_audio_missing") {
         // Completed-audio cleanup deliberately retains this canonical record.
         // A missing transport job is recoverable from this plan + publication.
         uploadState = "accepted";
-      } else if (rawUpload === null && staging) {
+      } else if (rawUpload === null && staging && failure?.retryable !== false) {
         // Absent canonical publication plus an available/expired fence permits
         // a same-key attempt; it does not claim the old writer never wrote bytes.
         // claimStaging increments attemptVersion before any new publication.
@@ -2356,7 +2359,10 @@ export class DailyReflectionRepository {
         jobId: receipt.jobId,
         contentHash: receipt.contentHash,
         status: reflection.status,
-        uploadState
+        uploadState,
+        uploadFailure: ["accepted", "terminated", "still_persisting"].includes(uploadState)
+          ? null : failure ?? (staging && lease && Date.parse(lease.leaseUntil) <= Date.parse(this.now())
+            ? dailyReflectionUploadFailure("daily_reflection_upload_lease_lost") : null)
       };
     })();
   }
@@ -2641,7 +2647,7 @@ export class DailyReflectionRepository {
     inputAdapter: DailyReflectionV2InputAdapter;
     processingProfile: ProcessingProfile;
     effectiveDurationMs: number;
-    durationSource: "server_ffprobe";
+    durationSource: "server_ffprobe" | "server_ffmpeg_decode";
     candidateLimit: number;
     leaseOwner: string;
     attemptVersion: number;
@@ -2785,6 +2791,7 @@ export class DailyReflectionRepository {
     leaseDurationMs: number;
     uploadFingerprint?: string;
     provisionalUploadId?: string;
+    clearUploadFailure?: boolean;
     expectedAttemptVersion?: number;
     allowedStatuses?: DailyReflectionStatus[];
     now?: string;
@@ -2947,6 +2954,14 @@ export class DailyReflectionRepository {
         return null;
       }
       const lease = this.leaseRow(accountId, reflectionId)!;
+      // Only the newly claimed persistence attempt can clear its predecessor's
+      // safe save error; a losing claim never changes the visible failure.
+      if (input.clearUploadFailure && provisionalUploadId !== null && row.status === "uploading" && dailyReflectionUploadFailure(row.error_code)) {
+        this.database.prepare(`
+          UPDATE dr_reflections SET error_code = NULL, error_message = NULL, version = version + 1
+          WHERE id = ? AND account_id = ? AND lease_owner = ? AND attempt_version = ?
+        `).run(reflectionId, accountId, leaseOwner, lease.attempt_version);
+      }
       return {
         leaseOwner: lease.lease_owner!,
         leaseUntil: lease.lease_until!,
@@ -2993,6 +3008,46 @@ export class DailyReflectionRepository {
   }) {
     this.requireReflectionRow(input.accountId, input.reflectionId);
     this.assertLeaseFence(input);
+  }
+
+  remainingExecutionLeaseMs(input: {
+    accountId: string; reflectionId: string; leaseOwner: string; attemptVersion: number;
+  }) {
+    this.assertExecutionLease(input);
+    return Date.parse(this.leaseRow(input.accountId, input.reflectionId)!.lease_until!) - Date.parse(this.now());
+  }
+
+  recordUploadFailure(input: {
+    accountId: string; reflectionId: string; leaseOwner: string; attemptVersion: number;
+    failure: DailyReflectionUploadFailure;
+  }) {
+    const failure = DailyReflectionUploadFailureSchema.parse(input.failure);
+    return this.database.transaction(() => {
+      this.assertExecutionLease(input);
+      const row = this.requireReflectionRow(input.accountId, input.reflectionId);
+      if (row.status !== "uploading" || row.error_code === "daily_reflection_delete_requested") {
+        throw new DailyReflectionLeaseLostError();
+      }
+      this.database.prepare(`
+        UPDATE dr_reflections SET status = ?, error_code = ?, error_message = ?,
+          version = version + 1, updated_at = ?, lease_owner = NULL, lease_until = NULL
+        WHERE id = ? AND account_id = ? AND lease_owner = ? AND attempt_version = ?
+      `).run(failure.retryable ? "uploading" : "failed", failure.code, failure.code, this.now(),
+        input.reflectionId, input.accountId, input.leaseOwner, input.attemptVersion);
+      return this.getUploadRecovery(input.accountId, input.reflectionId);
+    }).immediate();
+  }
+
+  getUploadRecovery(accountId: string, reflectionId: string) {
+    return this.database.transaction(() => {
+      this.requireReflectionRow(accountId, reflectionId);
+      const receipt = this.database.prepare(`
+        SELECT operation_key FROM dr_v2_input_receipts WHERE account_id = ? AND reflection_id = ?
+      `).get(accountId, reflectionId) as { operation_key: string } | undefined;
+      const lookup = receipt ? this.getOperationLookupV2(accountId, receipt.operation_key) : null;
+      return lookup?.found ? { uploadState: lookup.uploadState, uploadFailure: lookup.uploadFailure ?? null }
+        : { uploadState: null, uploadFailure: null };
+    })();
   }
 
   renewExecutionLease(input: {

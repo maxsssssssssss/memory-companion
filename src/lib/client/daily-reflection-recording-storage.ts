@@ -11,6 +11,7 @@ export type ReflectionRecordingBackup = Readonly<{
   recordingDate: string;
   clientReportedDurationMs?: number;
   submitted?: boolean;
+  inputAdapter?: "browser_recorder" | "file_picker";
 }>;
 
 export interface ReflectionRecordingStorage {
@@ -51,6 +52,7 @@ export function createReflectionRecordingStorage(): ReflectionRecordingStorage {
         const row = request.result as ReflectionRecordingBackup | undefined;
         result(row?.accountId === accountId && row.file instanceof Blob && row.file.size > 0
           && typeof row.operationKey === "string" && row.operationKey.length > 0
+          && (row.inputAdapter === undefined || row.inputAdapter === "browser_recorder" || row.inputAdapter === "file_picker")
           && /^\d{4}-\d{2}-\d{2}$/u.test(row.recordingDate)
           && (row.sourceOrigin === null || row.sourceOrigin === "user_reflection" || row.sourceOrigin === "direct_conversation")
           ? row : null);

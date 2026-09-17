@@ -476,6 +476,63 @@ function createReviewPendingCards(input: {
   return { reflection, operationKey };
 }
 
+describe("fenced upload failure recovery", () => {
+  function staging() {
+    const created = repository.createReflectionV2({
+      accountId: "account_1", uploadId: null, operationKey: "safe-save", inputAdapter: "browser_recorder",
+      sourceOrigin: "user_reflection", capturePurpose: "inspiration_capture", recordingDate: "2026-09-16", contentHash: "a".repeat(64)
+    });
+    const id = created.reflection.id;
+    repository.transitionStatus({ accountId: "account_1", reflectionId: id, expectedVersion: created.reflection.version, status: "uploading" });
+    const claim = (owner: string) => repository.claimExecutionLease({
+      accountId: "account_1", reflectionId: id, leaseOwner: owner, leaseDurationMs: 60000,
+      provisionalUploadId: created.receipt!.uploadId, uploadFingerprint: "a".repeat(64), allowedStatuses: ["uploading"], clearUploadFailure: true
+    });
+    const fence = claim("writer-1")!;
+    return { id, claim, fence, identity: { accountId: "account_1", reflectionId: id } };
+  }
+
+  it("stores failure without a plan, atomically clears it on a new claim, and rejects the stale writer", () => {
+    const { identity, id, claim, fence } = staging();
+    const failure = { code: "daily_reflection_duration_probe_timeout" as const, retryable: true };
+    expect(repository.recordUploadFailure({ ...identity, ...fence, failure })).toEqual({ uploadState: "reupload_allowed", uploadFailure: failure });
+    expect(repository.getProcessingPlan("account_1", id)).toBeNull();
+    expect(repository.getReflection("account_1", id).status).toBe("uploading");
+    const next = claim("writer-2")!;
+    expect(next.attemptVersion).toBe(fence.attemptVersion + 1);
+    expect(repository.getUploadRecovery("account_1", id)).toEqual({ uploadState: "still_persisting", uploadFailure: null });
+    expect(() => repository.recordUploadFailure({ ...identity, ...fence, failure })).toThrow(DailyReflectionLeaseLostError);
+    expect(claim("loser")).toBeNull();
+    expect(repository.getReflection("account_1", id).errorCode).toBeNull();
+    expect(() => repository.recordUploadFailure({ ...identity, ...next, accountId: "other-account", failure })).toThrow();
+    expect(repository.getOperationLookupV2("other-account", "safe-save")).toEqual({ found: false });
+  });
+
+  it("projects an expired lease from durable state without permitting its writer to overwrite a takeover", () => {
+    let clock = timestamp;
+    repository = new DailyReflectionRepository(database, { now: () => clock });
+    const { identity, id, claim, fence } = staging();
+    clock = "2026-08-13T00:02:00.000Z";
+    expect(repository.getUploadRecovery("account_1", id)).toEqual({ uploadState: "reupload_allowed", uploadFailure: {
+      code: "daily_reflection_upload_lease_lost", retryable: true
+    } });
+    expect(() => repository.recordUploadFailure({ ...identity, ...fence, failure: { code: "daily_reflection_upload_persist_failed", retryable: true } }))
+      .toThrow(DailyReflectionLeaseLostError);
+    const next = claim("writer-2")!;
+    expect(next.attemptVersion).toBe(2);
+    expect(repository.getUploadRecovery("account_1", id)).toEqual({ uploadState: "still_persisting", uploadFailure: null });
+  });
+
+  it("hides prior failures on terminal records and never accepts a forged retry classification", () => {
+    const { identity, id, fence } = staging();
+    expect(() => repository.recordUploadFailure({ ...identity, ...fence, failure: { code: "daily_reflection_audio_invalid", retryable: true } })).toThrow();
+    repository.recordUploadFailure({ ...identity, ...fence, failure: { code: "daily_reflection_upload_persist_failed", retryable: true } });
+    const current = repository.getReflection("account_1", id);
+    repository.transitionStatus({ ...identity, expectedVersion: current.version, status: "cancelled" });
+    expect(repository.getUploadRecovery("account_1", id)).toEqual({ uploadState: "terminated", uploadFailure: null });
+  });
+});
+
 describe("DailyReflectionRepository", () => {
   it("persists idempotent V2 input without merging accounts or operation payloads", () => {
     const input = {

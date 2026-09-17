@@ -77,12 +77,12 @@ export type WorkReviewAnalysisRuntimeConfig = {
   verifier: WorkReviewAnalysisProviderProfile;
 };
 
-export const WORK_MEETING_PIPELINE_VERSION = "work_meeting_v23" as const;
-export const WORK_MEETING_EXTRACTOR_PROMPT_VERSION = "work_meeting_extractor_v14" as const;
+export const WORK_MEETING_PIPELINE_VERSION = "work_meeting_v25" as const;
+export const WORK_MEETING_EXTRACTOR_PROMPT_VERSION = "work_meeting_extractor_v15" as const;
 export const WORK_MEETING_EXTRACTOR_SCHEMA_VERSION = "work_meeting_candidates_v7" as const;
-export const WORK_MEETING_VERIFIER_PROMPT_VERSION = "work_meeting_verifier_v12" as const;
+export const WORK_MEETING_VERIFIER_PROMPT_VERSION = "work_meeting_verifier_v13" as const;
 export const WORK_MEETING_VERIFIER_SCHEMA_VERSION = "work_meeting_claim_evaluations_v3" as const;
-export const WORK_MEETING_PUBLICATION_POLICY_VERSION = "work_meeting_publication_v7" as const;
+export const WORK_MEETING_PUBLICATION_POLICY_VERSION = "work_meeting_publication_v9" as const;
 
 export class WorkReviewRuntimeConfigError extends Error {
   constructor(

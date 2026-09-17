@@ -1,6 +1,3 @@
-import { execFile } from "node:child_process";
-import { promisify } from "node:util";
-
 import {
   DailyReflectionDurationResolutionSchema,
   normalizeDailyReflectionClientReportedDurationMs,
@@ -11,24 +8,19 @@ import type {
   InputMethod,
   DailyReflectionV2InputAdapter
 } from "@/lib/domain/daily-reflection";
-import { getFfprobeExecutable } from "@/lib/server/ffmpeg";
+import {
+  DailyReflectionDurationProbeError,
+  measureDailyReflectionAudio,
+  type DurationToolOptions
+} from "./duration-audio-tools";
+export { DailyReflectionDurationProbeError } from "./duration-audio-tools";
 
 export { resolveDailyReflectionProcessingProfile };
 
 export const DAILY_REFLECTION_DURATION_PROBE_ERROR_CODE =
   "daily_reflection_duration_probe_failed" as const;
 
-export class DailyReflectionDurationProbeError extends Error {
-  readonly name = "DailyReflectionDurationProbeError";
-  readonly code = DAILY_REFLECTION_DURATION_PROBE_ERROR_CODE;
-  readonly retryable = true;
-
-  constructor() {
-    super(DAILY_REFLECTION_DURATION_PROBE_ERROR_CODE);
-  }
-}
-
-export type ResolveDailyReflectionDurationInput = {
+export type ResolveDailyReflectionDurationInput = DurationToolOptions & {
   filePath: string;
   inputMethod: InputMethod;
   inputAdapter?: DailyReflectionV2InputAdapter;
@@ -40,37 +32,12 @@ export type DailyReflectionDurationResolverDependencies = {
   readFfprobeStdout?: (filePath: string) => Promise<unknown>;
 };
 
-const execFileAsync = promisify(execFile);
-
 export function parseDailyReflectionFfprobeDurationSeconds(stdout: unknown) {
   const durationSeconds = Number(String(stdout).trim());
   if (!Number.isFinite(durationSeconds) || durationSeconds <= 0) {
     throw new DailyReflectionDurationProbeError();
   }
   return durationSeconds;
-}
-
-async function readDailyReflectionFfprobeStdout(filePath: string) {
-  const result = await execFileAsync(getFfprobeExecutable(), [
-    "-v",
-    "error",
-    "-show_entries",
-    "format=duration",
-    "-of",
-    "default=noprint_wrappers=1:nokey=1",
-    filePath
-  ]);
-  return typeof result === "string" ? result : result.stdout;
-}
-
-async function probeDailyReflectionDurationSeconds(
-  filePath: string,
-  readFfprobeStdout: (filePath: string) => Promise<unknown> =
-    readDailyReflectionFfprobeStdout
-) {
-  return parseDailyReflectionFfprobeDurationSeconds(
-    await readFfprobeStdout(filePath)
-  );
 }
 
 function durationSecondsToMilliseconds(value: unknown) {
@@ -95,18 +62,21 @@ export async function resolveDailyReflectionAuthoritativeDuration(
   input: ResolveDailyReflectionDurationInput,
   dependencies: DailyReflectionDurationResolverDependencies = {}
 ): Promise<DailyReflectionDurationResolution> {
-  const probeDuration =
-    dependencies.probeDurationSeconds
-    ?? ((filePath: string) => probeDailyReflectionDurationSeconds(
-      filePath,
-      dependencies.readFfprobeStdout
-    ));
-
   let durationSeconds: number;
-  try {
-    durationSeconds = await probeDuration(input.filePath);
-  } catch {
-    throw new DailyReflectionDurationProbeError();
+  let durationSource: DailyReflectionDurationResolution["durationSource"] = "server_ffprobe";
+  let requiresAudioExtraction: true | undefined;
+  if (dependencies.probeDurationSeconds || dependencies.readFfprobeStdout) {
+    // Existing deterministic policy-test seams; production always measures audio.
+    try {
+      durationSeconds = dependencies.probeDurationSeconds
+        ? await dependencies.probeDurationSeconds(input.filePath)
+        : parseDailyReflectionFfprobeDurationSeconds(await dependencies.readFfprobeStdout!(input.filePath));
+    } catch { throw new DailyReflectionDurationProbeError(); }
+  } else {
+    const measured = await measureDailyReflectionAudio(input.filePath, input);
+    durationSeconds = measured.durationSeconds;
+    durationSource = measured.durationSource;
+    requiresAudioExtraction = measured.requiresAudioExtraction;
   }
 
   const effectiveDurationMs = durationSecondsToMilliseconds(durationSeconds);
@@ -127,7 +97,8 @@ export async function resolveDailyReflectionAuthoritativeDuration(
     clientReportedDurationMs: normalizeDailyReflectionClientReportedDurationMs(
       input.clientReportedDurationMs
     ),
-    durationSource: "server_ffprobe",
+    durationSource,
+    ...(requiresAudioExtraction ? { requiresAudioExtraction } : {}),
     processingProfile
   });
 }

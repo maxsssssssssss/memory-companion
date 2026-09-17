@@ -1,0 +1,68 @@
+{
+  "scoreOnly": true,
+  "neverSendToProvider": true,
+  "expected": {
+    "findingCount": 13,
+    "todoCount": 2,
+    "evidenceCount": 26,
+    "todoEventCount": 10,
+    "snapshotIdentitiesIncludingMeeting": 52,
+    "actualProductSourcePackCount": "Measure after the frozen production builder; do not claim 52 wire refs if fewer are selected."
+  },
+  "requiredMeaning": [
+    "cannot infer ready/open solely from planned date",
+    "current target September22, previous18 is historical",
+    "sandbox mapping and permission checks remain prerequisites",
+    "sandbox Todo completed then reopened: currently open, next recheck; historical completion not current readiness",
+    "training check Todo system-completed does not prove training took place",
+    "support/mobile remain unresolved without assigning owners"
+  ],
+  "citationRules": [
+    "all published refs in current-week allowlist",
+    "multiple independent sources support the conclusion",
+    "no invalidated or cross-account refs",
+    "score final published and displayed text, not raw answer field"
+  ],
+  "readability": [
+    "direct answer in opening",
+    "natural paragraphs or short lists",
+    "avoid repeated mechanical qualifiers on every sentence",
+    "retain material conditions and uncertainty",
+    "no new post-verifier polishing call"
+  ],
+  "latency": {
+    "preferredSeconds": [
+      10,
+      20
+    ],
+    "observationSeconds": [
+      20,
+      30
+    ],
+    "hardSemanticReject": false,
+    "noP95Claim": true,
+    "stages": [
+      "submission",
+      "durable_queue_wait",
+      "job_claim",
+      "source_selection",
+      "answerer",
+      "verifier",
+      "persistence",
+      "poll_visible"
+    ],
+    "missingStage": "NOT_MEASURED; direct executor is not full UI end-to-end"
+  },
+  "remoteBudget": {
+    "answerer": 1,
+    "verifier": 1,
+    "maxTotal": 2,
+    "model": "deepseek-v4-flash",
+    "retry": 0,
+    "sdkRetry": 0,
+    "fallback": 0,
+    "probe": 0,
+    "weeklyGeneration": 0,
+    "stopAfterFailureOrUnknown": true
+  }
+}

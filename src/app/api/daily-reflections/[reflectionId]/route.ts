@@ -176,6 +176,7 @@ export async function GET(
     .filter((receipt) => receipt.outcome === "revoked")
     .map((receipt) => receipt.candidateId);
   return NextResponse.json(DailyReflectionDetailResponseSchema.parse({
+    ...repository.getUploadRecovery(resolved.authContext.user.id, resolved.reflectionId),
     reflection: view.reflection,
     processingPlan: plan,
     job,

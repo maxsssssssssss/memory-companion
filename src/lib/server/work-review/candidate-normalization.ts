@@ -12,7 +12,7 @@ import {
 import type { TranscriptSegment } from "@/lib/domain/types";
 import { buildWorkMeetingVerifierProviderPayload, materializeWorkEvidence, type WorkMeetingVerifierInput } from "./analysis-provider";
 import type { WorkDuplicateCoverageRequest, WorkDuplicateCoverageEvaluation } from "./duplicate-coverage";
-import { evaluateWorkCandidatePublication, requiresWorkClaimGptVerification } from "./publication-policy";
+import { evaluateWorkCandidatePublication, isWorkOptionalAttributeClaim, requiresWorkClaimGptVerification } from "./publication-policy";
 
 export type WorkWindowCandidateBatch = {
   windowIndex: number;
@@ -157,6 +157,7 @@ export function estimateWorkVerifierEvidencePayloadCharacters(segment: Transcrip
 export function estimateWorkVerifierClaimPayloadCharacters(claim: WorkAtomicClaim) {
   return JSON.stringify({
     claimId: claim.id,
+    candidateId: claim.candidateId,
     claimType: claim.claimType,
     semanticRiskFlags: claim.semanticRiskFlags ?? [],
     semanticValue: claim.semanticValue ?? null,
@@ -186,6 +187,7 @@ function estimateWorkVerifierBatchPayloadCharactersFromCanonical(input: {
     })),
     items: input.claims.map((claim) => ({
       claimId: claim.id,
+      candidateId: claim.candidateId,
       claimType: claim.claimType,
       semanticRiskFlags: claim.semanticRiskFlags ?? [],
       semanticValue: claim.semanticValue ?? null,
@@ -300,6 +302,16 @@ export function partitionWorkCandidatesForVerification(input: {
   };
 
   for (const candidate of input.candidates) {
+    // Keep an ordinary item's core and attributes together. Oversized legacy
+    // candidates still use the existing bounded Claim partition below.
+    const candidateFits = candidate.claims.length <= maxClaimsPerBatch
+      && estimateWorkVerifierBatchPayloadCharactersFromCanonical({ claims: candidate.claims, segmentById }) <= maxPayloadCharactersPerBatch;
+    if (currentClaims.length > 0 && candidateFits && (
+      currentClaims.length + candidate.claims.length > maxClaimsPerBatch
+      || estimateWorkVerifierBatchPayloadCharactersFromCanonical({
+        claims: [...currentClaims, ...candidate.claims], segmentById
+      }) > maxPayloadCharactersPerBatch
+    )) flush();
     for (const claim of candidate.claims) {
       const trialClaims = [...currentClaims, claim];
       if (
@@ -344,6 +356,49 @@ export function partitionWorkCandidatesForVerification(input: {
     throw new Error("work_verifier_partition_claim_closure_invalid");
   }
   return batches;
+}
+
+/** Reserve required semantics before optional attributes consume bounded capacity. */
+export function planWorkCandidatesForVerification(input: Parameters<typeof partitionWorkCandidatesForVerification>[0]) {
+  const { segmentById, sourceClaims } = validateWorkVerificationSource(input);
+  const maxClaims = input.maxClaimsPerBatch ?? WORK_VERIFIER_MAX_CLAIMS_PER_BATCH;
+  const maxCharacters = input.maxPayloadCharactersPerBatch ?? WORK_VERIFIER_MAX_PAYLOAD_CHARACTERS_PER_BATCH;
+  const maxBatches = input.maxBatches ?? WORK_VERIFIER_MAX_BATCHES;
+  const fits = (claims: WorkAtomicClaim[]) => claims.length <= maxClaims
+    && estimateWorkVerifierBatchPayloadCharactersFromCanonical({ claims, segmentById }) <= maxCharacters;
+  try {
+    const batches = partitionWorkCandidatesForVerification(input);
+    if (batches.every(batch => fits(batch.flatMap(c => c.claims)))) return { batches, deferredClaimIds: [] as string[] };
+  } catch (error) {
+    if (!(error instanceof WorkMeetingAnalysisLimitError)) throw error;
+  }
+  const required = input.candidates.flatMap(candidate => {
+    const claims = candidate.claims.filter(claim => !isWorkOptionalAttributeClaim(claim));
+    return claims.length ? [{ ...candidate, claims }] : [];
+  });
+  const batches = partitionWorkCandidatesForVerification({ ...input, candidates: required });
+  // Preserve the existing required-Claim contract, including a single
+  // oversized Claim in its own batch. Never add optional payload to it.
+  const deferredClaimIds: string[] = [];
+  for (const candidate of input.candidates) for (const claim of candidate.claims.filter(isWorkOptionalAttributeClaim)) {
+    // Try the item's core batch first, then existing spare capacity, then a
+    // spare batch. Required Claims never move or disappear to make room.
+    const indexes = batches.map((batch, index) => ({ index, sameItem: batch.some(c => c.id === candidate.id) }))
+      .sort((a, b) => Number(b.sameItem) - Number(a.sameItem) || a.index - b.index).map(row => row.index);
+    const index = indexes.find(index => fits([...batches[index].flatMap(c => c.claims), claim]));
+    if (index !== undefined) {
+      const existing = batches[index].findIndex(c => c.id === candidate.id);
+      if (existing < 0) batches[index].push({ ...candidate, claims: [claim] });
+      else batches[index][existing] = { ...batches[index][existing], claims: [...batches[index][existing].claims, claim] };
+    } else if (batches.length < maxBatches && fits([claim])) {
+      batches.push([{ ...candidate, claims: [claim] }]);
+    } else deferredClaimIds.push(claim.id);
+  }
+  const routed = batches.flatMap(batch => batch.flatMap(c => c.claims.map(claim => claim.id)));
+  const accounted = [...routed, ...deferredClaimIds];
+  if (new Set(accounted).size !== sourceClaims.length || accounted.length !== sourceClaims.length
+    || sourceClaims.some(claim => !accounted.includes(claim.id))) throw new Error("work_verifier_partition_claim_closure_invalid");
+  return { batches, deferredClaimIds };
 }
 
 function stableId(prefix: string, value: unknown) {
@@ -433,6 +488,13 @@ function canMerge(
   evidenceOrder: ReadonlyMap<string, number>
 ) {
   if (left.kind !== right.kind) return false;
+  // For tasks, lexical similarity is not proof of the same deliverable. The
+  // single global organizer can propose semantic groups for later verification.
+  if (left.kind === "commitment" || left.kind === "action_item") {
+    if (JSON.stringify(coreTexts(left)) !== JSON.stringify(coreTexts(right))) return false;
+    if (left.structuredData.candidateOwner && right.structuredData.candidateOwner
+      && normalizedText(left.structuredData.candidateOwner) !== normalizedText(right.structuredData.candidateOwner)) return false;
+  }
   const bestSimilarity = coreSimilarity(left, right);
   if (evidenceOverlap(left.evidenceIds, right.evidenceIds)) {
     return bestSimilarity >= 0.62;

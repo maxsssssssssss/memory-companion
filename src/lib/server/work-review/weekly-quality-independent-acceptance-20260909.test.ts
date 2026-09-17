@@ -345,7 +345,7 @@ describe("QA adjacent use of the shared atomic publication policy", () => {
     const providers = qa(claims);
     const output = await ask(providers);
     expect(WorkWeeklySynthesizerResponseSchema.safeParse({ items: [item("qa_multiple_claims", claims)] }).success).toBe(true);
-    expect(output).toMatchObject({ answerStatus: "answered", answer: claims.map((c) => c.text).join("；"), sourceRefs: [ref(0), ref(1)], failureCode: null });
+    expect(output).toMatchObject({ answerStatus: "answered", answer: claims.map((c) => c.text).join("\n\n"), sourceRefs: [ref(0), ref(1)], failureCode: null });
     expect(providers.request).toHaveBeenCalledTimes(2);
     observed.push({ name: "QA two atomic answers", generated: [item("qa", claims)], published: output });
   });
