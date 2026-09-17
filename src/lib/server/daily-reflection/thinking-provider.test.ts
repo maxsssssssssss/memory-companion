@@ -8,9 +8,9 @@ import type { JsonStore } from "@/lib/server/storage/json-store";
 
 import {
   DailyReflectionThinkingProviderTimeoutError,
-  OpenAiThinkingConversationProvider,
+  TokenHubThinkingConversationProvider,
   buildDailyReflectionThinkingSystemPrompt,
-  resolveDailyReflectionThinkingModel
+  getThinkingConversationProvider
 } from "./thinking-provider";
 
 const store = {} as JsonStore;
@@ -73,14 +73,14 @@ describe("Daily Reflection Thinking Provider", () => {
     vi.useRealTimers();
   });
 
-  it("resolves OPENAI_QA_MODEL before OPENAI_TEXT_MODEL", () => {
-    expect(resolveDailyReflectionThinkingModel({
+  it("pins Thinking to TokenHub Pro independently of shared GPT model settings", () => {
+    const provider = new TokenHubThinkingConversationProvider({ environment: {
+      NODE_ENV: "test",
       OPENAI_QA_MODEL: "gpt-5.5",
       OPENAI_TEXT_MODEL: "gpt-4.1-mini"
-    })).toBe("gpt-5.5");
-    expect(resolveDailyReflectionThinkingModel({
-      OPENAI_TEXT_MODEL: "gpt-4.1-mini"
-    })).toBe("gpt-4.1-mini");
+    } });
+    expect(provider.model).toBe("deepseek-v4-pro");
+    expect(getThinkingConversationProvider()).toBeInstanceOf(TokenHubThinkingConversationProvider);
   });
 
   it("asks all five modes for direct natural plain text without presentation boilerplate", () => {
@@ -111,7 +111,7 @@ describe("Daily Reflection Thinking Provider", () => {
       interpretations: ["目前是在拓宽可能性。"],
       hypotheses: ["也许先做低成本试验。"]
     }));
-    const provider = new OpenAiThinkingConversationProvider({
+    const provider = new TokenHubThinkingConversationProvider({
       environment: {
         NODE_ENV: "test",
         OPENAI_QA_MODEL: "gpt-5.5",
@@ -134,8 +134,8 @@ describe("Daily Reflection Thinking Provider", () => {
     expect(output.answer).not.toContain("##");
     expect(output.answer).not.toContain("模型解释（不代表你的历史记录或原话）");
     expect(requestText).toHaveBeenCalledTimes(1);
-    expect(requestText.mock.calls[0]?.[1]).toBe("gpt-5.5");
-    expect(requestText.mock.calls[0]?.[4]).toBe("responses");
+    expect(requestText.mock.calls[0]?.[1]).toBe("deepseek-v4-pro");
+    expect(requestText.mock.calls[0]?.[4]).toBeInstanceOf(AbortSignal);
   });
 
   it("normalizes Markdown presentation into paragraphs and ordinary numbering", async () => {
@@ -145,7 +145,7 @@ describe("Daily Reflection Thinking Provider", () => {
       interpretations: ["模型解释：这两个步骤可以减少**沉没成本**。"],
       hypotheses: ["新的推演（不代表你的历史记录或原话）：也许一天就能得到第一轮信号。"]
     }));
-    const provider = new OpenAiThinkingConversationProvider({
+    const provider = new TokenHubThinkingConversationProvider({
       clientFactory: vi.fn(async () => client),
       requestText
     });
@@ -173,7 +173,7 @@ describe("Daily Reflection Thinking Provider", () => {
       interpretations: [],
       hypotheses: []
     }));
-    const provider = new OpenAiThinkingConversationProvider({
+    const provider = new TokenHubThinkingConversationProvider({
       clientFactory: vi.fn(async () => client),
       requestText
     });
@@ -201,7 +201,7 @@ describe("Daily Reflection Thinking Provider", () => {
       interpretations: ["这条线索适合转成验证动作。"],
       hypotheses: ["也许先定义一天内可观察的结果。"]
     }));
-    const provider = new OpenAiThinkingConversationProvider({
+    const provider = new TokenHubThinkingConversationProvider({
       clientFactory: vi.fn(async () => client),
       requestText
     });
@@ -266,7 +266,7 @@ describe("Daily Reflection Thinking Provider", () => {
       interpretations: [],
       hypotheses: []
     }));
-    const provider = new OpenAiThinkingConversationProvider({
+    const provider = new TokenHubThinkingConversationProvider({
       clientFactory: vi.fn(async () => client),
       requestText
     });
@@ -308,7 +308,7 @@ describe("Daily Reflection Thinking Provider", () => {
         interpretations: [],
         hypotheses: []
       }));
-    const provider = new OpenAiThinkingConversationProvider({
+    const provider = new TokenHubThinkingConversationProvider({
       clientFactory: vi.fn(async () => client),
       requestText,
       maxAttempts: 99
@@ -330,14 +330,13 @@ describe("Daily Reflection Thinking Provider", () => {
       _model,
       _system,
       _user,
-      _wire,
       signal: AbortSignal
     ) => new Promise<string>((_resolve, reject) => {
       signal.addEventListener("abort", () => reject(signal.reason), { once: true });
     }));
     const aborted = new AbortController();
     aborted.abort(new DOMException("cancelled", "AbortError"));
-    const provider = new OpenAiThinkingConversationProvider({
+    const provider = new TokenHubThinkingConversationProvider({
       clientFactory: vi.fn(async () => client),
       requestText,
       timeoutMs: 10
