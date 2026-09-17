@@ -6,6 +6,7 @@ import {
   normalizeDailyReflectionClientReportedDurationMs
 } from "@/lib/domain/daily-reflection-duration";
 import { DailyReflectionHistoryResponseSchema } from "@/lib/domain/daily-reflection-api";
+import { dailyReflectionUploadFailure } from "@/lib/domain/daily-reflection-upload-failure";
 import { InputMethodSchema, type InputMethod } from "@/lib/domain/daily-reflection";
 import { AudioUploadSchema } from "@/lib/domain/types";
 import {
@@ -168,6 +169,7 @@ export async function GET(request: Request) {
       const date = recordingDate ?? reflection.createdAt.slice(0, 10);
       return {
         id: reflection.id,
+        ...repository.getUploadRecovery(authContext.user.id, reflection.id),
         status: reflection.status,
         inputMethod: reflection.inputMethod,
         sourceOrigin: displayOrigin,
@@ -298,14 +300,17 @@ export async function POST(request: Request) {
     const lookup = repository.getOperationLookupV2(authContext.user.id, operationReceipt.operationKey);
     if (!lookup.found) throw new Error("daily_reflection_v2_receipt_missing");
     if (lookup.uploadState === "terminated") {
-      return NextResponse.json({ error: "daily_reflection_recovery_terminated" }, { status: 409 });
+      return NextResponse.json({ error: "daily_reflection_recovery_terminated", uploadState: lookup.uploadState, uploadFailure: null }, { status: 409 });
     }
     if (lookup.uploadState === "still_persisting" || lookup.uploadState === "unresolved") {
       return NextResponse.json({
         ...receipt({ operation: operationReceipt, status: lookup.status, executionMode, reused: true }),
         persistencePending: true,
+        uploadState: lookup.uploadState,
+        uploadFailure: lookup.uploadFailure ?? null,
+        ...(lookup.uploadFailure ? { retryable: lookup.uploadFailure.retryable } : {}),
         ...(lookup.uploadState === "unresolved"
-          ? { error: "daily_reflection_upload_outcome_unresolved" } : {})
+          ? { error: lookup.uploadFailure?.code ?? "daily_reflection_upload_outcome_unresolved" } : {})
       }, { status: lookup.uploadState === "still_persisting" ? 202 : 409 });
     }
     return null;
@@ -406,12 +411,16 @@ export async function POST(request: Request) {
       rawStoredUpload = await readPublishedUpload();
       uploadAvailable = rawStoredUpload !== null;
       if (!uploadAvailable) {
-        const assertPersistenceFence = () => repository.assertExecutionLease({
-          accountId: authContext.user.id,
-          reflectionId: created.reflection.id,
-          leaseOwner: fence.leaseOwner,
-          attemptVersion: fence.attemptVersion
-        });
+        const leaseInput = {
+          accountId: authContext.user.id, reflectionId: created.reflection.id,
+          leaseOwner: fence.leaseOwner, attemptVersion: fence.attemptVersion
+        };
+        const assertPersistenceFence = () => repository.assertExecutionLease(leaseInput);
+        const assertPublishable = () => {
+          assertPersistenceFence();
+          if (request.signal.aborted) throw new DailyReflectionDurationProbeError("daily_reflection_upload_interrupted");
+        };
+        const persistenceStartedAt = Date.now();
         const execution = persistAudioUpload({
           store: authContext.store,
           uploadId,
@@ -419,14 +428,22 @@ export async function POST(request: Request) {
           file,
           recordingDate,
           attemptSuffix: `attempt-${fence.attemptVersion}`,
-          assertWritable: assertPersistenceFence,
+          assertWritable: assertPublishable,
           publishUpload: async (upload) => {
             const duration = await resolveDailyReflectionAuthoritativeDuration({
               filePath: upload.filePath,
               inputMethod: inputContract.inputMethod,
               inputAdapter: inputContract.inputAdapter,
-              clientReportedDurationMs: reportedDurationMs
+              clientReportedDurationMs: reportedDurationMs,
+              signal: request.signal,
+              budgetMs: Math.max(0, repository.remainingExecutionLeaseMs(leaseInput) - 10_000),
+              assertWritable: assertPublishable,
+              onDiagnostic: (diagnostic) => console.info("[daily-reflection-upload] duration", {
+                reflectionId: created.reflection.id, uploadId,
+                attemptVersion: fence.attemptVersion, ...diagnostic
+              })
             });
+            assertPublishable();
             const current = service.get(
               authContext.user.id,
               created.reflection.id
@@ -451,6 +468,7 @@ export async function POST(request: Request) {
                 effectiveDurationMs: duration.effectiveDurationMs,
                 clientReportedDurationMs: duration.clientReportedDurationMs,
                 durationSource: duration.durationSource,
+                ...(duration.requiresAudioExtraction ? { requiresAudioExtraction: true } : {}),
                 processingProfile: duration.processingProfile
               }
             });
@@ -465,7 +483,7 @@ export async function POST(request: Request) {
         uploadPersistenceExecutions.set(persistenceKey, execution);
         try {
           await execution;
-          assertPersistenceFence();
+          assertPublishable();
           uploadAvailable = true;
         } catch (error) {
           let stillOwnsFence = true;
@@ -479,6 +497,12 @@ export async function POST(request: Request) {
             }
           }
           if (!stillOwnsFence) {
+            const recovery = repository.getUploadRecovery(authContext.user.id, created.reflection.id);
+            console.warn("[daily-reflection-upload] save_failed", {
+              reflectionId: created.reflection.id, uploadId, stage: "persistence",
+              attemptVersion: fence.attemptVersion, elapsedMs: Date.now() - persistenceStartedAt,
+              code: "daily_reflection_upload_lease_lost"
+            });
             return NextResponse.json({
               ...receipt({
                 operation: operationReceipt,
@@ -486,8 +510,12 @@ export async function POST(request: Request) {
                   .reflection.status,
                 executionMode
               }),
-              persistencePending: true
-            }, { status: 202 });
+              ...recovery,
+              error: recovery.uploadState === "terminated" ? "daily_reflection_recovery_terminated"
+                : recovery.uploadFailure?.code ?? "daily_reflection_upload_outcome_unresolved",
+              retryable: recovery.uploadFailure?.retryable ?? false,
+              persistencePending: recovery.uploadState === "still_persisting"
+            }, { status: recovery.uploadState === "still_persisting" ? 202 : 409 });
           }
           await cleanupDailyReflectionUploadPersistenceFailure({
             store: authContext.store,
@@ -509,50 +537,29 @@ export async function POST(request: Request) {
             ? {
                 code: cause.code,
                 retryable: cause.retryable,
-                status: cause instanceof DailyReflectionDurationPolicyError
-                  ? 400
-                  : 503
+                status: cause.retryable ? 503 : 400
               }
             : {
                 code: "daily_reflection_upload_persist_failed",
                 retryable: true,
                 status: 503
               };
-          const current = service.get(authContext.user.id, created.reflection.id);
-          // Any retryable failure before a V2 plan exists (including a
-          // raw-file write failure before ffprobe starts) must leave the
-          // idempotent workflow replayable. Once the immutable plan exists,
-          // the explicit retry contract can safely resume it from `failed`.
-          // Policy rejection is terminal even without a plan.
-          if (
-            current.reflection.status === "uploading"
-            && (!failure.retryable || current.processingPlan !== null)
-          ) {
-            try {
-              service.updateStatus({
-                accountId: authContext.user.id,
-                reflectionId: created.reflection.id,
-                expectedVersion: current.reflection.version,
-                status: "failed",
-                errorCode: failure.code,
-                errorMessage: failure.code,
-                leaseOwner: fence.leaseOwner,
-                attemptVersion: fence.attemptVersion
-              });
-            } catch (settleError) {
-              if (
-                !(settleError instanceof DailyReflectionVersionConflictError)
-                && !(settleError instanceof DailyReflectionLeaseLostError)
-              ) {
-                throw settleError;
-              }
-            }
+          try {
+            repository.recordUploadFailure({ ...leaseInput, failure: dailyReflectionUploadFailure(failure.code)! });
+          } catch (settleError) {
+            if (!(settleError instanceof DailyReflectionLeaseLostError)) throw settleError;
           }
+          console.warn("[daily-reflection-upload] save_failed", {
+            reflectionId: created.reflection.id, uploadId, stage: "persistence",
+            attemptVersion: fence.attemptVersion, elapsedMs: Date.now() - persistenceStartedAt,
+            code: failure.code
+          });
           return NextResponse.json({
             error: failure.code,
             reflectionId: created.reflection.id,
             uploadId,
-            retryable: failure.retryable
+            retryable: failure.retryable,
+            ...repository.getUploadRecovery(authContext.user.id, created.reflection.id)
           }, { status: failure.status });
         } finally {
           if (uploadPersistenceExecutions.get(persistenceKey) === execution) {

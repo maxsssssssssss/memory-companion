@@ -230,6 +230,15 @@ export async function recoverDailyReflectionJobs(
         report.freshActiveSkipped += 1;
         continue;
       }
+      // V2 upload recovery owns incomplete saves, including failures after plan
+      // binding. Queue recovery must not replace a replayable save error.
+      if (reflection.status === "uploading") {
+        const recovery = resolved.repository.getUploadRecovery(reflection.accountId, reflection.id);
+        if (recovery.uploadState !== null && recovery.uploadState !== "accepted") {
+          report.racesSkipped += 1;
+          continue;
+        }
+      }
       const store = resolved.getStore(reflection.accountId);
       let job = await readDailyReflectionJob(store, reflection.id);
       if (

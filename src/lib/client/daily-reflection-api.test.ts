@@ -4,9 +4,40 @@ import {
   DailyReflectionApiError,
   DailyReflectionUploadSourceSchema,
   createDailyReflectionApi,
+  reflectionUploadFailureMessage,
   type DailyReflectionBrowserRecordingInput,
   type DailyReflectionUploadInput
 } from "./daily-reflection-api";
+import { DailyReflectionUploadFailureCodeSchema, dailyReflectionUploadFailure } from "@/lib/domain/daily-reflection-upload-failure";
+
+describe("safe upload failure metadata", () => {
+  it("preserves a 503 classification and record ID without displaying raw server diagnostics", async () => {
+    const failure = { code: "daily_reflection_duration_probe_timeout", retryable: true };
+    const api = createDailyReflectionApi(async () => jsonResponse({ error: failure.code,
+      message: "ffprobe stderr: secret path and transcript", reflectionId: "reflection_1", uploadId: "upload_1",
+      retryable: true, uploadState: "reupload_allowed", uploadFailure: failure }, 503));
+    await expect(api.upload(uploadInput())).rejects.toMatchObject({ status: 503, code: failure.code,
+      reflectionId: "reflection_1", uploadState: "reupload_allowed", uploadFailure: failure,
+      message: "服务器检查音频时超时，保存没有完成。请核对状态后重试上传。" });
+  });
+
+  it("keeps old errors compatible and rejects untrusted failure classifications", async () => {
+    const oldApi = createDailyReflectionApi(async () => jsonResponse({ error: "daily_reflection_upload_persist_failed" }, 503));
+    await expect(oldApi.upload(uploadInput())).rejects.toMatchObject({ code: "daily_reflection_upload_persist_failed", uploadFailure: undefined });
+    const unsafeApi = createDailyReflectionApi(async () => jsonResponse({ error: "private-server-path",
+      uploadFailure: { code: "private-server-path", retryable: true } }, 503));
+    await expect(unsafeApi.upload(uploadInput())).rejects.toMatchObject({ code: "http_503", uploadFailure: undefined,
+      message: "暂时无法完成操作，请稍后重试。" });
+  });
+
+  it("gives all finite save failures a specific Chinese next step", () => {
+    for (const code of DailyReflectionUploadFailureCodeSchema.options) {
+      const failure = dailyReflectionUploadFailure(code)!;
+      expect(reflectionUploadFailureMessage(failure)).toMatch(/请/u);
+      expect(reflectionUploadFailureMessage(failure)).not.toBe("暂时无法完成操作，请稍后重试。");
+    }
+  });
+});
 
 function jsonResponse(payload: unknown, status = 200): Response {
   return new Response(JSON.stringify(payload), {

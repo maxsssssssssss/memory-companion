@@ -103,6 +103,6 @@ describe("ReflectionHome", () => {
     expect(resume).toHaveAttribute("href", "/reflection/capture?resume=1");
     fireEvent.click(resume);
     expect(resumeRecording).toHaveBeenCalledOnce();
-    expect(screen.getByText(/原录音已暂存在本机/u)).toBeVisible();
+    expect(screen.getByText(/此浏览器没有可用的本地副本/u)).toBeVisible();
   });
 });

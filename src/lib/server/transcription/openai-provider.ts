@@ -9,7 +9,7 @@ import {
 import type { TranscriptSegment } from "@/lib/domain/types";
 import { getOpenRouterErrorMessage } from "@/lib/openrouter/errors";
 import { classifySegment } from "@/lib/processing/classifier";
-import type { TranscriptionProvider } from "./provider";
+import type { TranscriptionInput, TranscriptionProvider } from "./provider";
 import { getOpenAIClientRuntimeConfig } from "@/lib/server/settings/provider-config";
 import {
   cleanupGeneratedAudioChunks,
@@ -429,11 +429,12 @@ async function transcribeOpenRouterWithoutDuration(
 }
 
 export async function transcribeOpenRouterToMergeResult(
-  input: { uploadId: string; filePath: string; mimeType: string },
+  input: TranscriptionInput,
   model: string
 ): Promise<TranscriptMergeResult> {
   const chunkSeconds = getOpenRouterChunkSeconds();
-  const durationSeconds = await tryProbeAudioDurationSeconds(input.filePath);
+  const durationSeconds = input.authoritativeAudio
+    ? input.authoritativeAudio.effectiveDurationMs / 1000 : await tryProbeAudioDurationSeconds(input.filePath);
   let audioChunks: AudioChunk[] = [];
 
   try {
@@ -446,6 +447,7 @@ export async function transcribeOpenRouterToMergeResult(
           uploadId: input.uploadId,
           filePath: input.filePath,
           mimeType: input.mimeType,
+          ...(input.authoritativeAudio ? { authoritativeAudio: input.authoritativeAudio } : {}),
           chunkDurationSeconds: chunkSeconds
         },
         { probeDurationSeconds: async () => durationSeconds }
@@ -474,12 +476,20 @@ export const openaiTranscriptionProvider: TranscriptionProvider = {
     }
 
     let response: OpenAICompatibleTranscriptionResponse;
+    let selectedAudio: AudioChunk[] = [];
     try {
+      if (input.authoritativeAudio?.extractFirstAudioTrack) {
+        selectedAudio = await planAudioChunks({
+          uploadId: input.uploadId, filePath: input.filePath, mimeType: input.mimeType,
+          chunkDurationSeconds: input.authoritativeAudio.effectiveDurationMs / 1000 + 1,
+          authoritativeAudio: input.authoritativeAudio
+        });
+      }
       const credentials = getDirectTranscriptionCredentials(routing.openAiApiKey, routing.openAiBaseUrl);
       const responseFormat = getOpenAIResponseFormat(model);
       response = await requestOpenAICompatibleTranscription({
-        filePath: input.filePath,
-        mimeType: input.mimeType,
+        filePath: selectedAudio[0]?.source.path ?? input.filePath,
+        mimeType: selectedAudio.length ? "audio/mpeg" : input.mimeType,
         apiKey: credentials.apiKey,
         model,
         baseUrl: credentials.baseUrl,
@@ -495,6 +505,8 @@ export const openaiTranscriptionProvider: TranscriptionProvider = {
         console.error(safeOpenAITranscriptionErrorLog(error));
       }
       throw error;
+    } finally {
+      await cleanupGeneratedAudioChunks(selectedAudio);
     }
 
     const segments = (response.segments ?? []).map((segment, index): TranscriptSegment =>

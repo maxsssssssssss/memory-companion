@@ -348,6 +348,10 @@ async function executeDailyReflectionUpload(
   if (view.reflection.status === "failed") {
     return resultFromView("failed", view);
   }
+  if (plan.planVersion === 2 && view.reflection.status === "uploading"
+    && dependencies.repository.getUploadRecovery(input.accountId, input.reflectionId).uploadState !== "accepted") {
+    return resultFromView("busy", view);
+  }
 
   const fence = dependencies.repository.claimExecutionLease({
     accountId: input.accountId,
@@ -474,6 +478,11 @@ async function executeDailyReflectionUpload(
           store: input.store,
           userId: input.accountId,
           identityPolicy: "skip",
+          ...(plan.planVersion === 2 ? { authoritativeAudio: {
+            uploadId: plan.uploadId,
+            effectiveDurationMs: plan.effectiveDurationMs,
+            extractFirstAudioTrack: rawUpload.requiresAudioExtraction === true
+          } } : {}),
           onChunkProgress: async ({ completed, total }) => {
             try {
               renewDraftLease(guard);

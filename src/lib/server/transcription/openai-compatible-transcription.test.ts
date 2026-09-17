@@ -1,6 +1,6 @@
 // @vitest-environment node
 
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -64,6 +64,28 @@ describe("OpenAI-compatible transcription HTTP contract", () => {
     expect(() => normalizeOpenAITranscriptionUrl(baseUrl)).toThrowError(
       expect.objectContaining({ code: "provider_config_error" })
     );
+  });
+
+  it("streams a derived audio file beyond the Windows path limit without changing multipart identity", async () => {
+    const directory = join(tempDir, "a".repeat(70), "b".repeat(70), "c".repeat(70));
+    await mkdir(directory, { recursive: true });
+    const longAudioPath = join(directory, "chunk_00000.mp3");
+    expect(longAudioPath.length).toBeGreaterThan(260);
+    await writeFile(longAudioPath, "synthetic-derived-audio");
+    const fetchMock = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+      const form = await new Request(url, init).formData();
+      const file = form.get("file") as File;
+      expect(file.name).toBe("chunk_00000.mp3");
+      expect(file.type).toBe("audio/mpeg");
+      expect(await file.text()).toBe("synthetic-derived-audio");
+      return new Response(JSON.stringify({ text: "synthetic result" }), {
+        status: 200, headers: { "Content-Type": "application/json" }
+      });
+    });
+    await expect(requestOpenAICompatibleTranscription(requestInput(fetchMock as typeof fetch, {
+      filePath: longAudioPath, mimeType: "audio/mpeg"
+    }))).resolves.toEqual({ text: "synthetic result" });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
   it("sends exact POST multipart fields while FormData owns the boundary", async () => {

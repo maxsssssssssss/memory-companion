@@ -13,7 +13,8 @@ import type {
   DailyReflectionCandidateDecision,
   DailyReflectionDetailResponse,
   DailyReflectionHistoryItem,
-  DailyReflectionOperationUploadState
+  DailyReflectionOperationUploadState,
+  DailyReflectionUploadFailure
 } from "@/lib/domain/daily-reflection-api";
 import type {
   DailyReflectionStatus,
@@ -28,6 +29,7 @@ import {
   DailyReflectionApiError,
   DailyReflectionOperationReceiptSchema,
   createDailyReflectionApi,
+  reflectionUploadFailureMessage,
   type DailyReflectionApi,
   type DailyReflectionManualCandidateInput,
   type DailyReflectionUploadReceipt
@@ -73,6 +75,10 @@ export type ReflectionRecordingRecovery = Omit<ReflectionRecordingBackup, "file"
   phase: "draft" | "uploading" | "interrupted" | "checking" | "persisting" | "saved";
   localCopy: "saving" | "saved" | "unavailable";
   errorMessage: string | null;
+  uploadState?: DailyReflectionOperationUploadState;
+  uploadFailure?: DailyReflectionUploadFailure | null;
+  uploadErrorMessage?: string | null;
+  contentHash?: string;
 };
 
 export type DailyReflectionSessionSnapshot = {
@@ -138,6 +144,8 @@ export type DailyReflectionSessionValue = DailyReflectionSessionSnapshot & {
   retryRecordingUpload(): Promise<void>;
   preserveRecording(backup: Omit<ReflectionRecordingBackup, "accountId">): Promise<void>;
   setRecordingRecoverySource(source: DailyReflectionUploadSource): Promise<void>;
+  setRecordingRecoveryFile(file: File): Promise<void>;
+  cancelRecordingUpload(): Promise<void>;
   discardRecordingDraft(): Promise<void>;
   updateCandidate(decision: DailyReflectionCandidateDecision): Promise<void>;
   updateCandidates(decisions: readonly DailyReflectionCandidateDecision[]): Promise<void>;
@@ -350,6 +358,7 @@ function parseRevocationAttempt(value: string | null): RevocationAttempt | null 
 }
 
 export class DailyReflectionSessionController {
+  private readonly releasedRecordingOperations = new Set<string>();
   private readonly api: DailyReflectionApi;
   private readonly pollIntervalMs: number;
   private readonly createIdempotencyKey: () => string;
@@ -631,6 +640,7 @@ export class DailyReflectionSessionController {
       this.clearPendingInputOperation();
       return null;
     }
+    if (pending.reflectionId && pending.reflectionId !== result.reflectionId) return null;
     if (result.uploadState === "terminated" || result.status === "deleted" || result.status === "cancelled") {
       this.clearPendingInputOperation();
       this.update({
@@ -643,6 +653,14 @@ export class DailyReflectionSessionController {
       return null;
     }
     this.writePendingInputOperation({ ...pending, reflectionId: result.reflectionId });
+    if (pending.inputAdapter !== "toy_sync" && !this.snapshot.recordingRecovery && result.uploadState !== "accepted") {
+      this.update({ recordingRecovery: { accountId: pending.accountId, operationKey: pending.operationKey,
+        inputAdapter: pending.inputAdapter, sourceOrigin: pending.sourceOrigin, recordingDate: pending.recordingDate,
+        file: null, submitted: true, localCopy: "unavailable", reflectionId: result.reflectionId, contentHash: result.contentHash,
+        phase: result.uploadState === "still_persisting" ? "persisting" : "interrupted", uploadState: result.uploadState,
+        uploadFailure: result.uploadFailure ?? null, uploadErrorMessage: result.uploadFailure ? reflectionUploadFailureMessage(result.uploadFailure) : null,
+        errorMessage: null } });
+    }
     return result.reflectionId;
   }
 
@@ -806,6 +824,20 @@ export class DailyReflectionSessionController {
       && this.snapshot.recordingRecovery?.reflectionId === detail.reflection.id) {
       void this.stopRecordingRecovery(detail.reflection.id);
     }
+    const recovery = this.snapshot.recordingRecovery;
+    if (recovery?.reflectionId === detail.reflection.id && detail.uploadState) {
+      if (detail.uploadState === "accepted") void this.markRecordingSaved(recovery, detail.reflection.id);
+      else if (detail.uploadState !== "terminated") {
+        this.update({ recordingRecovery: { ...recovery, uploadState: detail.uploadState,
+          uploadFailure: detail.uploadFailure ?? null,
+          phase: detail.uploadState === "still_persisting" ? "persisting" : "interrupted",
+          errorMessage: detail.uploadState === "still_persisting" ? "服务器正在保存录音。已保留原音频，请稍后核对。"
+            : detail.uploadState === "reupload_allowed" ? "服务器允许重新上传。可以使用原录音继续这次复盘。"
+              : "尚未确认录音保存状态。请保留原音频并稍后核对。",
+          uploadErrorMessage: detail.uploadState === "still_persisting" ? null : detail.uploadFailure
+            ? reflectionUploadFailureMessage(detail.uploadFailure) : recovery.uploadErrorMessage } });
+      }
+    }
     this.reconcileFinalizeAttempt(detail);
     for (const candidateId of detail.revokedCandidateIds ?? []) {
       this.clearRevocationAttempt(detail.reflection.id, candidateId);
@@ -861,6 +893,7 @@ export class DailyReflectionSessionController {
       firstRequest = false;
       const detail = await this.readServerTruth(reflectionId, controller, generation);
       if (!detail) return;
+      if (detail.uploadState === "reupload_allowed" || detail.uploadState === "unresolved") return;
       if (!shouldKeepPolling(detail.reflection.status)) return;
     }
   }
@@ -915,7 +948,8 @@ export class DailyReflectionSessionController {
           if (backup) this.update({ recordingRecovery: {
             ...backup,
             ...(pending?.operationKey === backup.operationKey ? { sourceOrigin: pending.sourceOrigin, recordingDate: pending.recordingDate } : {}),
-            reflectionId: null, phase: submitted ? "interrupted" : "draft", localCopy: "saved", errorMessage: null
+            reflectionId: pending?.operationKey === backup.operationKey ? pending.reflectionId ?? null : null,
+            phase: submitted ? "interrupted" : "draft", localCopy: "saved", errorMessage: null
           } });
         } catch { /* No claim of a local copy when storage cannot be read. */ }
       }
@@ -924,9 +958,11 @@ export class DailyReflectionSessionController {
         if (!this.isCurrentAuth(controller, generation)) return;
       }
       const requestedReflectionId = normalizeReflectionId(initialReflectionId);
+      const pendingReflectionId = !this.snapshot.recordingRecovery ? await this.lookupPendingInputOperation(controller.signal) : null;
+      if (!this.isCurrentAuth(controller, generation)) return;
       const reflectionId = requestedReflectionId
         ?? this.snapshot.recordingRecovery?.reflectionId
-        ?? (this.snapshot.recordingRecovery ? null : await this.lookupPendingInputOperation(controller.signal));
+        ?? (this.snapshot.recordingRecovery ? null : pendingReflectionId);
       if (!this.isCurrentAuth(controller, generation)) return;
       await Promise.all([
         this.refreshHistory(),
@@ -970,6 +1006,11 @@ export class DailyReflectionSessionController {
   ): Promise<boolean> => {
     if (this.snapshot.auth.status !== "authenticated") return false;
     if (this.snapshot.recordingRecovery && this.snapshot.recordingRecovery.phase !== "saved") return false;
+    if (options.inputAdapter !== "toy_sync") {
+      const operationKey = options.operationKey ?? this.createIdempotencyKey();
+      await this.uploadOriginal(file, undefined, recordingDate, operationKey, sourceOrigin, options.inputAdapter ?? "file_picker");
+      return this.snapshot.recordingRecovery?.operationKey === operationKey && this.snapshot.recordingRecovery.phase === "saved";
+    }
     const { controller, generation } = this.beginWork();
     let receiptReceived = false;
     const operationKey = options.operationKey ?? this.createIdempotencyKey();
@@ -1049,13 +1090,18 @@ export class DailyReflectionSessionController {
     operationKey: string,
     sourceOrigin: DailyReflectionUploadSource = "user_reflection"
   ): Promise<void> => {
+    await this.uploadOriginal(file, clientReportedDurationMs, recordingDate, operationKey, sourceOrigin, "browser_recorder");
+  };
+
+  private readonly uploadOriginal = async (file: File, clientReportedDurationMs: number | undefined, recordingDate: string,
+    operationKey: string, sourceOrigin: DailyReflectionUploadSource, inputAdapter: "browser_recorder" | "file_picker") => {
     const accountId = this.authenticatedAccountId();
     if (!accountId || this.uploadController) return;
     const previous = this.snapshot.recordingRecovery;
     if (previous && previous.phase !== "saved" && previous.operationKey !== operationKey) return;
     this.update({ state: "uploading", operation: "uploading", selectedFile: file, sourceOrigin, recordingDate });
     if (!previous || previous.phase === "draft" || previous.phase === "saved") {
-      await this.preserveRecording({ file, clientReportedDurationMs, recordingDate, operationKey, sourceOrigin });
+      await this.preserveRecording({ file, clientReportedDurationMs, recordingDate, operationKey, sourceOrigin, inputAdapter });
     }
     if (this.authenticatedAccountId() !== accountId || this.uploadController) return;
     const recovery = this.snapshot.recordingRecovery;
@@ -1068,23 +1114,25 @@ export class DailyReflectionSessionController {
     this.updateReflectionId(null);
     this.update({ state: "uploading", operation: "uploading", detail: null,
       selectedFile: file, sourceOrigin, recordingDate, operationReceipt: null, errorMessage: null,
-      recordingRecovery: { ...recovery, phase: "uploading", errorMessage: null } });
-    this.writePendingInputOperation({ accountId, operationKey, inputAdapter: "browser_recorder", sourceOrigin, recordingDate });
+      recordingRecovery: { ...recovery, inputAdapter, phase: "uploading", errorMessage: null, uploadErrorMessage: null, uploadFailure: null, uploadState: undefined } });
+    this.writePendingInputOperation({ accountId, operationKey, inputAdapter, sourceOrigin, recordingDate });
     try {
       try {
         await this.recordingStorage.save({ accountId, operationKey, file, sourceOrigin, recordingDate,
-          clientReportedDurationMs, submitted: true });
+          clientReportedDurationMs, inputAdapter, submitted: true });
+        if (this.releasedRecordingOperations.has(JSON.stringify([accountId, operationKey]))) {
+          await this.recordingStorage.remove(accountId, operationKey).catch(() => undefined);
+        }
       } catch {
         if (current()) this.update({ recordingRecovery: {
-          ...recovery, phase: "uploading", localCopy: "unavailable"
+          ...recovery, inputAdapter, phase: "uploading", localCopy: "unavailable", uploadErrorMessage: null, uploadFailure: null
         } });
       }
       if (!current()) return;
-      const receipt = await this.api.uploadBrowserRecording({
-        file, operationKey, recordingDate, inputAdapter: "browser_recorder", sourceOrigin,
-        capturePurpose: "inspiration_capture",
-        ...(clientReportedDurationMs ? { clientReportedDurationMs } : {})
-      }, controller.signal);
+      const receipt = inputAdapter === "browser_recorder"
+        ? await this.api.uploadBrowserRecording({ file, operationKey, recordingDate, inputAdapter, sourceOrigin,
+          capturePurpose: "inspiration_capture", ...(clientReportedDurationMs ? { clientReportedDurationMs } : {}) }, controller.signal)
+        : await this.api.upload({ file, operationKey, recordingDate, inputAdapter, sourceOrigin, capturePurpose: "inspiration_capture" }, controller.signal);
       if (!current()) return;
       const latestRecovery = this.snapshot.recordingRecovery ?? recovery;
       // Upload completion must not replace another reflection the user is reading.
@@ -1092,16 +1140,14 @@ export class DailyReflectionSessionController {
       const follow = () => this.workGeneration === followGeneration && this.snapshot.reflectionId === null
         && this.authenticatedAccountId() === accountId;
       this.writeOperationReceipt(receipt);
-      this.writePendingInputOperation({ accountId, operationKey, inputAdapter: "browser_recorder", sourceOrigin, recordingDate, reflectionId: receipt.reflectionId });
+      this.writePendingInputOperation({ accountId, operationKey, inputAdapter, sourceOrigin, recordingDate, reflectionId: receipt.reflectionId });
       if (receipt.status === "deleted" || receipt.status === "cancelled") {
         this.update({ recordingRecovery: { ...latestRecovery, reflectionId: receipt.reflectionId } });
         await this.stopRecordingRecovery(receipt.reflectionId);
         if (follow()) this.update({ state: receipt.status, operation: "idle", errorMessage: "这次复盘已结束，不会重新上传。" });
         return;
       }
-      if (!receipt.persistencePending) {
-        await this.markRecordingSaved(latestRecovery, receipt.reflectionId);
-      } else {
+      {
         this.update({ recordingRecovery: { ...latestRecovery, reflectionId: receipt.reflectionId,
           phase: "persisting", errorMessage: "服务器仍在保存录音，请稍后核对进度。" } });
         const outcome = await this.checkRecordingOperation(controller.signal);
@@ -1120,7 +1166,23 @@ export class DailyReflectionSessionController {
       if (isUnauthorized(error)) { this.expireAuthentication(); return; }
       const message = friendlyError(error, "上传中断，请核对进度后使用原录音重试。");
       const recoveryViewGeneration = this.workGeneration;
+      if (error instanceof DailyReflectionApiError && error.status === 409) {
+        // A conflicting key may belong to different bytes. Never adopt its lookup result.
+        this.clearPendingInputOperation();
+        this.update({ state: "error", operation: "idle", errorMessage: message,
+          recordingRecovery: { ...recovery, inputAdapter, phase: "draft", submitted: false, reflectionId: null,
+            uploadErrorMessage: message, errorMessage: "请先下载原音频；删除这份本机草稿后重新选择文件。" } });
+        await this.recordingStorage.save({ accountId, operationKey, file, sourceOrigin, recordingDate,
+          clientReportedDurationMs, inputAdapter, submitted: false }).catch(() => undefined);
+        if (this.releasedRecordingOperations.has(JSON.stringify([accountId, operationKey]))) {
+          await this.recordingStorage.remove(accountId, operationKey).catch(() => undefined);
+        }
+        return;
+      }
       this.update({ recordingRecovery: { ...(this.snapshot.recordingRecovery ?? recovery), phase: "interrupted",
+        uploadErrorMessage: message,
+        ...(error instanceof DailyReflectionApiError ? { uploadState: error.uploadState, uploadFailure: error.uploadFailure,
+          reflectionId: error.reflectionId ?? recovery.reflectionId } : {}),
         errorMessage: message } });
       const operationFound = await this.checkRecordingOperation(controller.signal);
       if (this.disposed || this.authenticatedAccountId() !== accountId
@@ -1130,7 +1192,10 @@ export class DailyReflectionSessionController {
         const rejected = this.snapshot.recordingRecovery;
         this.update({ recordingRecovery: { ...rejected, phase: "draft", submitted: false } });
         await this.recordingStorage.save({ accountId, operationKey, file, sourceOrigin, recordingDate,
-          clientReportedDurationMs, submitted: false }).catch(() => undefined);
+          clientReportedDurationMs, inputAdapter, submitted: false }).catch(() => undefined);
+        if (this.releasedRecordingOperations.has(JSON.stringify([accountId, operationKey]))) {
+          await this.recordingStorage.remove(accountId, operationKey).catch(() => undefined);
+        }
         if (this.authenticatedAccountId() !== accountId || this.snapshot.recordingRecovery?.operationKey !== operationKey) return;
       }
       if (this.snapshot.recordingRecovery && this.snapshot.recordingRecovery.phase !== "saved"
@@ -1188,6 +1253,10 @@ export class DailyReflectionSessionController {
     this.update({ recordingRecovery: recovery });
     try {
       await this.recordingStorage.save({ ...input, accountId });
+      if (this.releasedRecordingOperations.has(JSON.stringify([accountId, input.operationKey]))) {
+        await this.recordingStorage.remove(accountId, input.operationKey).catch(() => undefined);
+        return;
+      }
       if (this.snapshot.recordingRecovery === recovery) {
         this.update({ recordingRecovery: { ...recovery, localCopy: "saved" } });
       }
@@ -1201,7 +1270,9 @@ export class DailyReflectionSessionController {
   private async markRecordingSaved(recovery: ReflectionRecordingRecovery, reflectionId: string) {
     if (this.snapshot.recordingRecovery?.operationKey !== recovery.operationKey
       || this.authenticatedAccountId() !== recovery.accountId) return;
-    this.update({ recordingRecovery: { ...recovery, reflectionId, file: null, phase: "saved", errorMessage: null } });
+    this.update({ recordingRecovery: { ...recovery, reflectionId, file: null, phase: "saved", errorMessage: null,
+      uploadState: "accepted", uploadFailure: null, uploadErrorMessage: null } });
+    this.releasedRecordingOperations.add(JSON.stringify([recovery.accountId, recovery.operationKey]));
     await this.recordingStorage.remove(recovery.accountId, recovery.operationKey).catch(() => undefined);
     if (this.authenticatedAccountId() === recovery.accountId
       && this.snapshot.recordingRecovery?.operationKey === recovery.operationKey
@@ -1223,18 +1294,26 @@ export class DailyReflectionSessionController {
     const current = () => !this.disposed && !controller.signal.aborted
       && this.recordingCheckController === controller
       && this.snapshot.recordingRecovery?.operationKey === recovery.operationKey
+      && !this.releasedRecordingOperations.has(JSON.stringify([recovery.accountId, recovery.operationKey]))
       && this.authenticatedAccountId() === recovery.accountId;
-    this.update({ recordingRecovery: { ...recovery, phase: "checking", errorMessage: null } });
+    this.update({ recordingRecovery: { ...recovery, phase: "checking" } });
     try {
       for (let attempt = 0; attempt < 5; attempt += 1) {
         if (!current()) return "unresolved";
         const result = await this.api.getOperation(recovery.operationKey, controller.signal);
         if (!current()) return "unresolved";
         if (!result.found) {
-          this.update({ recordingRecovery: { ...recovery, phase: "interrupted", errorMessage: null } });
+          this.update({ recordingRecovery: { ...recovery, phase: "interrupted", uploadState: undefined,
+            errorMessage: "尚未查到保存记录。请保留原音频，确认后再上传。" } });
           return "not_found";
         }
+        if (recovery.reflectionId && recovery.reflectionId !== result.reflectionId) {
+          this.update({ recordingRecovery: { ...recovery, phase: "interrupted", uploadState: "unresolved",
+            errorMessage: "返回的记录与这次上传不一致，尚未确认保存。请保留原音频并稍后核对。" } });
+          return "unresolved";
+        }
         if (result.uploadState === "terminated" || result.status === "cancelled" || result.status === "deleted") {
+          this.releasedRecordingOperations.add(JSON.stringify([recovery.accountId, recovery.operationKey]));
           this.update({ recordingRecovery: null, selectedFile: null });
           this.clearPendingInputOperation();
           if (this.snapshot.reflectionId === result.reflectionId) {
@@ -1246,24 +1325,29 @@ export class DailyReflectionSessionController {
           return "terminated";
         }
         if (recovery.sourceOrigin) this.writePendingInputOperation({
-          accountId: recovery.accountId, operationKey: recovery.operationKey, inputAdapter: "browser_recorder",
+          accountId: recovery.accountId, operationKey: recovery.operationKey, inputAdapter: recovery.inputAdapter ?? "browser_recorder",
           sourceOrigin: recovery.sourceOrigin, recordingDate: recovery.recordingDate, reflectionId: result.reflectionId
         });
         if (result.uploadState === "accepted") {
           await this.markRecordingSaved(recovery, result.reflectionId);
           return "accepted";
         }
+        const currentRecovery: ReflectionRecordingRecovery = { ...recovery, reflectionId: result.reflectionId,
+          contentHash: result.contentHash,
+          uploadState: result.uploadState, uploadFailure: result.uploadFailure ?? null,
+          uploadErrorMessage: result.uploadState === "still_persisting" ? null : result.uploadFailure
+            ? reflectionUploadFailureMessage(result.uploadFailure) : recovery.uploadErrorMessage };
         if (result.uploadState === "reupload_allowed") {
-          this.update({ recordingRecovery: { ...recovery, reflectionId: result.reflectionId, phase: "interrupted",
+          this.update({ recordingRecovery: { ...currentRecovery, phase: "interrupted",
             errorMessage: "服务器允许重新上传。可以使用原录音继续这次复盘。" } });
           return "reupload_allowed";
         }
         if (result.uploadState !== "still_persisting") {
-          this.update({ recordingRecovery: { ...recovery, reflectionId: result.reflectionId, phase: "interrupted",
+          this.update({ recordingRecovery: { ...currentRecovery, phase: "interrupted",
             errorMessage: "尚未确认录音保存状态。已保留现有录音，请稍后重新核对。" } });
           return "unresolved";
         }
-        this.update({ recordingRecovery: { ...recovery, reflectionId: result.reflectionId, phase: "persisting",
+        this.update({ recordingRecovery: { ...currentRecovery, phase: "persisting",
           errorMessage: attempt === 4 ? "服务器仍在保存录音。已保留现有录音，可稍后重新核对。"
             : `服务器正在保存录音，核对进度 ${attempt + 1}/5。` } });
         if (attempt < 4) await waitForPoll(this.pollIntervalMs, controller.signal);
@@ -1273,7 +1357,7 @@ export class DailyReflectionSessionController {
       if (current()) {
         if (isUnauthorized(error)) this.expireAuthentication();
         else this.update({ recordingRecovery: { ...recovery, phase: "interrupted",
-          errorMessage: "暂时无法核对服务器，请联网后重试。" } });
+          errorMessage: friendlyError(error, "暂时无法核对保存状态。请保留原音频，稍后重新核对。") } });
       }
       return "unresolved";
     } finally {
@@ -1300,8 +1384,64 @@ export class DailyReflectionSessionController {
     if ((result !== "not_found" && result !== "reupload_allowed") || !recovery?.file || !recovery.sourceOrigin) {
       await this.resumeRecording(); return;
     }
-    await this.uploadBrowserRecording(recovery.file, recovery.clientReportedDurationMs,
-      recovery.recordingDate, recovery.operationKey, recovery.sourceOrigin);
+    if (recovery.uploadFailure?.retryable === false) return;
+    await this.uploadOriginal(recovery.file, recovery.clientReportedDurationMs,
+      recovery.recordingDate, recovery.operationKey, recovery.sourceOrigin, recovery.inputAdapter ?? "browser_recorder");
+  };
+
+  readonly setRecordingRecoveryFile = async (file: File) => {
+    const recovery = this.snapshot.recordingRecovery;
+    if (!recovery || recovery.file || this.uploadController || this.recordingCheckController
+      || recovery.phase === "saved" || recovery.uploadFailure?.retryable === false || file.size === 0) return;
+    try {
+      if (!recovery.contentHash || !globalThis.crypto?.subtle) throw new Error("original_file_not_verifiable");
+      const digest = await globalThis.crypto.subtle.digest("SHA-256", await file.arrayBuffer());
+      if (this.authenticatedAccountId() !== recovery.accountId || this.snapshot.recordingRecovery !== recovery) return;
+      const hash = [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+      if (hash !== recovery.contentHash) {
+        this.update({ recordingRecovery: { ...recovery, errorMessage: "所选文件与这次上传的原音频不一致，请重新选择原文件。" } });
+        return;
+      }
+    } catch {
+      if (this.authenticatedAccountId() === recovery.accountId && this.snapshot.recordingRecovery === recovery) {
+        this.update({ recordingRecovery: { ...recovery, errorMessage: "暂时无法核验原文件，请先核对保存状态；也可以删除失败记录后重新选择。" } });
+      }
+      return;
+    }
+    this.update({ recordingRecovery: { ...recovery, file, localCopy: "saving", errorMessage: "原文件已核对，可以继续核对保存状态并重试上传。" } });
+    try {
+      await this.recordingStorage.save({ ...recovery, file, submitted: true });
+      if (this.releasedRecordingOperations.has(JSON.stringify([recovery.accountId, recovery.operationKey]))) {
+        await this.recordingStorage.remove(recovery.accountId, recovery.operationKey).catch(() => undefined);
+        return;
+      }
+      if (this.authenticatedAccountId() === recovery.accountId && this.snapshot.recordingRecovery?.operationKey === recovery.operationKey) {
+        this.update({ recordingRecovery: { ...this.snapshot.recordingRecovery, localCopy: "saved" } });
+      }
+    } catch {
+      if (this.authenticatedAccountId() === recovery.accountId && this.snapshot.recordingRecovery?.operationKey === recovery.operationKey) {
+        this.update({ recordingRecovery: { ...this.snapshot.recordingRecovery, localCopy: "unavailable" } });
+      }
+    }
+  };
+
+  readonly cancelRecordingUpload = async () => {
+    const recovery = this.snapshot.recordingRecovery;
+    if (!recovery?.reflectionId) return;
+    this.fenceRecordingUpload(recovery.reflectionId);
+    const { controller, generation } = this.beginWork();
+    this.updateReflectionId(recovery.reflectionId);
+    try {
+      const detail = await this.readServerTruth(recovery.reflectionId, controller, generation);
+      if (!detail || this.authenticatedAccountId() !== recovery.accountId
+        || this.snapshot.recordingRecovery?.operationKey !== recovery.operationKey) return;
+      if (detail.reflection.status === "failed") await this.delete();
+      else await this.cancel();
+    } catch (error) {
+      this.handleWorkError(error, controller, generation, "未能取消这次上传，原音频仍被保留，请重试。");
+    } finally {
+      if (this.workController === controller) this.workController = null;
+    }
   };
 
   readonly setRecordingRecoverySource = async (sourceOrigin: DailyReflectionUploadSource) => {
@@ -1321,6 +1461,7 @@ export class DailyReflectionSessionController {
     }
     if (this.snapshot.recordingRecovery?.operationKey !== recovery.operationKey
       || this.authenticatedAccountId() !== recovery.accountId) return;
+    this.releasedRecordingOperations.add(JSON.stringify([recovery.accountId, recovery.operationKey]));
     this.update({ recordingRecovery: null });
     this.startNew();
   };
@@ -2150,6 +2291,7 @@ export class DailyReflectionSessionController {
   private async stopRecordingRecovery(reflectionId: string) {
     const recovery = this.snapshot.recordingRecovery;
     if (!recovery || recovery.reflectionId !== reflectionId) return;
+    this.releasedRecordingOperations.add(JSON.stringify([recovery.accountId, recovery.operationKey]));
     this.abortRecordingCheck();
     this.uploadController?.abort();
     this.uploadController = null;
@@ -2215,6 +2357,8 @@ export function useDailyReflectionSession(
     startNew: controller.startNew,
     preserveRecording: controller.preserveRecording,
     setRecordingRecoverySource: controller.setRecordingRecoverySource,
+    setRecordingRecoveryFile: controller.setRecordingRecoveryFile,
+    cancelRecordingUpload: controller.cancelRecordingUpload,
     discardRecordingDraft: controller.discardRecordingDraft,
     resumeRecording: controller.resumeRecording,
     retryRecordingUpload: controller.retryRecordingUpload,

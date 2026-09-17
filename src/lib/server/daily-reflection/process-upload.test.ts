@@ -181,6 +181,37 @@ function run(
 }
 
 describe("processDailyReflectionUpload", () => {
+  it.each([false, true])("passes bound V2 duration and audio selection to ASR (extract=%s)", async (extract) => {
+    const created = repository.createReflectionV2({
+      id: "reflection_pipeline", accountId: "account_pipeline", uploadId: null, operationKey: "pipeline_v2",
+      inputAdapter: "browser_recorder", sourceOrigin: "user_reflection", capturePurpose: "inspiration_capture",
+      recordingDate: "2026-08-13", contentHash: "a".repeat(64)
+    });
+    const identity = { accountId: "account_pipeline", reflectionId: "reflection_pipeline" };
+    const uploading = repository.transitionStatus({ ...identity, expectedVersion: created.reflection.version, status: "uploading" });
+    const fence = repository.claimExecutionLease({ ...identity, leaseOwner: "save", leaseDurationMs: 60000 })!;
+    const uploadId = created.receipt!.uploadId;
+    repository.bindUploadAndPlanV2({ ...identity, leaseOwner: fence.leaseOwner, attemptVersion: fence.attemptVersion, uploadId, expectedVersion: uploading.version,
+      inputAdapter: "browser_recorder", processingProfile: "quick_reflection", candidateLimit: 3,
+      effectiveDurationMs: 12000, durationSource: "server_ffmpeg_decode" });
+    const filePath = join(uploadsRootDir, `${uploadId}.webm`);
+    await writeFile(filePath, "synthetic audio");
+    repository.publishAssetUnderExecutionFence({ ...identity, ...fence, assetKind: "upload", payload: {
+      id: uploadId, originalName: "synthetic.webm", mimeType: "audio/webm", sizeBytes: 15,
+      recordingDate: "2026-08-13", createdAt: timestamp, status: "uploaded", filePath,
+      ingestionContext: "daily_reflection", reflectionId: identity.reflectionId, uploadFingerprint: "a".repeat(64),
+      // Legacy upload fields cannot replace the immutable plan duration.
+      effectiveDurationMs: 999999, ...(extract ? { requiresAudioExtraction: true } : {})
+    } });
+    repository.releaseExecutionLease({ ...identity, ...fence });
+    const transcribe = vi.fn(async () => { throw new Error("synthetic ASR stop"); });
+    await run(transcribe);
+    expect(transcribe).toHaveBeenCalledTimes(1);
+    expect(transcribe).toHaveBeenCalledWith(expect.objectContaining({
+      uploadId, identityPolicy: "skip", authoritativeAudio: { uploadId, effectiveDurationMs: 12000, extractFirstAudioTrack: extract }
+    }));
+  });
+
   it("removes completed raw audio and checkpoints while retaining review evidence", async () => {
     const { filePath } = await prepareWorkflow();
     const attemptPath = join(uploadsRootDir, "upload_pipeline.attempt-9.wav");

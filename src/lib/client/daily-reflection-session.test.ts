@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { createHash, webcrypto } from "node:crypto";
 
 import type {
   DailyReflectionCardUpdateRequest,
@@ -508,6 +509,7 @@ function deferred<T>() {
 }
 
 afterEach(() => {
+  vi.unstubAllGlobals();
   vi.useRealTimers();
   window.localStorage.clear();
 });
@@ -536,6 +538,252 @@ describe("recording transport recovery", () => {
     await storage.save(original);
     return original;
   }
+
+  const saveFailure = { code: "daily_reflection_duration_probe_timeout" as const, retryable: true };
+  const failedSaveDetail = () => ({ ...detail("reflection_1", "uploading"),
+    uploadState: "reupload_allowed" as const, uploadFailure: saveFailure });
+
+  it("preserves 503 failure across lookup, return and refresh even while status is uploading", async () => {
+    const { storage, rows } = recordingStorageFixture();
+    const upload = vi.fn(async () => { throw new DailyReflectionApiError(503, saveFailure.code, undefined,
+      { uploadState: "reupload_allowed", uploadFailure: saveFailure, reflectionId: "reflection_1" }); });
+    const api = fakeApi({ upload, get: async () => failedSaveDetail(),
+      getOperation: async () => ({ ...lookupState("reupload_allowed"), uploadFailure: saveFailure }) });
+    const first = new DailyReflectionSessionController({ api, recordingStorage: storage });
+    await first.initialize();
+    const original = file();
+    await first.upload(original, "direct_conversation", "2026-08-13", { operationKey: "picker-failure" });
+    await first.reload("reflection_1");
+    expect(first.getSnapshot().recordingRecovery).toMatchObject({ file: original, inputAdapter: "file_picker",
+      uploadState: "reupload_allowed", uploadFailure: saveFailure, phase: "interrupted" });
+    expect(first.getSnapshot().recordingRecovery?.uploadErrorMessage).toContain("超时");
+    expect(rows.size).toBe(1);
+    first.dispose();
+    const next = new DailyReflectionSessionController({ api, recordingStorage: storage });
+    await next.initialize("reflection_1");
+    expect(next.getSnapshot().recordingRecovery).toMatchObject({ file: original, uploadFailure: saveFailure, inputAdapter: "file_picker" });
+    expect(upload).toHaveBeenCalledOnce();
+    next.dispose();
+  });
+
+  it("does not erase the POST failure when the status lookup itself fails", async () => {
+    const { storage } = recordingStorageFixture();
+    const controller = new DailyReflectionSessionController({ recordingStorage: storage, api: fakeApi({
+      upload: async () => { throw new DailyReflectionApiError(503, saveFailure.code, undefined,
+        { uploadState: "unresolved", uploadFailure: saveFailure, reflectionId: "reflection_1" }); },
+      getOperation: async () => { throw new DailyReflectionApiError(503, "http_503"); }
+    }) });
+    await controller.initialize();
+    await controller.upload(file(), "user_reflection", "2026-08-13");
+    expect(controller.getSnapshot().recordingRecovery).toMatchObject({ uploadFailure: saveFailure, uploadState: "unresolved" });
+    expect(controller.getSnapshot().recordingRecovery?.uploadErrorMessage).toContain("超时");
+    controller.dispose();
+  });
+
+  it("retries a file picker operation only after fresh permission with unchanged bytes and metadata", async () => {
+    const { storage, rows } = recordingStorageFixture();
+    const upload = vi.fn().mockRejectedValueOnce(new DailyReflectionApiError(503, saveFailure.code))
+      .mockResolvedValue({ ...operationReceipt(), operationKey: "picker-retry" });
+    const lookup = vi.fn().mockResolvedValueOnce({ ...lookupState("reupload_allowed"), uploadFailure: saveFailure })
+      .mockResolvedValueOnce(lookupState("reupload_allowed")).mockResolvedValue(lookupState("accepted"));
+    const browserUpload = vi.fn();
+    const controller = new DailyReflectionSessionController({ recordingStorage: storage,
+      api: fakeApi({ upload, uploadBrowserRecording: browserUpload, getOperation: lookup }) });
+    await controller.initialize();
+    const original = file();
+    await controller.upload(original, "direct_conversation", "2026-08-13", { operationKey: "picker-retry" });
+    expect(upload).toHaveBeenCalledOnce();
+    expect(rows.size).toBe(1);
+    await controller.retryRecordingUpload();
+    expect(upload).toHaveBeenCalledTimes(2);
+    expect(upload.mock.calls[1][0]).toEqual(upload.mock.calls[0][0]);
+    expect(upload.mock.calls[1][0].file).toBe(original);
+    expect(upload.mock.calls[1][0]).toMatchObject({ inputAdapter: "file_picker", operationKey: "picker-retry" });
+    expect(browserUpload).not.toHaveBeenCalled();
+    expect(rows.size).toBe(0);
+    controller.dispose();
+  });
+
+  it.each([false, true])("retains bytes after a successful POST with persistencePending=%s until accepted", async (persistencePending) => {
+    const { storage, rows } = recordingStorageFixture();
+    const controller = new DailyReflectionSessionController({ recordingStorage: storage, api: fakeApi({
+      upload: async () => ({ ...operationReceipt(), persistencePending }),
+      getOperation: async () => lookupState("unresolved")
+    }) });
+    await controller.initialize();
+    expect(await controller.upload(file(), "user_reflection", "2026-08-13")).toBe(false);
+    expect(rows.size).toBe(1);
+    expect(controller.getSnapshot().recordingRecovery?.file).not.toBeNull();
+    controller.dispose();
+  });
+
+  it("does not call cancel for a failed audio record and releases bytes only after successful delete", async () => {
+    const { storage, rows } = recordingStorageFixture();
+    await storedRecording(storage);
+    const remove = vi.fn().mockRejectedValueOnce(new DailyReflectionApiError(503, "http_503")).mockResolvedValue(undefined);
+    const cancel = vi.fn();
+    const badAudio = { code: "daily_reflection_audio_invalid" as const, retryable: false };
+    const controller = new DailyReflectionSessionController({ recordingStorage: storage, api: fakeApi({ delete: remove, cancel,
+      getOperation: async () => ({ ...lookupState("unresolved", "failed"), uploadFailure: badAudio }),
+      get: async () => ({ ...detail("reflection_1", "failed"), uploadState: "unresolved", uploadFailure: badAudio })
+    }) });
+    await controller.initialize();
+    await controller.cancelRecordingUpload();
+    expect(rows.size).toBe(1);
+    expect(controller.getSnapshot().recordingRecovery?.file).not.toBeNull();
+    await controller.cancelRecordingUpload();
+    expect(remove).toHaveBeenCalledTimes(2);
+    expect(cancel).not.toHaveBeenCalled();
+    expect(rows.size).toBe(0);
+    expect(controller.getSnapshot().recordingRecovery).toBeNull();
+    controller.dispose();
+  });
+
+  it("cancels an active saving lease without waiting for detail polling to finish", async () => {
+    const { storage, rows } = recordingStorageFixture();
+    await storedRecording(storage);
+    let cancelled = false;
+    const cancel = vi.fn(async () => { cancelled = true; return { reflectionId: "reflection_1", status: "cancelled" as const }; });
+    const get = vi.fn(async (): Promise<DailyReflectionDetailResponse> => cancelled ? detail("reflection_1", "cancelled") : failedSaveDetail());
+    const controller = new DailyReflectionSessionController({ recordingStorage: storage, pollIntervalMs: 0,
+      api: fakeApi({ cancel, get, getOperation: async () => lookupState("reupload_allowed") }) });
+    await controller.initialize();
+    get.mockImplementation(async () => cancelled ? detail("reflection_1", "cancelled")
+      : { ...detail("reflection_1", "uploading"), uploadState: "still_persisting", uploadFailure: null });
+    await controller.cancelRecordingUpload();
+    expect(cancel).toHaveBeenCalledOnce();
+    expect(get).toHaveBeenCalledTimes(3); // Initial detail, single pre-cancel read, terminal detail.
+    expect(rows.size).toBe(0);
+    controller.dispose();
+  });
+
+  it("restores a no-Blob operation, checks original bytes before attaching, and keeps its file-picker adapter", async () => {
+    vi.stubGlobal("crypto", webcrypto);
+    storePendingInputOperation(window.localStorage, "reselect");
+    const { storage, rows } = recordingStorageFixture();
+    const bytes = new TextEncoder().encode("synthetic original");
+    const contentHash = createHash("sha256").update(bytes).digest("hex");
+    const controller = new DailyReflectionSessionController({ recordingStorage: storage,
+      api: fakeApi({ getOperation: async () => ({ ...lookupState("reupload_allowed"), contentHash }), get: async () => failedSaveDetail() }) });
+    await controller.initialize("reflection_1");
+    expect(controller.getSnapshot().recordingRecovery).toMatchObject({ file: null, localCopy: "unavailable", operationKey: "reselect" });
+    const wrong = file();
+    Object.defineProperty(wrong, "arrayBuffer", { value: async () => new TextEncoder().encode("wrong file").buffer });
+    await controller.setRecordingRecoveryFile(wrong);
+    expect(rows.size).toBe(0);
+    expect(controller.getSnapshot().recordingRecovery?.errorMessage).toContain("不一致");
+    const original = new File([bytes], "original.webm", { type: "audio/webm" });
+    Object.defineProperty(original, "arrayBuffer", { value: async () => bytes.buffer });
+    await controller.setRecordingRecoveryFile(original);
+    expect(rows.get("user_1")).toMatchObject({ file: original, operationKey: "reselect", inputAdapter: "file_picker" });
+    expect(controller.getSnapshot().recordingRecovery?.file).toBe(original);
+    controller.dispose();
+  });
+
+  it("does not release the original for a lookup bound to another record", async () => {
+    const { storage, rows } = recordingStorageFixture();
+    const controller = new DailyReflectionSessionController({ recordingStorage: storage, api: fakeApi({
+      upload: async () => operationReceipt("expected"),
+      getOperation: async () => lookupState("accepted")
+    }) });
+    await controller.initialize();
+    await controller.upload(file(), "user_reflection", "2026-08-13");
+    expect(controller.getSnapshot().recordingRecovery).toMatchObject({ reflectionId: "expected", phase: "interrupted", uploadState: "unresolved" });
+    expect(controller.getSnapshot().recordingRecovery?.errorMessage).toContain("不一致");
+    expect(rows.size).toBe(1);
+    controller.dispose();
+  });
+
+  it("clears the prior failure only when fresh authority reports an active lease", async () => {
+    const { storage, rows } = recordingStorageFixture();
+    await storedRecording(storage);
+    const get = vi.fn(async (): Promise<DailyReflectionDetailResponse> => failedSaveDetail());
+    const controller = new DailyReflectionSessionController({ recordingStorage: storage,
+      api: fakeApi({ get, getOperation: async () => ({ ...lookupState("reupload_allowed"), uploadFailure: saveFailure }) }) });
+    await controller.initialize();
+    get.mockResolvedValue({ ...detail("reflection_1", "failed"), uploadState: "still_persisting", uploadFailure: null });
+    await controller.reload("reflection_1");
+    expect(controller.getSnapshot().recordingRecovery).toMatchObject({ phase: "persisting", uploadFailure: null, uploadErrorMessage: null });
+    expect(controller.getSnapshot().recordingRecovery?.errorMessage).not.toContain("重新上传");
+    expect(rows.size).toBe(1);
+    controller.dispose();
+  });
+
+  it("keeps an old account's late backup write instead of treating logout as audio deletion", async () => {
+    const { storage, rows } = recordingStorageFixture();
+    const saving = deferred<void>();
+    let accountId = "user_1";
+    const controller = new DailyReflectionSessionController({ recordingStorage: { ...storage,
+      save: async (row) => { await saving.promise; await storage.save(row); } },
+      api: fakeApi({ getCurrentUser: async () => ({ id: accountId, email: "fixture@example.com" }) }) });
+    await controller.initialize();
+    const work = controller.preserveRecording({ file: file(), operationKey: "late-backup", recordingDate: "2026-08-13", sourceOrigin: null });
+    accountId = "user_2";
+    await controller.initialize();
+    saving.resolve();
+    await work;
+    expect(rows.get("user_1")?.operationKey).toBe("late-backup");
+    expect(controller.getSnapshot().recordingRecovery).toBeNull();
+    controller.dispose();
+  });
+
+  it("removes a late draft backup write after explicit discard so it cannot reappear", async () => {
+    const { storage, rows } = recordingStorageFixture();
+    const saving = deferred<void>();
+    const controller = new DailyReflectionSessionController({ recordingStorage: { ...storage,
+      save: async (row) => { await saving.promise; await storage.save(row); } }, api: fakeApi() });
+    await controller.initialize();
+    const work = controller.preserveRecording({ file: file(), operationKey: "discard-late", recordingDate: "2026-08-13", sourceOrigin: null });
+    await controller.discardRecordingDraft();
+    saving.resolve();
+    await work;
+    expect(rows.size).toBe(0);
+    expect(controller.getSnapshot().recordingRecovery).toBeNull();
+    controller.dispose();
+  });
+
+  it.each(["delete", "accepted"] as const)("does not resurrect a reselected Blob whose backup finishes after %s", async (action) => {
+    vi.stubGlobal("crypto", webcrypto);
+    storePendingInputOperation(window.localStorage, "late-reselection");
+    const { storage, rows } = recordingStorageFixture();
+    const saving = deferred<void>();
+    const save = vi.fn(async (row: ReflectionRecordingBackup) => { await saving.promise; await storage.save(row); });
+    const bytes = new TextEncoder().encode("synthetic original");
+    const get = vi.fn(async (): Promise<DailyReflectionDetailResponse> => ({ ...detail("reflection_1", "failed"),
+      uploadState: "reupload_allowed", uploadFailure: saveFailure }));
+    const controller = new DailyReflectionSessionController({ recordingStorage: { ...storage, save },
+      api: fakeApi({ get, getOperation: async () => ({ ...lookupState("reupload_allowed", "failed"),
+        contentHash: createHash("sha256").update(bytes).digest("hex") }) }) });
+    await controller.initialize();
+    const original = new File([bytes], "original.webm", { type: "audio/webm" });
+    Object.defineProperty(original, "arrayBuffer", { value: async () => bytes.buffer });
+    const work = controller.setRecordingRecoveryFile(original);
+    await vi.waitFor(() => expect(save).toHaveBeenCalledOnce());
+    if (action === "delete") await controller.cancelRecordingUpload();
+    else {
+      get.mockResolvedValue({ ...detail("reflection_1", "review_pending"), uploadState: "accepted", uploadFailure: null });
+      await controller.reload("reflection_1");
+    }
+    saving.resolve();
+    await work;
+    expect(rows.size).toBe(0);
+    expect(controller.getSnapshot().recordingRecovery?.file ?? null).toBeNull();
+    controller.dispose();
+  });
+
+  it("never retransmits a deterministically invalid original even when called directly", async () => {
+    const { storage, rows } = recordingStorageFixture();
+    await storedRecording(storage);
+    const upload = vi.fn();
+    const controller = new DailyReflectionSessionController({ recordingStorage: storage,
+      api: fakeApi({ uploadBrowserRecording: upload, getOperation: async () => ({ ...lookupState("unresolved", "failed"),
+        uploadFailure: { code: "daily_reflection_audio_invalid", retryable: false } }) }) });
+    await controller.initialize();
+    await controller.retryRecordingUpload();
+    expect(upload).not.toHaveBeenCalled();
+    expect(rows.size).toBe(1);
+    controller.dispose();
+  });
 
   it.each(["uploading", "failed", "review_pending"] as const)("adopts accepted %s without a POST and cleans only the local audio", async (status) => {
     const { storage, rows } = recordingStorageFixture();
@@ -735,7 +983,8 @@ describe("recording transport recovery", () => {
     let signal: AbortSignal | undefined;
     const upload = vi.fn((_input, nextSignal) => { signal = nextSignal; return pending.promise; });
     const { storage, rows } = recordingStorageFixture();
-    const controller = new DailyReflectionSessionController({ api: fakeApi({ uploadBrowserRecording: upload }), recordingStorage: storage });
+    const controller = new DailyReflectionSessionController({ api: fakeApi({ uploadBrowserRecording: upload,
+      getOperation: async () => ({ ...lookupState("accepted"), reflectionId: "uploaded" }) }), recordingStorage: storage });
     await controller.initialize();
     const original = file();
     const work = controller.uploadBrowserRecording(original, 3000, "2026-08-13", "nav-key", "direct_conversation");
@@ -783,7 +1032,7 @@ describe("recording transport recovery", () => {
     expect(upload).toHaveBeenCalledTimes(2);
     expect(upload.mock.calls[1][0]).toEqual(upload.mock.calls[0][0]);
     expect(upload.mock.calls[1][0].file).toBe(original);
-    expect(lookup).toHaveBeenCalledTimes(2);
+    expect(lookup).toHaveBeenCalledTimes(3); // Includes authoritative acceptance lookup after the retry response.
     controller.dispose();
   });
 

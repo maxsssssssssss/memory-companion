@@ -137,7 +137,8 @@ export async function transcribeSpeakerAsrAudioInChunks(
   const chunks = await planner({
     uploadId: input.uploadId,
     filePath: input.filePath,
-    mimeType: input.mimeType
+    mimeType: input.mimeType,
+    ...(input.authoritativeAudio ? { authoritativeAudio: input.authoritativeAudio } : {})
   });
   console.info(
     `[asr-chunks] planned upload_id=${input.uploadId} chunks=${chunks.length} duration_seconds=${chunks.at(-1)?.endSeconds ?? 0}`

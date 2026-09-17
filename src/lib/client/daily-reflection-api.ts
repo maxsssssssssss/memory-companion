@@ -19,6 +19,8 @@ import {
   DailyReflectionDetailResponseSchema,
   DailyReflectionHistoryResponseSchema,
   DailyReflectionOperationLookupResponseSchema,
+  DailyReflectionOperationUploadStateSchema,
+  DailyReflectionUploadFailureSchema,
   DailyReflectionUploadSourceSchema,
   DailyReflectionWorkingCardDetailResponseSchema,
   DailyReflectionWorkingCardLifecycleRequestSchema,
@@ -37,6 +39,8 @@ import {
   type DailyReflectionDetailResponse,
   type DailyReflectionHistoryItem,
   type DailyReflectionOperationLookupResponse,
+  type DailyReflectionOperationUploadState,
+  type DailyReflectionUploadFailure,
   type DailyReflectionUploadSource,
   type DailyReflectionWorkingCardDetailResponse,
   type DailyReflectionWorkingCardLifecycleRequest,
@@ -279,7 +283,9 @@ const ErrorCodeResponseSchema = z.object({
   reflectionId: DailyReflectionIdSchema.optional(),
   uploadId: DailyReflectionIdSchema.optional(),
   currentVersion: z.number().int().nonnegative().optional(),
-  retryable: z.boolean().optional()
+  retryable: z.boolean().optional(),
+  uploadState: DailyReflectionOperationUploadStateSchema.optional(),
+  uploadFailure: DailyReflectionUploadFailureSchema.nullable().optional()
 }).strict();
 
 export type DailyReflectionUploadReceipt = z.infer<
@@ -463,7 +469,21 @@ const ERROR_MESSAGES: Readonly<Record<string, string>> = {
   invalid_upload_body: "无法读取所选音频，请重新选择文件。",
   daily_reflection_idempotency_conflict: "这次上传与已有记录不一致，请重新选择文件。",
   daily_reflection_cancelled: "这条复盘已取消。",
-  daily_reflection_upload_persist_failed: "录音暂时无法保存，请稍后重试。",
+  daily_reflection_upload_persist_failed: "录音保存失败，原音频尚未确认保存。请核对状态后重试上传。",
+  daily_reflection_audio_no_track: "音频中没有可读取的音轨，请重新选择有声音的原文件或重新录制。",
+  daily_reflection_audio_invalid: "音频损坏或不完整，无法保存。请重新选择完整的原文件或重新录制。",
+  daily_reflection_audio_codec_unsupported: "暂不支持这段音频的编码，请选择其他受支持的原文件。",
+  daily_reflection_profile_input_invalid: "这段音频不符合当前录入方式，请删除失败记录后重新选择文件。",
+  daily_reflection_input_method_invalid: "这次录入方式无效，请删除失败记录后重新录制或选择文件。",
+  daily_reflection_duration_missing: "无法取得有效音频时长，请选择完整的原文件或重新录制。",
+  daily_reflection_duration_invalid: "音频时长无效，请选择完整的原文件或重新录制。",
+  daily_reflection_duration_too_short: "录音太短，无法整理。请重新录制一段更完整的内容。",
+  daily_reflection_duration_probe_timeout: "服务器检查音频时超时，保存没有完成。请核对状态后重试上传。",
+  daily_reflection_duration_decode_timeout: "服务器读取音频时超时，保存没有完成。请核对状态后重试上传。",
+  daily_reflection_duration_tool_unavailable: "服务器的音频处理工具暂不可用，保存没有完成。请保留原文件并稍后重试。",
+  daily_reflection_duration_probe_failed: "服务器未能读取音频时长，保存没有完成。请保留原文件并核对状态后重试。",
+  daily_reflection_upload_lease_lost: "本次保存已中断，原音频尚未确认保存。请核对状态后重试上传。",
+  daily_reflection_upload_interrupted: "上传已中断，原音频尚未确认保存。请核对状态后重试上传。",
   daily_reflection_evidence_unavailable: "复盘内容暂时无法加载，请稍后重试。",
   daily_reflection_cannot_cancel_failed: "处理已停止，可重试或删除这条记录。",
   daily_reflection_retry_requires_failed: "当前记录无需重试。",
@@ -527,17 +547,23 @@ function errorMessage(status: number, code: string): string {
 export class DailyReflectionApiError extends Error {
   readonly status: number;
   readonly code: string;
+  readonly uploadState?: DailyReflectionOperationUploadState;
+  readonly uploadFailure?: DailyReflectionUploadFailure | null;
+  readonly reflectionId?: string;
 
   constructor(
     status: number,
     code: string,
     message: string = errorMessage(status, code),
-    options?: ErrorOptions
+    options?: ErrorOptions & { uploadState?: DailyReflectionOperationUploadState; uploadFailure?: DailyReflectionUploadFailure | null; reflectionId?: string }
   ) {
     super(message, options);
     this.name = "DailyReflectionApiError";
     this.status = status;
     this.code = code;
+    this.uploadState = options?.uploadState;
+    this.uploadFailure = options?.uploadFailure;
+    this.reflectionId = options?.reflectionId;
   }
 }
 
@@ -567,7 +593,13 @@ function responseError(response: Response, payload: unknown): DailyReflectionApi
     : parsed.success
       ? parsed.data.error
       : `http_${response.status}`;
-  return new DailyReflectionApiError(response.status, code);
+  return new DailyReflectionApiError(response.status, code, undefined, parsed.success ? {
+    uploadState: parsed.data.uploadState, uploadFailure: parsed.data.uploadFailure, reflectionId: parsed.data.reflectionId
+  } : undefined);
+}
+
+export function reflectionUploadFailureMessage(failure: DailyReflectionUploadFailure): string {
+  return errorMessage(503, failure.code);
 }
 
 async function parseJsonResponse<Schema extends z.ZodTypeAny>(

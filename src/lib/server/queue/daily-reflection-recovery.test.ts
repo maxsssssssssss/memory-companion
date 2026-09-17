@@ -113,6 +113,41 @@ function enqueueResult(enqueued = true) {
 }
 
 describe("daily reflection startup recovery", () => {
+  it.each(["pre_plan", "pre_plan_assets", "bound_plan"] as const)("preserves durable V2 save failure across queue recovery (%s)", async (stage) => {
+    const created = repository.createReflectionV2({
+      id: `save_${stage}`, accountId: "account_1", uploadId: null, operationKey: `save_${stage}`,
+      inputAdapter: "file_picker", sourceOrigin: "user_reflection", capturePurpose: "inspiration_capture",
+      recordingDate: "2026-08-13", contentHash: "a".repeat(64)
+    });
+    const identity = { accountId: "account_1", reflectionId: created.reflection.id };
+    repository.transitionStatus({ ...identity, expectedVersion: created.reflection.version, status: "uploading" });
+    const fence = repository.claimExecutionLease({ ...identity, leaseOwner: "saving", leaseDurationMs: 60000,
+      provisionalUploadId: created.receipt!.uploadId, uploadFingerprint: "a".repeat(64) })!;
+    if (stage === "bound_plan") repository.bindUploadAndPlanV2({ ...identity, leaseOwner: fence.leaseOwner, attemptVersion: fence.attemptVersion,
+      expectedVersion: repository.getReflection(identity.accountId, identity.reflectionId).version, uploadId: created.receipt!.uploadId,
+      inputAdapter: "file_picker", processingProfile: "quick_reflection", candidateLimit: 3,
+      effectiveDurationMs: 2000, durationSource: "server_ffmpeg_decode"
+    });
+    const uploadsRootDir = join(temporaryDirectory, "uploads");
+    await mkdir(uploadsRootDir, { recursive: true });
+    const attemptPath = join(uploadsRootDir, `${created.receipt!.uploadId}.attempt-1.webm`);
+    if (stage === "pre_plan_assets") await writeFile(attemptPath, "synthetic partial save");
+    const failure = { code: "daily_reflection_upload_persist_failed" as const, retryable: true };
+    repository.recordUploadFailure({ ...identity, ...fence, failure });
+    const enqueue = enqueueResult();
+    const report = await recoverDailyReflectionJobs({ enqueue }, {
+      ...recoveryDependencies(), getUploadsRootDir: () => uploadsRootDir
+    });
+    expect(report).toMatchObject({ missingUploadFailed: 0, missingPlanFailed: 0 });
+    expect(repository.getUploadRecovery(identity.accountId, identity.reflectionId))
+      .toEqual({ uploadState: "reupload_allowed", uploadFailure: failure });
+    expect(enqueue).not.toHaveBeenCalled();
+    if (stage === "pre_plan_assets") {
+      expect(report.provisionalCleaned).toBe(1);
+      await expect(access(attemptPath)).rejects.toThrow();
+    }
+  });
+
   it("does not fail a fresh created workflow while upload persistence is in flight", async () => {
     repository = new DailyReflectionRepository(database, { now: () => fresh });
     const workflow = createWorkflow({ reflectionId: "creation_in_flight" });

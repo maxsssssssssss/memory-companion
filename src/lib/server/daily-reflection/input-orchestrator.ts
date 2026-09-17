@@ -153,6 +153,7 @@ export class DailyReflectionInputOrchestrator {
       leaseDurationMs: input.leaseDurationMs,
       uploadFingerprint: input.receipt.contentHash,
       provisionalUploadId: input.receipt.uploadId,
+      clearUploadFailure: true,
       allowedStatuses: ["uploading"]
     });
   }

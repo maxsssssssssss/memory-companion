@@ -16,6 +16,7 @@ import {
   DAILY_REFLECTION_SCHEMA_VERSION,
   migrateDailyReflectionSchema
 } from "./schema";
+import { DailyReflectionRepository } from "./repository";
 
 const roots: string[] = [];
 const timestamp = "2026-08-13T00:00:00.000Z";
@@ -103,7 +104,28 @@ function createVersionOneFixture(database: Database.Database) {
     );
     CREATE TABLE dr_candidates (
       id TEXT PRIMARY KEY,
-      proposed_text TEXT NOT NULL
+      account_id TEXT NOT NULL,
+      reflection_id TEXT NOT NULL,
+      ordinal INTEGER NOT NULL,
+      proposed_text TEXT NOT NULL,
+      user_text TEXT,
+      status TEXT NOT NULL,
+      candidate_type TEXT NOT NULL,
+      subject_person_id TEXT,
+      subject_confirmed INTEGER NOT NULL DEFAULT 0,
+      version INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      UNIQUE (id, account_id),
+      UNIQUE (account_id, reflection_id, ordinal),
+      FOREIGN KEY (reflection_id, account_id) REFERENCES dr_reflections(id, account_id) ON DELETE CASCADE
+    );
+    CREATE TABLE dr_candidate_sources (
+      account_id TEXT NOT NULL, candidate_id TEXT NOT NULL, position INTEGER NOT NULL,
+      source_segment_id TEXT NOT NULL,
+      PRIMARY KEY (account_id, candidate_id, position),
+      UNIQUE (account_id, candidate_id, source_segment_id),
+      FOREIGN KEY (candidate_id, account_id) REFERENCES dr_candidates(id, account_id) ON DELETE CASCADE
     );
   `);
 }
@@ -124,6 +146,58 @@ function insertLegacyReflection(
 }
 
 describe("Daily Reflection SQLite schema", () => {
+  it("migrates a V14 ffprobe plan without changing its receipt or immutable binding and permits decoded provenance", async () => {
+    const root = await mkdtemp(join(tmpdir(), "reflection-duration-v15-"));
+    roots.push(root);
+    const filePath = join(root, "isolated.sqlite");
+    const legacy = new Database(filePath);
+    legacy.pragma("foreign_keys = ON");
+    // Build the actual V1-V14 schema, deliberately stopping before this migration.
+    const beforeV15 = new Proxy(legacy, { get(target, property) {
+      if (property !== "prepare") {
+        const value = Reflect.get(target, property, target);
+        return typeof value === "function" ? value.bind(target) : value;
+      }
+      return (sql: string) => {
+        const statement = target.prepare(sql);
+        if (sql !== "SELECT 1 FROM dr_schema_migrations WHERE version = ?") return statement;
+        return { get(version: number) { return version === 15 ? { version: 15 } : statement.get(version); } };
+      };
+    } }) as Database.Database;
+    migrateDailyReflectionSchema(beforeV15);
+    expect(legacy.pragma("user_version", { simple: true })).toBe(14);
+    const repo = new DailyReflectionRepository(legacy, { now: () => timestamp });
+    const bind = (repository: DailyReflectionRepository, id: string, durationSource: "server_ffprobe" | "server_ffmpeg_decode") => {
+      const created = repository.createReflectionV2({
+        id, accountId: "account_1", uploadId: null, operationKey: id, inputAdapter: "browser_recorder",
+        sourceOrigin: "user_reflection", capturePurpose: "inspiration_capture", recordingDate: "2026-09-16", contentHash: "d".repeat(64)
+      });
+      const uploading = repository.transitionStatus({ accountId: "account_1", reflectionId: id, expectedVersion: created.reflection.version, status: "uploading" });
+      const fence = repository.claimExecutionLease({ accountId: "account_1", reflectionId: id, leaseOwner: "test-owner", leaseDurationMs: 60000 })!;
+      return repository.bindUploadAndPlanV2({
+        accountId: "account_1", reflectionId: id, uploadId: created.receipt!.uploadId,
+        expectedVersion: uploading.version, inputAdapter: "browser_recorder", processingProfile: "quick_reflection",
+        effectiveDurationMs: 2000, durationSource, candidateLimit: 3, leaseOwner: fence.leaseOwner, attemptVersion: fence.attemptVersion
+      }).processingPlan;
+    };
+    const plan = bind(repo, "old", "server_ffprobe");
+    const receipt = repo.getInputReceiptV2("account_1", "old");
+    legacy.close();
+    const upgraded = openDailyReflectionDatabase({ filePath });
+    try {
+      const upgradedRepo = new DailyReflectionRepository(upgraded, { now: () => timestamp });
+      expect(upgradedRepo.getProcessingPlan("account_1", "old")).toEqual(plan);
+      expect(upgradedRepo.getInputReceiptV2("account_1", "old")).toEqual(receipt);
+      expect(bind(upgradedRepo, "new", "server_ffmpeg_decode")).toMatchObject({ durationSource: "server_ffmpeg_decode" });
+      expect(() => upgraded.prepare("UPDATE dr_processing_plans_v2 SET duration_source = 'server_ffmpeg_decode' WHERE reflection_id = 'old'").run())
+        .toThrow("daily_reflection_v2_plan_immutable");
+      migrateDailyReflectionSchema(upgraded);
+      expect(upgraded.pragma("foreign_key_check")).toEqual([]);
+      expect(upgraded.pragma("integrity_check", { simple: true })).toBe("ok");
+      expect(upgraded.prepare("SELECT COUNT(*) AS count FROM dr_schema_migrations WHERE version = 15").get()).toEqual({ count: 1 });
+    } finally { upgraded.close(); }
+  });
+
   it("rechecks the ledger after a two-connection Web and Worker startup barrier", async () => {
     const root = await mkdtemp(join(tmpdir(), "daily-reflection-schema-race-"));
     roots.push(root);
@@ -170,7 +244,8 @@ describe("Daily Reflection SQLite schema", () => {
           { version: 11, count: 1 },
           { version: 12, count: 1 },
           { version: 13, count: 1 },
-          { version: 14, count: 1 }
+          { version: 14, count: 1 },
+          { version: 15, count: 1 }
         ]);
       }
       expect((web.prepare("PRAGMA table_info(dr_reflections)").all() as Array<{
@@ -224,7 +299,8 @@ describe("Daily Reflection SQLite schema", () => {
         { version: 11 },
         { version: 12 },
         { version: 13 },
-        { version: 14 }
+        { version: 14 },
+        { version: 15 }
       ]);
       expect((first.prepare("PRAGMA table_info(dr_reflections)").all() as Array<{
         name: string;
@@ -274,14 +350,14 @@ describe("Daily Reflection SQLite schema", () => {
     try {
       expect(reopened.prepare(
         "SELECT COUNT(*) AS count FROM dr_schema_migrations"
-      ).get()).toEqual({ count: 14 });
+      ).get()).toEqual({ count: 15 });
       expect(reopened.prepare(
         "SELECT source_origin FROM dr_reflections WHERE id = 'reflection_reopen'"
       ).get()).toEqual({ source_origin: "unknown" });
       migrateDailyReflectionSchema(reopened);
       expect(reopened.prepare(
         "SELECT COUNT(*) AS count FROM dr_schema_migrations"
-      ).get()).toEqual({ count: 14 });
+      ).get()).toEqual({ count: 15 });
       expect(reopened.pragma("foreign_key_check")).toEqual([]);
       expect(reopened.pragma("integrity_check", { simple: true })).toBe("ok");
     } finally {
@@ -317,7 +393,8 @@ describe("Daily Reflection SQLite schema", () => {
         { version: 11 },
         { version: 12 },
         { version: 13 },
-        { version: 14 }
+        { version: 14 },
+        { version: 15 }
       ]);
       expect(database.prepare(`
         SELECT lease_owner, lease_until, attempt_version, upload_fingerprint
@@ -621,7 +698,7 @@ describe("Daily Reflection SQLite schema", () => {
 
       expect(database.prepare(
         "SELECT version FROM dr_schema_migrations ORDER BY version DESC LIMIT 2"
-      ).all()).toEqual([{ version: 14 }, { version: 13 }]);
+      ).all()).toEqual([{ version: 15 }, { version: 14 }]);
       expect(database.prepare(`
         SELECT id, title, content, status, version
         FROM dr_working_cards WHERE id = 'card_v10_proposal'

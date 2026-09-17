@@ -2,6 +2,7 @@ import { z } from "zod";
 
 import {
   DailyReflectionV2InputAdapterSchema,
+  DailyReflectionDurationSourceSchema,
   InputMethodSchema,
   ProcessingProfileSchema,
   type ProcessingProfile
@@ -29,7 +30,7 @@ export const DailyReflectionClientReportedDurationMsSchema = z.number()
   .positive()
   .max(Number.MAX_SAFE_INTEGER);
 
-export const DailyReflectionDurationSourceSchema = z.literal("server_ffprobe");
+export { DailyReflectionDurationSourceSchema } from "./daily-reflection";
 
 export type DailyReflectionDurationPolicyErrorCode =
   | "daily_reflection_profile_input_invalid"
@@ -125,6 +126,7 @@ export const DailyReflectionDurationResolutionSchema = z.object({
   effectiveDurationMs: DailyReflectionEffectiveDurationMsSchema,
   clientReportedDurationMs: DailyReflectionClientReportedDurationMsSchema.nullable(),
   durationSource: DailyReflectionDurationSourceSchema,
+  requiresAudioExtraction: z.literal(true).optional(),
   processingProfile: ProcessingProfileSchema
 }).strict().superRefine((resolution, context) => {
   try {

@@ -136,12 +136,14 @@ export const ProcessingPlanV1Schema = z.object({
   reviewPolicy: ReviewPolicySchema
 }).strict();
 
+export const DailyReflectionDurationSourceSchema = z.enum(["server_ffprobe", "server_ffmpeg_decode"]);
+
 export const ProcessingPlanV2Schema = ProcessingPlanV1Schema.extend({
   planVersion: z.literal(DAILY_REFLECTION_PROCESSING_PLAN_V2_VERSION),
   inputAdapter: DailyReflectionV2InputAdapterSchema,
   capturePurpose: DailyReflectionV2CapturePurposeSchema,
   effectiveDurationMs: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
-  durationSource: z.literal("server_ffprobe"),
+  durationSource: DailyReflectionDurationSourceSchema,
   candidateLimit: z.number().int().min(1).max(7)
 }).strict();
 
