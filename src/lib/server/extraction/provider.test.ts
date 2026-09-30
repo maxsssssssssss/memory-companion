@@ -6,6 +6,25 @@ import { getExtractionProvider } from "./provider";
 import { ruleExtractionProvider } from "./rule-provider";
 
 describe("extraction providers", () => {
+  it("preserves the primary failure without calling rule extraction when fallback is none", async () => {
+    const primary = new Error("extraction_failed");
+    const extract = vi.spyOn(openaiExtractionProvider, "extract").mockRejectedValue(primary);
+    const fallback = vi.spyOn(ruleExtractionProvider, "extract");
+    vi.stubEnv("EXTRACTION_PROVIDER", "openai");
+    vi.stubEnv("EXTRACTION_FALLBACK_PROVIDER", "none");
+    try {
+      const provider = getExtractionProvider();
+      expect(provider).toBe(openaiExtractionProvider);
+      await expect(provider.extract("upload_test", [])).rejects.toBe(primary);
+      expect(extract).toHaveBeenCalledOnce();
+      expect(fallback).not.toHaveBeenCalled();
+    } finally {
+      extract.mockRestore();
+      fallback.mockRestore();
+      vi.unstubAllEnvs();
+    }
+  });
+
   it("uses the rule provider by default", async () => {
     const originalProvider = process.env.EXTRACTION_PROVIDER;
     delete process.env.EXTRACTION_PROVIDER;
