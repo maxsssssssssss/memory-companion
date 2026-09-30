@@ -1,6 +1,6 @@
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import type { ComponentProps } from "react";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type {
   DailyReflectionAiReviewApi,
@@ -107,6 +107,72 @@ function renderReview(api: DailyReflectionAiReviewApi, props: Partial<ComponentP
 }
 
 describe("DailyReflectionAiReview", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+  });
+
+  it.each([300, -150])("only preserves a scroll anchor when already reading inside the rules (top=%s)", async (top) => {
+    vi.useFakeTimers();
+    const scroll = vi.spyOn(window, "scrollBy").mockImplementation(() => {});
+    vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(() => ({
+      top: screen.queryByRole("heading", { name: "AI 深度回看" }) ? top + 400 : top
+    } as DOMRect));
+    const lookup = (status: DailyReflectionAiReviewOperationView["status"]): DailyReflectionAiReviewLookupResponse => ({
+      schemaVersion: 1, exposureMode: "on", scope: "daily", referenceDate: "2026-08-24", review: operation(status)
+    });
+    const get = vi.fn<DailyReflectionAiReviewApi["get"]>()
+      .mockResolvedValueOnce(lookup("processing")).mockResolvedValue(lookup("ready"));
+    await act(async () => { renderReview(reviewApi({ get })); });
+    await act(async () => { await vi.advanceTimersByTimeAsync(2_500); });
+    expect(screen.getByRole("heading", { name: "AI 深度回看" })).toBeVisible();
+    if (top < 0) {
+      expect(scroll).toHaveBeenCalledWith({ behavior: "auto", top: 400 });
+      expect(screen.getByText("规则内容立即可读")).toBeVisible();
+    } else expect(scroll).not.toHaveBeenCalled();
+  });
+
+  it("continues polling after a failed status read and shows ready content without remounting", async () => {
+    vi.useFakeTimers();
+    const lookup = (status: DailyReflectionAiReviewOperationView["status"]): DailyReflectionAiReviewLookupResponse => ({
+      schemaVersion: 1, exposureMode: "on", scope: "daily", referenceDate: "2026-08-24", review: operation(status)
+    });
+    const get = vi.fn<DailyReflectionAiReviewApi["get"]>()
+      .mockResolvedValueOnce(lookup("queued"))
+      .mockRejectedValueOnce(new Error("temporary read failure"))
+      .mockResolvedValue(lookup("ready"));
+    const api = reviewApi({ get });
+    await act(async () => { renderReview(api); });
+    expect(screen.getByRole("heading", { name: "AI 深度回看正在等待整理" })).toBeVisible();
+    await act(async () => { await vi.advanceTimersByTimeAsync(2_500); });
+    expect(screen.getByText("暂时没有读到最新回看")).toBeVisible();
+    expect(screen.getByText("规则内容立即可读")).toBeVisible();
+    await act(async () => { await vi.advanceTimersByTimeAsync(2_500); });
+    expect(screen.getByRole("heading", { name: "AI 深度回看" })).toBeVisible();
+    expect(screen.getByText("你正在用一个可验证的小版本控制扩展范围。")).toBeVisible();
+    expect(api.ensure).not.toHaveBeenCalled();
+    await act(async () => { await vi.advanceTimersByTimeAsync(10_000); });
+    expect(get).toHaveBeenCalledTimes(3);
+  });
+
+  it("recovers an initial read failure and ignores late errors from an aborted read", async () => {
+    vi.useFakeTimers();
+    let rejectOld!: (error: Error) => void;
+    const get = vi.fn<DailyReflectionAiReviewApi["get"]>()
+      .mockRejectedValueOnce(new Error("offline"))
+      .mockImplementationOnce(() => new Promise((_resolve, reject) => { rejectOld = reject; }))
+      .mockResolvedValue({ schemaVersion: 1, exposureMode: "on", scope: "daily", referenceDate: "2026-08-24", review: operation("ready") });
+    const api = reviewApi({ get });
+    await act(async () => { renderReview(api); });
+    expect(screen.getByText("暂时没有读到最新回看")).toBeVisible();
+    await act(async () => { await vi.advanceTimersByTimeAsync(2_500); });
+    await act(async () => { fireEvent.focus(window); });
+    expect(screen.getByRole("heading", { name: "AI 深度回看" })).toBeVisible();
+    await act(async () => { rejectOld(new Error("obsolete read")); });
+    expect(screen.queryByText("暂时没有读到最新回看")).not.toBeInTheDocument();
+    expect(get.mock.calls[1][1]?.aborted).toBe(true);
+  });
+
   it("keeps rules immediately visible and ensures one real queued review without fake percent", async () => {
     const api = reviewApi({
       get: vi.fn(async () => ({

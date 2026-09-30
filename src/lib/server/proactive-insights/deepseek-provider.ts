@@ -9,6 +9,7 @@ import {
 } from "@/lib/domain/date-companion-proactive-value";
 import type { ProactiveInsight, ProactiveInsightContext } from "@/lib/domain/proactive-insights";
 import { parseJsonObjectFromModelText } from "@/lib/server/openai/structured-json";
+import { requestTokenHubDeepseekFlashJson, TOKENHUB_DEEPSEEK_FLASH_BASE_URL } from "@/lib/server/openai/tokenhub-deepseek-flash";
 
 import {
   summarizeProactiveInsightSchemaIssues,
@@ -371,6 +372,7 @@ function logRun(logger: Logger, input: {
 
 export function createDeepseekProactiveInsightProvider(deps: {
   clientFactory?: (config: DeepseekClientConfig) => DeepseekClient;
+  fetch?: typeof globalThis.fetch;
   now?: () => number;
   logger?: Logger;
 } = {}) {
@@ -427,7 +429,9 @@ export function createDeepseekProactiveInsightProvider(deps: {
         });
       }
 
-      const apiKey = readStringEnv("DEEPSEEK_API_KEY");
+      const baseURL = normalizeDeepseekBaseUrl(readStringEnv("PROACTIVE_INSIGHT_BASE_URL") ?? readStringEnv("DEEPSEEK_BASE_URL"));
+      const tokenHub = Boolean(readStringEnv("PROACTIVE_INSIGHT_BASE_URL")) && baseURL === TOKENHUB_DEEPSEEK_FLASH_BASE_URL;
+      const apiKey = readStringEnv(tokenHub ? "OPENAI_API_KEY" : "DEEPSEEK_API_KEY");
       if (!apiKey) {
         return complete({
           status: "fallback",
@@ -437,8 +441,7 @@ export function createDeepseekProactiveInsightProvider(deps: {
           failureCode: "missing_api_key"
         });
       }
-      const baseURL = normalizeDeepseekBaseUrl(readStringEnv("DEEPSEEK_BASE_URL"));
-      if (!isAllowedDeepseekBaseUrl(baseURL)) {
+      if (!isAllowedDeepseekBaseUrl(baseURL) && !tokenHub) {
         return complete({
           status: "fallback",
           items: [],
@@ -447,7 +450,7 @@ export function createDeepseekProactiveInsightProvider(deps: {
           failureCode: "invalid_base_url"
         });
       }
-      if (!validateModelName(model)) {
+      if (!validateModelName(model) || (tokenHub && model !== "deepseek-v4-flash")) {
         return complete({
           status: "fallback",
           items: [],
@@ -458,14 +461,18 @@ export function createDeepseekProactiveInsightProvider(deps: {
       }
 
       try {
-        const client = clientFactory({
+        const client = tokenHub ? null : clientFactory({
           apiKey,
           baseURL,
           timeout: resolveTimeoutMs(),
           maxRetries: resolveMaxRetries()
         });
         const prompt = buildPrompt(input.context, maxItems, input.memoryContext);
-        const response = await client.chat.completions.create({
+        const response = tokenHub ? { choices: [{ message: { content: await requestTokenHubDeepseekFlashJson({
+          apiKey, timeoutMs: resolveTimeoutMs(),
+          maxOutputTokens: readIntEnv("PROACTIVE_INSIGHT_MAX_OUTPUT_TOKENS", DEFAULT_MAX_OUTPUT_TOKENS),
+          messages: [{ role: "system", content: prompt.systemPrompt }, { role: "user", content: prompt.userPrompt }], fetch: deps.fetch
+        }) } }] } : await client!.chat.completions.create({
           model,
           stream: false,
           response_format: {

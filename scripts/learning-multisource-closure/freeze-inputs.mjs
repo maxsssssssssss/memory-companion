@@ -1,0 +1,3 @@
+import fs from 'node:fs';import {LearningRepository} from '../../src/lib/server/learning/repository.ts';import {root,save} from './runtime.mjs';
+const s=JSON.parse(fs.readFileSync(root+'/session.json','utf8')),repo=new LearningRepository(root+'/data/users/'+s.userId,s.userId);
+try{const catalog=repo.get(s.pageId).materials.map(m=>{const source=repo.source(s.pageId,m.id);return {materialId:m.id,kind:m.kind,title:m.title,paragraphs:source.paragraphs,scopeNotice:source.scopeNotice};});save('input-catalog.json',catalog);console.log(JSON.stringify({materials:catalog.length,paragraphs:catalog.map(m=>({kind:m.kind,count:m.paragraphs.length})),ocrAndAsr:'reused unchanged'}));}finally{repo.close();}

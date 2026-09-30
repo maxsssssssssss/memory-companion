@@ -1,6 +1,6 @@
 # Analysis Chunk Checkpoint Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **Historical plan:** This is a design snapshot for the dated phase, not a current task queue. Unchecked boxes do not establish unfinished work. Use it for requirements, invariants, and acceptance scenarios; verify current code and tests before reusing any implementation steps. Follow the current user scope and root `AGENTS.md`; no particular skill, subagent workflow, commit, or external operation is required or authorized by this document.
 
 **Goal:** Add bounded Daily Brief chunk execution and resumable checkpoints for Audio Insight, Daily Brief, and Relationship candidate chunks without changing their output schemas or deterministic reducers.
 

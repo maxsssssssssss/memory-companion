@@ -1,6 +1,7 @@
 import OpenAI from "openai";
 
-import { parseJsonObjectFromModelText } from "@/lib/server/openai/structured-json";
+import { parseJsonObjectFromModelText, StructuredJsonResponseError, type StructuredJsonFailureCode } from "@/lib/server/openai/structured-json";
+import { requestTokenHubDeepseekFlashJson, TOKENHUB_DEEPSEEK_FLASH_BASE_URL } from "@/lib/server/openai/tokenhub-deepseek-flash";
 
 import {
   MemoryRelevanceResponseSchema,
@@ -31,6 +32,13 @@ const DEFAULT_TIMEOUT_MS = 15_000;
 const MAX_TIMEOUT_MS = 20_000;
 const DEFAULT_MAX_OUTPUT_TOKENS = 1_600;
 const allowedModels = new Set(["deepseek-v4-flash", "deepseek-v4-pro"]);
+
+export type MemoryRelevanceResponseDiagnostic = {
+  resultsType: "missing" | "null" | "array" | "object" | "string" | "number" | "boolean" | "other";
+  resultCount?: number;
+  extraFieldCount: number;
+  issues: Array<{ code: string; path: "results" | "$" }>;
+};
 
 function readStringEnv(name: string) {
   const value = process.env[name]?.trim();
@@ -110,6 +118,10 @@ function buildPrompt(input: Parameters<MemoryRelevanceJudge["judge"]>[0]) {
 
 export function createDeepseekMemoryRelevanceJudge(deps: {
   clientFactory?: (config: DeepseekClientConfig) => DeepseekClient;
+  fetch?: typeof globalThis.fetch;
+  /** Optional evaluation observation; fixed codes only, never model or SDK text. */
+  onTransportFailure?: (code: StructuredJsonFailureCode | "request_failed") => void;
+  onResponseSchemaFailure?: (diagnostic: MemoryRelevanceResponseDiagnostic) => void;
   now?: () => number;
 } = {}): MemoryRelevanceJudge {
   const clientFactory = deps.clientFactory ?? defaultClientFactory;
@@ -128,15 +140,16 @@ export function createDeepseekMemoryRelevanceJudge(deps: {
       }
 
       const model = readStringEnv("DEEPSEEK_MODEL") ?? DEFAULT_MODEL;
-      const apiKey = readStringEnv("DEEPSEEK_API_KEY");
+      const baseURL = normalizeBaseUrl(readStringEnv("MEMORY_RELEVANCE_BASE_URL") ?? readStringEnv("DEEPSEEK_BASE_URL"));
+      const tokenHub = Boolean(readStringEnv("MEMORY_RELEVANCE_BASE_URL")) && baseURL === TOKENHUB_DEEPSEEK_FLASH_BASE_URL;
+      const apiKey = readStringEnv(tokenHub ? "OPENAI_API_KEY" : "DEEPSEEK_API_KEY");
       if (!apiKey) {
         return complete({ status: "fallback", rawResults: [], provider: "deepseek", model, failureCode: "missing_api_key" });
       }
-      const baseURL = normalizeBaseUrl(readStringEnv("DEEPSEEK_BASE_URL"));
-      if (baseURL !== DEFAULT_BASE_URL) {
+      if (baseURL !== DEFAULT_BASE_URL && !tokenHub) {
         return complete({ status: "fallback", rawResults: [], provider: "deepseek", model, failureCode: "invalid_base_url" });
       }
-      if (model.includes("/") || !allowedModels.has(model)) {
+      if (model.includes("/") || !allowedModels.has(model) || (tokenHub && model !== "deepseek-v4-flash")) {
         return complete({ status: "fallback", rawResults: [], provider: "deepseek", model, failureCode: "invalid_model" });
       }
 
@@ -145,9 +158,13 @@ export function createDeepseekMemoryRelevanceJudge(deps: {
           readPositiveIntEnv("MEMORY_RELEVANCE_TIMEOUT_MS", DEFAULT_TIMEOUT_MS),
           MAX_TIMEOUT_MS
         );
-        const client = clientFactory({ apiKey, baseURL, timeout, maxRetries: 0 });
+        const client = tokenHub ? null : clientFactory({ apiKey, baseURL, timeout, maxRetries: 0 });
         const prompt = buildPrompt(input);
-        const response = await client.chat.completions.create({
+        const response = tokenHub ? { choices: [{ message: { content: await requestTokenHubDeepseekFlashJson({
+          apiKey, timeoutMs: timeout, jsonRootField: "results",
+          maxOutputTokens: readPositiveIntEnv("MEMORY_RELEVANCE_MAX_OUTPUT_TOKENS", DEFAULT_MAX_OUTPUT_TOKENS),
+          messages: [{ role: "system", content: prompt.systemPrompt }, { role: "user", content: prompt.userPrompt }], fetch: deps.fetch
+        }) } }] } : await client!.chat.completions.create({
           model,
           stream: false,
           response_format: { type: "json_object" },
@@ -171,6 +188,20 @@ export function createDeepseekMemoryRelevanceJudge(deps: {
         }
         const responseDocument = MemoryRelevanceResponseSchema.safeParse(parsed);
         if (!responseDocument.success) {
+          if (deps.onResponseSchemaFailure) {
+            const object = parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed as Record<string, unknown> : {};
+            const value = object.results;
+            const resultsType: MemoryRelevanceResponseDiagnostic["resultsType"] = !Object.hasOwn(object, "results") ? "missing"
+              : value === null ? "null" : Array.isArray(value) ? "array"
+                : typeof value === "string" ? "string" : typeof value === "number" ? "number"
+                  : typeof value === "boolean" ? "boolean" : typeof value === "object" ? "object" : "other";
+            try {
+              deps.onResponseSchemaFailure({ resultsType, ...(Array.isArray(value) ? { resultCount: value.length } : {}),
+                extraFieldCount: Object.keys(object).filter(key => key !== "results").length,
+                issues: responseDocument.error.issues.slice(0, 10).map(issue => ({ code: issue.code, path: issue.path[0] === "results" ? "results" : "$" }))
+              });
+            } catch { /* Observation must not alter the product failure contract. */ }
+          }
           return complete({ status: "fallback", rawResults: [], provider: "deepseek", model, failureCode: "invalid_schema" });
         }
 
@@ -181,6 +212,11 @@ export function createDeepseekMemoryRelevanceJudge(deps: {
           model
         });
       } catch (error) {
+        if (tokenHub) {
+          try {
+            deps.onTransportFailure?.(error instanceof StructuredJsonResponseError ? error.code : "request_failed");
+          } catch { /* Observation must not alter the product failure contract. */ }
+        }
         return complete({
           status: "fallback",
           rawResults: [],
@@ -196,4 +232,3 @@ export function createDeepseekMemoryRelevanceJudge(deps: {
 export function getMemoryRelevanceJudge() {
   return createDeepseekMemoryRelevanceJudge();
 }
-

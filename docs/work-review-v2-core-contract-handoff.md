@@ -2,9 +2,11 @@
 
 > 状态：Core contract implemented；不代表 Work Review V2 完成、可发布或已接入真实 GPT/Worker/UI。
 
-## 冻结的运行边界
+> 适用阶段：这是 Wave 1 的历史交接快照，以上完成状态、owner 分工、文件清单和“未来”任务仅对应当时阶段，不是当前待办或完整 contract。2026-09-14 本地核对时 [`schema.ts`](../src/lib/server/work-review/schema.ts) 已声明 schema V8；不要按本文重新创建 V5 或推断现行调用签名。当前工作应追踪实际调用链和相关测试；产品隔离、Evidence、事务与 lease 不变量仍需维护。历史 owner 分工不自动授权接管他人的当前修改，服务器/Provider 操作继续受根规则限制。
 
-- 数据库：继续使用 `work-review.sqlite`；Project 与 Weekly 共同占用唯一 V5 migration。
+## Wave 1 冻结的运行边界
+
+- 数据库：当时继续使用 `work-review.sqlite`；Project 与 Weekly 共同占用该阶段的 V5 migration。这是历史迁移安排，后续版本以当前 schema 为准。
 - Source Snapshot：只读取 Work-owned confirmed Findings、Meeting metadata、Work Todo/event ledger、Project links，以及 Finding 直接引用的 Canonical Evidence。
 - 禁止来源：pending/ignored Candidate 正文、整份 Transcript、Follow-up、Daily Reflection、Date Companion、Memory、Person、generic Retrieval、旧 QA answer。
 - Freshness：`sourceSnapshotDigest` 覆盖全部 eligible revision identities，包括被容量裁掉的来源；`inputPackDigest` 另含账号、周、时区、scope、容量与本次有界输入。

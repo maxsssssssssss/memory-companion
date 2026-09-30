@@ -200,8 +200,11 @@ export function ReflectionAppShell({
           <nav className={styles.reflectionDesktopNav} aria-label="日常复盘主导航">
             {REFLECTION_DESKTOP_NAV.map((item) => {
               const active = reflectionRouteIsActive(pathname, item);
+              // Prefetch these client pages' modules; account-scoped data still
+              // loads in page effects after navigation, behind authentication.
               return (
-                <Link aria-current={active ? "page" : undefined} className={active ? styles.reflectionNavActive : undefined} href={item.href} key={item.href}>
+                <Link aria-current={active ? "page" : undefined} className={active ? styles.reflectionNavActive : undefined} href={item.href} key={item.href}
+                  prefetch={item.href === REFLECTION_ROUTES.cards || item.href === REFLECTION_ROUTES.memory ? true : undefined}>
                   <ReflectionAiReviewNavLabel label={item.label} />
                 </Link>
               );
@@ -231,7 +234,7 @@ export function ReflectionAppShell({
 
         {focused ? (
           <div aria-label="当前页面导航" className={styles.reflectionFocusedHeader} role="navigation">
-            <Link href={focused.backHref} aria-label={`返回${focused.label === "开始讲述" ? "今天" : focused.label}`}>
+            <Link href={focused.backHref} prefetch={focused.backHref === REFLECTION_ROUTES.cards || focused.backHref === REFLECTION_ROUTES.memory ? true : undefined} aria-label={`返回${focused.label === "开始讲述" ? "今天" : focused.label}`}>
               <span aria-hidden="true">←</span>
               <span>返回</span>
             </Link>
@@ -254,6 +257,7 @@ export function ReflectionAppShell({
                 className={primary ? styles.reflectionMobilePrimary : active ? styles.reflectionNavActive : undefined}
                 href={href}
                 key={item.href}
+                prefetch={item.href === REFLECTION_ROUTES.cards ? true : undefined}
                 onClick={primary ? () => armVoiceAutostartIntent() : undefined}
               >
                 <span aria-hidden="true">{item.icon}</span>

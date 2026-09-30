@@ -73,7 +73,8 @@ export function ProductPopover({
         {trigger}
       </button>
       {open ? (
-        <div className={panelClassName} id={panelId} onClickCapture={handlePanelClick}>
+        // Let the link handle navigation before closing and unmounting its panel.
+        <div className={panelClassName} id={panelId} onClick={handlePanelClick}>
           {children}
         </div>
       ) : null}

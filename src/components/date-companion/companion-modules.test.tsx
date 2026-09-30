@@ -58,6 +58,8 @@ describe("CompanionModules", () => {
     );
 
     expect(await screen.findByText("上次使用")).toBeVisible();
-    expect(screen.getByRole("link", { name: /日常复盘/u })).toHaveTextContent("继续进入");
+    const productSpaces = within(screen.getByRole("region", { name: "产品空间" }));
+    expect(productSpaces.getByRole("link", { name: /日常复盘/u })).toHaveTextContent("继续进入");
+    expect(productSpaces.getByRole("link", { name: /约会陪伴/u })).not.toHaveTextContent("继续进入");
   });
 });

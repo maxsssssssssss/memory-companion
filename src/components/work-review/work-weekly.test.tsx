@@ -267,6 +267,83 @@ afterEach(() => {
   vi.clearAllMocks();
 });
 
+describe("Weekly reading layout interactions", () => {
+  it("collapses detailed statistics while keeping omitted-source information visible", async () => {
+    const limited = { ...summary, truncated: true, omittedFindingCount: 2 };
+    renderWeekly(api({ getWeeklyReview: vi.fn().mockResolvedValue({ review: review(), items: [item()], sourceSummary: limited }) }));
+    await screen.findByText("有效概览");
+    expect(screen.getByText("原话证据")).not.toBeVisible();
+    expect(screen.getByText(/服务端未纳入 2 项结果/u)).toBeVisible();
+    fireEvent.click(screen.getByText("来源详情"));
+    expect(screen.getByText("原话证据")).toBeVisible();
+    expect(screen.getByText("待确认结果")).toBeVisible();
+  });
+
+  it("opens secondary actions on demand and restores focus on Escape without mutating", async () => {
+    const client = api();
+    renderWeekly(client);
+    const row = (await screen.findByText("有效概览")).closest("li")!;
+    expect(within(row).queryByRole("button", { name: "隐藏" })).not.toBeInTheDocument();
+    const trigger = within(row).getByRole("button", { name: "更多条目操作" });
+    fireEvent.click(trigger);
+    expect(trigger).toHaveAttribute("aria-expanded", "true");
+    expect(within(row).getByRole("button", { name: "上移" })).toBeDisabled();
+    expect(within(row).getByRole("button", { name: "下移" })).toBeDisabled();
+    fireEvent.keyDown(document, { key: "Escape" });
+    expect(trigger).toHaveFocus();
+    expect(trigger).toHaveAttribute("aria-expanded", "false");
+    expect(client.updateWeeklyItem).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "更多回顾操作" }));
+    fireEvent.click(screen.getByRole("button", { name: "恢复系统版本" }));
+    expect(screen.getByRole("dialog", { name: "恢复最近的系统版本？" })).toBeVisible();
+    expect(client.resetWeeklyReview).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "取消" }));
+    expect(screen.getByRole("button", { name: "更多回顾操作" })).toHaveFocus();
+  });
+
+  it("keeps every original reference reachable through the compact source list", async () => {
+    const refs = ["evidence:publication_1:segment_1", "evidence:publication_1:segment_2"];
+    const client = api({ getWeeklyReview: vi.fn().mockResolvedValue({ review: review(), items: [item({ sourceRefs: refs })], sourceSummary: summary }), getWeeklySource: vi.fn().mockRejectedValue(new Error("fixture_source_unavailable")) });
+    renderWeekly(client);
+    await screen.findByText("有效概览");
+    expect(client.getWeeklySource).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "查看本条全部来源（2）" }));
+    const sourceButton = screen.getByRole("button", { name: "来源 2" });
+    sourceButton.focus();
+    fireEvent.click(sourceButton);
+    await waitFor(() => expect(client.getWeeklySource).toHaveBeenCalledWith("wrw_1", refs[1], expect.any(AbortSignal)));
+    expect(await screen.findByText("这条来源暂时不可用")).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "返回周回顾" }));
+    expect(screen.getByRole("button", { name: "查看本条全部来源（2）" })).toHaveFocus();
+  });
+
+  it("hides and restores a row through the collapsed list without restoring invalidated text", async () => {
+    const current = item();
+    const invalid = item({ id: "invalid", systemText: "失效内容不可恢复", invalidatedAt: "2026-09-03T09:00:00.000Z", verificationState: "invalidated" });
+    const client = api({
+      getWeeklyReview: vi.fn().mockResolvedValue({ review: review(), items: [current, invalid], sourceSummary: summary }),
+      getWeeklyReviewDetail: vi.fn().mockImplementation(async () => ({ review: review(), items: [current, invalid], sourceSummary: summary })),
+      updateWeeklyItem: vi.fn().mockImplementation(async (_reviewId, _itemId, input) => {
+        current.hiddenAt = input.hidden ? "2026-09-03T09:00:00.000Z" : null;
+        current.version += 1;
+        return { ...current };
+      })
+    });
+    renderWeekly(client);
+    const row = (await screen.findByText("有效概览")).closest("li")!;
+    fireEvent.click(within(row).getByRole("button", { name: "更多条目操作" }));
+    fireEvent.click(within(row).getByRole("button", { name: "隐藏" }));
+    const disclosure = await screen.findByText("已隐藏内容（1）");
+    expect(screen.getByText("有效概览")).not.toBeVisible();
+    fireEvent.click(disclosure);
+    fireEvent.click(screen.getByRole("button", { name: "恢复" }));
+    await waitFor(() => expect(screen.queryByText("已隐藏内容（1）")).not.toBeInTheDocument());
+    expect(screen.getByText("有效概览")).toBeVisible();
+    expect(screen.queryByText("失效内容不可恢复")).not.toBeInTheDocument();
+    expect(client.updateWeeklyItem).toHaveBeenCalledTimes(2);
+  });
+});
+
 describe("Weekly generation polling recovery", () => {
   it("backs off to thirty seconds without silently stopping a ten-minute queue", async () => {
     vi.useFakeTimers();
@@ -773,7 +850,7 @@ describe("Weekly QA source-backed status display", () => {
 });
 
 describe("Work Review Weekly UI", () => {
-  it.each(["ready", "failed", "queued"] as const)("preserves displayed partial quality and copy when the latest status is %s", async (status) => {
+  it.each(["ready", "failed", "queued"] as const)("shows available content without a manual review notice when the latest status is %s", async (status) => {
     const displayedGeneration: WorkWeeklyDisplayedGeneration = {
       runId: "published_run", runVersion: 2, systemVersion: 1, qualityStatus: "needs_review",
       reviewIssues: [
@@ -789,29 +866,24 @@ describe("Work Review Weekly UI", () => {
     const getWeeklySource = vi.fn().mockRejectedValue(new WorkReviewApiError(410, "source_unavailable"));
     const client = api({ getWeeklyReview: vi.fn().mockResolvedValue(partial), getWeeklyReviewDetail: vi.fn().mockResolvedValue(partial), getWeeklySource });
     renderWeekly(client);
-    const notice = (await screen.findByRole("heading", { name: "已生成，部分内容待核对" })).closest("section")!;
-    expect(screen.getByText("我的可用改文")).toBeVisible();
+    expect(await screen.findByText("我的可用改文")).toBeVisible();
+    expect(screen.queryByRole("heading", { name: "已生成，部分内容待核对" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /查看待核对事项/u })).not.toBeInTheDocument();
     expect(screen.queryByText("不确定的正文不能恢复")).not.toBeInTheDocument();
     expect(screen.queryByText(/这份回顾尚未评估完整性/u)).not.toBeInTheDocument();
     if (status === "ready") expect(screen.queryByText("本次生成未完成")).not.toBeInTheDocument();
     else expect(screen.getByText(status === "failed" ? "本次生成未完成" : "等待生成本周回顾")).toBeVisible();
-    const toggle = within(notice).getByRole("button", { name: "查看待核对事项（2）" });
-    expect(toggle).toHaveAttribute("aria-expanded", "false");
-    fireEvent.click(toggle);
-    expect(within(notice).getByText("这条来源的重要内容尚未完整纳入回顾。")).toBeVisible();
-    expect(within(notice).getByText("原来源已不可用，相关事项仍待核对。")).toBeVisible();
-    expect(within(notice).getAllByRole("button", { name: /查看事项.*的原始记录/u })).toHaveLength(1);
     fireEvent.click(screen.getByRole("button", { name: "复制全文" }));
     await waitFor(() => expect(navigator.clipboard.writeText).toHaveBeenCalled());
-    expect(vi.mocked(navigator.clipboard.writeText).mock.calls[0]![0]).toMatch(/^已生成，部分内容待核对\n/u);
+    expect(vi.mocked(navigator.clipboard.writeText).mock.calls[0]![0]).not.toContain("部分内容待核对");
     expect(vi.mocked(navigator.clipboard.writeText).mock.calls[0]![0]).toContain("我的可用改文");
     expect(vi.mocked(navigator.clipboard.writeText).mock.calls[0]![0]).not.toContain("不确定的正文不能恢复");
     if (status !== "ready") {
       fireEvent.click(screen.getByRole("button", { name: status === "failed" ? "载入最新状态" : "刷新状态" }));
       await waitFor(() => expect(client.getWeeklyReviewDetail).toHaveBeenCalled());
-      expect(within(notice).getByRole("button", { name: "收起待核对事项（2）" })).toHaveAttribute("aria-expanded", "true");
+      expect(screen.queryByRole("heading", { name: "已生成，部分内容待核对" })).not.toBeInTheDocument();
     }
-    fireEvent.click(within(notice).getByRole("button", { name: "查看事项 1 的原始记录" }));
+    fireEvent.click(screen.getAllByRole("button", { name: "来源 1" })[0]!);
     await waitFor(() => expect(getWeeklySource).toHaveBeenCalledWith("wrw_1", "evidence:publication_1:segment_1", expect.any(AbortSignal)));
     expect(client.generateWeeklyReview).not.toHaveBeenCalled();
     expect(client.regenerateWeeklyReview).not.toHaveBeenCalled();
@@ -859,7 +931,10 @@ describe("Work Review Weekly UI", () => {
     expect(copied).toContain("保留我修改的内容");
     expect(copied).toContain("个人补充独立保留");
     expect(copied).not.toMatch(/已隐藏旧文|失效旧文/u);
-    if (status === "generating") expect(screen.getByRole("button", { name: "重新生成" })).toBeDisabled();
+    if (status === "generating") {
+      fireEvent.click(screen.getByRole("button", { name: "更多回顾操作" }));
+      expect(screen.getByRole("button", { name: "重新生成" })).toBeDisabled();
+    }
     const row = screen.getByText("保留我修改的内容").closest("li")!;
     fireEvent.click(within(row).getByRole("button", { name: "编辑" }));
     fireEvent.change(screen.getByLabelText("编辑回顾内容"), { target: { value: "尚未保存的草稿" } });
@@ -918,6 +993,8 @@ describe("Work Review Weekly UI", () => {
     expect(screen.getByText(/来源核对仅检查原始记录/u)).toBeVisible();
     const legacyText = "AI建议关注：核对范围；正文中的 GPT 保持不变。";
     const legacy = screen.getByText(legacyText).closest("li")!;
+    expect(screen.getByText("AI建议关注：隐藏旧条目")).not.toBeVisible();
+    fireEvent.click(screen.getByText("已隐藏内容（1）"));
     expect(screen.getByText("AI建议关注：隐藏旧条目")).toBeVisible();
     expect(screen.queryByText(/不应覆盖空改文/u)).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "复制全文" }));
@@ -976,6 +1053,7 @@ describe("Work Review Weekly UI", () => {
       timeZone: expect.any(String)
     }), expect.any(AbortSignal));
     expect(screen.getByRole("heading", { name: "本周标记完成的待办" })).toBeVisible();
+    fireEvent.click(screen.getByText("来源详情"));
     expect(screen.getByText("待确认结果")).toBeVisible();
     expect(screen.getByText("7")).toBeVisible();
     expect(screen.getByText("当前周数据截至 2026-09-03；本周尚未结束。")).toBeVisible();
@@ -1199,6 +1277,7 @@ describe("Work Review Weekly UI", () => {
 
     const secondRow = (await screen.findByText("第二条个人补充")).closest("li");
     expect(secondRow).not.toBeNull();
+    fireEvent.click(within(secondRow!).getByRole("button", { name: "更多条目操作" }));
     fireEvent.click(within(secondRow!).getByRole("button", { name: "上移" }));
 
     await waitFor(() => expect(updateWeeklyItem).toHaveBeenNthCalledWith(1, "wrw_1", "wrwi_note_b", expect.objectContaining({

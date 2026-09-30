@@ -133,6 +133,38 @@ describe("DateCompanionRepository", () => {
     return { relationship, imported, recapItem: detail.recapItems[0] };
   }
 
+  it("reads a real summary while preserving exact full detail and its ownership boundaries", () => {
+    const { relationship, imported } = importDraft();
+    const full = repository.getRelationshipView("user_a", relationship.id);
+    const summary = repository.getRelationshipSummary("user_a", relationship.id);
+    const { recapItems, ...metadata } = full.interactions[0];
+    expect(summary.interactions).toEqual([{
+      ...metadata, promiseRecapItems: recapItems.filter((item) => item.kind === "promise")
+    }]);
+    expect(JSON.stringify(summary)).not.toContain("排除关键词火星咖啡");
+    expect(summary.promises).toEqual(full.promises);
+    expect(repository.getInteractionDetail("user_a", relationship.id, imported.interactionId))
+      .toEqual(full.interactions[0]);
+    expect(repository.getRelationshipView("user_a", relationship.id)).toEqual(full);
+    expect(() => repository.getRelationshipSummary("user_b", relationship.id)).toThrow(DcNotFoundError);
+    expect(() => repository.getInteractionDetail("user_b", relationship.id, imported.interactionId)).toThrow(DcNotFoundError);
+    const other = importDraft("user_b", "upload_other");
+    expect(() => repository.getInteractionDetail("user_a", relationship.id, other.imported.interactionId)).toThrow(DcNotFoundError);
+    database.prepare("UPDATE dc_relationships SET status = 'archived' WHERE id = ?").run(relationship.id);
+    const next = repository.createOrGetRelationship("user_a", "新关系").relationship;
+    expect(() => repository.getInteractionDetail("user_a", next.id, imported.interactionId)).toThrow(DcNotFoundError);
+    expect(() => repository.getInteractionDetail("user_a", relationship.id, imported.interactionId)).toThrow(DcNotFoundError);
+    expect(() => repository.getRelationshipSummary("user_a", relationship.id)).toThrow(DcNotFoundError);
+  });
+
+  it("cannot load deleted interaction detail from a summary captured before deletion", () => {
+    const { relationship, imported } = importDraft();
+    expect(repository.getRelationshipSummary("user_a", relationship.id).interactions).toHaveLength(1);
+    repository.deleteInteraction("user_a", imported.interactionId, 0);
+    expect(repository.getRelationshipSummary("user_a", relationship.id).interactions).toEqual([]);
+    expect(() => repository.getInteractionDetail("user_a", relationship.id, imported.interactionId)).toThrow(DcNotFoundError);
+  });
+
   it("stores participant audio inside the user-scoped interaction and cascades it on delete", () => {
     const { imported } = importDraft();
     repository.saveParticipantAudioSamples({

@@ -1,6 +1,6 @@
 # Post-ASR Pipeline Parallelism Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **Historical plan:** This is a design snapshot for the dated phase, not a current task queue. Unchecked boxes do not establish unfinished work. Use it for requirements, invariants, and acceptance scenarios; verify current code and tests before reusing any implementation steps. Follow the current user scope and root `AGENTS.md`; no particular skill, subagent workflow, commit, or external operation is required or authorized by this document.
 
 **Goal:** Run independent post-ASR analysis stages concurrently while preserving existing output schemas, fallbacks, and downstream ordering.
 

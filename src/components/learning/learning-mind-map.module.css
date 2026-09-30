@@ -1,0 +1,67 @@
+.map { margin-block: 20px; min-width: 0; }
+.toolbar { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px 16px; margin-bottom: 12px; }
+.toolbar > div { display: flex; align-items: center; flex-wrap: wrap; gap: 4px; }
+.zoomControls { margin-left: auto; }
+.zoomControls output { min-width: 48px; text-align: center; font-size: 13px; font-variant-numeric: tabular-nums; }
+.map .toolbar button { padding: 8px 12px; font-size: 13px; background: transparent; border-color: transparent; }
+.map .zoomControls button { min-width: 44px; min-height: 44px; }
+.hint { margin: 8px 0 0; color: var(--db-text-secondary); font-size: 12px; }
+.viewport { overflow: auto; overflow-anchor: none; height: clamp(320px, 60vh, 640px); border: 1px solid var(--db-border); border-radius: var(--db-radius-card); background: var(--db-surface); scrollbar-gutter: stable; cursor: grab; }
+.viewport[data-dragging] { cursor: grabbing; user-select: none; }
+.viewport:focus-visible { outline: 3px solid var(--db-focus); outline-offset: 3px; }
+.scaledArea { position: relative; min-width: 100%; min-height: 100%; overflow: clip; }
+.canvas { position: absolute; top: 0; left: 0; display: flex; align-items: center; width: max-content; box-sizing: border-box; padding: 28px 24px; transform-origin: 0 0; }
+.map .root { width: 140px; flex: 0 0 140px; display: grid; gap: 8px; justify-items: center; padding: 20px 16px; border-color: var(--db-accent); background: var(--db-accent-soft); color: var(--db-accent-hover); border-radius: var(--db-radius-card); }
+.root > span { font-weight: 600; font-size: 17px; }
+.root small { font-size: 12px; }
+.branches, .leaves { list-style: none; padding: 0 0 0 32px; margin: 0; }
+.branch, .leaf { position: relative; display: flex; align-items: center; padding: 10px 0; }
+.branch::before, .leaf::before { content: ""; position: absolute; left: -32px; width: 32px; top: 50%; border-top: 1px solid var(--db-border-strong); }
+.branch::after, .leaf::after { content: ""; position: absolute; left: -32px; top: 0; bottom: 0; border-left: 1px solid var(--db-border-strong); }
+.branch:first-child::after, .leaf:first-child::after { top: 50%; }
+.branch:last-child::after, .leaf:last-child::after { bottom: 50%; }
+.chapter { width: 205px; flex: 0 0 205px; display: flex; align-items: center; border: 1px solid var(--db-border-strong); border-radius: var(--db-radius-control); background: var(--db-surface-muted); }
+.map .branchLabel { width: 205px; flex: 0 0 205px; display: grid; gap: 6px; padding: 12px; text-align: left; background: var(--db-surface-muted); border-color: var(--db-border-strong); overflow-wrap: anywhere; }
+.chapter .branchLabel { flex: 1; width: auto; min-width: 0; border: 0; background: transparent; }
+.branchLabel > span:not(.count) { font-weight: 600; color: var(--db-text); line-height: 1.5; }
+.branchLabel small, .count { font-size: 12px; color: var(--db-text-secondary); }
+.count { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.map .readChapter { flex: none; min-width: 44px; padding: 8px 6px; border: 0; background: transparent; font-size: 12px; }
+.map .node { display: grid; gap: 4px; width: 240px; padding: 10px 14px; border-color: var(--db-border); text-align: left; color: var(--db-text); line-height: 1.5; overflow-wrap: anywhere; }
+.node small { color: var(--db-text-secondary); font-size: 12px; font-weight: normal; }
+.map .node[aria-expanded="true"] { background: var(--db-accent-soft); border-color: var(--db-accent); }
+.relationBranch > .branchLabel { border-style: dashed; }
+.empty { max-width: 240px; color: var(--db-text-secondary); font-size: 13px; }
+.detail { margin-top: 16px; padding: 16px 20px; background: var(--db-surface-inset); border-radius: var(--db-radius-control); }
+.detailHeader { display: flex; justify-content: space-between; align-items: center; gap: 16px; color: var(--db-text-secondary); font-size: 13px; }
+.map .detailHeader button { background: transparent; border-color: transparent; font-size: 13px; }
+.detail article { margin: 0; padding: 0; border: 0; }
+.fullscreen > div { padding: 16px; }
+.fullscreen [role="dialog"] { width: 100%; max-width: none; height: calc(100dvh - 32px); max-height: none; grid-template-rows: auto minmax(0, 1fr); }
+.fullscreen [role="dialog"] > div { padding: 8px 20px 16px; overflow: hidden; }
+.fullscreenContent { height: 100%; min-height: 0; display: flex; flex-direction: column; }
+.fullscreenContent .viewport { flex: 1 1 0; height: auto; min-height: 160px; }
+.fullscreenContent .toolbar, .fullscreenContent .hint { flex: none; }
+.fullscreenContent .detail { flex: 0 1 auto; max-height: 30dvh; overflow: auto; }
+@media (max-width: 700px) {
+  .viewport { height: clamp(300px, 55vh, 560px); }
+  .canvas { display: block; width: var(--map-width, 100%); padding: 20px 14px; }
+  .zoomControls { margin-left: 0; }
+  .map .root { position: static; width: 100%; display: flex; flex-wrap: wrap; gap: 10px; justify-content: center; padding: 12px; }
+  .branches, .leaves { padding-left: 18px; }
+  .branches { margin-top: 8px; }
+  .branch { display: block; padding-block: 8px; }
+  .branch::before { top: 40px; }
+  .branch:first-child::after { top: 40px; }
+  .branch:last-child::after { height: 40px; top: 0; bottom: auto; }
+  .branch::before, .leaf::before { left: -18px; width: 18px; }
+  .branch::after, .leaf::after { left: -18px; }
+  .chapter, .map .branchLabel, .map .node { width: 100%; }
+  .leaves { padding-top: 4px; }
+  .map .detail { padding: 14px; }
+  .fullscreen > div { padding: 0; }
+  .fullscreen [role="dialog"] { height: 100dvh; border-radius: 0; border: 0; }
+  .fullscreen [role="dialog"] > header { padding: 12px 14px 8px; }
+  .fullscreen [role="dialog"] > div { padding: 8px 12px max(12px, env(safe-area-inset-bottom)); }
+  .fullscreenContent .detail { max-height: 32dvh; }
+}

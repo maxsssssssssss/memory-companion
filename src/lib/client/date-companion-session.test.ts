@@ -178,6 +178,18 @@ function fakeApi(overrides: Partial<DateCompanionApi> = {}): DateCompanionApi {
     listRelationships: async () => [emptyRelationshipView.relationship],
     createRelationship: async () => ({ relationship: emptyRelationshipView.relationship, reused: false }),
     getRelationshipView: async () => emptyRelationshipView,
+    getRelationshipSummary: async (id, signal) => {
+      const view = await (overrides.getRelationshipView?.(id, signal) ?? Promise.resolve(emptyRelationshipView));
+      return { ...view, interactions: view.interactions.map(({ recapItems, ...metadata }) => ({
+        ...metadata, promiseRecapItems: recapItems.filter((item) => item.kind === "promise")
+      })) };
+    },
+    getInteractionDetail: async (relationshipId, interactionId, signal) => {
+      const view = await (overrides.getRelationshipView?.(relationshipId, signal) ?? Promise.resolve(emptyRelationshipView));
+      const interaction = view.interactions.find((item) => item.id === interactionId);
+      if (!interaction) throw new DateCompanionApiError({ status: 404, code: "not_found" });
+      return interaction;
+    },
     importInteraction: async (_relationshipId, input) => ({
       interactionId: "interaction_1",
       reused: false,
@@ -357,6 +369,119 @@ beforeEach(() => {
 });
 
 describe("DateCompanionSessionController", () => {
+  it("loads summary first, joins one selected detail read, and fetches the full view only on demand", async () => {
+    const full = relationshipView(["upload_1", "upload_2"]);
+    full.interactions.forEach((item) => { item.status = "confirmed"; });
+    const summary = { ...full, interactions: full.interactions.map(({ recapItems, ...metadata }) => ({
+      ...metadata, promiseRecapItems: recapItems.filter((item) => item.kind === "promise")
+    })) };
+    let resolveDetail!: (value: DcRelationshipView["interactions"][number]) => void;
+    const getRelationshipSummary = vi.fn(async () => summary);
+    const getRelationshipView = vi.fn(async () => full);
+    const getInteractionDetail = vi.fn(() => new Promise<DcRelationshipView["interactions"][number]>((resolve) => { resolveDetail = resolve; }));
+    const controller = new DateCompanionSessionController({
+      api: fakeApi({ getRelationshipSummary, getRelationshipView, getInteractionDetail }),
+      cache: memoryCache().cache, storage: window.localStorage
+    });
+    await controller.initialize();
+    expect(getRelationshipSummary).toHaveBeenCalledTimes(1);
+    expect(getRelationshipView).not.toHaveBeenCalled();
+    expect(getInteractionDetail).not.toHaveBeenCalled();
+    expect(controller.getSnapshot().viewModel.currentInteraction).toBeNull();
+    controller.selectRelationshipInteraction("interaction_1");
+    const read = controller.retryInteractionDetail();
+    await Promise.resolve();
+    expect(getInteractionDetail).toHaveBeenCalledTimes(1);
+    expect(getInteractionDetail).toHaveBeenCalledWith("relationship_1", "interaction_1", expect.any(AbortSignal));
+    expect(controller.getSnapshot().viewModel.recap.interaction?.detailLoaded).toBe(false);
+    resolveDetail(full.interactions[0]);
+    await read;
+    expect(controller.getSnapshot().viewModel.recap.interaction?.detailLoaded).toBe(true);
+    expect(controller.getSnapshot().relationshipDetailsLoaded).toBe(false);
+    await controller.retryInteractionDetail();
+    expect(getInteractionDetail).toHaveBeenCalledTimes(1);
+    await controller.ensureRelationshipDetailsLoaded();
+    expect(getRelationshipView).toHaveBeenCalledTimes(1);
+    expect(controller.getSnapshot().relationshipDetailsLoaded).toBe(true);
+    await controller.ensureRelationshipDetailsLoaded();
+    expect(getRelationshipView).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(["logout", "delete", "selection", "clear-selection"] as const)("ignores late detail after %s", async (action) => {
+    const full = relationshipView(["upload_1"]);
+    full.interactions[0].status = "confirmed";
+    full.interactions[0].sourceState = "server_cleaned";
+    const summary = { ...full, interactions: full.interactions.map(({ recapItems, ...metadata }) => ({
+      ...metadata, promiseRecapItems: recapItems
+    })) };
+    let resolveDetail!: (value: DcRelationshipView["interactions"][number]) => void;
+    let detailSignal: AbortSignal | undefined;
+    const controller = new DateCompanionSessionController({
+      api: fakeApi({ getRelationshipSummary: async () => summary,
+        getInteractionDetail: async (_relationshipId, _interactionId, signal) => {
+          detailSignal = signal;
+          return new Promise((resolve) => { resolveDetail = resolve; });
+        } }), cache: memoryCache().cache, storage: window.localStorage
+    });
+    await controller.initialize();
+    controller.selectRelationshipInteraction("interaction_1");
+    const read = controller.retryInteractionDetail();
+    await Promise.resolve();
+    if (action === "logout") await controller.logout();
+    if (action === "delete") await controller.deleteInteraction("interaction_1");
+    if (action === "selection") controller.selectRelationshipInteraction("invalid_interaction");
+    if (action === "clear-selection") controller.selectRelationshipInteraction(null);
+    expect(detailSignal?.aborted).toBe(true);
+    resolveDetail(full.interactions[0]);
+    await read;
+    expect(controller.getSnapshot().viewModel.recap.interaction).toBeNull();
+    if (action === "logout") expect(controller.getSnapshot().auth.status).toBe("anonymous");
+  });
+
+  it("rejects mismatched detail without converting missing content to an empty successful recap", async () => {
+    const full = relationshipView(["upload_1"]);
+    full.interactions[0].status = "confirmed";
+    const controller = new DateCompanionSessionController({
+      api: fakeApi({ getRelationshipView: async () => full,
+        getInteractionDetail: async () => ({ ...full.interactions[0], relationshipId: "other_relationship" }) }),
+      cache: memoryCache().cache, storage: window.localStorage
+    });
+    await controller.initialize();
+    controller.selectRelationshipInteraction("interaction_1");
+    await controller.retryInteractionDetail();
+    expect(controller.getSnapshot().detailReadState.status).toBe("error");
+    expect(controller.getSnapshot().viewModel.recap.interaction?.detailLoaded).toBe(false);
+    expect(controller.getSnapshot().relationshipDetailsLoaded).toBe(false);
+  });
+
+  it("reads each metadata group once during cleaned cached recovery and still permits explicit refresh", async () => {
+    const full = relationshipView(["upload_1"]);
+    full.interactions[0].sourceState = "server_cleaned";
+    window.localStorage.setItem("daily-brief:user_1:date-companion:session", JSON.stringify({
+      version: 1, currentUploadId: "upload_1", cleanupConfirmed: true,
+      receipt: { uploadId: "upload_1", jobId: "job_1", status: "uploaded" }
+    }));
+    const api = fakeApi({ getRelationshipView: async () => full });
+    const calls = [vi.spyOn(api, "listConfirmedPeople"), vi.spyOn(api, "getSelfBinding"),
+      vi.spyOn(api, "getMemoryReview"), vi.spyOn(api, "getPersonSourceCatalog")];
+    const controller = new DateCompanionSessionController({ api,
+      cache: memoryCache({ upload_1: payload() }).cache, storage: window.localStorage });
+    // Match the shell effect that starts metadata as soon as the summary is ready.
+    const unsubscribe = controller.subscribe(() => {
+      if (controller.getSnapshot().relationshipState.status === "ready"
+        && controller.getSnapshot().memoryBridgeState.status === "idle") void controller.ensureMemoryBridgeLoaded();
+    });
+    await controller.initialize();
+    await vi.waitFor(() => expect(controller.getSnapshot().memoryBridgeState.status).toBe("ready"));
+    await controller.ensureMemoryBridgeLoaded();
+    calls.forEach((call) => expect(call).toHaveBeenCalledTimes(1));
+    expect(controller.getSnapshot().viewModel.currentInteraction?.id).toBe("upload_1");
+    await controller.ensureMemoryBridgeLoaded(true);
+    calls.forEach((call) => expect(call).toHaveBeenCalledTimes(2));
+    unsubscribe();
+    controller.dispose();
+  });
+
   it("restores a full receipt and finalizes strictly as cache, relationship import, then cleanup", async () => {
     const receipt = {
       uploadId: "upload_1",
@@ -2555,6 +2680,12 @@ describe("DateCompanionSessionController", () => {
     await controller.initialize();
     await controller.ensureMemoryBridgeLoaded();
 
+    const summarySources = controller.personQaSources();
+    expect(summarySources).toHaveLength(1);
+    // Opening the person page explicitly requests canonical recap detail.
+    await controller.ensureRelationshipDetailsLoaded();
+    await controller.ensureMemoryBridgeLoaded(true);
+    expect(controller.personQaSources()).toEqual(summarySources);
     expect(controller.getSnapshot().viewModel.person.remembered).toEqual([
       expect.objectContaining({ id: "recap_1", displayedText: "Ta 喜欢摄影。" })
     ]);
@@ -2588,6 +2719,7 @@ describe("DateCompanionSessionController", () => {
     });
     await controller.initialize();
     await controller.ensureMemoryBridgeLoaded();
+    await controller.ensureRelationshipDetailsLoaded();
     expect(controller.personQaSources()).toEqual([]);
     expect(controller.getSnapshot().viewModel.person.remembered).toEqual([]);
   });
@@ -2621,6 +2753,7 @@ describe("DateCompanionSessionController", () => {
     });
     await controller.initialize();
     await controller.ensureMemoryBridgeLoaded();
+    await controller.ensureRelationshipDetailsLoaded();
     expect(controller.getSnapshot().viewModel.person.remembered).toHaveLength(1);
 
     unavailable = true;

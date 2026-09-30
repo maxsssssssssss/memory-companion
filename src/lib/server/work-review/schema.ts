@@ -1,6 +1,6 @@
 import type Database from "better-sqlite3";
 
-export const WORK_REVIEW_SCHEMA_VERSION = 8;
+export const WORK_REVIEW_SCHEMA_VERSION = 9;
 
 const WORK_REVIEW_SCHEMA_V1 = `
   CREATE TABLE wr_meetings (
@@ -1250,6 +1250,11 @@ const WORK_REVIEW_SCHEMA_V8 = `
     CHECK (quality_assessment_json IS NULL OR json_valid(quality_assessment_json));
 `;
 
+const WORK_REVIEW_SCHEMA_V9 = `
+  -- Keep the project identity for historical Weekly references and replay fencing.
+  ALTER TABLE wr_projects ADD COLUMN deleted_at TEXT;
+`;
+
 const MIGRATIONS = [
   { version: 1, sql: WORK_REVIEW_SCHEMA_V1 },
   { version: 2, sql: WORK_REVIEW_SCHEMA_V2 },
@@ -1258,7 +1263,8 @@ const MIGRATIONS = [
   { version: 5, sql: WORK_REVIEW_SCHEMA_V5 },
   { version: 6, sql: WORK_REVIEW_SCHEMA_V6 },
   { version: 7, sql: WORK_REVIEW_SCHEMA_V7 },
-  { version: 8, sql: WORK_REVIEW_SCHEMA_V8 }
+  { version: 8, sql: WORK_REVIEW_SCHEMA_V8 },
+  { version: 9, sql: WORK_REVIEW_SCHEMA_V9 }
 ] as const;
 
 export function migrateWorkReviewSchema(database: Database.Database) {

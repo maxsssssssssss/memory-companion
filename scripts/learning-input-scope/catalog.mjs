@@ -1,0 +1,4 @@
+import fs from 'node:fs';import path from 'node:path';import {LearningRepository} from '../../src/lib/server/learning/repository.ts';
+const root=path.resolve('output/learning-input-scope-20260924'),session=JSON.parse(fs.readFileSync(root+'/session.json')),repo=new LearningRepository(root+'/data/users/'+session.userId,session.userId);
+try{const catalog=repo.list().flatMap(page=>repo.get(page.id).materials.map(m=>{const source=repo.source(page.id,m.id);return{pageId:page.id,materialId:m.id,title:m.title,kind:m.kind,paragraphs:source.paragraphs,scopeNotice:source.scopeNotice};}));fs.writeFileSync(root+'/input-catalog.json',JSON.stringify(catalog,null,2),{flag:'wx'});console.log(JSON.stringify({materials:catalog.length,course:catalog.filter(m=>m.pageId===session.pageId).map(m=>({id:m.materialId,title:m.title,kind:m.kind,paragraphs:m.paragraphs.length}))}));}
+finally{repo.close();}

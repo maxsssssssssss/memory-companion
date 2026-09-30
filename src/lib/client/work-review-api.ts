@@ -2,12 +2,14 @@ import { z } from "zod";
 
 import { AuthUserSchema } from "@/lib/client/date-companion-api";
 import {
+  DeleteWorkProjectRequestSchema,
   SetWorkResourceProjectsRequestSchema,
   WorkProjectListStatusSchema,
   WorkProjectReferenceSchema,
   WorkProjectSchema,
   WorkProjectScopeFilterSchema,
   type CreateWorkProjectRequest,
+  type DeleteWorkProjectRequest,
   type SetWorkResourceProjectsRequest,
   type UpdateWorkProjectRequest,
   type WorkProject,
@@ -687,6 +689,7 @@ export interface WorkReviewApi {
   ): Promise<{ resourceVersion: number; projects: WorkProjectReference[] }>;
   listProjects?(status?: WorkProjectListStatus, signal?: AbortSignal): Promise<WorkProject[]>;
   getProject?(projectId: string, signal?: AbortSignal): Promise<WorkProject>;
+  deleteProject?(projectId: string, input: DeleteWorkProjectRequest, signal?: AbortSignal): Promise<void>;
   createProject?(input: CreateWorkProjectRequest, signal?: AbortSignal): Promise<WorkProject>;
   updateProject?(
     projectId: string,
@@ -810,6 +813,7 @@ const ERROR_MESSAGES: Readonly<Record<string, string>> = {
   follow_up_operation_conflict: "这次纪要操作标识已用于其他内容，请重新操作。",
   projects_disabled: "工作复盘项目暂未开放。",
   project_not_found: "这个项目不存在或不属于当前账号。",
+  project_not_archived: "请先归档项目，再删除。",
   project_name_conflict: "当前账号已有同名的活跃项目。",
   project_operation_conflict: "这次项目操作标识已用于其他内容，请重新操作。",
   project_link_limit: "一次最多可以关联 3 个项目。",
@@ -1269,6 +1273,15 @@ export function createWorkReviewApi(fetchImpl: typeof fetch = fetch): WorkReview
         signal
       });
       return (await parseResponse(response, WorkProjectMutationResponseSchema)).project;
+    },
+    async deleteProject(projectId, input, signal) {
+      const response = await sameOrigin(projectPath(projectId), {
+        method: "DELETE",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(DeleteWorkProjectRequestSchema.parse(input)),
+        signal
+      });
+      await parseResponse(response, z.object({ deleted: z.literal(true) }).strict());
     },
     async getWeeklyReview(scope, signal) {
       const query = weeklyScopeQuery(scope);

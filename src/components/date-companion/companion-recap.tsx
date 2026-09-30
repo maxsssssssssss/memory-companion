@@ -840,7 +840,7 @@ export function CompanionRecap({
               const speakerName = speaker.label?.trim() || `说话人 ${index + 1}`;
               const review = participants.find((participant) => participant.speakerId === speaker.id);
               const memberSpeakerIds = participantMemberSpeakerIds(review, speaker.id);
-              const audioSpeakerId = review?.audioSpeakerId ?? (memberSpeakerIds.length === 1 ? memberSpeakerIds[0] : undefined);
+              const audioSpeakerId = review?.audioSpeakerId;
               const audioAvailable = Boolean(interaction?.relationshipInteractionId && audioSpeakerId && !audioErrors[speaker.id]);
               return (
                 <article className={styles.participantCard} key={speaker.id}>

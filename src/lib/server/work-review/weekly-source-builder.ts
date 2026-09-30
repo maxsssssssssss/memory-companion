@@ -264,7 +264,7 @@ function projectReferences(
     SELECT p.id, p.name, p.status, p.version
     FROM ${relation} link
     JOIN wr_projects p ON p.id = link.project_id AND p.account_id = link.account_id
-    WHERE link.account_id = ? AND link.${column} = ?
+    WHERE link.account_id = ? AND link.${column} = ? AND p.deleted_at IS NULL
     ORDER BY p.id
   `).all(accountId, resourceId) as Array<{
     id: string; name: string; status: "active" | "archived"; version: number;
@@ -387,7 +387,7 @@ function readSnapshot(input: BuilderInput): WorkWeeklySourceSnapshot {
   const limits = capacity(input.capacity);
   if (window.scope.scopeKind === "project") {
     const project = input.database.prepare(`
-      SELECT 1 FROM wr_projects WHERE id = ? AND account_id = ?
+      SELECT 1 FROM wr_projects WHERE id = ? AND account_id = ? AND deleted_at IS NULL
     `).get(window.scope.projectId, accountId);
     if (!project) throw new WorkWeeklySourceError("work_weekly_project_not_found");
   }

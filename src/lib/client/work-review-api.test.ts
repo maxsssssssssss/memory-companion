@@ -35,6 +35,17 @@ const draft = {
 };
 
 describe("WorkReviewApi V1-4 contracts", () => {
+  it("sends a versioned project DELETE and requires a confirmed deletion response", async () => {
+    const fetchImpl = vi.fn(async () => Response.json({ deleted: true }));
+    const api = createWorkReviewApi(fetchImpl);
+    await expect(api.deleteProject!("project_1", { expectedVersion: 3 })).resolves.toBeUndefined();
+    expect(fetchImpl).toHaveBeenCalledWith("/api/work-reviews/projects/project_1", expect.objectContaining({
+      method: "DELETE", credentials: "same-origin", body: JSON.stringify({ expectedVersion: 3 })
+    }));
+    fetchImpl.mockResolvedValueOnce(Response.json({ deleted: false }));
+    await expect(api.deleteProject!("project_1", { expectedVersion: 3 })).rejects.toThrow();
+  });
+
   it("keeps runtime project and account fields out of the strict Todo PATCH body", async () => {
     const fetchImpl = vi.fn(async () => Response.json({ error: "version_conflict" }, { status: 409 }));
     const api = createWorkReviewApi(fetchImpl);

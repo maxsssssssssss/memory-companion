@@ -1,0 +1,6 @@
+import fs from 'node:fs';import {spawnSync} from 'node:child_process';import {root,save,environment} from './runtime.mjs';
+const stamp=Date.now(),env={...environment(false),APP_DATA_DIR:root+'/verification-data',DATA_DIR:root+'/verification-data'};
+const args=['node_modules/vitest/vitest.mjs','run','--config',root+'/vitest.config.ts','--reporter=json','--outputFile',root+'/tests-'+stamp+'.json'];
+const t=Date.now(),r=spawnSync(process.execPath,args,{env,encoding:'utf8',windowsHide:true,maxBuffer:10*1024*1024});fs.writeFileSync(root+'/tests-'+stamp+'.log',(r.stdout??'')+(r.stderr??''));save('tests-'+stamp+'-exit.json',{command:args,exitCode:r.status,error:r.error?.code,durationMs:Date.now()-t});
+let summary=null;try{const j=JSON.parse(fs.readFileSync(root+'/tests-'+stamp+'.json'));summary={files:j.testResults.length,tests:j.numTotalTests,pass:j.numPassedTests,failed:j.numFailedTests,skipped:j.numPendingTests,failures:j.testResults.flatMap(t=>t.assertionResults.filter(a=>a.status==='failed').map(a=>({title:a.fullName,message:a.failureMessages.join('\n').slice(0,2000)})))};}catch{}
+console.log(JSON.stringify({exitCode:r.status,error:r.error?.code,summary}));process.exitCode=r.status??1;

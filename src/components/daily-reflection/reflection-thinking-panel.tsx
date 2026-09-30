@@ -41,12 +41,14 @@ type ThinkingTurn = Readonly<{
   id: string;
   mode: ThinkingMode;
   operationKey: string;
-  response: DailyReflectionThinkingResponse;
+  response: DailyReflectionThinkingResponse | null;
+  status: "pending" | "completed" | "failed" | "cancelled";
   userText: string;
 }>;
 
 type RetryRequest = Readonly<{
   input: DailyReflectionThinkingRequest;
+  turnId: string;
   userText: string;
 }>;
 
@@ -198,6 +200,7 @@ function turnsFromConversation(
       mode: user.mode,
       operationKey: assistant.operationKey,
       response: response.data,
+      status: "completed" as const,
       userText: user.content
     }];
   });
@@ -237,6 +240,9 @@ export function ReflectionThinkingProvider({
     }
     activeRequest.current?.abort();
     activeRequest.current = null;
+    submitting.current = false;
+    setTurns((current) => current.map((turn) => turn.status === "pending"
+      ? { ...turn, status: "cancelled" } : turn));
     setBusy(false);
   }, []);
 
@@ -276,6 +282,22 @@ export function ReflectionThinkingProvider({
     retryRequest.current = request;
     setBusy(true);
     setError(null);
+    const pendingTurn: ThinkingTurn = {
+      contextMode: request.input.contextMode,
+      id: request.turnId,
+      mode: request.input.mode,
+      operationKey: request.input.operationKey,
+      response: null,
+      status: "pending",
+      userText: request.userText
+    };
+    setTurns((current) => current.some((turn) => turn.id === request.turnId)
+      ? current.map((turn) => turn.id === request.turnId ? pendingTurn : turn)
+      : [...current, pendingTurn]);
+    const updateTurn = (status: ThinkingTurn["status"], response: ThinkingTurn["response"] = null) => {
+      setTurns((current) => current.map((turn) => turn.id === request.turnId
+        ? { ...turn, status, response } : turn));
+    };
     try {
       if (refreshBeforeNextRequest.current && conversationIdRef.current) {
         const conversation = await api.getConversation(
@@ -283,7 +305,11 @@ export function ReflectionThinkingProvider({
           controller.signal
         );
         if (controller.signal.aborted) return;
-        setTurns(turnsFromConversation(conversation));
+        const recovered = turnsFromConversation(conversation);
+        setTurns((current) => [
+          ...recovered,
+          ...current.filter((turn) => !recovered.some((saved) => saved.operationKey === turn.operationKey))
+        ]);
         refreshBeforeNextRequest.current = false;
       }
       const response = await api.think(request.input, controller.signal);
@@ -311,37 +337,37 @@ export function ReflectionThinkingProvider({
             conversationId: response.conversationId,
             operationKey: createOperationKey()
           },
+          turnId: request.turnId,
           userText: request.userText
         };
+        updateTurn("failed");
         setError("这次没有继续下去。原问题仍然保留，你可以再试一次。");
         return;
       }
       if (completionStatus === "cancelled") {
         retryRequest.current = request;
+        updateTurn("cancelled");
         setError("这次已停止，原问题仍然保留。");
         return;
       }
-      setTurns((current) => [...current, {
-        contextMode: request.input.contextMode,
-        id: response.operationKey,
-        mode: request.input.mode,
-        operationKey: request.input.operationKey,
-        response,
-        userText: request.userText
-      }]);
+      updateTurn("completed", response);
       retryRequest.current = null;
-      setDraftState("");
     } catch (caught) {
-      if (!controller.signal.aborted) setError(errorMessage(caught));
+      if (!controller.signal.aborted) {
+        updateTurn("failed");
+        setError(errorMessage(caught));
+      }
     } finally {
-      if (activeRequest.current === controller) activeRequest.current = null;
-      if (!controller.signal.aborted) setBusy(false);
-      submitting.current = false;
+      if (activeRequest.current === controller) {
+        activeRequest.current = null;
+        setBusy(false);
+        submitting.current = false;
+      }
     }
   }, [api]);
 
   const send = useCallback(async () => {
-    if (busy) return;
+    if (busy || submitting.current) return;
     const message = normalizeDraft(draft);
     if (!message) {
       setError("先写下你想一起推演的内容。");
@@ -354,7 +380,8 @@ export function ReflectionThinkingProvider({
       mode,
       operationKey: createOperationKey()
     });
-    await run({ input, userText: message });
+    setDraftState("");
+    await run({ input, turnId: input.operationKey, userText: message });
   }, [busy, conversationId, draft, mode, run]);
 
   const retry = useCallback(async () => {
@@ -477,8 +504,8 @@ export function ThinkingResponse({ response }: Readonly<{
 }
 
 export function ThinkingConversation() {
-  const { busy, turns } = useReflectionThinking();
-  if (turns.length === 0 && !busy) return null;
+  const { turns } = useReflectionThinking();
+  if (turns.length === 0) return null;
   return (
     <ol className={styles.thinkingConversation} aria-label="本次一起想的内容">
       {turns.map((turn) => (
@@ -487,13 +514,16 @@ export function ThinkingConversation() {
             {THINKING_MODE_COPY[turn.mode].label}
           </p>
           <p className={styles.thinkingUserMessage}>{turn.userText}</p>
-          <ThinkingResponse response={turn.response} />
+          {turn.response ? <ThinkingResponse response={turn.response} /> : turn.status === "pending" ? (
+            <div className={styles.thinkingPending} role="status">
+              <span aria-hidden="true" />
+              <p>AI 正在思考回复…</p>
+            </div>
+          ) : <p className={styles.thinkingTurnContext}>
+            {turn.status === "cancelled" ? "已停止回复" : "这次回复未完成，原问题已保留。"}
+          </p>}
         </li>
       ))}
-      {busy ? <li className={styles.thinkingPending} aria-live="polite" role="status">
-        <span aria-hidden="true" />
-        <p>正在沿着这个方向继续想…</p>
-      </li> : null}
     </ol>
   );
 }
@@ -564,7 +594,6 @@ export function ThinkingComposer({ compact = false }: Readonly<{ compact?: boole
         想一起推演什么
       </label>
       <textarea
-        disabled={busy}
         id={draftId}
         maxLength={MAX_DRAFT_LENGTH}
         onChange={(event) => setDraft(event.target.value)}

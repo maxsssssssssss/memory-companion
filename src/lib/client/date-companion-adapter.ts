@@ -16,9 +16,10 @@ import {
 import type {
   DcEvidenceSnapshot,
   DcInteractionDetail,
+  DcInteractionRead,
   DcPromise,
   DcRecapItem,
-  DcRelationshipView,
+  DcRelationshipReadView,
   DcSearchResult
 } from "@/lib/domain/date-companion-stage2";
 import type { DateCompanionRelationshipPersonSource } from "@/lib/domain/date-companion-person-source";
@@ -48,6 +49,10 @@ export type DateCompanionRelationshipAdapterOptions = {
 
 export function dateCompanionRetainedSourceKey(uploadId: string, sourceSegmentId: string) {
   return `${uploadId}\u0000${sourceSegmentId}`;
+}
+
+export function dateCompanionReadRecapItems(interaction: DcInteractionRead): DcRecapItem[] {
+  return "recapItems" in interaction ? interaction.recapItems : interaction.promiseRecapItems;
 }
 
 type SourceKind = SourceRefVM["kind"];
@@ -452,7 +457,7 @@ const LONG_TERM_TITLES: Record<RecapItemVM["kind"], string> = {
   continue: "可以自然继续"
 };
 
-function relationshipVm(view: DcRelationshipView): RelationshipVM {
+function relationshipVm(view: DcRelationshipReadView): RelationshipVM {
   const interactionDates = view.interactions.map((interaction) => interaction.recordingDate).sort();
   return {
     id: view.relationship.id,
@@ -514,11 +519,12 @@ function persistentRecapItem(
 }
 
 function persistentInteraction(
-  interaction: DcInteractionDetail,
+  interaction: DcInteractionRead,
   options: DateCompanionRelationshipAdapterOptions
 ): InteractionVM {
   const localPayload = options.getLocalDay?.(interaction.sourceUploadId) ?? null;
   return {
+    detailLoaded: "recapItems" in interaction,
     id: interaction.sourceUploadId,
     uploadIds: [interaction.sourceUploadId],
     recordingDate: interaction.recordingDate,
@@ -536,7 +542,7 @@ function persistentInteraction(
   };
 }
 
-function assignmentRole(interaction: DcInteractionDetail, speakerId: string | undefined) {
+function assignmentRole(interaction: DcInteractionRead, speakerId: string | undefined) {
   if (!speakerId) return "unresolved" as const;
   return interaction.participants.find((assignment) => assignment.speakerId === speakerId)?.role ?? "unresolved";
 }
@@ -560,7 +566,7 @@ function relationshipPersonSourceFor(
 }
 
 function sourceIsLongTermAdmitted(
-  interaction: DcInteractionDetail,
+  interaction: DcInteractionRead,
   evidence: DcEvidenceSnapshot,
   options: DateCompanionRelationshipAdapterOptions
 ) {
@@ -580,7 +586,7 @@ function subjectEligible(kind: DcRecapItem["kind"], subject: DateCompanionMemory
 }
 
 function isLongTermEligible(
-  interaction: DcInteractionDetail,
+  interaction: DcInteractionRead,
   item: DcRecapItem,
   options: DateCompanionRelationshipAdapterOptions
 ): boolean {
@@ -622,7 +628,7 @@ function promiseVm(
 }
 
 function participantReviews(
-  interaction: DcInteractionDetail,
+  interaction: DcInteractionRead,
   existing: ParticipantReviewVM[]
 ): ParticipantReviewVM[] {
   const bySpeaker = new Map(existing.map((participant) => [participant.speakerId, participant]));
@@ -695,26 +701,26 @@ function participantReviews(
  */
 export function applyDateCompanionRelationshipView(
   current: DateCompanionViewModel,
-  view: DcRelationshipView,
+  view: DcRelationshipReadView,
   options: DateCompanionRelationshipAdapterOptions = {}
 ): DateCompanionViewModel {
   const confirmed = [...view.interactions]
     .filter((interaction) =>
       interaction.status === "confirmed" &&
-      interaction.recapItems.some((item) => isLongTermEligible(interaction, item, options))
+      dateCompanionReadRecapItems(interaction).some((item) => isLongTermEligible(interaction, item, options))
     )
     .sort((left, right) => left.recordingDate.localeCompare(right.recordingDate) || left.id.localeCompare(right.id));
   const confirmedItems = confirmed.flatMap((interaction) =>
-    interaction.recapItems
+    dateCompanionReadRecapItems(interaction)
       .filter((item) => isLongTermEligible(interaction, item, options))
       .sort((left, right) => left.sortOrder - right.sortOrder || left.id.localeCompare(right.id))
       .map((item) => persistentRecapItem(item, interaction.recordingDate, options))
   );
   const dateByRecapItem = new Map(
-    view.interactions.flatMap((interaction) => interaction.recapItems.map((item) => [item.id, interaction.recordingDate] as const))
+    view.interactions.flatMap((interaction) => dateCompanionReadRecapItems(interaction).map((item) => [item.id, interaction.recordingDate] as const))
   );
   const interactionByRecapItem = new Map(
-    view.interactions.flatMap((interaction) => interaction.recapItems.map((item) => [item.id, interaction.id] as const))
+    view.interactions.flatMap((interaction) => dateCompanionReadRecapItems(interaction).map((item) => [item.id, interaction.id] as const))
   );
   const eligibleRecapItemIds = new Set(confirmedItems.map((item) => item.id));
   const promises = view.promises
@@ -746,6 +752,7 @@ export function applyDateCompanionRelationshipView(
         persistenceStatus: importedCurrent.status,
         sourceState: importedCurrent.sourceState,
         version: importedCurrent.version,
+        detailLoaded: "recapItems" in importedCurrent,
         ...(importedCurrent.memoryBridge ? { memoryBridge: importedCurrent.memoryBridge } : {})
       }
     : current.currentInteraction;
@@ -755,7 +762,7 @@ export function applyDateCompanionRelationshipView(
       : persistentInteraction(recapTarget, options)
     : currentInteraction;
   const currentRecapItems = recapTarget
-    ? [...recapTarget.recapItems]
+    ? [...("recapItems" in recapTarget ? recapTarget.recapItems : [])]
         .sort((left, right) => left.sortOrder - right.sortOrder || left.id.localeCompare(right.id))
         .map((item) => persistentRecapItem(item, recapTarget.recordingDate, options))
     : current.recap.items;
@@ -816,12 +823,13 @@ export function applyDateCompanionRelationshipView(
 
 export function buildDateCompanionSearchResults(
   results: DcSearchResult[],
-  options: DateCompanionRelationshipAdapterOptions & { relationshipView?: DcRelationshipView } = {}
+  options: DateCompanionRelationshipAdapterOptions & { relationshipView?: DcRelationshipReadView } = {}
 ): DateCompanionSearchResultVM[] {
   return results.filter((result) => {
     if (!options.relationshipView) return false;
     const interaction = options.relationshipView.interactions.find((candidate) => candidate.id === result.interactionId);
-    const item = interaction?.recapItems.find((candidate) => candidate.id === result.recapItemId);
+    const item = interaction && "recapItems" in interaction
+      ? interaction.recapItems.find((candidate) => candidate.id === result.recapItemId) : undefined;
     return Boolean(interaction && item && isLongTermEligible(interaction, item, options));
   }).map((result) => ({
     id: result.recapItemId,

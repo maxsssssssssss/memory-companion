@@ -29,7 +29,7 @@ vi.mock("@/lib/server/work-review/runtime-config", () => ({
 
 import { PATCH as patchMeetingProjects } from "@/app/api/work-reviews/meetings/[meetingId]/projects/route";
 import { PATCH as patchTodoProjects } from "@/app/api/work-reviews/todos/[todoId]/projects/route";
-import { GET as getProject, PATCH as patchProject } from "./[projectId]/route";
+import { DELETE as deleteProject, GET as getProject, PATCH as patchProject } from "./[projectId]/route";
 import { GET as listProjects, POST as createProject } from "./route";
 import { openWorkReviewDatabase } from "@/lib/server/work-review/db";
 
@@ -111,6 +111,44 @@ afterEach(() => {
 });
 
 describe("Work Project routes", () => {
+  it("gates deletion by feature, authentication and strict server-owned account scope", async () => {
+    const request = (body: unknown = { expectedVersion: 0 }) => jsonRequest("http://localhost/api/work-reviews/projects/test", "DELETE", body);
+    state.enabled = false;
+    expect((await deleteProject(request(), projectContext("test"))).status).toBe(404);
+    expect(mocks.requireAuthContext).not.toHaveBeenCalled();
+    state.enabled = true;
+    mocks.requireAuthContext.mockRejectedValueOnce(new Error("unauthenticated"));
+    const unauthorized = await deleteProject(request(), projectContext("test"));
+    expect(unauthorized.status).toBe(401);
+    expect(unauthorized.headers.get("cache-control")).toBe("private, no-store");
+    for (const body of [{}, { expectedVersion: -1 }, { expectedVersion: 0, accountId: "account_b" }]) {
+      expect((await deleteProject(request(body), projectContext("test"))).status).toBe(400);
+    }
+  });
+
+  it("deletes only archived owned projects with version checks and idempotent replay", async () => {
+    const created = await createProject(jsonRequest("http://localhost/api/work-reviews/projects", "POST",
+      { name: "Archive then delete", operationKey: "create-delete" }));
+    const project = (await responseJson(created)).project as { id: string };
+    const url = `http://localhost/api/work-reviews/projects/${project.id}`;
+    const remove = (expectedVersion: number) => deleteProject(jsonRequest(url, "DELETE", { expectedVersion }), projectContext(project.id));
+    const active = await remove(0);
+    expect(active.status).toBe(409);
+    expect(await responseJson(active)).toEqual({ error: "project_not_archived" });
+    await patchProject(jsonRequest(url, "PATCH", { expectedVersion: 0, status: "archived", operationKey: "archive-delete" }), projectContext(project.id));
+    state.accountId = "account_b";
+    expect((await remove(1)).status).toBe(404);
+    state.accountId = "account_a";
+    expect((await remove(0)).status).toBe(409);
+    const deleted = await remove(1);
+    expect(deleted.status).toBe(200);
+    expect(deleted.headers.get("cache-control")).toBe("private, no-store");
+    expect(await responseJson(deleted)).toEqual({ deleted: true });
+    expect((await remove(1)).status).toBe(200);
+    expect((await getProject(new Request(url), projectContext(project.id))).status).toBe(404);
+    expect((await responseJson(await listProjects(new Request("http://localhost/api/work-reviews/projects?status=all")))).projects).toEqual([]);
+  });
+
   it("fails closed before auth and applies private no-store to disabled and auth errors", async () => {
     state.enabled = false;
     const disabled = await listProjects(new Request("http://localhost/api/work-reviews/projects"));

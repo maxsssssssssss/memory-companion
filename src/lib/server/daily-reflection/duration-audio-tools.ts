@@ -22,6 +22,7 @@ export type DurationToolDiagnostic = {
   outcome: "success" | DailyReflectionUploadFailureCode;
 };
 export type DurationToolOptions = {
+  localFilesOnly?: boolean;
   signal?: AbortSignal;
   budgetMs?: number;
   assertWritable?: () => void;
@@ -57,9 +58,10 @@ async function runTool(input: DurationToolOptions & {
     const args = input.stage === "probe" ? [
       "-v", "error", "-count_packets", "-show_entries",
       "format=duration:stream=index,codec_type,codec_name,duration,start_time,sample_rate",
-      "-of", "json", filePath
+      "-of", "json", ...(input.localFilesOnly ? ["-protocol_whitelist", "file,pipe"] : []), filePath
     ] : [
       "-nostdin", "-hide_banner", "-v", "error", "-xerror", "-err_detect", "explode",
+      ...(input.localFilesOnly ? ["-protocol_whitelist", "file,pipe"] : []),
       "-i", filePath, "-map", `0:${input.streamIndex}`, "-vn", "-sn", "-dn",
       "-ac", "1", "-ar", "48000", "-c:a", "pcm_s16le", "-f", "s16le", "pipe:1"
     ];

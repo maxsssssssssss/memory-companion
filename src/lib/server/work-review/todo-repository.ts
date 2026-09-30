@@ -284,7 +284,7 @@ function insertTodoProjectLinks(
   if (projectIds.length === 0) return;
   const found = database.prepare(`
     SELECT count(*) AS count FROM wr_projects
-    WHERE account_id = ? AND id IN (${projectIds.map(() => "?").join(",")})
+    WHERE account_id = ? AND deleted_at IS NULL AND id IN (${projectIds.map(() => "?").join(",")})
   `).get(input.accountId, ...projectIds) as { count: number };
   if (found.count !== projectIds.length) {
     throw new WorkReviewConflictError("work_project_not_found");

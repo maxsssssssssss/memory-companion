@@ -301,11 +301,18 @@ export function markWorkWeeklySourceChangedWithinTransaction(
   const rows = database.prepare(`
     SELECT DISTINCT weekly_review_id, run_id FROM wr_weekly_run_sources
     WHERE account_id = ? AND ${predicate}
-  `).all(input.accountId, sourceId) as Array<{
+    UNION
+    SELECT review.id AS weekly_review_id, run.id AS run_id
+    FROM wr_weekly_reviews review
+    LEFT JOIN wr_weekly_review_runs run
+      ON run.account_id = review.account_id AND run.weekly_review_id = review.id
+    WHERE review.account_id = ? AND review.project_id = ? AND review.deleted_at IS NULL
+  `).all(input.accountId, sourceId, input.accountId, input.projectId ?? null) as Array<{
     weekly_review_id: string;
-    run_id: string;
+    run_id: string | null;
   }>;
   for (const row of rows) {
+    if (row.run_id === null) continue;
     database.prepare(`
       UPDATE wr_weekly_review_runs
       SET state = 'superseded', lease_owner = NULL, lease_expires_at = NULL,

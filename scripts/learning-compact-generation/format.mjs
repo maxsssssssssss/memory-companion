@@ -1,0 +1,4 @@
+import fs from 'node:fs';import assert from 'node:assert/strict';import {spawnSync} from 'node:child_process';import {root,environment,save} from './runtime.mjs';
+const label=process.argv[2];assert(['F1','F2'].includes(label));assert(!fs.existsSync(root+'/'+label+'-exit.json'));
+let exitCode=1;try{save('ds-permits.json',[{label}]);const r=spawnSync(process.execPath,['scripts/learning-compact-generation/format-step.mjs',label],{env:environment(true),encoding:'utf8',windowsHide:true,maxBuffer:1024*1024});exitCode=r.status??1;fs.writeFileSync(root+'/'+label+'-process.log',(r.stdout??'')+(r.stderr??''));console.log(JSON.stringify({label,exitCode,output:r.stdout?.trim()}));}
+finally{save('ds-permits.json',[]);save(label+'-exit.json',{exitCode,at:new Date().toISOString()});process.exitCode=exitCode;}

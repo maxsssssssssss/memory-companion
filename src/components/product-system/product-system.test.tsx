@@ -1,6 +1,6 @@
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
 import { GlobalProductEntry } from "./global-product-entry";
 import { GlobalProductEntryBoundary } from "./global-product-entry-boundary";
@@ -26,6 +26,24 @@ beforeEach(() => {
 afterEach(cleanup);
 
 describe("product system", () => {
+  it("adds the trial learning entrance while retaining the existing three destinations", () => {
+    render(<GlobalProductEntry accountId="account_a" dailyReflectionEnabled workReviewEnabled onLogout={vi.fn()} userLabel="synthetic@example.com" />);
+    for (const [name, href] of [["约会陪伴", "/date-companion/a"], ["日常复盘", "/reflection"], ["工作复盘", "/work-review"], ["学习整理", "/learning"]]) {
+      expect(screen.getByRole("link", { name: new RegExp(name) })).toHaveAttribute("href", href);
+    }
+    const learning = screen.getByRole("link", { name: /学习整理/ });
+    expect(learning).toHaveTextContent("试用中");
+    learning.addEventListener("click", (event) => event.preventDefault());
+    fireEvent.click(learning);
+    expect(window.localStorage.getItem(productPreferenceKey("account_a"))).toBe("learning_organizer");
+  });
+
+  it("exposes learning in the switcher without changing other feature gates", () => {
+    render(<ProductSwitcher accountId="account_a" currentProduct="learning_organizer" dailyReflectionEnabled={false} workReviewEnabled={false} />);
+    fireEvent.click(screen.getByRole("button", { name: /切换产品/ }));
+    expect(screen.getByRole("link", { name: /学习整理/ })).toHaveAttribute("aria-current", "page");
+    expect(screen.queryByRole("link", { name: /工作复盘|日常复盘/ })).not.toBeInTheDocument();
+  });
   it.each([undefined, false])("uses the server capability at the entry while honoring override %s", (override) => {
     render(
       <ProductCapabilitiesProvider workReviewEnabled>
@@ -117,7 +135,8 @@ describe("product system", () => {
     );
 
     expect(await screen.findByText("上次使用")).toBeVisible();
-    expect(screen.getByRole("link", { name: /日常复盘/u })).toHaveTextContent("继续进入");
+    expect(screen.getByRole("link", { name: /日常复盘.*继续进入/u })).toHaveTextContent("继续进入");
+    expect(screen.getByRole("link", { name: "继续上次使用 · 日常复盘 →" })).toHaveAttribute("href", "/reflection");
     expect(window.localStorage.getItem(productPreferenceKey("account_b"))).toBe("date_companion");
   });
 
@@ -254,6 +273,48 @@ describe("product system", () => {
     await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
     expect(document.body.style.overflow).toBe("");
     expect(opener).toHaveFocus();
+  });
+
+  it("traps focus using visible controls and disclosure summaries, not closed details content", () => {
+    render(<ProductDialog open onClose={() => {}} title="折叠内容">
+      <button>可见操作</button>
+      <details><summary>处理详情</summary><button>隐藏操作</button></details>
+      <input type="hidden" />
+      <div hidden><button>另一隐藏操作</button></div>
+    </ProductDialog>);
+    const close = screen.getByRole("button", { name: "关闭" });
+    const summary = screen.getByText("处理详情");
+    close.focus(); fireEvent.keyDown(document, { key: "Tab", shiftKey: true });
+    expect(summary).toHaveFocus();
+    fireEvent.keyDown(document, { key: "Tab" }); expect(close).toHaveFocus();
+    fireEvent.click(summary);
+    close.focus(); fireEvent.keyDown(document, { key: "Tab", shiftKey: true });
+    expect(screen.getByRole("button", { name: "隐藏操作" })).toHaveFocus();
+  });
+
+  it("can preserve an in-flight child controller while closed without keeping focus or scroll lock", async () => {
+    const unmounted = vi.fn();
+    let complete!: () => void;
+    function Child() {
+      const [status, setStatus] = useState("进行中");
+      useEffect(() => { complete = () => setStatus("已完成"); return unmounted; }, []);
+      return <p>{status}</p>;
+    }
+    function Harness() {
+      const [open, setOpen] = useState(false);
+      return <><button onClick={() => setOpen(true)}>材料进度</button>
+        <ProductDialog keepMounted open={open} onClose={() => setOpen(false)} title="材料与进度"><Child /></ProductDialog></>;
+    }
+    render(<Harness />);
+    const opener = screen.getByRole("button", { name: "材料进度" });
+    opener.focus(); fireEvent.click(opener);
+    expect(screen.getByText("进行中")).toBeVisible();
+    fireEvent.keyDown(document, { key: "Escape" });
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(document.body.style.overflow).toBe(""); expect(opener).toHaveFocus();
+    act(() => complete());
+    expect(unmounted).not.toHaveBeenCalled();
+    fireEvent.click(opener); expect(screen.getByText("已完成")).toBeVisible();
   });
 
   it("uses one evidence language and honest loading/error semantics", () => {

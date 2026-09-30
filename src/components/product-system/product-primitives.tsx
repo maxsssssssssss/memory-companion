@@ -13,11 +13,29 @@ import styles from "./product-system.module.css";
 const FOCUSABLE = [
   "a[href]",
   "button:not([disabled])",
-  "input:not([disabled])",
+  "input:not([disabled]):not([type='hidden'])",
   "select:not([disabled])",
   "textarea:not([disabled])",
-  "[tabindex]:not([tabindex='-1'])"
+  "[tabindex]:not([tabindex='-1'])",
+  "summary"
 ].join(",");
+
+function dialogFocusable(panel: HTMLElement) {
+  return Array.from(panel.querySelectorAll<HTMLElement>(FOCUSABLE)).filter(item => {
+    if (item.tabIndex < 0 || item.matches(":disabled")) return false;
+    for (let ancestor: HTMLElement | null = item; ancestor; ancestor = ancestor.parentElement) {
+      if (ancestor.hidden || ancestor.hasAttribute("inert")) return false;
+      const style = window.getComputedStyle(ancestor);
+      if (style.display === "none" || style.visibility === "hidden") return false;
+      if (ancestor instanceof HTMLDetailsElement && !ancestor.open) {
+        const summary = Array.from(ancestor.children).find(child => child.tagName === "SUMMARY");
+        if (!summary?.contains(item)) return false;
+      }
+      if (ancestor === panel) break;
+    }
+    return true;
+  });
+}
 
 export function ProductState({
   action,
@@ -146,12 +164,14 @@ export function ProductDialog({
   footer,
   onClose,
   open,
+  keepMounted = false,
   title
 }: Readonly<{
   children: ReactNode;
   footer?: ReactNode;
   onClose: () => void;
   open: boolean;
+  keepMounted?: boolean;
   title: string;
 }>) {
   const titleId = useId();
@@ -166,7 +186,7 @@ export function ProductDialog({
     const previousOverflow = document.body.style.overflow;
     document.body.style.overflow = "hidden";
     const panel = panelRef.current;
-    const focusable = panel?.querySelector<HTMLElement>(FOCUSABLE);
+    const focusable = panel ? dialogFocusable(panel)[0] : null;
     (focusable ?? panel)?.focus();
 
     const onKeyDown = (event: KeyboardEvent) => {
@@ -176,7 +196,7 @@ export function ProductDialog({
         return;
       }
       if (event.key !== "Tab" || !panel) return;
-      const items = Array.from(panel.querySelectorAll<HTMLElement>(FOCUSABLE));
+      const items = dialogFocusable(panel);
       if (items.length === 0) {
         event.preventDefault();
         panel.focus();
@@ -200,9 +220,11 @@ export function ProductDialog({
     };
   }, [onClose, open]);
 
-  if (!open) return null;
+  if (!open && !keepMounted) return null;
   return (
     <div
+      hidden={!open}
+      style={!open ? { display: "none" } : undefined}
       className={styles.dialogBackdrop}
       onMouseDown={(event) => {
         if (event.currentTarget === event.target) onClose();

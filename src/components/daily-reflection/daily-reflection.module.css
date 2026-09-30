@@ -220,6 +220,7 @@
 .detailToolbar > span { color: var(--dr-faint); font-size: 9px; line-height: 1.55; text-align: right; }
 .statusCard { display: grid; gap: 18px; }
 .statusTop { display: flex; align-items: flex-start; justify-content: space-between; gap: 20px; }
+.statusActions { display: grid; flex: none; justify-items: end; gap: 8px; }
 .statusBadge { flex: none; padding: 7px 10px; border-radius: 999px; background: var(--dr-accent-soft); color: var(--dr-accent-dark); font-size: 9px; font-weight: 800; }
 .recordMeta { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
 .recordMeta div { min-width: 0; padding: 13px; border-radius: 14px; background: var(--dr-surface-soft); }
@@ -1517,12 +1518,19 @@
   white-space: nowrap;
   border: 0;
 }
-.aiReviewState > section { min-height: 0; padding-block: 18px; }
+.aiReviewState,
+.aiReviewReady {
+  min-width: 0;
+  padding: 28px 30px;
+  border: 1px solid var(--dr-border);
+  border-radius: 22px;
+  background: var(--dr-surface);
+  overflow-wrap: anywhere;
+}
+.aiReviewState > section { min-height: 0; padding: 0; }
 .aiReviewReady {
   display: grid;
-  padding: 28px 0 32px;
   gap: 26px;
-  border-block: 1px solid var(--dr-border-strong);
 }
 .aiReviewHeader {
   display: flex;
@@ -1757,7 +1765,7 @@
 .thinkingSources blockquote > p { margin: 0; color: var(--dr-text); font-size: 13px; line-height: 1.68; }
 .thinkingSources blockquote footer { display: flex; align-items: center; justify-content: space-between; margin-top: 8px; gap: 12px; color: var(--dr-text-muted); font-size: 12px; }
 .thinkingSources blockquote a { display: inline-flex; min-height: 44px; align-items: center; color: var(--dr-accent); font-weight: 680; }
-.thinkingPending { grid-template-columns: auto 1fr; align-items: center; padding-top: 0 !important; border: 0 !important; color: var(--dr-text-muted); }
+.thinkingPending { display: grid; grid-template-columns: auto 1fr; align-items: center; gap: 8px; padding-top: 0 !important; border: 0 !important; color: var(--dr-text-muted); }
 .thinkingPending > span { width: 8px; height: 8px; border-radius: 50%; background: var(--dr-accent); animation: breathe 1.25s ease-in-out infinite; }
 .thinkingPending p { margin: 0; font-size: 12px; }
 .thinkingComposer { display: grid; padding: 16px; gap: 10px; border: 1px solid var(--dr-border-strong); border-radius: 17px; background: var(--dr-surface); }
@@ -2071,7 +2079,8 @@
     gap: 8px;
   }
   .aiReviewCompletionNotice span { display: none; }
-  .aiReviewReady { padding-block: 22px 26px; gap: 22px; }
+  .aiReviewState,
+  .aiReviewReady { padding: 22px 19px; border-radius: 18px; gap: 22px; }
   .aiReviewHeader { flex-direction: column; gap: 12px; }
   .aiReviewObservationList { gap: 24px; }
   .aiReviewInterpretation { font-size: 18px; }

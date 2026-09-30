@@ -35,6 +35,8 @@ import {
   DcImportInteractionResponseSchema,
   DcPatchPromiseRequestSchema,
   DcRelationshipViewResponseSchema,
+  DcRelationshipSummaryResponseSchema,
+  DcInteractionDetailResponseSchema,
   DcRelationshipsResponseSchema,
   DcSearchResponseSchema,
   DcMemoryBridgeReviewSchema,
@@ -45,6 +47,8 @@ import {
   type DcPatchPromiseRequest,
   type DcRelationship,
   type DcRelationshipView,
+  type DcRelationshipSummary,
+  type DcInteractionDetail,
   type DcSearchResult,
   type DcSubjectSuggestionConfirmation,
   type DcUpdateParticipantsRequest,
@@ -375,6 +379,8 @@ export interface DateCompanionApi {
     signal?: AbortSignal
   ): Promise<{ relationship: DcRelationship; reused: boolean }>;
   getRelationshipView(relationshipId: string, signal?: AbortSignal): Promise<DcRelationshipView>;
+  getRelationshipSummary(relationshipId: string, signal?: AbortSignal): Promise<DcRelationshipSummary>;
+  getInteractionDetail(relationshipId: string, interactionId: string, signal?: AbortSignal): Promise<DcInteractionDetail>;
   importInteraction(
     relationshipId: string,
     input: DcImportInteractionRequest,
@@ -773,6 +779,19 @@ export function createDateCompanionApi(fetcher: typeof fetch = fetch): DateCompa
         signal
       });
       return (await parseJsonResponse(response, DcRelationshipViewResponseSchema)).view;
+    },
+
+    async getRelationshipSummary(relationshipId, signal) {
+      const id = assertCompanionId(relationshipId, "invalid_relationship_id");
+      const response = await sameOrigin(`/api/date-companion/relationships/${encodeURIComponent(id)}/view?scope=summary`, { method: "GET", signal });
+      return (await parseJsonResponse(response, DcRelationshipSummaryResponseSchema)).summary;
+    },
+
+    async getInteractionDetail(relationshipId, interactionId, signal) {
+      const relationship = assertCompanionId(relationshipId, "invalid_relationship_id");
+      const interaction = assertCompanionId(interactionId, "invalid_interaction_id");
+      const response = await sameOrigin(`/api/date-companion/interactions/${encodeURIComponent(interaction)}?relationshipId=${encodeURIComponent(relationship)}`, { method: "GET", signal });
+      return (await parseJsonResponse(response, DcInteractionDetailResponseSchema)).interaction;
     },
 
     async importInteraction(relationshipId, input, signal) {

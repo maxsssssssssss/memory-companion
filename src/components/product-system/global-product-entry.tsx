@@ -24,10 +24,14 @@ export function GlobalProductEntry({
 }>) {
   const capabilities = useProductCapabilities();
   const workReviewAvailable = workReviewEnabled ?? capabilities.workReviewEnabled;
-  const [lastProduct, setLastProduct] = useState<ProductId | null>(null);
+  const [preference, setPreference] = useState<{ accountId: string; product: ProductId | null } | null>(null);
+  const lastProduct = preference?.accountId === accountId ? preference.product : null;
+  const recent = PRODUCT_CATALOG.find(product => product.id === lastProduct && product.href
+    && (product.id === "date_companion" || product.id === "learning_organizer"
+      || (product.id === "daily_reflection" && dailyReflectionEnabled) || (product.id === "office_review" && workReviewAvailable)));
 
   useEffect(() => {
-    setLastProduct(readLastProduct(accountId));
+    try { setPreference({ accountId, product: readLastProduct(accountId) }); } catch { setPreference(null); }
   }, [accountId]);
 
   return (
@@ -43,11 +47,13 @@ export function GlobalProductEntry({
       <section className={styles.globalEntryIntro}>
         <h1>选择一个空间</h1>
         <p>每个空间保留自己的内容边界，你可以随时回来切换。</p>
+        {recent?.href ? <Link className={styles.continueLast} href={recent.href} onClick={() => rememberLastProduct(accountId, recent.id)}>继续上次使用 · {recent.name} →</Link> : null}
       </section>
 
       <section aria-label="产品空间" className={styles.globalProductGrid}>
         {PRODUCT_CATALOG.map((product) => {
           const enabled = product.id === "date_companion"
+            || product.id === "learning_organizer"
             || (product.id === "daily_reflection" && dailyReflectionEnabled)
             || (product.id === "office_review" && workReviewAvailable);
           const wasLast = enabled && product.id === lastProduct;
@@ -68,7 +74,7 @@ export function GlobalProductEntry({
               key={product.id}
               onClick={() => rememberLastProduct(accountId, product.id)}
             >
-              <div><span aria-hidden="true">{product.mark}</span>{wasLast ? <small>上次使用</small> : null}</div>
+              <div><span aria-hidden="true">{product.mark}</span>{product.trial ? <small>试用中{wasLast ? " · 上次使用" : ""}</small> : wasLast ? <small>上次使用</small> : null}</div>
               <h2>{product.name}</h2>
               <p>{product.description}</p>
               <b>{wasLast ? "继续进入" : "进入"}<span aria-hidden="true">→</span></b>

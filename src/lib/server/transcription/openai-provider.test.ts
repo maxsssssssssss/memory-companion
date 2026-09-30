@@ -3,6 +3,7 @@
 import { mkdtemp, rm, writeFile } from "fs/promises";
 import { tmpdir } from "os";
 import { join } from "path";
+import type { ExecFileOptions } from "child_process";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const { directFetchMock, execFileMock, getOpenAIClientRuntimeConfigMock, transcribeMock } = vi.hoisted(() => ({
@@ -30,6 +31,15 @@ const inputTemplate = {
   mimeType: "audio/mp4"
 };
 let tempAudioPath: string | undefined;
+
+type ExecFileCallback = (error: Error | null, stdout: string, stderr: string) => void;
+
+// ffprobe uses execFile(file, args, callback); ffmpeg also passes process options.
+function mockExecFile(implementation: (command: string, args: string[], callback: ExecFileCallback) => void) {
+  return (command: string, args: string[], ...rest: [ExecFileCallback] | [ExecFileOptions, ExecFileCallback]) => {
+    implementation(command, args, rest[rest.length - 1] as ExecFileCallback);
+  };
+}
 
 describe("openai transcription provider", () => {
   const originalApiKey = process.env.OPENAI_API_KEY;
@@ -87,9 +97,9 @@ describe("openai transcription provider", () => {
     getOpenAIClientRuntimeConfigMock.mockReset();
     getOpenAIClientRuntimeConfigMock.mockResolvedValue({});
     execFileMock.mockReset();
-    execFileMock.mockImplementation((command: string, _args: string[], callback: (error: Error | null, stdout: string, stderr: string) => void) => {
+    execFileMock.mockImplementation(mockExecFile((command, _args, callback) => {
       callback(new Error(`${command} unavailable`), "", "");
-    });
+    }));
   });
 
   afterEach(async () => {
@@ -525,7 +535,7 @@ describe("openai transcription provider", () => {
     process.env.OPENROUTER_TRANSCRIBE_CHUNK_SECONDS = "60";
     globalThis.fetch = fetchMock as unknown as typeof fetch;
     execFileMock.mockImplementation(
-      (command: string, args: string[], callback: (error: Error | null, stdout: string, stderr: string) => void) => {
+      mockExecFile((command, args, callback) => {
         if (command === "ffprobe") {
           callback(null, "120\n", "");
           return;
@@ -543,7 +553,7 @@ describe("openai transcription provider", () => {
         ])
           .then(() => callback(null, "", ""))
           .catch((error: Error) => callback(error, "", ""));
-      }
+      })
     );
 
     const mergeResult = await transcribeOpenRouterToMergeResult({ ...input,
@@ -553,11 +563,11 @@ describe("openai transcription provider", () => {
 
     if (bound) {
       expect(execFileMock.mock.calls.some(([command]) => command === "ffprobe")).toBe(false);
-      expect(execFileMock).toHaveBeenCalledWith("ffmpeg", expect.arrayContaining(["-map", "0:a:0"]), expect.any(Function));
+      expect(execFileMock).toHaveBeenCalledWith("ffmpeg", expect.arrayContaining(["-map", "0:a:0"]), { windowsHide: true }, expect.any(Function));
     } else {
       expect(execFileMock).toHaveBeenCalledWith("ffprobe", expect.any(Array), expect.any(Function));
     }
-    expect(execFileMock).toHaveBeenCalledWith("ffmpeg", expect.any(Array), expect.any(Function));
+    expect(execFileMock).toHaveBeenCalledWith("ffmpeg", expect.any(Array), { windowsHide: true }, expect.any(Function));
     expect(fetchMock).toHaveBeenCalledTimes(2);
     expect(segments).toEqual([
       expect.objectContaining({
@@ -589,11 +599,11 @@ describe("openai transcription provider", () => {
 
   it("extracts only the selected audio for native OpenAI and cleans the derived file", async () => {
     let derivedPath = "";
-    execFileMock.mockImplementation((command: string, args: string[], callback: (error: Error | null, stdout: string, stderr: string) => void) => {
+    execFileMock.mockImplementation(mockExecFile((command, args, callback) => {
       if (command !== "ffmpeg") throw new Error("must not re-probe bound duration");
       derivedPath = args.at(-1)!.replace("%05d", "00000");
       void writeFile(derivedPath, "selected-audio").then(() => callback(null, "", ""));
-    });
+    }));
     transcribeMock.mockResolvedValue({ segments: [{ start: 0, end: 2, text: "synthetic", speaker: "speaker_1" }] });
     let sentAudio: { text: string; type: string } | undefined;
     directFetchMock.mockImplementationOnce(async (url: string, init: RequestInit) => {
@@ -609,7 +619,7 @@ describe("openai transcription provider", () => {
       authoritativeAudio: { uploadId: inputTemplate.uploadId, effectiveDurationMs: 2000, extractFirstAudioTrack: true }
     });
     expect(execFileMock).toHaveBeenCalledTimes(1);
-    expect(execFileMock).toHaveBeenCalledWith("ffmpeg", expect.arrayContaining(["-map", "0:a:0"]), expect.any(Function));
+    expect(execFileMock).toHaveBeenCalledWith("ffmpeg", expect.arrayContaining(["-map", "0:a:0"]), { windowsHide: true }, expect.any(Function));
     expect(sentAudio).toEqual({ text: "selected-audio", type: "audio/mpeg" });
     await expect(import("node:fs/promises").then(({ access }) => access(derivedPath))).rejects.toThrow();
   });
@@ -648,7 +658,7 @@ describe("openai transcription provider", () => {
     process.env.OPENROUTER_TRANSCRIBE_CHUNK_SECONDS = "600";
     globalThis.fetch = fetchMock as unknown as typeof fetch;
     execFileMock.mockImplementation(
-      (command: string, args: string[], callback: (error: Error | null, stdout: string, stderr: string) => void) => {
+      mockExecFile((command, args, callback) => {
         if (command === "ffprobe") {
           callback(null, "120\n", "");
           return;
@@ -666,7 +676,7 @@ describe("openai transcription provider", () => {
         ])
           .then(() => callback(null, "", ""))
           .catch((error: Error) => callback(error, "", ""));
-      }
+      })
     );
 
     await openaiTranscriptionProvider.transcribe(input);

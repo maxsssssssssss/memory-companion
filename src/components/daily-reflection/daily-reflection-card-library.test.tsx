@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { StrictMode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -162,6 +162,38 @@ afterEach(() => {
 });
 
 describe("DailyReflectionCardLibrary", () => {
+  it("ignores an aborted list response after the sort request changes", async () => {
+    let finishFirst!: (value: ReturnType<typeof listResponse>) => void;
+    const first = new Promise<ReturnType<typeof listResponse>>((resolve) => { finishFirst = resolve; });
+    const listWorkingCards = vi.fn<DailyReflectionApi["listWorkingCards"]>()
+      .mockImplementationOnce(() => first)
+      .mockResolvedValue(listResponse([cardTwo()]));
+    render(<DailyReflectionCardLibrary api={testApi(vi.fn(), { listWorkingCards })} />);
+    fireEvent.change(screen.getByRole("combobox", { name: "卡片排序" }), { target: { value: "created_asc" } });
+    expect(await screen.findByRole("button", { name: `打开卡片：${cardTwo().title}` })).toBeVisible();
+    expect(listWorkingCards.mock.calls[0]?.[1]?.aborted).toBe(true);
+    await act(async () => { finishFirst(listResponse([card()])); await first; });
+    expect(screen.getByRole("button", { name: `打开卡片：${cardTwo().title}` })).toBeVisible();
+    expect(screen.queryByRole("button", { name: `打开卡片：${card().title}` })).not.toBeInTheDocument();
+  });
+
+  it("reads and edits the card while its memory status is still pending", async () => {
+    const getWorkingCardMemoryProposal = vi.fn<DailyReflectionApi["getWorkingCardMemoryProposal"]>(
+      () => new Promise(() => undefined)
+    );
+    const client = testApi(vi.fn(), {
+      listWorkingCards: vi.fn(async () => listResponse([card()])),
+      getWorkingCard: vi.fn(async () => detail()),
+      getWorkingCardMemoryProposal
+    });
+    render(<DailyReflectionCardLibrary api={client} initialCardId="card_1" />);
+    const dialog = await screen.findByRole("dialog", { name: card().title });
+    expect(within(dialog).getByText(card().content)).toBeVisible();
+    fireEvent.click(within(dialog).getByRole("button", { name: "编辑卡片" }));
+    expect(within(dialog).getByDisplayValue(card().content)).toBeVisible();
+    expect(getWorkingCardMemoryProposal).toHaveBeenCalledTimes(1);
+  });
+
   it("opens a direct deep link over the Card Library and keeps Canonical Evidence", async () => {
     const fetcher = vi.fn<typeof fetch>(async (input, init) => {
       const path = String(input);

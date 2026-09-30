@@ -1,6 +1,6 @@
 # Memory Index v1.5 Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **Historical plan:** This is a design snapshot for the dated phase, not a current task queue. Unchecked boxes do not establish unfinished work. Use it for requirements, invariants, and acceptance scenarios; verify current code and tests before reusing any implementation steps. Follow the current user scope and root `AGENTS.md`; no particular skill, subagent workflow, commit, or external operation is required or authorized by this document.
 
 **Goal:** Add deterministic importance scoring, cross-upload memory deduplication, evidence-backed relations, and an idempotent upgrade command to Memory Index v1.
 
@@ -15,7 +15,7 @@
 - Every memory remains traceable to transcript evidence.
 - Memory indexing failure must not block upload `ready`.
 - All schema migration and upgrade operations must be idempotent.
-- The workspace has no Git metadata, so verification replaces commit steps.
+- Historical environment note: this plan was written for a workspace without Git metadata. Determine the current repository state from Git; this note imposes no current commit or verification workflow.
 
 ---
 

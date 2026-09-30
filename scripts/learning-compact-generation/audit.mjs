@@ -1,0 +1,25 @@
+// Summarize existing evidence and safe configuration presence; never generates.
+import fs from 'node:fs';import path from 'node:path';import {createHash} from 'node:crypto';import {spawnSync} from 'node:child_process';import {parseEnv} from 'node:util';import assert from 'node:assert/strict';
+import {root,save,vault} from './runtime.mjs';
+const hash=b=>createHash('sha256').update(b).digest('hex'),read=f=>JSON.parse(fs.readFileSync(root+'/'+f));
+save('review-only/final-review.json',{...read('review-only/initial-review.json'),...read('review-only/additional-review.json')});
+const ledger=read('ledger.json'),plan=[...read('plan.json').runs,...read('recheck-plan.json').runs],rows=ledger.rows;
+const pairs=[['normal','R1','R2'],['complex','R4','R3']].map(([task,a,b])=>{
+ const x=rows.find(r=>r.label===a),y=rows.find(r=>r.label===b),reduction=(p,q)=>Number(((p-q)/p*100).toFixed(2));
+ return{task,stable:a,compact:b,inputChars:[x.inputChars,y.inputChars],metadataChars:[x.inputMetadataChars,y.inputMetadataChars],inputTokens:[x.usage.input_tokens,y.usage.input_tokens],outputTokens:[x.usage.output_tokens,y.usage.output_tokens],durationMs:[x.durationMs,y.durationMs],inputTokenReductionPercent:reduction(x.usage.input_tokens,y.usage.input_tokens),outputTokenReductionPercent:reduction(x.usage.output_tokens,y.usage.output_tokens),timeReductionPercent:reduction(x.durationMs,y.durationMs),metadataLimitation:'Control and geometry metadata retained; sourceContext inside materials not included in this metadata-only count.'};
+});
+let requested=0,raw=0,published=0,completeGroups=0;const groups=[];
+for(const step of plan){const row=rows.find(x=>x.label===step.label);if(!row)continue;const response=read('ds-response-'+row.n+'.json'),value=JSON.parse(response.text.trim().replace(/^```(?:json)?\s*/i,'').replace(/\s*```$/,''));requested+=step.settings.count;raw+=value.items.length;published+=row.count;completeGroups+=Number(row.count===step.settings.count);groups.push({label:step.label,model:step.model,requested:step.settings.count,raw:value.items.length,published:row.count});}
+save('comparison-summary.json',{pairs,publication:{groups:groups.length,completeRequestedCountGroups:completeGroups,requested,raw,published,groupsDetail:groups},usage:ledger.knownTotals,requests:rows.length,privateReasoningSaved:false,remarks:['Output and latency changes include stochastic content and cache differences, not pure encoding effects.','TokenHub billing and underlying fixed model revisions UNKNOWN.','All request bodies used reasoning none; candidate returned none but nonzero reasoning token metadata.']});
+const files=['src/lib/server/learning/quiz-compact.ts','src/lib/server/learning/quiz-service.ts','src/lib/server/learning/quiz-compact.test.ts','src/lib/server/learning/quiz.test.ts'];
+for(const f of fs.readdirSync('scripts/learning-compact-generation'))files.push('scripts/learning-compact-generation/'+f);
+if(fs.existsSync('docs/learning-compact-generation-trial.md'))files.push('docs/learning-compact-generation-trial.md');
+const git={};for(const[k,args]of Object.entries({branch:['branch','--show-current'],head:['rev-parse','HEAD'],status:['status','--short'],staged:['diff','--cached','--name-only']})){const r=spawnSync('git',args,{encoding:'utf8',windowsHide:true});assert.equal(r.status,0);git[k]=r.stdout.trim();}
+const stableFiles=read('baseline.json').files.filter(f=>f.file!=='quiz-service.ts').map(f=>({file:f.file,unchanged:hash(fs.readFileSync('src/lib/server/learning/'+f.file))===f.sha256}));assert(stableFiles.every(f=>f.unchanged));
+save('final-code.json',{at:new Date().toISOString(),git,files:files.map(file=>({file,sha256:hash(fs.readFileSync(file))})),stableFiles});
+const cfg=parseEnv(fs.readFileSync('.env.local','utf8')),secure=vault('read'),secrets=[cfg.OPENAI_API_KEY,secure.secret,secure.password,secure.invite].filter(s=>typeof s==='string'&&s.length>=8),textFiles=[];
+function walk(dir){for(const entry of fs.readdirSync(dir,{withFileTypes:true})){if(entry.isDirectory()){if(!['build','data','next','verification-data'].includes(entry.name))walk(path.join(dir,entry.name));}else if(/\.(json|log|md|mjs|cjs|ts|tsx|txt)$/.test(entry.name))textFiles.push(path.join(dir,entry.name));}}
+walk(root);walk('scripts/learning-compact-generation');if(fs.existsSync('docs/learning-compact-generation-trial.md'))textFiles.push('docs/learning-compact-generation-trial.md');
+const hits=[];for(const file of textFiles){const text=fs.readFileSync(file,'utf8');if(secrets.some(s=>text.includes(s)))hits.push(path.relative(process.cwd(),file));}
+save('credential-scan.json',{filesScanned:textFiles.length,plaintextCredentialMatches:hits.length,files:hits,excluded:'binary databases, images and generated build; no private reasoning persisted'});assert.equal(hits.length,0);
+console.log(JSON.stringify({requests:rows.length,pairs,publication:{requested,raw,published,groups:groups.length,completeGroups},oldRows:read('data-audit.json').oldRowsUnchanged,credentialMatches:hits.length}));

@@ -116,6 +116,8 @@ export async function splitAudioWithFfmpeg(input: {
   chunkDurationSeconds: number;
   ranges: AudioChunkRange[];
   selectFirstAudioTrack?: boolean;
+  signal?: AbortSignal;
+  timeoutMs?: number;
 }) {
   await rm(input.outputDirectory, { recursive: true, force: true });
   await mkdir(input.outputDirectory, { recursive: true });
@@ -130,6 +132,7 @@ export async function splitAudioWithFfmpeg(input: {
       "-y",
       "-v",
       "error",
+      ...(input.timeoutMs ? ["-nostdin", "-protocol_whitelist", "file,pipe", "-xerror", "-err_detect", "explode"] : []),
       "-i",
       input.filePath,
       ...(input.selectFirstAudioTrack ? ["-map", "0:a:0"] : []),
@@ -148,7 +151,7 @@ export async function splitAudioWithFfmpeg(input: {
       "-b:a",
       "32k",
       outputPattern
-    ]);
+    ], { ...(input.timeoutMs ? { timeout: input.timeoutMs } : {}), ...(input.signal ? { signal: input.signal } : {}), windowsHide: true });
 
     return (await readdir(input.outputDirectory))
       .filter((fileName) => /^chunk_\d{5}\.mp3$/.test(fileName))

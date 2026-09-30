@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import type {
@@ -302,7 +302,7 @@ describe("Reflection thinking UI", () => {
     expect(normalizeThinkingPlainText("保留 source_id 和 2 * 3")).toBe("保留 source_id 和 2 * 3");
   });
 
-  it("aborts an in-flight request on mode switch without clearing its draft", async () => {
+  it("aborts an in-flight request on mode switch and preserves the sent question in the conversation", async () => {
     const client = api();
     let capturedSignal: AbortSignal | undefined;
     client.think.mockImplementationOnce((_input, signal) => {
@@ -319,7 +319,81 @@ describe("Reflection thinking UI", () => {
     fireEvent.click(screen.getByRole("button", { name: "切到决定" }));
 
     expect(capturedSignal?.aborted).toBe(true);
-    expect(screen.getByLabelText("想一起推演什么")).toHaveValue("切换时仍要保留。");
+    expect(screen.getByLabelText("想一起推演什么")).toHaveValue("");
+    expect(screen.getByText("切换时仍要保留。")).toBeVisible();
+    expect(screen.getByText("已停止回复")).toBeVisible();
+  });
+
+  it("shows the sent question and thinking status immediately, then preserves the next draft", async () => {
+    const client = api();
+    let finish!: () => void;
+    client.think.mockImplementationOnce((input) => new Promise((resolve) => {
+      finish = () => resolve(responseFor(input));
+    }));
+    render(<ReflectionThinkingProvider api={client}><Harness /></ReflectionThinkingProvider>);
+    const composer = screen.getByLabelText("想一起推演什么");
+    fireEvent.change(composer, { target: { value: "先从哪里开始？" } });
+    fireEvent.keyDown(composer, { key: "Enter" });
+    expect(composer).toHaveValue("");
+    const conversation = screen.getByRole("list", { name: "本次一起想的内容" });
+    expect(within(conversation).getByText("先从哪里开始?")).toBeVisible();
+    expect(within(conversation).getByRole("status")).toHaveTextContent("AI 正在思考回复");
+    fireEvent.change(composer, { target: { value: "下一句草稿" } });
+    fireEvent.keyDown(composer, { key: "Enter" });
+    expect(client.think).toHaveBeenCalledTimes(1);
+    await act(async () => finish());
+    expect(screen.getByText("回应：先从哪里开始?")).toBeVisible();
+    expect(within(conversation).queryByRole("status")).not.toBeInTheDocument();
+    expect(within(conversation).getAllByText("先从哪里开始?")).toHaveLength(1);
+    expect(composer).toHaveValue("下一句草稿");
+  });
+
+  it.each(["network", "provider"])("retains one question through %s failure and explicit retry", async (failure) => {
+    const client = api();
+    client.think.mockImplementationOnce(async (input) => {
+      if (failure === "network") throw new Error("offline");
+      const response = responseFor(input);
+      return { ...response, assistantMessage: { ...response.assistantMessage, completionStatus: "provider_error" } };
+    });
+    render(<ReflectionThinkingProvider api={client}><Harness /></ReflectionThinkingProvider>);
+    fireEvent.change(screen.getByLabelText("想一起推演什么"), { target: { value: "保留这个问题" } });
+    fireEvent.click(screen.getByRole("button", { name: "一起想" }));
+    await screen.findByRole("alert");
+    expect(screen.getByText("保留这个问题")).toBeVisible();
+    expect(screen.getByLabelText("想一起推演什么")).toHaveValue("");
+    expect(client.think).toHaveBeenCalledTimes(1);
+    fireEvent.click(screen.getByRole("button", { name: "重试" }));
+    await screen.findByText("回应：保留这个问题");
+    expect(screen.getAllByText("保留这个问题")).toHaveLength(1);
+    const firstKey = client.think.mock.calls[0][0].operationKey;
+    const retryKey = client.think.mock.calls[1][0].operationKey;
+    if (failure === "network") expect(retryKey).toBe(firstKey);
+    else expect(retryKey).not.toBe(firstKey);
+  });
+
+  it("ignores a late stopped reply while another question is waiting", async () => {
+    const client = api();
+    let finishOld!: () => void;
+    let finishNew!: () => void;
+    client.think.mockImplementationOnce((input) => new Promise((resolve) => {
+      finishOld = () => resolve(responseFor(input));
+    })).mockImplementationOnce((input) => new Promise((resolve) => {
+      finishNew = () => resolve(responseFor(input));
+    }));
+    render(<ReflectionThinkingProvider api={client}><Harness /></ReflectionThinkingProvider>);
+    const composer = screen.getByLabelText("想一起推演什么");
+    fireEvent.change(composer, { target: { value: "旧问题" } });
+    fireEvent.click(screen.getByRole("button", { name: "一起想" }));
+    fireEvent.click(screen.getByRole("button", { name: "停止" }));
+    fireEvent.change(composer, { target: { value: "新问题" } });
+    fireEvent.click(screen.getByRole("button", { name: "一起想" }));
+    await act(async () => finishOld());
+    expect(screen.queryByText("回应：旧问题")).not.toBeInTheDocument();
+    expect(screen.getByText("AI 正在思考回复…")).toBeVisible();
+    expect(client.think).toHaveBeenCalledTimes(2);
+    await act(async () => finishNew());
+    expect(screen.getByText("回应：新问题")).toBeVisible();
+    expect(screen.getByText("旧问题")).toBeVisible();
   });
 
   it("hides scope controls and forces personal retrieval for past clues", async () => {

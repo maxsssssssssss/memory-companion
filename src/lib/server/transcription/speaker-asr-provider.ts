@@ -340,6 +340,7 @@ function isRetryableHttpStatus(status: number) {
 }
 
 async function submitSpeakerAsr(input: {
+  audioUrl?: string;
   uploadId: string;
   recordId?: string;
   filePath: string;
@@ -355,7 +356,7 @@ async function submitSpeakerAsr(input: {
     signal: input.signal,
     body: JSON.stringify({
       req_id: input.reqId,
-      audio_url: buildAudioUrl(input),
+      audio_url: input.audioUrl ?? buildAudioUrl(input),
       record_id: input.recordId ?? input.uploadId,
       user_id: input.userId ?? parseUserIdFromUploadPath(input.filePath) ?? input.uploadId,
       language: getLanguageList(),
@@ -578,6 +579,18 @@ async function executeSpeakerAsr(input: {
         input.signal,
         submitted.code === 0 ? Date.now() : undefined
       );
+}
+
+/** Transport-only entry for product-owned audio. Callers own the signed URL,
+ * durable request ID, recovery and timestamp validation. No identity resolution. */
+export async function requestCompanyAsr(input: {
+  requestId: string; materialId: string; userId: string; audioUrl: string;
+  resume: boolean; signal: AbortSignal;
+}) {
+  if (input.resume) return waitForSpeakerAsr(input.requestId, input.signal);
+  const submitted = await submitSpeakerAsr({ uploadId: input.materialId, recordId: input.requestId,
+    filePath: "", userId: input.userId, reqId: input.requestId, audioUrl: input.audioUrl, signal: input.signal });
+  return hasUsableSpeakerAsrResult(submitted.data) ? submitted.data! : waitForSpeakerAsr(input.requestId, input.signal);
 }
 
 export const speakerAsrTranscriptionProvider: TranscriptionProvider = {

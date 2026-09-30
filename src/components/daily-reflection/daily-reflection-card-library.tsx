@@ -466,6 +466,7 @@ export function DailyReflectionCardLibrary({
         limit: 50,
         offset: 0
       }, signal);
+      if (signal?.aborted) return;
       setCards(result.cards);
       setTotal(result.total);
       setCountsComplete(result.total <= result.cards.length);
@@ -1130,7 +1131,7 @@ export function DailyReflectionCardLibrary({
       <main aria-hidden={expansionOpen ? "true" : undefined} className={`${embedded ? styles.productPage : styles.page} ${styles.cardLibraryPage}`}>
         <section className={`${styles.productIntro} ${styles.cardLibraryIntro}`}>
           <div><p className={styles.eyebrow}>思想资产</p><h1>你的卡片</h1><p>记录灵感、决定与问题，让过去的思考能够继续使用。</p></div>
-          <div className={styles.cardLibraryIntroAside}><span aria-live="polite">{error ? "读取失败" : loading ? "正在读取" : `${total} 张`}</span><Link href="/reflection/memory">查看长期记忆</Link></div>
+          <div className={styles.cardLibraryIntroAside}><span aria-live="polite">{error ? "读取失败" : loading ? "正在读取" : `${total} 张`}</span><Link href="/reflection/memory" prefetch>查看长期记忆</Link></div>
         </section>
 
         <div className={styles.cardLibraryTools}>

@@ -41,6 +41,7 @@ import {
 } from "@/lib/domain/date-companion";
 import type {
   DcRelationshipView,
+  DcRelationshipReadView,
   DcSubjectSuggestionConfirmation
 } from "@/lib/domain/date-companion-stage2";
 import type { DateCompanionRelationshipPersonSource } from "@/lib/domain/date-companion-person-source";
@@ -50,7 +51,8 @@ import {
   applyDateCompanionRelationshipView,
   buildDateCompanionSearchResults,
   buildDateCompanionViewModel,
-  dateCompanionRetainedSourceKey
+  dateCompanionRetainedSourceKey,
+  dateCompanionReadRecapItems
 } from "./date-companion-adapter";
 import {
   DateCompanionApiError,
@@ -116,6 +118,8 @@ const PersistedSessionSchema = z
 type PersistedSession = z.infer<typeof PersistedSessionSchema>;
 
 export type DateCompanionSessionSnapshot = {
+  relationshipDetailsLoaded: boolean;
+  detailReadState: { status: "idle" | "loading" | "ready" } | { status: "error"; message: string };
   auth: AuthState;
   viewModel: DateCompanionViewModel;
   uploadState: UploadState;
@@ -162,6 +166,8 @@ export type DateCompanionCurrentQaAvailability =
   | { enabled: false; message: string };
 
 export type DateCompanionSessionValue = DateCompanionSessionSnapshot & {
+  ensureRelationshipDetailsLoaded(): Promise<void>;
+  retryInteractionDetail(): Promise<void>;
   login(input: LoginInput): Promise<void>;
   register(input: RegisterInput): Promise<void>;
   clearAuthError(): void;
@@ -582,7 +588,7 @@ function relationshipQaSourceSignature(source: SourceRefVM) {
 }
 
 export function buildDateCompanionRelationshipQaSources(
-  view: DcRelationshipView,
+  view: DcRelationshipReadView,
   getLocalDay: (uploadId: string) => DayPayload | null
 ): SourceRefVM[] {
   const candidates: SourceRefVM[] = [];
@@ -603,7 +609,7 @@ export function buildDateCompanionRelationshipQaSources(
     const localSegments = new Set(
       getLocalDay(interaction.sourceUploadId)?.segments.map((segment) => segment.id) ?? []
     );
-    for (const recap of interaction.recapItems) {
+    for (const recap of dateCompanionReadRecapItems(interaction)) {
       if (recap.disposition !== "kept") continue;
       for (const evidence of recap.evidence) {
         const role = evidence.speakerId ? roleBySpeaker.get(evidence.speakerId) : undefined;
@@ -703,6 +709,8 @@ export class DateCompanionSessionController {
   private readonly toyRecoveryPollMaxAttempts: number;
   private readonly listeners = new Set<() => void>();
   private snapshot: DateCompanionSessionSnapshot = {
+    relationshipDetailsLoaded: false,
+    detailReadState: { status: "idle" },
     auth: { status: "checking" },
     viewModel: emptyDateCompanionViewModel(),
     uploadState: { status: "idle" },
@@ -729,7 +737,11 @@ export class DateCompanionSessionController {
   private memoryMutationController: AbortController | null = null;
   private activeUploadId: string | null = null;
   private currentPayload: DayPayload | null = null;
-  private relationshipView: DcRelationshipView | null = null;
+  private relationshipView: DcRelationshipReadView | null = null;
+  private detailController: AbortController | null = null;
+  private detailReadKey: string | null = null;
+  private detailReadPromise: Promise<void> | null = null;
+  private detailReadVersion = 0;
   private selectedRelationshipInteractionId: string | null = null;
   private activeToyRecoveryScope: ToyRecoveryRelationshipScope | null = null;
   private uploadRequestVersion = 0;
@@ -792,6 +804,7 @@ export class DateCompanionSessionController {
   }
 
   private cancelRelationshipWork() {
+    this.cancelDetailRead();
     this.relationshipController?.abort();
     this.relationshipController = null;
     this.mutationController?.abort();
@@ -832,7 +845,7 @@ export class DateCompanionSessionController {
     this.update({ viewModel });
   }
 
-  private applyRelationshipView(view: DcRelationshipView) {
+  private applyRelationshipView(view: DcRelationshipReadView) {
     if (
       this.activeToyRecoveryScope
       && this.activeToyRecoveryScope.relationshipId !== view.relationship.id
@@ -847,6 +860,7 @@ export class DateCompanionSessionController {
       this.selectedRelationshipInteractionId = null;
     }
     this.update({
+      relationshipDetailsLoaded: view.interactions.every((interaction) => "recapItems" in interaction),
       relationshipState: {
         status: "ready",
         relationship: {
@@ -1326,6 +1340,7 @@ export class DateCompanionSessionController {
   }
 
   private async loadRelationship(): Promise<void> {
+    this.cancelDetailRead();
     this.fenceActiveToyRecoveryForRelationshipChange();
     this.relationshipController?.abort();
     this.relationshipRequestVersion += 1;
@@ -1344,7 +1359,7 @@ export class DateCompanionSessionController {
         this.refreshViewModel();
         return;
       }
-      const view = await this.api.getRelationshipView(relationship.id, controller.signal);
+      const view = await this.api.getRelationshipSummary(relationship.id, controller.signal);
       if (this.disposed || version !== this.relationshipRequestVersion) return;
       if (view.relationship.id !== relationship.id) {
         throw new Error("Relationship view belongs to another relationship");
@@ -1363,6 +1378,87 @@ export class DateCompanionSessionController {
       if (this.relationshipController === controller) this.relationshipController = null;
     }
   }
+
+  private cancelDetailRead() {
+    this.detailController?.abort();
+    this.detailController = null;
+    this.detailReadKey = null;
+    this.detailReadPromise = null;
+    this.detailReadVersion += 1;
+  }
+
+  private readRelationshipDetails(interactionId: string | null): Promise<void> {
+    const view = this.relationshipView;
+    const userId = this.authenticatedUserId();
+    if (!view || !userId) return Promise.resolve();
+    const target = interactionId ? view.interactions.find((item) => item.id === interactionId) : null;
+    if (interactionId && (!target || "recapItems" in target)
+      || !interactionId && this.snapshot.relationshipDetailsLoaded) {
+      this.cancelDetailRead();
+      this.update({ detailReadState: { status: "ready" } });
+      return Promise.resolve();
+    }
+    const relationshipId = view.relationship.id;
+    const key = `${userId}:${relationshipId}:${interactionId ?? "all"}`;
+    if (this.detailReadKey === key && this.detailReadPromise) return this.detailReadPromise;
+    this.cancelDetailRead();
+    const controller = new AbortController();
+    const version = this.detailReadVersion;
+    const relationshipVersion = this.relationshipRequestVersion;
+    const mutationVersion = this.mutationRequestVersion;
+    this.detailController = controller;
+    this.detailReadKey = key;
+    const isCurrent = () => !this.disposed && !controller.signal.aborted
+      && version === this.detailReadVersion
+      && userId === this.authenticatedUserId()
+      && relationshipVersion === this.relationshipRequestVersion
+      && mutationVersion === this.mutationRequestVersion
+      && this.relationshipView?.relationship.id === relationshipId;
+    const request = Promise.resolve().then(async () => {
+      if (!isCurrent()) return;
+      this.update({ detailReadState: { status: "loading" } });
+      try {
+        if (interactionId) {
+          const interaction = await this.api.getInteractionDetail(relationshipId, interactionId, controller.signal);
+          if (!isCurrent()) return;
+          if (interaction.id !== interactionId || interaction.relationshipId !== relationshipId
+            || interaction.sourceState === "explicitly_deleted") throw new Error("Invalid interaction detail scope");
+          this.applyRelationshipView({ ...this.relationshipView!, interactions: this.relationshipView!.interactions.map(
+            (item) => item.id === interactionId ? interaction : item
+          ) });
+        } else {
+          const fullView = await this.api.getRelationshipView(relationshipId, controller.signal);
+          if (!isCurrent()) return;
+          if (fullView.relationship.id !== relationshipId || fullView.relationship.status !== "active") throw new Error("Invalid relationship detail scope");
+          this.applyRelationshipView(fullView);
+        }
+        this.update({ detailReadState: { status: "ready" } });
+      } catch (error) {
+        if (!isCurrent() || isAbortError(error)) return;
+        if (error instanceof DateCompanionApiError && error.status === 401) {
+          this.expireAuthentication();
+          return;
+        }
+        this.update({ detailReadState: { status: "error", message: relationshipActionErrorMessage(error, "这次相处的内容暂时没有读取成功。") } });
+      } finally {
+        if (this.detailController === controller) {
+          this.detailController = null;
+          this.detailReadKey = null;
+          this.detailReadPromise = null;
+        }
+      }
+    });
+    this.detailReadPromise = request;
+    return request;
+  }
+
+  readonly ensureRelationshipDetailsLoaded = () => this.readRelationshipDetails(null);
+
+  readonly retryInteractionDetail = (): Promise<void> => {
+    const interactionId = this.selectedRelationshipInteractionId
+      ?? this.relationshipView?.interactions.find((item) => item.sourceUploadId === this.currentPayload?.upload.id)?.id;
+    return interactionId ? this.readRelationshipDetails(interactionId) : Promise.resolve();
+  };
 
   private async finishPayload(
     payload: DayPayload,
@@ -1526,7 +1622,9 @@ export class DateCompanionSessionController {
           serverCleanupStatus: "completed"
         }
       });
-      void this.ensureMemoryBridgeLoaded(true);
+      // Restoring an already imported/cleaned snapshot made no server change.
+      // Join/retain the initial read; mutations and new imports still force refresh.
+      void this.ensureMemoryBridgeLoaded();
       return;
     }
 
@@ -1815,6 +1913,7 @@ export class DateCompanionSessionController {
     mutate: (signal: AbortSignal) => Promise<DcRelationshipView>
   ): Promise<void> {
     if (this.snapshot.relationshipState.status !== "ready" || !this.relationshipView) return;
+    this.cancelDetailRead();
     this.mutationController?.abort();
     this.mutationRequestVersion += 1;
     const version = this.mutationRequestVersion;
@@ -2199,6 +2298,7 @@ export class DateCompanionSessionController {
 
     try {
       const user = await this.api.getCurrentUser(controller.signal);
+      if (controller.signal.aborted || this.authController !== controller || this.disposed) return;
       if (!user) {
         this.setActiveUser(null);
         this.update({ auth: { status: "anonymous" } });
@@ -2281,7 +2381,7 @@ export class DateCompanionSessionController {
         await this.resumeCachedPayload(uploadId, undefined, undefined, version);
       }
     } catch (error) {
-      if (isAbortError(error)) return;
+      if (isAbortError(error) || controller.signal.aborted || this.authController !== controller) return;
       if (error instanceof DateCompanionApiError && error.status === 401) {
         this.setActiveUser(null);
         this.update({ auth: { status: "anonymous" } });
@@ -3036,6 +3136,10 @@ export class DateCompanionSessionController {
     const controller = this.searchController;
     this.update({ searchState: { status: "loading", query: normalizedQuery } });
     try {
+      await this.ensureRelationshipDetailsLoaded();
+      if (this.disposed || controller.signal.aborted || version !== this.searchRequestVersion
+        || this.relationshipView?.relationship.id !== relationshipId) return;
+      if (!this.snapshot.relationshipDetailsLoaded) throw new Error("关系内容暂时没有读取成功，请重试。");
       const results = await this.api.searchRelationship(relationshipId, normalizedQuery, controller.signal);
       if (this.disposed || version !== this.searchRequestVersion) return;
       const interactionIds = new Set(this.relationshipView.interactions.map((interaction) => interaction.id));
@@ -3076,6 +3180,7 @@ export class DateCompanionSessionController {
   };
 
   readonly deleteInteraction = async (interactionId: string): Promise<void> => {
+    this.cancelDetailRead();
     const relationshipId = this.relationshipView?.relationship.id;
     const interaction = this.relationshipView?.interactions.find((candidate) => candidate.id === interactionId);
     if (!relationshipId || !interaction) return;
@@ -3124,6 +3229,7 @@ export class DateCompanionSessionController {
         serverCleanupStatus: "completed"
       }
     });
+    void this.retryInteractionDetail();
     return true;
   };
 
@@ -3135,15 +3241,21 @@ export class DateCompanionSessionController {
         interaction.id === normalized && interaction.status === "confirmed"
       )
     ) {
+      this.cancelDetailRead();
       if (this.selectedRelationshipInteractionId !== null) {
         this.selectedRelationshipInteractionId = null;
         this.refreshViewModel();
       }
       return false;
     }
-    if (this.selectedRelationshipInteractionId === normalized) return true;
+    if (this.selectedRelationshipInteractionId === normalized) {
+      void this.retryInteractionDetail();
+      return true;
+    }
+    this.cancelDetailRead();
     this.selectedRelationshipInteractionId = normalized;
     this.refreshViewModel();
+    void this.retryInteractionDetail();
     return true;
   };
 
@@ -3412,6 +3524,8 @@ export function useDateCompanionSession(options: DateCompanionSessionOptions = {
 
   return {
     ...snapshot,
+    ensureRelationshipDetailsLoaded: controller.ensureRelationshipDetailsLoaded,
+    retryInteractionDetail: controller.retryInteractionDetail,
     login: controller.login,
     register: controller.register,
     clearAuthError: controller.clearAuthError,

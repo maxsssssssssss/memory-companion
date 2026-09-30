@@ -2327,6 +2327,7 @@ export function useDailyReflectionSession(
     navigationSession ??= new DailyReflectionSessionController(options);
     return navigationSession;
   });
+  const [authenticationStarted, setAuthenticationStarted] = useState(false);
   const snapshot = useSyncExternalStore(
     controller.subscribe,
     controller.getSnapshot,
@@ -2336,6 +2337,8 @@ export function useDailyReflectionSession(
 
   useEffect(() => {
     void controller.initialize(initialReflectionId);
+    // initialize synchronously enters checking before awaiting the current user.
+    setAuthenticationStarted(true);
   }, [controller, initialReflectionId]);
 
   const retainAcrossNavigation = options.retainAcrossNavigation;
@@ -2346,6 +2349,9 @@ export function useDailyReflectionSession(
 
   return {
     ...snapshot,
+    // A retained snapshot belongs to the previous mount. Do not expose its
+    // account or anonymous redirect until this mount has begun revalidation.
+    auth: authenticationStarted ? snapshot.auth : { status: "checking" },
     initialize: controller.initialize.bind(controller),
     setSelectedFile: controller.setSelectedFile,
     setSourceOrigin: controller.setSourceOrigin,

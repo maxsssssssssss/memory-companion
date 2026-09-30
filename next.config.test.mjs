@@ -13,9 +13,9 @@ describe("Next server package configuration", () => {
     expect(nextConfig.redirects).toBeUndefined();
   });
 
-  it("excludes runtime and evaluation data from every server trace", () => {
+  it("excludes runtime data and historical local artifacts from every server trace", () => {
     expect(nextConfig.outputFileTracingExcludes).toEqual({
-      "/*": ["./.data/**/*", "./test-data/**/*"]
+      "/*": ["./.data/**/*", "./test-data/**/*", "./output/**/*", "./reports/**/*", "./tmp/**/*"]
     });
   });
 });

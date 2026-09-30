@@ -935,7 +935,7 @@ function ReflectionCardReview({
             type="button"
           >保存为卡片</button>
         ) : workingCardStatus === "saved" ? (
-          <Link className={styles.secondaryButton} href={`/reflection/cards/${encodeURIComponent(card.id)}`}>打开卡片</Link>
+          <Link className={styles.secondaryButton} href={`/reflection/cards/${encodeURIComponent(card.id)}`} prefetch>打开卡片</Link>
         ) : workingCardStatus ? (
           <button className={styles.secondaryButton} disabled={busy} onClick={() => onRestoreToCards(card.id)} type="button">恢复卡片</button>
         ) : null}
@@ -2219,8 +2219,8 @@ export function DailyReflectionShellContent({
         <nav className={styles.productNav} aria-label="产品空间">
           <Link href="/date-companion/a">约会陪伴</Link>
           <Link aria-current="page" className={styles.activeProductNav} href={REFLECTION_ROUTES.home}>日常复盘</Link>
-          <Link href="/reflection/cards">卡片</Link>
-          <Link href="/reflection/memory">记忆</Link>
+          <Link href="/reflection/cards" prefetch>卡片</Link>
+          <Link href="/reflection/memory" prefetch>记忆</Link>
           <Link href="/reflection/reflect">回看</Link>
           <Link href="/reflection/think?mode=past_clues">一起想</Link>
         </nav>
@@ -2507,6 +2507,7 @@ export function DailyReflectionShellContent({
                       ? "这次复盘"
                       : processingCopy(detail, session.state)}</h2>
                 </div>
+                <div className={styles.statusActions}>
                 <span className={styles.statusBadge}>{uploadFailure ? "保存失败" : detail?.uploadState === "still_persisting" ? "保存中" : detail?.uploadState === "unresolved" || detail?.uploadState === "reupload_allowed" || (status === "created" || status === "uploading") && detail?.uploadState !== "accepted" ? "尚未确认" : status === "review_pending"
                   ? "等你看看"
                   : status === "confirmation_ready" || status === "admitting"
@@ -2522,6 +2523,10 @@ export function DailyReflectionShellContent({
                       : session.state === "error"
                         ? "暂时中断"
                         : "处理中"}</span>
+                {status === "completed" ? (
+                  <Link className={styles.secondaryButton} href="/reflection/cards" prefetch>查看卡片</Link>
+                ) : null}
+                </div>
               </div>
 
               <div className={styles.recordMeta}>
@@ -2990,7 +2995,7 @@ export function DailyReflectionShellContent({
                           >查看来源</button>
                           {session.workingCardStates[card.id]?.status === "saved" ? (
                             <div className={styles.candidateActions}>
-                              <Link className={styles.secondaryButton} href={`/reflection/cards/${encodeURIComponent(card.id)}`}>打开卡片</Link>
+                              <Link className={styles.secondaryButton} href={`/reflection/cards/${encodeURIComponent(card.id)}`} prefetch>打开卡片</Link>
                               {canRemember && explicitMemoryType ? (
                                 <ReflectionMemoryAction
                                   busy={memoryBusyCardId === card.id}

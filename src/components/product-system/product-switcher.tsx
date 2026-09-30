@@ -45,6 +45,7 @@ export function ProductSwitcher({
       <Link href="/">全部产品</Link>
       {PRODUCT_CATALOG.map((product) => {
         const enabled = product.id === "date_companion"
+          || product.id === "learning_organizer"
           || (product.id === "daily_reflection" && dailyReflectionEnabled)
           || (product.id === "office_review" && workReviewAvailable);
         return product.href && enabled ? (
@@ -55,7 +56,7 @@ export function ProductSwitcher({
             onClick={() => rememberLastProduct(accountId, product.id)}
           >
             <span aria-hidden="true">{product.mark}</span>
-            <span><b>{product.name}</b><small>{product.id === currentProduct ? "当前空间" : "进入"}</small></span>
+            <span><b>{product.name}</b><small>{product.trial ? "试用中 · " : ""}{product.id === currentProduct ? "当前空间" : "进入"}</small></span>
           </Link>
         ) : (
           <span aria-disabled="true" className={styles.productSwitcherDisabled} key={product.id}>

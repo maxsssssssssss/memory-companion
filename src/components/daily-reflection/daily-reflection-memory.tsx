@@ -119,9 +119,11 @@ export function DailyReflectionMemory({ api: providedApi, memoryId = null }: Dai
     try {
       if (memoryId) {
         const response = await api.getMemory(memoryId, signal);
+        if (signal?.aborted) return;
         setDetail(response);
       } else {
         const response = await api.listMemories(signal);
+        if (signal?.aborted) return;
         setMemories(response.memories);
       }
     } catch (cause) {
@@ -269,7 +271,7 @@ export function DailyReflectionMemory({ api: providedApi, memoryId = null }: Dai
   if (memoryId) {
     return (
       <main className={`${styles.productPage} ${styles.memoryPage}`}>
-        <Link className={styles.backLink} href="/reflection/memory">← 返回记忆</Link>
+        <Link className={styles.backLink} href="/reflection/memory" prefetch>← 返回记忆</Link>
         {loading ? <ProductState description="正在核对长期状态与来源。" title="正在读取这条记忆" tone="loading" /> : loadError ? (
           <ProductState action={<button className={styles.secondaryButton} onClick={() => void load()} type="button">重新尝试</button>} description={loadError} title="暂时无法打开这条记忆" tone="error" />
         ) : detail ? (
@@ -330,7 +332,7 @@ export function DailyReflectionMemory({ api: providedApi, memoryId = null }: Dai
           <p>重要的表达在这里沉淀下来，未来可以继续使用，也可以随时回看来源或撤销。</p>
           {!loading && memories.length > 0 ? <small>{memories.length} 条记忆正在长期保留</small> : null}
         </div>
-        <Link className={styles.memoryLibraryLink} href="/reflection/cards">进入卡片库 <span aria-hidden="true">→</span></Link>
+        <Link className={styles.memoryLibraryLink} href="/reflection/cards" prefetch>进入卡片库 <span aria-hidden="true">→</span></Link>
       </section>
       {loading ? <ProductState description="正在找回你确认留下的长期内容。" title="正在读取长期记忆" tone="loading" /> : loadError ? (
         <ProductState action={<button className={styles.secondaryButton} onClick={() => void load()} type="button">重新尝试</button>} description="请稍后再试；已经长期保留的内容不会受影响。" title="长期记忆暂时没有加载完成" tone="error" />
@@ -436,7 +438,7 @@ export function DailyReflectionMemory({ api: providedApi, memoryId = null }: Dai
             </div>
             <footer className={styles.memoryQuickViewActions}>
               <button className={styles.memoryQuickViewRevoke} disabled={busy} onClick={() => setConfirmOpen(true)} type="button">撤销这条记忆</button>
-              <Link className={styles.primaryButton} href={reflectionMemoryPath(quickViewMemory.id)}>查看完整详情 <span aria-hidden="true">→</span></Link>
+              <Link className={styles.primaryButton} href={reflectionMemoryPath(quickViewMemory.id)} prefetch>查看完整详情 <span aria-hidden="true">→</span></Link>
             </footer>
           </section>
         </div>

@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { buildAudioChunkId, type AudioChunk } from "@/lib/domain/chunks";
 import { createTranscriptionAudioAccessCapability } from "./audio-access-capability";
-import { speakerAsrChunkTranscriptionAdapter, speakerAsrTranscriptionProvider } from "./speaker-asr-provider";
+import { requestCompanyAsr, speakerAsrChunkTranscriptionAdapter, speakerAsrTranscriptionProvider } from "./speaker-asr-provider";
 
 const originalEnv = { ...process.env };
 const capabilitySecret = "daily-reflection-capability-secret-test-only";
@@ -34,6 +34,21 @@ function restoreEnv() {
 }
 
 describe("speaker-asr transcription provider", () => {
+  it("offers a transport-only learning call with its own signed URL and durable query-only resume", async () => {
+    process.env.SPEAKER_ASR_BASE_URL = "http://speaker-asr.test:8300";
+    const data = { asr_result: { sentences: [{ text: "[合成测试] 原始术语", timestamp: [{ start: 0, end: 500 }] }] } };
+    const mock = vi.fn(async () => new Response(JSON.stringify({ code: 0, data }), { headers: { "content-type": "application/json" } }));
+    vi.stubGlobal("fetch", mock);
+    try {
+      const input = { requestId: "learning_synthetic_stable", materialId: "synthetic", userId: "synthetic-owner",
+        audioUrl: "https://app.synthetic.invalid/api/learning/asr-audio/signed", resume: false, signal: AbortSignal.timeout(1000) };
+      expect(await requestCompanyAsr(input)).toEqual(data);
+      const [url, init] = mock.mock.calls[0] as unknown as [string, RequestInit]; expect(url).toContain("/api/ai/non-realtime-asr");
+      expect(JSON.parse(init.body as string)).toMatchObject({ req_id: input.requestId, audio_url: input.audioUrl, record_id: input.requestId });
+      await requestCompanyAsr({ ...input, resume: true });
+      expect((mock.mock.calls[1] as unknown as [string])[0]).toContain("/query?reqid=learning_synthetic_stable"); expect(mock).toHaveBeenCalledTimes(2);
+    } finally { vi.unstubAllGlobals(); }
+  });
   afterEach(() => {
     vi.useRealTimers();
     vi.restoreAllMocks();

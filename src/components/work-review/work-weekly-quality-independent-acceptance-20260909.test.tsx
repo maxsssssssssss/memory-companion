@@ -59,7 +59,7 @@ afterEach(() => { cleanup(); expect(writes).toEqual([]); vi.clearAllMocks(); });
 
 describe("11/11 independent Weekly presentation and copy contract", () => {
   it.each(["复制全文", "只复制决定", "复制待办与等待他人"])(
-    "retains the displayed partial warning in %s without publishing rejected or unavailable content", async (button) => {
+    "omits the manual review notice from %s without publishing rejected or unavailable content", async (button) => {
       const data = createFixture();
       const displayed: WorkWeeklyDisplayedGeneration = { runId: "reviewed_partial_run", runVersion: 1,
         systemVersion: data.review.currentSystemVersion, qualityStatus: "needs_review", reviewIssues: [
@@ -76,25 +76,22 @@ describe("11/11 independent Weekly presentation and copy contract", () => {
         runId: "later_failed_run", runVersion: 2, executionStatus: "failed", sourceCheckStatus: "not_established",
         qualityStatus: "not_assessed", reviewIssues: [], displayingPreviousVersion: true, errorCode: "weekly_generation_failed"
       } });
-      expect(await screen.findByRole("heading", { name: "已生成，部分内容待核对" })).toBeVisible();
-      const expand = screen.getByRole("button", { name: "查看待核对事项（2）" });
-      fireEvent.click(expand);
-      expect(screen.getByText("这条来源的重要内容尚未完整纳入回顾。")).toBeVisible();
-      expect(screen.getByText("原来源已不可用，相关事项仍待核对。")).toBeVisible();
-      expect(screen.getByRole("button", { name: "查看事项 1 的原始记录" })).toBeVisible();
-      expect(screen.queryByRole("button", { name: "查看事项 2 的原始记录" })).not.toBeInTheDocument();
+      expect(await screen.findByText("暂定的范围保持待确认。")).toBeVisible();
+      expect(screen.queryByRole("heading", { name: "已生成，部分内容待核对" })).not.toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: /查看待核对事项/u })).not.toBeInTheDocument();
+      if (button !== "复制全文") fireEvent.click(screen.getByRole("button", { name: "更多复制方式" }));
       fireEvent.click(screen.getByRole("button", { name: button }));
       await waitFor(() => expect(navigator.clipboard.writeText).toHaveBeenCalledTimes(1));
       const copy = vi.mocked(navigator.clipboard.writeText).mock.calls[0]![0];
-      expect(copy).toContain("已生成，部分内容待核对");
-      expect(copy).toContain("以下是当前可用内容，仍有缺失或待核对事项。");
+      expect(copy).not.toContain("已生成，部分内容待核对");
+      expect(copy).not.toContain("以下是当前可用内容，仍有缺失或待核对事项。");
       expect(copy).not.toMatch(/PRIVATE_|全稿已核对|完整性已通过/);
       if (button !== "复制待办与等待他人") expect(copy).toContain("暂定的范围保持待确认。");
       if (button !== "只复制决定") expect(copy).toContain("用户保留的依赖说明。");
     }
   );
 
-  it("keeps the current partial assessment when a refresh reports a newer failed attempt", async () => {
+  it("keeps available content without restoring the review notice when a refresh reports a newer failed attempt", async () => {
     const data = createFixture();
     const displayed: WorkWeeklyDisplayedGeneration = { runId: "current_partial_run", runVersion: 1,
       systemVersion: data.review.currentSystemVersion, qualityStatus: "needs_review", reviewIssues: [
@@ -105,7 +102,7 @@ describe("11/11 independent Weekly presentation and copy contract", () => {
         executionStatus: "pending", sourceCheckStatus: "not_established", qualityStatus: "not_assessed",
         reviewIssues: [], displayingPreviousVersion: true, errorCode: null }
     });
-    await screen.findByRole("heading", { name: "已生成，部分内容待核对" });
+    await screen.findByText("已核对的安排仍为暂定。");
     const refreshed = { ...state.detail, review: { ...state.detail.review, status: "failed" },
       latestGeneration: { runId: "later_attempt", runVersion: 2, executionStatus: "failed", sourceCheckStatus: "not_established",
         qualityStatus: "not_assessed", reviewIssues: [], displayingPreviousVersion: true, errorCode: "weekly_generation_failed" } };
@@ -113,11 +110,11 @@ describe("11/11 independent Weekly presentation and copy contract", () => {
     state.allowed.getWeeklyReviewDetail.mockResolvedValue(refreshed);
     fireEvent.click(screen.getByRole("button", { name: "刷新状态" }));
     await waitFor(() => expect(state.allowed.getWeeklyReviewDetail).toHaveBeenCalledTimes(1));
-    expect(screen.getByRole("heading", { name: "已生成，部分内容待核对" })).toBeVisible();
+    expect(screen.queryByRole("heading", { name: "已生成，部分内容待核对" })).not.toBeInTheDocument();
     expect(screen.getByText("已核对的安排仍为暂定。")).toBeVisible();
     fireEvent.click(screen.getByRole("button", { name: "复制全文" }));
     await waitFor(() => expect(navigator.clipboard.writeText).toHaveBeenCalledTimes(1));
-    expect(vi.mocked(navigator.clipboard.writeText).mock.calls[0]![0]).toContain("已生成，部分内容待核对");
+    expect(vi.mocked(navigator.clipboard.writeText).mock.calls[0]![0]).not.toContain("已生成，部分内容待核对");
   });
 
   it("shows the suggestion boundary and copies the exact visible system text without changing stored history", async () => {

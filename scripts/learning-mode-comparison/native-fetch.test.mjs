@@ -1,0 +1,5 @@
+import assert from 'node:assert/strict';import http from 'node:http';import {nativeFetch} from './native-fetch.cjs';
+let requests=0;const server=http.createServer((req,res)=>{requests++;if(req.url==='/redirect'){res.writeHead(302,{location:'https://unapproved.invalid'});res.end();return;}res.writeHead(200,{'Content-Type':'text/event-stream'});res.write('data: start\n\n');const t=setTimeout(()=>res.end('data: final\n\n'),100);res.on('close',()=>clearTimeout(t));});
+await new Promise(r=>server.listen(0,'127.0.0.1',r));const base='http://127.0.0.1:'+server.address().port;
+try{const r=await nativeFetch(new Request(base,{signal:AbortSignal.timeout(1000)}));assert.equal(await r.text(),'data: start\n\ndata: final\n\n');const aborted=await nativeFetch(new Request(base,{signal:AbortSignal.timeout(30)}));await assert.rejects(aborted.text());const redirect=await nativeFetch(new Request(base+'/redirect'));assert.equal(redirect.status,302);assert.equal(requests,3);console.log(JSON.stringify({status:'PASS',cases:3,externalRequests:0,redirectsFollowed:0,retries:0}));}
+finally{await new Promise(r=>server.close(r));}

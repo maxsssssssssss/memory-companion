@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 
-import { UpdateWorkProjectRequestSchema } from "@/lib/domain/work-project";
+import { DeleteWorkProjectRequestSchema, UpdateWorkProjectRequestSchema } from "@/lib/domain/work-project";
 import { WorkReviewIdSchema } from "@/lib/domain/work-review";
 import { requireAuthContext } from "@/lib/server/auth/request-context";
 import { getWorkReviewDatabase } from "@/lib/server/work-review/db";
@@ -50,6 +50,21 @@ export async function PATCH(request: Request, { params }: ProjectRouteContext) {
     const body = UpdateWorkProjectRequestSchema.parse(await request.json());
     const result = new WorkProjectService(getWorkReviewDatabase())
       .updateProject(auth.user.id, projectId, body);
+    return workProjectPrivateJson(result);
+  } catch (error) {
+    return workProjectRouteError(error);
+  }
+}
+
+export async function DELETE(request: Request, { params }: ProjectRouteContext) {
+  if (!isWorkReviewProjectsEnabled()) return workProjectFeatureDisabled();
+  const projectId = projectIdFrom((await params).projectId);
+  if (!projectId) return invalidProjectId();
+  try {
+    const auth = await requireAuthContext(request);
+    const body = DeleteWorkProjectRequestSchema.parse(await request.json());
+    const result = new WorkProjectService(getWorkReviewDatabase())
+      .deleteProject(auth.user.id, projectId, body);
     return workProjectPrivateJson(result);
   } catch (error) {
     return workProjectRouteError(error);

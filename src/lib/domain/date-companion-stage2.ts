@@ -150,6 +150,12 @@ export const DcInteractionDetailSchema = DcInteractionSchema.extend({
   }).strict().optional()
 }).strict();
 
+// A summary is an explicit projection, never a complete recap with omitted items.
+// Promise evidence is needed by the home page's existing admission checks.
+export const DcInteractionSummarySchema = DcInteractionDetailSchema.omit({ recapItems: true }).extend({
+  promiseRecapItems: z.array(DcRecapItemSchema)
+}).strict();
+
 export const DcPromiseSchema = z.object({
   id: DcIdSchema,
   relationshipId: DcIdSchema,
@@ -167,6 +173,16 @@ export const DcRelationshipViewSchema = z.object({
   relationship: DcRelationshipSchema,
   interactions: z.array(DcInteractionDetailSchema),
   promises: z.array(DcPromiseSchema)
+}).strict();
+
+export const DcRelationshipSummarySchema = DcRelationshipViewSchema.extend({
+  interactions: z.array(DcInteractionSummarySchema)
+}).strict();
+export const DcRelationshipSummaryResponseSchema = z.object({
+  summary: DcRelationshipSummarySchema
+}).strict();
+export const DcInteractionDetailResponseSchema = z.object({
+  interaction: DcInteractionDetailSchema
 }).strict();
 
 export const DcSearchResultSchema = z.object({
@@ -326,6 +342,12 @@ export type DcParticipantAssignment = z.infer<typeof DcParticipantAssignmentSche
 export type DcRecapItem = z.infer<typeof DcRecapItemSchema>;
 export type DcInteraction = z.infer<typeof DcInteractionSchema>;
 export type DcInteractionDetail = z.infer<typeof DcInteractionDetailSchema>;
+export type DcInteractionSummary = z.infer<typeof DcInteractionSummarySchema>;
+export type DcInteractionRead = DcInteractionDetail | DcInteractionSummary;
+export type DcRelationshipSummary = z.infer<typeof DcRelationshipSummarySchema>;
+export type DcRelationshipReadView = Omit<DcRelationshipView, "interactions"> & {
+  interactions: DcInteractionRead[];
+};
 export type DcPromise = z.infer<typeof DcPromiseSchema>;
 export type DcRelationshipView = z.infer<typeof DcRelationshipViewSchema>;
 export type DcSearchResult = z.infer<typeof DcSearchResultSchema>;

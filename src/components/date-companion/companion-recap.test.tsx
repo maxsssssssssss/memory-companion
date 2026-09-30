@@ -1146,6 +1146,26 @@ describe("CompanionRecap", () => {
     expect(screen.getByText(/这台设备没有完整文字稿/u)).toBeInTheDocument();
   });
 
+  it("does not request audio when availability is absent even if a single speaker is known", () => {
+    render(<CompanionRecap interaction={{ ...interaction, relationshipInteractionId: "interaction-1" }}
+      items={items} participants={[{ speakerId: "speaker_1", displayLabel: "声音 1", state: "confirmed",
+        role: "self", sampleQuotes: [] }]} />);
+    expect(document.querySelector("audio")).toBeNull();
+    expect(screen.getByText("声音节选暂不可用，请结合原话判断。")).toBeInTheDocument();
+  });
+
+  it("keeps unavailable audio hidden after a stale availability response fails and the same interaction rerenders", () => {
+    const props = { interaction: { ...interaction, relationshipInteractionId: "interaction-1" }, items,
+      participants: [{ speakerId: "speaker_1", audioSpeakerId: "speaker_1", displayLabel: "声音 1",
+        state: "confirmed" as const, role: "self" as const, sampleQuotes: [] }] };
+    const { rerender } = render(<CompanionRecap {...props} />);
+    fireEvent.error(screen.getByLabelText("声音 1的声音节选"));
+    expect(document.querySelector("audio")).toBeNull();
+    rerender(<CompanionRecap {...props} participants={props.participants.map((item) => ({ ...item }))} />);
+    expect(document.querySelector("audio")).toBeNull();
+    expect(screen.getByText("声音节选暂不可用，请结合原话判断。")).toBeInTheDocument();
+  });
+
   it("uses the complete server participant set when this device has no transcript", async () => {
     const onFinalize = vi.fn().mockResolvedValue(undefined);
     const companionSource = {
@@ -1171,6 +1191,7 @@ describe("CompanionRecap", () => {
           {
             speakerId: "speaker_1",
             displayLabel: "第一段声音",
+            audioSpeakerId: "speaker_1",
             state: "confirmed",
             role: "self",
             sampleQuotes: [items[0].sources[0]]
@@ -1178,6 +1199,7 @@ describe("CompanionRecap", () => {
           {
             speakerId: "speaker_2",
             displayLabel: "第二段声音",
+            audioSpeakerId: "speaker_2",
             state: "confirmed",
             role: "companion",
             sampleQuotes: [companionSource]

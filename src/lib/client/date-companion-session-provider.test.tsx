@@ -151,6 +151,17 @@ function createApi(view: DcRelationshipView) {
     listRelationships,
     createRelationship: async () => ({ relationship: view.relationship, reused: true }),
     getRelationshipView,
+    getRelationshipSummary: async () => {
+      const full = await getRelationshipView();
+      return { ...full, interactions: full.interactions.map(({ recapItems, ...metadata }) => ({
+        ...metadata, promiseRecapItems: recapItems.filter((item) => item.kind === "promise")
+      })) };
+    },
+    getInteractionDetail: async (_relationshipId, interactionId) => {
+      const interaction = view.interactions.find((item) => item.id === interactionId);
+      if (!interaction) throw new Error("Unexpected interaction");
+      return interaction;
+    },
     importInteraction,
     updateParticipants: async () => view,
     updateRecap: async () => view,

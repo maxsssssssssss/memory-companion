@@ -4,12 +4,15 @@ import type Database from "better-sqlite3";
 import {
   DcEvidenceSnapshotSchema,
   DcInteractionDetailSchema,
+  DcInteractionSummarySchema,
   DcPromiseSchema,
   DcRelationshipSchema,
   DcRelationshipViewSchema,
+  DcRelationshipSummarySchema,
   DcSearchResultSchema,
   type DcEvidenceSnapshot,
   type DcInteractionDetail,
+  type DcInteractionSummary,
   type DcPromiseStatus,
   type DcRelationship,
   type DcRelationshipView,
@@ -329,7 +332,9 @@ export class DateCompanionRepository {
     return rows.map(evidenceFromRow);
   }
 
-  private interactionDetail(userId: string, row: InteractionRow): DcInteractionDetail {
+  private interactionDetail(userId: string, row: InteractionRow): DcInteractionDetail;
+  private interactionDetail(userId: string, row: InteractionRow, scope: "summary"): DcInteractionSummary;
+  private interactionDetail(userId: string, row: InteractionRow, scope: "full" | "summary" = "full"): DcInteractionDetail | DcInteractionSummary {
     const enrollment = this.database.prepare(`
       SELECT o.status, s.expires_at
       FROM dc_voice_enrollment_outbox o
@@ -434,8 +439,9 @@ export class DateCompanionRepository {
              version, sort_order
       FROM dc_recap_items
       WHERE interaction_id = ? AND user_id = ?
+        AND (? = 'full' OR kind = 'promise')
       ORDER BY sort_order, id
-    `).all(row.id, userId) as RecapRow[];
+    `).all(row.id, userId, scope) as RecapRow[];
     const recapItems = recapRows.map((item) => ({
       id: item.id,
       interactionId: item.interaction_id,
@@ -451,7 +457,7 @@ export class DateCompanionRepository {
     const memoryBridge = createDateCompanionMemoryBridgeRepository(this.database)
       .getInteractionBridgeStatus(userId, row.id);
 
-    return DcInteractionDetailSchema.parse({
+    const metadata = {
       id: row.id,
       relationshipId: row.relationship_id,
       sourceUploadId: row.source_upload_id,
@@ -465,12 +471,14 @@ export class DateCompanionRepository {
       updatedAt: row.updated_at,
       ...(row.confirmed_at ? { confirmedAt: row.confirmed_at } : {}),
       participants,
-      recapItems,
       ...(voiceEnrollmentStatus
         ? { voiceEnrollment: { status: voiceEnrollmentStatus } }
         : {}),
       ...(memoryBridge ? { memoryBridge } : {})
-    });
+    };
+    return scope === "summary"
+      ? DcInteractionSummarySchema.parse({ ...metadata, promiseRecapItems: recapItems })
+      : DcInteractionDetailSchema.parse({ ...metadata, recapItems });
   }
 
   listRelationships(userId: string) {
@@ -512,6 +520,28 @@ export class DateCompanionRepository {
   }
 
   getRelationshipView(userId: string, relationshipId: string): DcRelationshipView {
+    return DcRelationshipViewSchema.parse(this.relationshipRead(userId, relationshipId, "full"));
+  }
+
+  getRelationshipSummary(userId: string, relationshipId: string) {
+    if (this.requireRelationship(userId, relationshipId).status !== "active") {
+      throw new DcNotFoundError("Relationship not found");
+    }
+    return DcRelationshipSummarySchema.parse(this.relationshipRead(userId, relationshipId, "summary"));
+  }
+
+  getInteractionDetail(userId: string, relationshipId: string, interactionId: string) {
+    if (this.requireRelationship(userId, relationshipId).status !== "active") {
+      throw new DcNotFoundError("Relationship not found");
+    }
+    const interaction = this.requireInteraction(userId, interactionId);
+    if (interaction.relationship_id !== relationshipId || interaction.source_state === "explicitly_deleted") {
+      throw new DcNotFoundError("Interaction not found");
+    }
+    return this.interactionDetail(userId, interaction);
+  }
+
+  private relationshipRead(userId: string, relationshipId: string, scope: "full" | "summary") {
     const relationship = relationshipFromRow(this.requireRelationship(userId, relationshipId));
     const interactionRows = this.database.prepare(`
       SELECT id, relationship_id, source_upload_id, recording_date, original_name,
@@ -519,8 +549,9 @@ export class DateCompanionRepository {
              confirmed_at, confirmation_fingerprint
       FROM dc_interactions
       WHERE relationship_id = ? AND user_id = ?
+        AND (? = 'full' OR source_state <> 'explicitly_deleted')
       ORDER BY recording_date DESC, created_at DESC, id
-    `).all(relationshipId, userId) as InteractionRow[];
+    `).all(relationshipId, userId, scope) as InteractionRow[];
     const promiseRows = this.database.prepare(`
       SELECT id, relationship_id, originating_recap_item_id, text, status, version,
              resolved_at, created_at, updated_at
@@ -541,11 +572,13 @@ export class DateCompanionRepository {
       evidence: this.evidenceForRecap(userId, item.originating_recap_item_id)
     }));
 
-    return DcRelationshipViewSchema.parse({
+    return {
       relationship,
-      interactions: interactionRows.map((row) => this.interactionDetail(userId, row)),
+      interactions: interactionRows.map((row) => scope === "summary"
+        ? this.interactionDetail(userId, row, "summary")
+        : this.interactionDetail(userId, row)),
       promises
-    });
+    };
   }
 
   importInteraction(input: DcImportInteractionInput) {

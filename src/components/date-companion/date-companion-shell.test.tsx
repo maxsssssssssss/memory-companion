@@ -41,6 +41,10 @@ const mockedUseDateCompanionPersonArchive = vi.mocked(useDateCompanionPersonArch
 
 function makeSession(overrides: Partial<DateCompanionSessionValue> = {}): DateCompanionSessionValue {
   return {
+    relationshipDetailsLoaded: true,
+    detailReadState: { status: "idle" },
+    ensureRelationshipDetailsLoaded: vi.fn(async () => undefined),
+    retryInteractionDetail: vi.fn(async () => undefined),
     auth: { status: "checking" },
     viewModel: emptyDateCompanionViewModel(),
     uploadState: { status: "idle" },
@@ -706,6 +710,13 @@ describe("DateCompanionShell", () => {
     expect(screen.getByText("正在找回这次相处…")).toBeInTheDocument();
     await waitFor(() => expect(selectRelationshipInteraction).toHaveBeenCalledWith("interaction-1"));
     expect(fetcher.mock.calls.some(([input]) => String(input).includes("/interactions/interaction-old/"))).toBe(false);
+
+    const summaryViewModel = { ...viewModel, recap: { ...viewModel.recap,
+      interaction: { ...interaction, detailLoaded: false }, items: [] } };
+    mockedUseDateCompanionSession.mockReturnValue({ ...restoredSession, viewModel: summaryViewModel });
+    rendered.rerender(<DateCompanionShell entry="companion" initialInteractionId="interaction-1" screen="recap" />);
+    expect(screen.getByText("正在读取相处内容…")).toBeInTheDocument();
+    expect(fetcher.mock.calls.some(([input]) => String(input).includes("/interactions/interaction-1/proactive-value"))).toBe(false);
 
     mockedUseDateCompanionSession.mockReturnValue(restoredSession);
     rendered.rerender(

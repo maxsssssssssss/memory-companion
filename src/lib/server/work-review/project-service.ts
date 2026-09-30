@@ -2,6 +2,7 @@ import type Database from "better-sqlite3";
 
 import type {
   CreateWorkProjectRequest,
+  DeleteWorkProjectRequest,
   SetWorkResourceProjectsRequest,
   UpdateWorkProjectRequest,
   WorkProjectListStatus,
@@ -48,6 +49,10 @@ export class WorkProjectService {
     request: UpdateWorkProjectRequest
   ): WorkProjectMutationResult {
     return this.repository.updateProject({ accountId, projectId, ...request });
+  }
+
+  deleteProject(accountId: string, projectId: string, request: DeleteWorkProjectRequest) {
+    return this.repository.deleteProject({ accountId, projectId, ...request });
   }
 
   setMeetingProjects(

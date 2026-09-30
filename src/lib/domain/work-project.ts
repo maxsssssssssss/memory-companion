@@ -65,6 +65,10 @@ export const WorkProjectIdsSchema = z.array(WorkReviewIdSchema)
     }
   });
 
+export const DeleteWorkProjectRequestSchema = z.object({
+  expectedVersion: WorkReviewVersionSchema
+}).strict();
+
 export const SetWorkResourceProjectsRequestSchema = z.object({
   operationKey: WorkReviewIdSchema,
   expectedVersion: WorkReviewVersionSchema,
@@ -93,6 +97,7 @@ export type WorkProject = z.infer<typeof WorkProjectSchema>;
 export type WorkProjectReference = z.infer<typeof WorkProjectReferenceSchema>;
 export type CreateWorkProjectRequest = z.infer<typeof CreateWorkProjectRequestSchema>;
 export type UpdateWorkProjectRequest = z.infer<typeof UpdateWorkProjectRequestSchema>;
+export type DeleteWorkProjectRequest = z.infer<typeof DeleteWorkProjectRequestSchema>;
 export type SetWorkResourceProjectsRequest = z.infer<
   typeof SetWorkResourceProjectsRequestSchema
 >;

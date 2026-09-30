@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 
 import {
   DcDeleteInteractionResponseSchema,
+  DcInteractionDetailResponseSchema,
   DcIdSchema
 } from "@/lib/domain/date-companion-stage2";
 import { getDateCompanionRepository } from "@/lib/server/date-companion";
@@ -19,6 +20,34 @@ import { deleteVoiceprintTrainingCandidatesForUpload } from "@/lib/server/speake
 import { JsonSpeakerIdentityRepository } from "@/lib/server/speaker-identity/repository";
 
 export const runtime = "nodejs";
+
+export async function GET(request: Request, { params }: { params: Promise<{ interactionId: string }> }) {
+  const auth = await dateCompanionAuth(request);
+  if ("response" in auth) {
+    auth.response.headers.set("Cache-Control", "private, no-store");
+    return auth.response;
+  }
+  const interactionId = DcIdSchema.safeParse((await params).interactionId);
+  const relationshipId = DcIdSchema.safeParse(new URL(request.url).searchParams.get("relationshipId"));
+  if (!interactionId.success || !relationshipId.success) {
+    return NextResponse.json({ error: "invalid_interaction_detail_request" }, {
+      status: 400, headers: { "Cache-Control": "private, no-store" }
+    });
+  }
+  try {
+    const interaction = getDateCompanionRepository().getInteractionDetail(
+      auth.authContext.user.id, relationshipId.data, interactionId.data
+    );
+    return NextResponse.json(DcInteractionDetailResponseSchema.parse({ interaction }), { headers: { "Cache-Control": "private, no-store" } });
+  } catch (error) {
+    const response = dateCompanionErrorResponse(error);
+    if (response) {
+      response.headers.set("Cache-Control", "private, no-store");
+      return response;
+    }
+    throw error;
+  }
+}
 
 function expectedVersionFromIfMatch(request: Request) {
   const value = request.headers.get("if-match");

@@ -207,6 +207,8 @@ function DateCompanionShellContent({
     requestedRecapInteractionId,
     router,
     session.relationshipState.status,
+    session.relationshipState.status === "ready" ? session.relationshipState.relationship.id : undefined,
+    viewModel.recap.interaction?.relationshipInteractionId,
     session.selectRelationshipInteraction
   ]);
 
@@ -215,6 +217,16 @@ function DateCompanionShellContent({
       void session.ensureMemoryBridgeLoaded();
     }
   }, [props.entry, session.ensureMemoryBridgeLoaded, session.relationshipState.status]);
+
+  useEffect(() => {
+    if (props.entry === "companion" && (props.screen === "prepare" || props.screen === "person")
+      && session.relationshipState.status === "ready") {
+      void session.ensureRelationshipDetailsLoaded();
+    }
+  }, [props.entry, props.entry === "companion" ? props.screen : undefined,
+    session.relationshipState.status,
+    session.relationshipState.status === "ready" ? session.relationshipState.relationship.id : undefined,
+    session.ensureRelationshipDetailsLoaded]);
 
   const personQaSources = useMemo(
     () => session.personQaSources(),
@@ -295,6 +307,7 @@ function DateCompanionShellContent({
     && props.entry === "companion"
     && props.screen === "recap"
     && currentQaInteraction?.status === "ready"
+    && currentQaInteraction.detailLoaded !== false
     && currentQaInteraction.persistenceStatus === "confirmed"
     && currentQaInteraction.relationshipInteractionId
     && (!requestedRecapInteractionId
@@ -458,6 +471,8 @@ function DateCompanionShellContent({
     segmentIds: chapter.sourceSegmentIds
   }));
   const recapInteraction = viewModel.recap.interaction;
+  const detailPending = screen === "recap" ? recapInteraction?.detailLoaded === false
+    : (screen === "prepare" || screen === "person") && !session.relationshipDetailsLoaded;
   const canPersistRecap = Boolean(
     recapInteraction?.relationshipInteractionId
     && recapInteraction.persistenceStatus === "draft"
@@ -541,6 +556,15 @@ function DateCompanionShellContent({
 
       <div className={styles.shell}>
         <div className={styles.page}>
+          {detailPending ? (
+            <div role={session.detailReadState.status === "error" ? "alert" : "status"}>
+              <p>{session.detailReadState.status === "error" ? session.detailReadState.message : "正在读取相处内容…"}</p>
+              {session.detailReadState.status === "error" ? (
+                <button type="button" onClick={() => void (screen === "recap"
+                  ? session.retryInteractionDetail() : session.ensureRelationshipDetailsLoaded())}>重新读取</button>
+              ) : null}
+            </div>
+          ) : <>
           {screen === "home" ? (
             <CompanionHome
               accountId={auth.user.id}
@@ -685,6 +709,7 @@ function DateCompanionShellContent({
               state={session.memoryBridgeState}
             />
           ) : null}
+          </>}
         </div>
       </div>
     </main>

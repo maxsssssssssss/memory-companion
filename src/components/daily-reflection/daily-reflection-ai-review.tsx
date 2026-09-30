@@ -159,8 +159,9 @@ export function DailyReflectionAiReview({
   const commitReview = useCallback((next: DailyReflectionAiReviewOperationView | null) => {
     const becameReady = next?.status === "ready" && previousStatus.current !== "ready";
     if (becameReady && exposureModeRef.current === "on" && next.content) {
-      anchorTop.current = rulesWrapper.current?.getBoundingClientRect().top ?? null;
-      const readerIsInsideRules = (rulesWrapper.current?.getBoundingClientRect().top ?? 0) < -96;
+      const rulesTop = rulesWrapper.current?.getBoundingClientRect().top ?? 0;
+      const readerIsInsideRules = rulesTop < -96;
+      anchorTop.current = readerIsInsideRules ? rulesTop : null;
       setRulesOpen(quickViewOpenRef.current || rulesInteracted.current || readerIsInsideRules);
     }
     previousStatus.current = next?.status ?? null;
@@ -172,6 +173,7 @@ export function DailyReflectionAiReview({
     activeRequest.current?.abort();
     const controller = new AbortController();
     activeRequest.current = controller;
+    let shouldPoll = hasRuleContent;
     try {
       const lookup = await api.get({ scope, referenceDate }, controller.signal);
       if (controller.signal.aborted || requestGeneration !== generation.current) return;
@@ -190,13 +192,21 @@ export function DailyReflectionAiReview({
         reviewUpdated();
       }
       commitReview(next);
+      shouldPoll = hasRuleContent && (next === null || next.status === "stale" || PENDING_STATUSES.has(next.status));
       if (next?.status === "ready" || next?.status === "failed") {
         reviewUpdated();
       }
     } catch (error) {
-      if (!(error instanceof DOMException && error.name === "AbortError")) setReadError(true);
+      if (!controller.signal.aborted && requestGeneration === generation.current
+        && !(error instanceof DOMException && error.name === "AbortError")) setReadError(true);
     } finally {
-      if (activeRequest.current === controller) activeRequest.current = null;
+      if (activeRequest.current === controller) {
+        activeRequest.current = null;
+        if (shouldPoll && !controller.signal.aborted && requestGeneration === generation.current
+          && document.visibilityState !== "hidden") {
+          pollTimer.current = window.setTimeout(() => void load(requestGeneration), REVIEW_POLL_INTERVAL_MS);
+        }
+      }
     }
   }, [api, clearPoll, commitReview, hasRuleContent, key, referenceDate, reviewUpdated, scope]);
 
@@ -221,23 +231,10 @@ export function DailyReflectionAiReview({
   }, [clearPoll, key, load]);
 
   useEffect(() => {
-    if (!review || !PENDING_STATUSES.has(review.status) || document.visibilityState === "hidden") {
-      clearPoll();
-      return;
-    }
-    clearPoll();
-    pollTimer.current = window.setTimeout(
-      () => void load(generation.current),
-      REVIEW_POLL_INTERVAL_MS
-    );
-    return clearPoll;
-  }, [clearPoll, load, review]);
-
-  useEffect(() => {
     const resume = () => {
       if (
         document.visibilityState === "visible"
-        && (!review || PENDING_STATUSES.has(review.status))
+        && (readError || !review || review.status === "stale" || PENDING_STATUSES.has(review.status))
       ) {
         void load(generation.current);
       } else if (document.visibilityState === "hidden") {
@@ -246,8 +243,12 @@ export function DailyReflectionAiReview({
       }
     };
     document.addEventListener("visibilitychange", resume);
-    return () => document.removeEventListener("visibilitychange", resume);
-  }, [clearPoll, load, review]);
+    window.addEventListener("focus", resume);
+    return () => {
+      document.removeEventListener("visibilitychange", resume);
+      window.removeEventListener("focus", resume);
+    };
+  }, [clearPoll, load, readError, review]);
 
   useLayoutEffect(() => {
     if (anchorTop.current === null || !rulesWrapper.current) return;
@@ -287,16 +288,16 @@ export function DailyReflectionAiReview({
       <div aria-live="polite" className={styles.aiReviewLiveRegion} role="status">
         {visibleStatus?.title ?? (ready ? "AI 深度回看已完成" : "")}
       </div>
-      {visibleStatus ? (
+      {visibleStatus && !readError ? (
         <div className={styles.aiReviewState}>
           <ProductState description={visibleStatus.description} title={visibleStatus.title} />
         </div>
       ) : null}
-      {hasRuleContent && exposureMode === "on" && (review?.status === "failed" || readError) ? (
+      {hasRuleContent && (exposureMode === "on" || exposureMode === null) && (review?.status === "failed" || readError) ? (
         <div className={styles.aiReviewState}>
           <ProductState
-            description="快速回看仍然可用，你不需要等待或重新操作。"
-            title="这次 AI 深度回看暂时没有生成"
+            description={readError ? "正在重新获取最新状态，快速回看仍然可用。" : "快速回看仍然可用，你不需要等待或重新操作。"}
+            title={readError ? "暂时没有读到最新回看" : "这次 AI 深度回看暂时没有生成"}
           />
         </div>
       ) : null}

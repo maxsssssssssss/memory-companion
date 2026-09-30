@@ -73,7 +73,7 @@ import { PUT as updateParticipants } from "./interactions/[interactionId]/partic
 import { PUT as updateRecap } from "./interactions/[interactionId]/recap/route";
 import { PATCH as patchPromise } from "./promises/[promiseId]/route";
 import { GET as searchRelationship } from "./relationships/[relationshipId]/search/route";
-import { DELETE as deleteInteraction } from "./interactions/[interactionId]/route";
+import { DELETE as deleteInteraction, GET as getInteractionDetail } from "./interactions/[interactionId]/route";
 import { GET as getParticipantAudio } from "./interactions/[interactionId]/participants/[speakerId]/audio/route";
 
 const roots: string[] = [];
@@ -124,6 +124,73 @@ describe("Date Companion API isolation", () => {
     const response = await listRelationships(new Request("http://localhost/api/date-companion/relationships"));
     expect(response.status).toBe(401);
     await expect(response.json()).resolves.toEqual({ error: "unauthenticated" });
+  });
+
+  it("serves explicit summary and exact detail with scoped ownership and deletion checks", async () => {
+    const relationship = repository.createOrGetRelationship("user_a").relationship;
+    const imported = repository.importInteraction({ userId: "user_a", relationshipId: relationship.id,
+      sourceUploadId: "upload_detail", recordingDate: "2026-08-04", originalName: "fixture.wav",
+      participants: [], recapCandidates: [] });
+    const full = repository.getRelationshipView("user_a", relationship.id);
+    const callSummary = (userId?: string) => getRelationshipView(new Request(
+      `http://localhost/api/date-companion/relationships/${relationship.id}/view?scope=summary`,
+      { headers: userId ? { "x-test-user": userId } : {} }
+    ), { params: Promise.resolve({ relationshipId: relationship.id }) });
+    expect((await callSummary()).status).toBe(401);
+    expect((await callSummary("user_b")).status).toBe(404);
+    const summary = await callSummary("user_a");
+    expect(summary.status).toBe(200);
+    expect(summary.headers.get("cache-control")).toBe("private, no-store");
+    expect(await summary.json()).toEqual({ summary: repository.getRelationshipSummary("user_a", relationship.id) });
+    const callDetail = (userId?: string, relationshipId: string | null = relationship.id) => getInteractionDetail(new Request(
+      `http://localhost/api/date-companion/interactions/${imported.interactionId}${relationshipId ? `?relationshipId=${relationshipId}` : ""}`,
+      { headers: userId ? { "x-test-user": userId } : {} }
+    ), { params: Promise.resolve({ interactionId: imported.interactionId }) });
+    const anonymous = await callDetail();
+    expect(anonymous.status).toBe(401);
+    expect(anonymous.headers.get("cache-control")).toBe("private, no-store");
+    expect((await callDetail("user_b")).status).toBe(404);
+    expect((await callDetail("user_a", "wrong_relationship")).status).toBe(404);
+    expect((await callDetail("user_a", null)).status).toBe(400);
+    const detail = await callDetail("user_a");
+    expect(detail.status).toBe(200);
+    expect(detail.headers.get("cache-control")).toBe("private, no-store");
+    expect(await detail.json()).toEqual({ interaction: full.interactions[0] });
+    repository.deleteInteraction("user_a", imported.interactionId, 0);
+    const deleted = await callDetail("user_a");
+    expect(deleted.status).toBe(404);
+    expect(deleted.headers.get("cache-control")).toBe("private, no-store");
+  });
+
+  it.each([
+    { label: "anonymous", userId: undefined, invalidId: false, scope: "summary", status: 401 },
+    { label: "invalid relationship id", userId: "user_a", invalidId: true, scope: "summary", status: 400 },
+    { label: "invalid scope", userId: "user_a", invalidId: false, scope: "invalid", status: 400 },
+    { label: "another account", userId: "user_b", invalidId: false, scope: "summary", status: 404 }
+  ])("does not cache a scoped view error for $label", async ({ userId, invalidId, scope, status }) => {
+    const relationship = repository.createOrGetRelationship("user_a").relationship;
+    const relationshipId = invalidId ? "" : relationship.id;
+    const response = await getRelationshipView(new Request(
+      `http://localhost/api/date-companion/relationships/${relationship.id}/view?scope=${scope}`,
+      { headers: userId ? { "x-test-user": userId } : {} }
+    ), { params: Promise.resolve({ relationshipId }) });
+    expect(response.status).toBe(status);
+    expect(response.headers.get("cache-control")).toBe("private, no-store");
+  });
+
+  it("preserves the unscoped full view response contract", async () => {
+    const relationship = repository.createOrGetRelationship("user_a").relationship;
+    const call = (userId?: string) => getRelationshipView(new Request(
+      `http://localhost/api/date-companion/relationships/${relationship.id}/view`,
+      { headers: userId ? { "x-test-user": userId } : {} }
+    ), { params: Promise.resolve({ relationshipId: relationship.id }) });
+    const full = await call("user_a");
+    expect(full.status).toBe(200);
+    expect(full.headers.get("cache-control")).toBeNull();
+    expect(await full.json()).toEqual({ view: repository.getRelationshipView("user_a", relationship.id) });
+    const anonymous = await call();
+    expect(anonymous.status).toBe(401);
+    expect(anonymous.headers.get("cache-control")).toBeNull();
   });
 
   it("creates one relationship and returns 404 for the same id under another user", async () => {

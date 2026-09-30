@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
@@ -85,6 +85,22 @@ beforeEach(() => {
 });
 
 describe("DailyReflectionMemory", () => {
+  it("ignores an aborted detail response after navigating to another memory", async () => {
+    let finishFirst!: (value: { memory: DailyReflectionMemoryView }) => void;
+    const first = new Promise<{ memory: DailyReflectionMemoryView }>((resolve) => { finishFirst = resolve; });
+    const getMemory = vi.fn<DailyReflectionApi["getMemory"]>()
+      .mockImplementationOnce(() => first)
+      .mockResolvedValue({ memory: earlierMemory });
+    const client = api({ getMemory });
+    const view = render(<DailyReflectionMemory api={client} memoryId={memory.id} />);
+    view.rerender(<DailyReflectionMemory api={client} memoryId={earlierMemory.id} />);
+    expect(await screen.findByRole("heading", { name: earlierMemory.title })).toBeVisible();
+    expect(getMemory.mock.calls[0]?.[1]?.aborted).toBe(true);
+    await act(async () => { finishFirst({ memory }); await first; });
+    expect(screen.getByRole("heading", { name: earlierMemory.title })).toBeVisible();
+    expect(screen.queryByRole("heading", { name: memory.title })).not.toBeInTheDocument();
+  });
+
   it("presents durable memories as a recent collection and month-grouped archive", async () => {
     render(<DailyReflectionMemory api={api({
       listMemories: vi.fn(async () => ({ memories: [memory, earlierMemory], total: 2 }))

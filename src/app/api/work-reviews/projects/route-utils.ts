@@ -35,7 +35,8 @@ export function workProjectRouteError(error: unknown) {
     const conflictCodes = new Set([
       "project_name_conflict",
       "project_operation_conflict",
-      "project_link_limit"
+      "project_link_limit",
+      "project_not_archived"
     ]);
     return workProjectPrivateJson(
       { error: error.code },

@@ -97,7 +97,7 @@ describe("Daily Reflection responsive product shell", () => {
     const phoneMedia = css.lastIndexOf("@media (max-width: 620px)");
     const reducedMotion = css.lastIndexOf("@media (prefers-reduced-motion: reduce)");
 
-    expect(css).toMatch(/\.aiReviewReady\s*\{[^}]*display:\s*grid[^}]*border-block:\s*1px solid/u);
+    expect(css).toMatch(/\.aiReviewReady\s*\{[^}]*border:\s*1px solid[^}]*border-radius:[^}]*background:\s*var\(--dr-surface\)/u);
     expect(css).toMatch(/\.aiReviewEvidenceList a\s*\{[^}]*min-height:\s*44px/u);
     expect(css).toMatch(/\.aiReviewSources\s*>\s*summary,[\s\S]*?min-height:\s*44px/u);
     expect(css.slice(phoneMedia, reducedMotion)).toMatch(

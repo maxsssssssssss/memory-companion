@@ -147,10 +147,11 @@ export function WorkProjectsPage({ api: apiOverride }: Readonly<{
   const [editorError, setEditorError] = useState<string | null>(null);
   const [statusDialog, setStatusDialog] = useState<{
     project: WorkProjectRecord;
-    status: "active" | "archived";
+    status: "active" | "archived" | "deleted";
   } | null>(null);
   const [statusError, setStatusError] = useState<string | null>(null);
   const [statusSaving, setStatusSaving] = useState(false);
+  const statusSavingRef = useRef(false);
   const [notice, setNotice] = useState<string | null>(null);
   const operationKeysRef = useRef(new Map<string, string>());
 
@@ -249,6 +250,16 @@ export function WorkProjectsPage({ api: apiOverride }: Readonly<{
           }}
           type="button"
         >{project.status === "active" ? "归档" : "恢复"}</button>
+        {project.status === "archived" && v2Api.deleteProject ? (
+          <button
+            className={workStyles.dangerButton}
+            onClick={() => {
+              setStatusError(null);
+              setStatusDialog({ project, status: "deleted" });
+            }}
+            type="button"
+          >删除</button>
+        ) : null}
       </div>
     </li>
   );
@@ -329,47 +340,66 @@ export function WorkProjectsPage({ api: apiOverride }: Readonly<{
           <div className={styles.dialogActions}>
             <button className={workStyles.secondaryButton} disabled={statusSaving} onClick={() => setStatusDialog(null)} type="button">取消</button>
             <button
-              className={statusDialog?.status === "archived" ? workStyles.dangerButton : workStyles.primaryButton}
+              className={statusDialog?.status === "active" ? workStyles.primaryButton : workStyles.dangerButton}
               disabled={statusSaving}
               onClick={() => {
-                if (!statusDialog) return;
+                if (!statusDialog || statusSavingRef.current) return;
                 const { project, status } = statusDialog;
+                if (status === "deleted" && !v2Api.deleteProject) return;
                 const logicalKey = `status:${project.id}:${project.version}:${status}`;
-                const operationKey = keyFor(logicalKey, status === "archived" ? "archive-project" : "restore-project");
+                statusSavingRef.current = true;
                 setStatusSaving(true);
                 setStatusError(null);
-                void v2Api.updateProject(project.id, {
-                  expectedVersion: project.version,
-                  operationKey,
-                  status
-                }).then((next) => {
+                const mutation = status === "deleted"
+                  ? v2Api.deleteProject!(project.id, { expectedVersion: project.version })
+                  : v2Api.updateProject(project.id, {
+                    expectedVersion: project.version,
+                    operationKey: keyFor(logicalKey, status === "archived" ? "archive-project" : "restore-project"),
+                    status
+                  });
+                void mutation.then((next) => {
                   settle(logicalKey);
-                  replaceProject(next);
+                  if (status === "deleted") {
+                    setProjects((current) => current.filter((value) => value.id !== project.id));
+                  } else if (next) {
+                    replaceProject(next);
+                  }
                   setStatusDialog(null);
-                  setNotice(status === "archived"
+                  setNotice(status === "deleted"
+                    ? "项目已删除；会议、待办和已有周回顾仍然保留。"
+                    : status === "archived"
                     ? "项目已归档；历史会议和待办关联仍然保留。"
                     : "项目已恢复，可以用于新的会议和待办。"
                   );
                 }).catch((error: unknown) => {
                   settle(logicalKey, error);
-                  setStatusError(projectError(error, status === "archived" ? "暂时无法归档项目。" : "暂时无法恢复项目。"));
-                }).finally(() => setStatusSaving(false));
+                  setStatusError(projectError(error, status === "deleted" ? "暂时无法删除项目，请稍后重试。" : status === "archived" ? "暂时无法归档项目。" : "暂时无法恢复项目。"));
+                }).finally(() => {
+                  statusSavingRef.current = false;
+                  setStatusSaving(false);
+                });
               }}
               type="button"
-            >{statusSaving ? "正在保存…" : statusDialog?.status === "archived" ? "确认归档" : "确认恢复"}</button>
+            >{statusSaving ? "正在处理…" : statusDialog?.status === "deleted" ? "确认删除" : statusDialog?.status === "archived" ? "确认归档" : "确认恢复"}</button>
           </div>
         )}
-        onClose={() => setStatusDialog(null)}
+        onClose={() => { if (!statusSavingRef.current) setStatusDialog(null); }}
         open={Boolean(statusDialog)}
-        title={statusDialog?.status === "archived" ? "归档这个项目吗？" : "恢复这个项目吗？"}
+        title={statusDialog?.status === "deleted" ? "删除这个项目吗？" : statusDialog?.status === "archived" ? "归档这个项目吗？" : "恢复这个项目吗？"}
       >
         <div className={styles.statusCopy}>
           <strong>{statusDialog?.project.name}</strong>
-          <p>{statusDialog?.status === "archived"
+          <p>{statusDialog?.status === "deleted"
+            ? "删除后无法恢复。项目与会议、待办的关联将被解除，会议、待办和已有周回顾仍然保留。"
+            : statusDialog?.status === "archived"
             ? "归档后，它不会出现在新的关联选项中；已有会议和待办关联不会被移除。"
             : "恢复后，它会重新出现在新的会议和待办关联选项中。"
           }</p>
           {statusError ? <p className={workStyles.formError} role="alert">{statusError}</p> : null}
+          {statusError ? <button className={workStyles.secondaryButton} disabled={statusSaving} onClick={() => {
+            setStatusDialog(null);
+            setLoadAttempt((value) => value + 1);
+          }} type="button">重新载入项目</button> : null}
         </div>
       </ProductDialog>
     </main>

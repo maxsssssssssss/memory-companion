@@ -101,6 +101,22 @@ function relationshipView() {
 }
 
 describe("date-companion API", () => {
+  it("keeps summary and full interaction reads explicit and account-scoped", async () => {
+    const full = relationshipView();
+    const summary = { ...full, interactions: full.interactions.map(({ recapItems, ...metadata }) => ({
+      ...metadata, promiseRecapItems: []
+    })) };
+    const fetcher = vi.fn().mockResolvedValueOnce(jsonResponse({ summary }))
+      .mockResolvedValueOnce(jsonResponse({ interaction: full.interactions[0] }));
+    const api = createDateCompanionApi(fetcher as typeof fetch);
+    await expect(api.getRelationshipSummary("relationship_1")).resolves.toEqual(summary);
+    await expect(api.getInteractionDetail("relationship_1", "interaction_1")).resolves.toEqual(full.interactions[0]);
+    expect(fetcher).toHaveBeenNthCalledWith(1, "/api/date-companion/relationships/relationship_1/view?scope=summary",
+      expect.objectContaining({ credentials: "same-origin" }));
+    expect(fetcher).toHaveBeenNthCalledWith(2, "/api/date-companion/interactions/interaction_1?relationshipId=relationship_1",
+      expect.objectContaining({ credentials: "same-origin" }));
+  });
+
   it("uses the real cookie session and treats auth 401 as anonymous", async () => {
     const fetcher = vi
       .fn()

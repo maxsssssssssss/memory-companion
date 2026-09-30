@@ -84,6 +84,7 @@ function api(overrides: Partial<WorkReviewV2CoreApi> = {}): WorkReviewApi {
     getProject: vi.fn().mockResolvedValue(currentProject),
     createProject: vi.fn().mockResolvedValue(currentProject),
     updateProject: vi.fn().mockResolvedValue(currentProject),
+    deleteProject: vi.fn().mockResolvedValue(undefined),
     getWeeklyReview: vi.fn(),
     generateWeeklyReview: vi.fn(),
     getWeeklyReviewDetail: vi.fn(),
@@ -102,6 +103,46 @@ function api(overrides: Partial<WorkReviewV2CoreApi> = {}): WorkReviewApi {
 }
 
 describe("Work Review Project UI", () => {
+  it("confirms deletion only for archived projects, allows cancel and waits for server success", async () => {
+    const archived = project({ id: "archived", name: "旧项目", status: "archived" });
+    let finish!: () => void;
+    const deleteProject = vi.fn().mockImplementation(() => new Promise<void>((resolve) => { finish = resolve; }));
+    render(<WorkProjectsPage api={api({ deleteProject, listProjects: vi.fn().mockResolvedValue([project(), archived]) })} />);
+    const row = (await screen.findByText("旧项目")).closest("li")!;
+    expect(within(screen.getByText("Alpha 发布").closest("li")!).queryByRole("button", { name: "删除" })).toBeNull();
+    fireEvent.click(within(row).getByRole("button", { name: "删除" }));
+    expect(screen.getByText(/删除后无法恢复/u)).toHaveTextContent("会议、待办和已有周回顾仍然保留");
+    fireEvent.click(screen.getByRole("button", { name: "取消" }));
+    expect(deleteProject).not.toHaveBeenCalled();
+    fireEvent.click(within(row).getByRole("button", { name: "删除" }));
+    fireEvent.click(screen.getByRole("button", { name: "确认删除" }));
+    expect(deleteProject).toHaveBeenCalledExactlyOnceWith(archived.id, { expectedVersion: archived.version });
+    expect(screen.getByRole("button", { name: "正在处理…" })).toBeDisabled();
+    fireEvent.keyDown(screen.getByRole("dialog"), { key: "Escape" });
+    expect(screen.getByRole("dialog")).toBeVisible();
+    expect(row).toBeVisible();
+    finish();
+    await waitFor(() => expect(screen.queryByText("旧项目")).not.toBeInTheDocument());
+    expect(screen.getByText("项目已删除；会议、待办和已有周回顾仍然保留。")).toBeVisible();
+    expect(screen.getByText("Alpha 发布")).toBeVisible();
+  });
+
+  it.each([
+    [new Error("private database path"), "暂时无法删除项目，请稍后重试。"],
+    [new WorkReviewApiError(409, "version_conflict"), "这个项目已在其他页面更新。请重新载入项目后再操作。"]
+  ])("keeps the project visible after a failed delete and allows a fresh reload", async (error, message) => {
+    const archived = project({ status: "archived" });
+    const listProjects = vi.fn().mockResolvedValue([archived]);
+    render(<WorkProjectsPage api={api({ listProjects, deleteProject: vi.fn().mockRejectedValue(error) })} />);
+    fireEvent.click(await screen.findByRole("button", { name: "删除" }));
+    fireEvent.click(screen.getByRole("button", { name: "确认删除" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent(message as string);
+    expect(screen.getByRole("heading", { name: "Alpha 发布" })).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "重新载入项目" }));
+    await waitFor(() => expect(listProjects).toHaveBeenCalledTimes(2));
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  });
+
   it("closes the project picker before dismissing its parent Todo dialog with Escape", async () => {
     const onClose = vi.fn();
     const onSubmit = vi.fn();

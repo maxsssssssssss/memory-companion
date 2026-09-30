@@ -1199,6 +1199,9 @@ describe("DailyReflectionShellContent", () => {
     })} />);
 
     expect(screen.getByText("这次复盘已经整理好")).toBeVisible();
+    const cardsLink = screen.getByRole("link", { name: "查看卡片" });
+    expect(cardsLink).toHaveAttribute("href", "/reflection/cards");
+    expect(within(cardsLink.parentElement!).getByText("已完成")).toBeVisible();
     expect(screen.getByText("我记住了 2 件事，另有 1 件暂时没有保存。你选择不记 3 件。")).toBeVisible();
     expect(container.textContent).not.toMatch(/Admission|owner|operation/iu);
   });

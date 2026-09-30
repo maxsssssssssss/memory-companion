@@ -46,11 +46,31 @@
 .globalEntryStatus button { min-height: var(--db-touch-target); padding: 0 15px; border: 1px solid var(--db-border-strong); border-radius: var(--db-radius-control); background: var(--db-surface); color: var(--db-accent); cursor: pointer; font: 700 12px/1 var(--db-font-ui); }
 .globalEntryIntro h1 { max-width: 760px; margin: 0; font-family: var(--db-font-display); font-size: clamp(42px, 5vw, 62px); font-weight: 570; letter-spacing: -.045em; line-height: 1.12; text-wrap: balance; }
 .globalEntryIntro p { margin: 16px 0 0; color: var(--db-text-secondary); font-size: 15px; line-height: 1.7; }
-.globalProductGrid { display: grid; width: min(100%, var(--db-workspace-width)); grid-template-columns: repeat(3, minmax(0, 1fr)); margin-inline: auto; gap: 18px; }
+.continueLast { display: inline-flex; align-items: center; min-height: 44px; margin-top: 16px; color: var(--db-text); text-underline-offset: 4px; }
+@media (max-width: 700px) {
+  .globalEntry .globalEntryIntro { padding: 28px 0 20px; }
+  .globalEntry .globalEntryIntro h1 { font-size: 32px; }
+  .globalEntry .globalEntryIntro p { display: none; }
+  .globalEntry .globalProductGrid { gap: 12px; }
+  .globalEntry .globalProductCard, .globalEntry .globalProductUnavailable { min-height: 0; padding: 16px 20px; gap: 8px; grid-template-columns: 38px minmax(0, 1fr); grid-template-rows: auto auto; }
+  .globalEntry .globalProductCard > div, .globalEntry .globalProductUnavailable > div { grid-row: 1; grid-column: 1; }
+  .globalEntry .globalProductCard h2, .globalEntry .globalProductUnavailable h2 { grid-row: 1; grid-column: 2; margin: 0; font-size: 25px; align-self: center; }
+  .globalEntry .globalProductCard p, .globalEntry .globalProductUnavailable p { grid-column: 1 / -1; line-height: 1.65; }
+  .globalEntry .globalProductCard > b { position: absolute; inset: 16px 16px auto auto; min-height: 38px; margin: 0; font-size: 12px; }
+  .globalEntry .globalProductCard > div > small { position: absolute; right: 20px; bottom: 8px; }
+  .globalEntry .globalProductCard:has(small) { padding-bottom: 28px; }
+}
+.globalProductGrid { display: grid; width: min(100%, var(--db-workspace-width)); grid-template-columns: repeat(4, minmax(0, 1fr)); margin-inline: auto; gap: 18px; }
 /* Match each product's current theme without changing shared shell tokens. */
 .globalProductGrid > [data-product="date_companion"] { --entry-accent: #5a4240; --entry-soft: #f0e5e1; }
 .globalProductGrid > [data-product="daily_reflection"] { --entry-accent: #315945; --entry-soft: #e4ece4; }
 .globalProductGrid > [data-product="office_review"] { --entry-accent: #0f6cbd; --entry-soft: #ebf3fc; }
+.globalProductGrid > [data-product="learning_organizer"] { --entry-accent: #90651c; --entry-soft: #f4ebd6; --db-text-muted: #716756; }
+.globalProductGrid > [data-product="learning_organizer"]:is(:hover, :focus-visible) { --entry-accent: #765216; }
+.globalProductGrid > [data-product] { padding-inline: clamp(20px, 2vw, 28px); }
+@media (min-width: 701px) and (max-width: 1050px) {
+  .globalProductGrid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
 .globalProductCard,
 .globalProductUnavailable {
   position: relative;

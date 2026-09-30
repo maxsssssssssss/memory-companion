@@ -5,6 +5,7 @@ import { z } from "zod";
 
 import {
   CreateWorkProjectRequestSchema,
+  DeleteWorkProjectRequestSchema,
   SetWorkResourceProjectsRequestSchema,
   UpdateWorkProjectRequestSchema,
   WorkProjectListStatusSchema,
@@ -13,6 +14,7 @@ import {
   WorkProjectScopeFilterSchema,
   normalizeWorkProjectName,
   type CreateWorkProjectRequest,
+  type DeleteWorkProjectRequest,
   type SetWorkResourceProjectsRequest,
   type UpdateWorkProjectRequest,
   type WorkProject,
@@ -175,7 +177,7 @@ export class WorkProjectRepository {
 
   private projectRow(accountId: string, projectId: string) {
     return this.database.prepare(`
-      SELECT * FROM wr_projects WHERE id = ? AND account_id = ?
+      SELECT * FROM wr_projects WHERE id = ? AND account_id = ? AND deleted_at IS NULL
     `).get(projectId, accountId) as ProjectRow | undefined;
   }
 
@@ -269,7 +271,7 @@ export class WorkProjectRepository {
     const parameters = status === "all" ? [accountId] : [accountId, status];
     return (this.database.prepare(`
       SELECT * FROM wr_projects
-      WHERE account_id = ? ${statusClause}
+      WHERE account_id = ? AND deleted_at IS NULL ${statusClause}
       ORDER BY CASE status WHEN 'active' THEN 0 ELSE 1 END,
         name_key, created_at, id
     `).all(...parameters) as ProjectRow[]).map(projectFromRow);
@@ -431,6 +433,48 @@ export class WorkProjectRepository {
     return run.immediate();
   }
 
+  deleteProject(input: DeleteWorkProjectRequest & { accountId: string; projectId: string }) {
+    const accountId = requireId(input.accountId, "project_invalid_account");
+    const projectId = requireId(input.projectId, "project_invalid_id");
+    const { expectedVersion } = DeleteWorkProjectRequestSchema.parse({ expectedVersion: input.expectedVersion });
+    return this.database.transaction(() => {
+      const row = this.database.prepare(`
+        SELECT version, status, deleted_at FROM wr_projects WHERE id = ? AND account_id = ?
+      `).get(projectId, accountId) as { version: number; status: string; deleted_at: string | null } | undefined;
+      if (!row) throw new WorkProjectNotFoundError("project");
+      // A lost response can be retried without restoring the project or changing resources again.
+      if (row.deleted_at !== null) return { deleted: true as const };
+      if (row.version !== expectedVersion) throw new WorkProjectVersionConflictError(row.version);
+      if (row.status !== "archived") throw new WorkProjectConflictError("project_not_archived");
+      const now = this.now();
+      for (const kind of ["meeting", "todo"] as const) {
+        const links = kind === "meeting" ? "wr_meeting_projects" : "wr_todo_projects";
+        const resources = kind === "meeting" ? "wr_meetings" : "wr_todos";
+        const column = kind === "meeting" ? "meeting_id" : "todo_id";
+        const affected = this.database.prepare(`
+          SELECT ${column} AS id FROM ${links} WHERE account_id = ? AND project_id = ?
+        `).all(accountId, projectId) as Array<{ id: string }>;
+        this.database.prepare(`DELETE FROM ${links} WHERE account_id = ? AND project_id = ?`)
+          .run(accountId, projectId);
+        for (const resource of affected) {
+          this.database.prepare(`
+            UPDATE ${resources} SET version = version + 1, updated_at = ?
+            WHERE account_id = ? AND id = ? AND deleted_at IS NULL
+          `).run(now, accountId, resource.id);
+          markWorkWeeklySourceChangedWithinTransaction(this.database, {
+            accountId, now, ...(kind === "meeting" ? { meetingId: resource.id } : { todoId: resource.id })
+          });
+        }
+      }
+      this.database.prepare(`
+        UPDATE wr_projects SET deleted_at = ?, updated_at = ?, version = version + 1
+        WHERE account_id = ? AND id = ?
+      `).run(now, now, accountId, projectId);
+      markWorkWeeklySourceChangedWithinTransaction(this.database, { accountId, projectId, now });
+      return { deleted: true as const };
+    }).immediate();
+  }
+
   private resourceVersionRow(
     accountId: string,
     resourceId: string,
@@ -469,7 +513,7 @@ export class WorkProjectRepository {
     const placeholders = projectIds.map(() => "?").join(", ");
     const rows = this.database.prepare(`
       SELECT * FROM wr_projects
-      WHERE account_id = ? AND id IN (${placeholders})
+      WHERE account_id = ? AND deleted_at IS NULL AND id IN (${placeholders})
       ORDER BY name_key, id
     `).all(accountId, ...projectIds) as ProjectRow[];
     if (rows.length !== projectIds.length) throw new WorkProjectNotFoundError("project");
@@ -505,6 +549,8 @@ export class WorkProjectRepository {
     }
     this.requireResourceVersionRow(input.accountId, row.target_id, input.resourceKind);
     const response = ProjectLinkOperationResponseSchema.parse(JSON.parse(row.response_json));
+    // Do not replay an old association response after its project was deleted.
+    this.referencesForIds(input.accountId, response.projects.map((project) => project.id));
     return { ...response, reused: true };
   }
 
@@ -659,7 +705,7 @@ export class WorkProjectRepository {
       SELECT p.* FROM ${linkTable} links
       JOIN wr_projects p
         ON p.account_id = links.account_id AND p.id = links.project_id
-      WHERE links.account_id = ? AND links.${idColumn} = ?
+      WHERE links.account_id = ? AND links.${idColumn} = ? AND p.deleted_at IS NULL
       ORDER BY p.name_key, p.id
     `).all(parsedAccountId, parsedResourceId) as ProjectRow[])
       .map((row) => projectReference(projectFromRow(row)));

@@ -12,6 +12,7 @@ import {
   DateCompanionAdapterError
 } from "./date-companion-adapter";
 import { isRealDateCompanionUploadId } from "./date-companion-api";
+import { dateCompanionProactiveSourceRevision } from "./date-companion-proactive-value";
 
 function payloadFixture(): DayPayload {
   return parseDayPayload({
@@ -405,6 +406,24 @@ describe("date-companion adapter", () => {
       "segment_1",
       "segment_2"
     ]);
+  });
+
+  it("preserves homepage promises and their AI source revision in the summary read", () => {
+    const view = relationshipViewFixture();
+    const summary = { ...view, interactions: view.interactions.map(({ recapItems, ...metadata }) => ({
+      ...metadata, promiseRecapItems: recapItems.filter((item) => item.kind === "promise")
+    })) };
+    const options = { retainedSubjects: { ["upload_1\u0000segment_1"]: "both" as const,
+      ["upload_1\u0000segment_2"]: "companion" as const } };
+    const fullVm = applyDateCompanionRelationshipView(emptyDateCompanionViewModel(), view, options);
+    const summaryVm = applyDateCompanionRelationshipView(emptyDateCompanionViewModel(), summary, options);
+    expect(summaryVm.person.promises).toHaveLength(1);
+    expect(summaryVm.person.promises).toEqual(fullVm.person.promises);
+    const revision = (vm: typeof fullVm) => dateCompanionProactiveSourceRevision(
+      vm.person.promises.flatMap((promise) => promise.sources),
+      JSON.stringify(vm.person.promises.map((promise) => [promise.id, promise.status, promise.version, promise.text]))
+    );
+    expect(revision(summaryVm)).toBe(revision(fullVm));
   });
 
   it("uses exact relationship catalog snapshot admission when Memory sources are empty", () => {

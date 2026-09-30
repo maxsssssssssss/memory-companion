@@ -197,6 +197,8 @@ export type TranscriptLineVM = {
 };
 
 export type InteractionVM = {
+  /** False until the canonical single-interaction detail has been fetched. */
+  detailLoaded?: boolean;
   id: string;
   uploadIds: string[];
   recordingDate: string;

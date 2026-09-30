@@ -5,8 +5,8 @@ import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import {
   type ChangeEvent,
   type MutableRefObject,
+  type MouseEvent,
   useEffect,
-  useId,
   useMemo,
   useRef,
   useState
@@ -17,6 +17,7 @@ import {
   ProductState,
   ProductTabs
 } from "@/components/product-system/product-primitives";
+import { ProductPopover } from "@/components/product-system/product-popover";
 import {
   isDefinitiveWorkReviewApiError,
   WorkReviewApiError,
@@ -44,20 +45,6 @@ import styles from "./work-weekly.module.css";
 type LoadState = "idle" | "loading" | "ready" | "error";
 type WeeklyTab = "review" | "qa";
 type ConfirmAction = "regenerate" | "reset" | null;
-type DisplayedGeneration = NonNullable<WorkWeeklyScopeResponse["displayedGeneration"]>;
-
-const PARTIAL_REVIEW_TITLE = "已生成，部分内容待核对";
-const REVIEW_ISSUE_LABELS: Readonly<Record<DisplayedGeneration["reviewIssues"][number]["reasonCode"], string>> = {
-  missing_key_content: "这条来源的重要内容尚未完整纳入回顾。",
-  missing_qualification: "相关表述的前提或限定条件仍需核对。",
-  claim_not_verified: "相关内容尚未通过来源核对，未作为已证实正文展示。",
-  coverage_claim_filtered: "部分相关内容未进入可用正文，请对照来源核对。",
-  coverage_not_applicable_invalid: "这条来源是否需要纳入回顾仍需核对。",
-  source_pack_truncated: "本次使用的来源范围有限，可能遗漏重要内容。",
-  source_history_incomplete: "部分来源历史不完整，仍需补充核对。",
-  source_unavailable: "原来源已不可用，相关事项仍待核对。"
-};
-
 const DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/u;
 const PROCESSING_STATUSES = new Set(["queued", "generating", "verifying"]);
 const SECTION_ORDER: readonly WorkWeeklySectionKind[] = [
@@ -183,32 +170,41 @@ function SourceSummary({ scope, summary }: Readonly<{
   summary: WorkWeeklySourceSummary;
 }>) {
   return (
-    <section aria-labelledby="weekly-source-heading" className={styles.sourceSummary}>
-      <header>
-        <h2 id="weekly-source-heading">来源覆盖范围</h2>
-        <p>以下数字由服务端 Source Snapshot 返回，不是页面估算。</p>
-      </header>
-      <dl>
-        <div><dt>会议</dt><dd>{summary.meetingCount}</dd></div>
-        <div><dt>已确认结果</dt><dd>{summary.findingCount}</dd></div>
-        <div><dt>待办</dt><dd>{summary.todoCount}</dd></div>
-        <div><dt>待办变化</dt><dd>{summary.todoEventCount}</dd></div>
-        <div><dt>原话证据</dt><dd>{summary.evidenceCount}</dd></div>
-        <div><dt>项目</dt><dd>{summary.projectCount}</dd></div>
-        <div><dt>待确认结果</dt><dd>{summary.pendingCandidateCount}</dd></div>
-      </dl>
-      {scope ? (
-        <p className={styles.observedThrough}>
-          {scope.windowComplete
-            ? `数据窗口已完整覆盖这一周；统计截至 ${scope.observedThrough}。`
-            : `当前周数据截至 ${scope.observedThrough}；本周尚未结束。`}
-        </p>
-      ) : null}
-      <p className={styles.coverageDetail}>
-        本次有界输入包含 {summary.includedFindingCount} 项结果、{summary.includedTodoCount} 条待办、
-        {summary.includedTodoEventCount} 条待办变化与 {summary.includedEvidenceCount} 条原话证据。
-        {summary.historyCompleteness === "legacy_limited" ? " 部分旧待办的周内历史有限。" : " 待办历史覆盖完整。"}
-      </p>
+    <section aria-label="来源覆盖范围" className={styles.sourceSummary}>
+      <details className={styles.sourceDetails}>
+        <summary>
+          <span className={styles.sourceMetrics}>
+            <span>会议 <b>{summary.meetingCount}</b></span>
+            <span>待办 <b>{summary.todoCount}</b></span>
+            <span>项目 <b>{summary.projectCount}</b></span>
+            {scope ? <span className={styles.sourceCutoff}>截至 {scope.observedThrough}</span> : null}
+          </span>
+          <span className={styles.disclosureLabel}>来源详情<ChevronDown /></span>
+        </summary>
+        <div className={styles.sourceDetailsBody}>
+          <dl>
+            <div><dt>会议</dt><dd>{summary.meetingCount}</dd></div>
+            <div><dt>已确认结果</dt><dd>{summary.findingCount}</dd></div>
+            <div><dt>待办</dt><dd>{summary.todoCount}</dd></div>
+            <div><dt>待办变化</dt><dd>{summary.todoEventCount}</dd></div>
+            <div><dt>原话证据</dt><dd>{summary.evidenceCount}</dd></div>
+            <div><dt>项目</dt><dd>{summary.projectCount}</dd></div>
+            <div><dt>待确认结果</dt><dd>{summary.pendingCandidateCount}</dd></div>
+          </dl>
+          {scope ? (
+            <p className={styles.observedThrough}>
+              {scope.windowComplete
+                ? `数据窗口已完整覆盖这一周；统计截至 ${scope.observedThrough}。`
+                : `当前周数据截至 ${scope.observedThrough}；本周尚未结束。`}
+            </p>
+          ) : null}
+          <p className={styles.coverageDetail}>
+            本次回顾使用了 {summary.includedFindingCount} 项结果、{summary.includedTodoCount} 条待办、
+            {summary.includedTodoEventCount} 条待办变化与 {summary.includedEvidenceCount} 条原话证据。
+            {summary.historyCompleteness === "legacy_limited" ? " 部分旧待办的周内历史有限。" : " 待办历史覆盖完整。"}
+          </p>
+            </div>
+      </details>
       {summary.truncated ? (
         <p className={styles.capacityWarning} role="status">
           来源超过本次处理容量；服务端未纳入 {summary.omittedFindingCount} 项结果、
@@ -220,14 +216,35 @@ function SourceSummary({ scope, summary }: Readonly<{
   );
 }
 
+function ChevronDown() {
+  return <svg aria-hidden="true" className={styles.chevron} fill="none" viewBox="0 0 16 16"><path d="m4 6 4 4 4-4" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.5" /></svg>;
+}
+
+function focusMenuTrigger(event: MouseEvent<HTMLButtonElement>) {
+  // Keep a stable opener when the menu closes or opens a dialog.
+  const trigger = event.currentTarget.parentElement?.previousElementSibling;
+  if (trigger instanceof HTMLButtonElement) trigger.focus();
+}
+
 function SourceButtons({
+  compact = false,
   onOpenSource,
   sourceRefs
 }: Readonly<{
+  compact?: boolean;
   onOpenSource: (sourceRef: string) => void;
   sourceRefs: readonly string[];
 }>) {
   if (sourceRefs.length === 0) return null;
+  if (compact && sourceRefs.length > 1) {
+    return (
+      <ProductPopover className={styles.actionPopover} label={`查看本条全部来源（${sourceRefs.length}）`} panelClassName={`${styles.actionMenu} ${styles.sourceMenu}`} trigger={<>来源 {sourceRefs.length}<ChevronDown /></>} triggerClassName={styles.textButton}>
+        {sourceRefs.map((sourceRef, index) => (
+          <button data-product-popover-close="true" key={sourceRef} onClick={(event) => { focusMenuTrigger(event); onOpenSource(sourceRef); }} type="button">来源 {index + 1}</button>
+        ))}
+      </ProductPopover>
+    );
+  }
   return (
     <div aria-label="本条来源" className={styles.sourceButtons}>
       {sourceRefs.map((sourceRef, index) => (
@@ -236,36 +253,6 @@ function SourceButtons({
         </button>
       ))}
     </div>
-  );
-}
-
-function PartialReviewNotice({ generation, onOpenSource }: Readonly<{
-  generation: DisplayedGeneration;
-  onOpenSource: (sourceRef: string) => void;
-}>) {
-  const [expanded, setExpanded] = useState(false);
-  const headingId = useId();
-  const issuesId = useId();
-  return (
-    <section aria-labelledby={headingId} className={styles.partialReviewNotice}>
-      <h2 id={headingId}>{PARTIAL_REVIEW_TITLE}</h2>
-      <p>下方是当前可用的回顾内容，仍有缺失或待核对事项；这些提示不作为已证实结论。</p>
-      {generation.reviewIssues.length ? (
-        <>
-          <button aria-controls={issuesId} aria-expanded={expanded} className={styles.textButton} onClick={() => setExpanded((value) => !value)} type="button">
-            {expanded ? "收起待核对事项" : "查看待核对事项"}（{generation.reviewIssues.length}）
-          </button>
-          <ul hidden={!expanded} id={issuesId}>
-            {generation.reviewIssues.map((issue, index) => (
-              <li key={`${issue.reasonCode}:${issue.sourceRef ?? "unavailable"}:${index}`}>
-                <p>{REVIEW_ISSUE_LABELS[issue.reasonCode]}</p>
-                {issue.sourceRef ? <button className={styles.textButton} onClick={() => onOpenSource(issue.sourceRef!)} type="button">查看事项 {index + 1} 的原始记录</button> : null}
-              </li>
-            ))}
-          </ul>
-        </>
-      ) : <p>待核对事项详情暂不可用。</p>}
-    </section>
   );
 }
 
@@ -1094,10 +1081,7 @@ function WorkWeeklyScopePage() {
     if (lines.length === 0) return;
     try {
       if (!navigator.clipboard?.writeText) throw new Error("clipboard_unavailable");
-      const partialNotice = displayedGeneration?.qualityStatus === "needs_review"
-        ? `${PARTIAL_REVIEW_TITLE}\n以下是当前可用内容，仍有缺失或待核对事项。\n\n`
-        : "";
-      await navigator.clipboard.writeText(partialNotice + lines.join("\n").trim());
+      await navigator.clipboard.writeText(lines.join("\n").trim());
       setNotice(successMessage);
       setError(null);
     } catch {
@@ -1170,6 +1154,23 @@ function WorkWeeklyScopePage() {
   ) : review && review.currentSystemVersion > 0 && (displayedGeneration ? displayedGeneration.qualityStatus === "not_assessed" : !latestGeneration || latestGeneration.qualityStatus === "not_assessed") ? (
     <p className={styles.verifierNotice} role="status">{displayedGeneration || latestGeneration ? "这份回顾尚未评估完整性。" : "当前未提供这份回顾的完整性评估状态。"}生成完成或来源已核对，不表示重要内容已完整覆盖。</p>
   ) : null;
+  const reviewActions = review && loadState === "ready" && activeTab === "review" ? (
+    <div aria-label="回顾操作" className={styles.reviewActions}>
+      <div className={styles.copyActions}>
+        <button className={styles.primaryButton} disabled={busyAction !== null || narrativeItems.length === 0} onClick={() => void copy(allSections, "已复制当前可见回顾全文。")} type="button">复制全文</button>
+        <ProductPopover className={styles.actionPopover} label="更多复制方式" panelClassName={styles.actionMenu} trigger={<ChevronDown />} triggerClassName={`${styles.primaryButton} ${styles.copyMoreButton}`}>
+          <button data-product-popover-close="true" disabled={busyAction !== null || !narrativeItems.some((item) => item.section === "decisions")} onClick={(event) => { focusMenuTrigger(event); void copy(decisionsSections, "已复制决定部分。"); }} type="button">只复制决定</button>
+          <button data-product-popover-close="true" disabled={busyAction !== null || !narrativeItems.some((item) => actionSections.includes(item.section as typeof actionSections[number]))} onClick={(event) => { focusMenuTrigger(event); void copy(actionSections, "已复制待办与等待他人部分。"); }} type="button">复制待办与等待他人</button>
+        </ProductPopover>
+      </div>
+      <button className={styles.secondaryButton} disabled={busyAction !== null} onClick={() => setNoteOpen(true)} type="button">增加个人补充</button>
+      <ProductPopover className={styles.actionPopover} label="更多回顾操作" panelClassName={styles.actionMenu} trigger={<svg aria-hidden="true" fill="currentColor" height="18" viewBox="0 0 18 18" width="18"><circle cx="3" cy="9" r="1.25" /><circle cx="9" cy="9" r="1.25" /><circle cx="15" cy="9" r="1.25" /></svg>} triggerClassName={styles.moreButton}>
+        {capabilities.weeklyAi && capabilities.weeklyVerifier ? <button data-product-popover-close="true" disabled={busyAction !== null || generationProcessing} onClick={(event) => { focusMenuTrigger(event); setConfirmAction("regenerate"); }} type="button">重新生成</button> : null}
+        <button data-product-popover-close="true" disabled={busyAction !== null || generationProcessing || review.currentSystemVersion === 0} onClick={(event) => { focusMenuTrigger(event); setConfirmAction("reset"); }} type="button">恢复系统版本</button>
+      </ProductPopover>
+    </div>
+  ) : null;
+
   const reviewPanel = loadState === "idle" || loadState === "loading" ? (
     <ProductState title="正在读取这一周的来源与回顾…" tone="loading" />
   ) : loadState === "error" ? (
@@ -1199,30 +1200,19 @@ function WorkWeeklyScopePage() {
       ) : (
         <>
           {generationNotice}
-          {displayedGeneration?.qualityStatus === "needs_review" ? <PartialReviewNotice generation={displayedGeneration} key={`${review.id}:${displayedGeneration.systemVersion}`} onOpenSource={setActiveSourceRef} /> : null}
           {review.status === "stale" ? (
             <section className={styles.staleNotice} role="status">
               <div><h2>本周来源后来发生变化</h2><p>旧回顾没有被自动覆盖。确认变化后，可以主动重新生成。</p></div>
               {capabilities.weeklyAi && capabilities.weeklyVerifier ? <button className={styles.primaryButton} disabled={busyAction !== null} onClick={() => setConfirmAction("regenerate")} type="button">按最新来源重新生成</button> : null}
             </section>
           ) : null}
-          <div className={styles.reviewActions}>
-            <button className={styles.primaryButton} disabled={busyAction !== null} onClick={() => setNoteOpen(true)} type="button">增加个人补充</button>
-            <button className={styles.secondaryButton} disabled={busyAction !== null || narrativeItems.length === 0} onClick={() => void copy(allSections, "已复制当前可见回顾全文。")} type="button">复制全文</button>
-            <button className={styles.secondaryButton} disabled={busyAction !== null || !narrativeItems.some((item) => item.section === "decisions")} onClick={() => void copy(decisionsSections, "已复制决定部分。")} type="button">只复制决定</button>
-            <button className={styles.secondaryButton} disabled={busyAction !== null || !narrativeItems.some((item) => actionSections.includes(item.section as typeof actionSections[number]))} onClick={() => void copy(actionSections, "已复制待办与等待他人部分。")} type="button">复制待办与等待他人</button>
-            <button className={styles.tertiaryButton} disabled={busyAction !== null || generationProcessing || review.currentSystemVersion === 0} onClick={() => setConfirmAction("reset")} type="button">恢复系统版本</button>
-            {capabilities.weeklyAi && capabilities.weeklyVerifier ? <button className={styles.tertiaryButton} disabled={busyAction !== null || generationProcessing} onClick={() => setConfirmAction("regenerate")} type="button">重新生成</button> : null}
-          </div>
-          <p className={styles.copyBoundary}>复制只使用当前屏幕可见、未失效的服务端 item；不会创建 Todo、Finding 或 Memory。</p>
-          <p className={styles.copyBoundary}>来源核对仅检查原始记录是否支持相关表述，不保证内容质量或决定已最终确认；AI 建议不代表承诺。</p>
-
+          <div aria-label="回顾正文" className={styles.reviewDocument}>
           {SECTION_ORDER.map((section) => {
             const sectionItems = narrativeItems.filter((item) => item.section === section)
               .sort((left, right) => left.sortOrder - right.sortOrder || left.id.localeCompare(right.id));
             if (sectionItems.length === 0) return null;
             return (
-              <section className={styles.weeklySection} key={section}>
+              <section className={styles.weeklySection} data-section={section} key={section}>
                 <header><h2>{SECTION_LABELS[section]}</h2>{section === "next_week" ? <span>AI 建议，不是承诺</span> : null}</header>
                 <ol>
                   {sectionItems.map((item, index) => {
@@ -1237,15 +1227,19 @@ function WorkWeeklyScopePage() {
                           </div>
                         ) : (
                           <>
-                            <div className={styles.itemHeader}><span>{item.origin === "user_note" ? "个人补充" : item.userEditedAt ? "用户编辑" : item.verificationState === "qualified" ? "经限定核对" : "来源已核对"}</span>{item.origin === "gpt" && item.systemVersion !== review.currentSystemVersion ? <small>保留的旧版内容</small> : null}</div>
                             <p>{itemText(item)}</p>
                             <div className={styles.itemFooter}>
-                            <SourceButtons onOpenSource={setActiveSourceRef} sourceRefs={item.sourceRefs} />
+                            <div className={styles.itemMetadata}>
+                              <SourceButtons compact onOpenSource={setActiveSourceRef} sourceRefs={item.sourceRefs} />
+                              <div className={styles.itemHeader}><span>{item.origin === "user_note" ? "个人补充" : item.userEditedAt ? "用户编辑" : item.verificationState === "qualified" ? "经限定核对" : "来源已核对"}</span>{item.origin === "gpt" && item.systemVersion !== review.currentSystemVersion ? <small>保留的旧版内容</small> : null}</div>
+                            </div>
                             <div className={styles.itemActions}>
                               <button className={styles.textButton} disabled={busyAction !== null} onClick={() => { setEditingId(item.id); setEditText(itemText(item)); }} type="button">编辑</button>
-                              {item.origin === "gpt" ? <button className={styles.textButton} disabled={busyAction !== null} onClick={() => void mutateItem(item, { hidden: true }, "这条内容已从当前浏览中隐藏。")} type="button">隐藏</button> : <button className={styles.dangerTextButton} disabled={busyAction !== null} onClick={() => void deleteNote(item)} type="button">删除补充</button>}
-                              <button className={styles.textButton} disabled={busyAction !== null || index === 0} onClick={() => void reorderItem(item, -1)} type="button">上移</button>
-                              <button className={styles.textButton} disabled={busyAction !== null || index === sectionItems.length - 1} onClick={() => void reorderItem(item, 1)} type="button">下移</button>
+                              <ProductPopover className={styles.actionPopover} label="更多条目操作" panelClassName={styles.actionMenu} trigger={<>更多<ChevronDown /></>} triggerClassName={styles.textButton}>
+                                <button data-product-popover-close="true" disabled={busyAction !== null || index === 0} onClick={(event) => { focusMenuTrigger(event); void reorderItem(item, -1); }} type="button">上移</button>
+                                <button data-product-popover-close="true" disabled={busyAction !== null || index === sectionItems.length - 1} onClick={(event) => { focusMenuTrigger(event); void reorderItem(item, 1); }} type="button">下移</button>
+                                {item.origin === "gpt" ? <button data-product-popover-close="true" disabled={busyAction !== null} onClick={(event) => { focusMenuTrigger(event); void mutateItem(item, { hidden: true }, "这条内容已从当前浏览中隐藏。"); }} type="button">隐藏</button> : <button className={styles.menuDanger} data-product-popover-close="true" disabled={busyAction !== null} onClick={(event) => { focusMenuTrigger(event); void deleteNote(item); }} type="button">删除补充</button>}
+                              </ProductPopover>
                             </div>
                             </div>
                           </>
@@ -1258,13 +1252,18 @@ function WorkWeeklyScopePage() {
             );
           })}
           {!hasVisibleSystemContent && (generationProcessing || qualityInsufficient || generationFailed || outcomeUnknown) ? <ProductState description="个人补充与已隐藏内容独立保留；失效或未核验的正文不会恢复显示。" title="当前没有可展示的系统回顾" tone="empty" /> : narrativeItems.length === 0 ? <ProductState description={capabilities.weeklyVerifier ? "当前版本没有可展示的非空区块。" : "只有完成核验的 GPT 内容才会在这里显示。"} title="暂无可展示的回顾内容" tone="empty" /> : null}
+          </div>
           {hiddenItems.length > 0 ? (
-            <section className={styles.hiddenItems}>
-              <h2>已隐藏内容</h2>
+            <details className={styles.hiddenItems}>
+              <summary>已隐藏内容（{hiddenItems.length}）<ChevronDown /></summary>
               <ul>{hiddenItems.map((item) => <li key={item.id}><span>{itemText(item)}</span><button className={styles.textButton} disabled={busyAction !== null} onClick={() => void mutateItem(item, { hidden: false }, "这条内容已恢复显示。")} type="button">恢复</button></li>)}</ul>
-            </section>
+            </details>
           ) : null}
           {invalidatedCount > 0 ? <p className={styles.invalidatedNotice}>{invalidatedCount} 条 GPT 内容因来源失效已隐藏，正文与失效引用不会继续显示。</p> : null}
+          <footer className={styles.reviewFootnote}>
+            <p className={styles.copyBoundary}>复制包含当前可见且有效的回顾内容，保留你的修改。</p>
+            <p className={styles.copyBoundary}>来源核对仅检查原始记录是否支持相关表述，不保证内容质量或决定已最终确认；AI 建议不代表承诺。</p>
+          </footer>
         </>
       )}
     </div>
@@ -1273,8 +1272,8 @@ function WorkWeeklyScopePage() {
   return (
     <main className={styles.page}>
       <header className={styles.pageHeader}>
-        <div><h1>本周回顾</h1><p>把一周内已确认的会议结果、待办变化与原话证据整理在同一个可信范围里。</p></div>
-        {capabilities.projects ? <Link className={styles.manageLink} href="/work-review/projects">管理项目</Link> : null}
+        <div><h1>本周回顾</h1><p>{weekRangeLabel(weekStart)}</p></div>
+        {reviewActions}
       </header>
       <section aria-label="周回顾范围" className={styles.scopeBar}>
         <div className={styles.weekControl}>
@@ -1301,6 +1300,7 @@ function WorkWeeklyScopePage() {
             {archivedProjects.length > 0 ? <optgroup label="已归档项目">{archivedProjects.map((project) => <option key={project.id} value={`project:${project.id}`}>{project.name}（已归档）</option>)}</optgroup> : null}
           </select>
         </label>
+        {capabilities.projects ? <Link className={styles.manageLink} href="/work-review/projects">管理项目</Link> : null}
       </section>
       {!capabilities.projects ? <p className={styles.scopeNotice}>项目能力未开放；页面保持 URL 指定的服务端范围，但不提供项目切换。</p> : null}
       <ProductTabs
