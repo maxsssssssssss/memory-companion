@@ -225,7 +225,7 @@ describe("text framework isolated persistence and generation (mock only)", () =>
     await generated(); expect(repo.view(pageId).runs[0]).toMatchObject({ status: "failed", failure: "framework_save_failed" }); expect(repo.view(pageId).chapters).toHaveLength(0);
     learning.database.exec("DROP TRIGGER fail_framework; DROP TABLE learning_framework_chapters; DROP TABLE learning_framework_runs; PRAGMA user_version=3");
     learning.close(); learning = new LearningRepository(root, "synthetic-owner"); opened.push(learning); repo = new LearningFrameworkRepository(learning);
-    expect(learning.database.pragma("user_version", { simple: true })).toBe(10); expect(learning.source(pageId, materialId).text).toBe(text);
+    expect(learning.database.pragma("user_version", { simple: true })).toBe(11); expect(learning.source(pageId, materialId).text).toBe(text);
     expect(repo.view(pageId)).toEqual({ runs: [], chapters: [], overview: [] });
     learning.close(); const db = new Database(join(root, "learning-organizer.sqlite"));
     db.exec("DROP TABLE learning_framework_chapters; DROP TABLE learning_framework_runs; PRAGMA user_version=3; CREATE VIEW learning_framework_runs AS SELECT 1"); db.close();

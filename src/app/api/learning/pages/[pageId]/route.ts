@@ -1,4 +1,5 @@
 import { cleanupLearningAudioTemp } from "@/lib/server/learning/audio-files";
+import { cleanupLearningPdfSources } from "@/lib/server/learning/pdf-parser-service";
 import { LearningId, LearningSelection } from "@/lib/domain/learning";
 import { learningJson, learningJsonBody, withLearning } from "../../route-utils";
 
@@ -16,6 +17,7 @@ export async function DELETE(request: Request, context: Context) {
     const pageId = LearningId.parse((await context.params).pageId);
     repository.deletePage(pageId);
     await cleanupLearningAudioTemp(repository.accountDataRoot, pageId);
+    await cleanupLearningPdfSources(repository, pageId);
     return learningJson({ deleted: true });
   });
 }

@@ -6,6 +6,8 @@ import { LearningId, LEARNING_PDF_MAX_PAGES, LEARNING_PDF_PARSE_MAX_PAGES } from
 import type { ParsedDocumentResult } from "@/lib/domain/learning-parsed-document";
 import { adaptPaddleServiceResponse, type PaddleServiceFinding } from "./paddle-parsed-adapter";
 import { LearningError, type LearningRepository } from "./repository";
+import { PdfSourceCapability, ensurePdfSource, cleanupDeletedPdfSources, type PdfSourceConnection } from "./pdf-source-transfer";
+import { pdfParserTransport } from "./pdf-source-http";
 
 export const ParsePdfRequest = z.object({ id:LearningId, physicalPages:z.array(z.number().int().positive().max(200)).min(1).max(LEARNING_PDF_PARSE_MAX_PAGES)
   .refine(p=>new Set(p).size===p.length), resumeFrom:LearningId.optional() }).strict();
@@ -17,7 +19,7 @@ const ResumeAutomaticPdfRequest = ParsePdfRequest.extend({
 });
 type PdfParserDependencies = { fetch?: typeof fetch; config?: ReturnType<typeof pdfParserConfig>; resourceWaitMs?: number; now?: () => number; sleep?: (ms: number) => Promise<void> };
 type Checkpoint = { physical_page:number; request_id:string; status:"pending"|"submitted"|"completed"|"failed"|"unknown"|"waiting_resource"; response_json:string|null; request_context_json:string|null };
-type RequestContext = { instance?: string; serviceEpoch?: string; issue?:string; wait?: { reason:"resource_wait"|"busy"; retryAfterSeconds:number; retryAt:string; expiresAt:string } };
+type RequestContext = { instance?: string; serviceEpoch?: string; sourceId?: string; issue?:string; wait?: { reason:"resource_wait"|"busy"; retryAfterSeconds:number; retryAt:string; expiresAt:string } };
 const safeIdentity = z.string().regex(/^[a-zA-Z0-9_.:-]{1,200}$/);
 const serviceEpoch=z.string().regex(/^[a-f0-9]{64}$/),serviceInstance=z.string().regex(/^session-[1-9][0-9]*$/);
 const NotAccepted = z.object({ request_id: safeIdentity, status:z.literal("not_accepted"),accepted:z.literal(false),reason:z.enum(["resource_wait","busy","instance_changed","budget_exhausted","session_expired"]),
@@ -117,15 +119,17 @@ async function boundedParserJson(response: Response,maxBytes=8*1024*1024): Promi
 }
 /** Resolve fresh identity only for direct server connections. No material is
  * uploaded here; an unhealthy/invalid gateway never authorizes a parse request. */
-async function resolvePdfParserInstance(config:ReturnType<typeof pdfParserConfig>,transport:typeof fetch) {
+async function resolvePdfParserInstance(config:ReturnType<typeof pdfParserConfig>,transport:typeof fetch): Promise<ReturnType<typeof pdfParserConfig> & PdfSourceConnection> {
   try{
     const response=await transport(`${config.url}/health`,{headers:{Authorization:`Bearer ${config.token}`},
       redirect:"error",cache:"no-store",signal:AbortSignal.timeout(5000)});
     if(!response.ok)throw new Error("health_unavailable");
     const health=z.object({service_version:z.literal("ocr-pdf-trial-0.1"),resource_policy_version:z.literal("learning-ocr-resource-v1"),
-      ready:z.literal(true),service_epoch:serviceEpoch,instance:serviceInstance}).parse(await boundedParserJson(response,64*1024));
-    return {...config,serviceEpoch:health.service_epoch,instance:health.instance};
-  }catch{throw new LearningError(503,"pdf_parser_unavailable");}
+      ready:z.literal(true),service_epoch:serviceEpoch,instance:serviceInstance,pdf_source_transport:z.unknown().optional()}).parse(await boundedParserJson(response,64*1024));
+    const capability=PdfSourceCapability.safeParse(health.pdf_source_transport);
+    if(!capability.success)throw new LearningError(503,"pdf_source_transport_unavailable");
+    return {...config,serviceEpoch:health.service_epoch,instance:health.instance,sourceTransport:capability.data};
+  }catch(error){if(error instanceof LearningError)throw error;throw new LearningError(503,"pdf_parser_unavailable");}
 }
 /** Explicit resume only. Query an already submitted request under its persisted
  * service epoch; a missing, changed or unfinished result never authorizes POST. */
@@ -166,8 +170,8 @@ async function recoverPdfRequests(repo:LearningRepository,pageId:string,material
 /** One durable claim per physical page; a transport error is unknown, never a retry instruction. */
 async function parseLearningPdfPages(repo:LearningRepository,pageId:string,materialId:string,value:z.infer<typeof ParsePdfRequest>,
   dependencies:PdfParserDependencies) {
-  const original=repo.pdfOriginal(pageId,materialId);
-  const configured=dependencies.config??pdfParserConfig(), transport=dependencies.fetch??fetch;
+  const original=repo.pdfOriginal(pageId,materialId,false);
+  const configured=dependencies.config??pdfParserConfig(), transport=dependencies.fetch??pdfParserTransport;
   const pages=[...value.physicalPages].sort((a,b)=>a-b);
   const now=dependencies.now??Date.now, sleep=dependencies.sleep??(ms=>new Promise(resolve=>setTimeout(resolve,ms)));
   const waitMs=dependencies.resourceWaitMs??10*60*1000;
@@ -183,7 +187,7 @@ async function parseLearningPdfPages(repo:LearningRepository,pageId:string,mater
   }
   // A fresh attempt first records pending pages, so a health failure remains
   // explicitly resumable without pretending any PDF was submitted.
-  let config=value.resumeFrom&&configured.discoverInstance?await resolvePdfParserInstance(configured,transport):configured;
+  let config:ReturnType<typeof pdfParserConfig> & Partial<PdfSourceConnection>=value.resumeFrom?await resolvePdfParserInstance(configured,transport):configured;
   let resume:Checkpoint[]=[];
   if(value.resumeFrom) {
     const prior=repo.getParsedDocument(pageId,value.resumeFrom);
@@ -215,7 +219,7 @@ async function parseLearningPdfPages(repo:LearningRepository,pageId:string,mater
     const unresolved=repo.database.prepare("SELECT physical_page FROM learning_pdf_requests WHERE material_id=? AND status IN ('submitted','unknown')").all(materialId) as Array<{physical_page:number}>;
     if(unresolved.some(r=>pages.includes(r.physical_page)))throw new LearningError(409,"pdf_parser_outcome_unknown");
     const attempt=repo.createParsedDocument(pageId,{id:value.id,materialId,originalSha256:original.material.pdf!.sha256,originalVersion:1,requestedPages:pages,parser:{name:"PaddleOCR",version:"ocr-pdf-trial-0.1"}});
-    for(const physical of pages){const saved=resume.find(r=>r.physical_page===physical&&["completed","waiting_resource"].includes(r.status));
+    for(const physical of pages){const saved=resume.find(r=>r.physical_page===physical&&["completed","waiting_resource","pending"].includes(r.status));
       repo.database.prepare("INSERT INTO learning_pdf_requests(document_id,material_id,page_id,physical_page,request_id,status,response_json,request_context_json) VALUES(?,?,?,?,?,?,?,?)")
         .run(attempt.id,materialId,pageId,physical,saved?.request_id??`${attempt.id}_${physical}`,saved?.status??"pending",saved?.response_json??null,saved?.request_context_json??null);
     }
@@ -235,14 +239,43 @@ async function parseLearningPdfPages(repo:LearningRepository,pageId:string,mater
   const parts:ParsedDocumentResult[]=[];
   let failure=false, resourceDeadline:number|undefined;
   try {
-  if(configured.discoverInstance&&!value.resumeFrom){
+  if(!value.resumeFrom){
     try{config=await resolvePdfParserInstance(configured,transport);}
     catch(error){assertOwner();repo.failParsedDocument(pageId,attempt.id,"parser_error");throw error;}
+  }
+  let sourceId:string|undefined,sourcePreparationFailed=false;
+  if(pages.some(physical=>!resume.some(r=>r.physical_page===physical&&r.status==="completed"&&r.response_json))){
+    try {
+      // Do not upload into a new instance only to reject an old page binding afterwards.
+      for(const prior of resume.filter(r=>r.status!=="completed")){
+        const context=contextOf(prior);
+        if(context.serviceEpoch&&(context.serviceEpoch!==config.serviceEpoch||context.instance!==config.instance))
+          throw new LearningError(409,"pdf_parser_service_changed");
+      }
+      sourceId=await ensurePdfSource(repo,pageId,materialId,config as PdfSourceConnection,transport,
+        {assertOwner,explicitResume:Boolean(value.resumeFrom),now});
+    } catch(error) {
+      assertOwner();
+      const issue=error instanceof LearningError?error.code:"pdf_source_outcome_unknown";
+      // Uploading the original is not submission of any physical page to OCR.
+      repo.database.prepare("UPDATE learning_pdf_requests SET request_context_json=json_set(coalesce(request_context_json,'{}'),'$.issue',?) WHERE document_id=? AND status IN ('pending','waiting_resource')")
+        .run(issue,attempt.id);
+      // Still assemble already saved pages below. The coordinator must receive
+      // this version to bind Continue; unsent pages remain pending, not OCR failures.
+      sourcePreparationFailed=true;failure=true;
+    }
+  } else {
+    // Recovery may have saved the final unknown page before this version was
+    // opened. Retire its already-confirmed handle without uploading again.
+    const used=new Set(resume.map(r=>contextOf(r).sourceId).filter(Boolean));
+    sourceId=repo.listPdfSources(pageId,materialId).find(s=>used.has(s.sourceId)&&s.status==="ready"
+      &&s.serviceUrl===config.url&&s.serviceEpoch===config.serviceEpoch&&s.instance===config.instance)?.sourceId;
   }
   for(const physical of pages) {
     // Recheck ownership/tombstones between pages, and again before each persisted response.
     assertOwner();
     const row=repo.database.prepare("SELECT * FROM learning_pdf_requests WHERE document_id=? AND physical_page=?").get(attempt.id,physical) as Checkpoint;
+    if(sourcePreparationFailed&&row.status!=="completed")continue;
     let raw:unknown; let receivedComplete=false, checkpointSaved=false;
     try {
       if(row.status==="completed"&&row.response_json)raw=JSON.parse(row.response_json);
@@ -289,19 +322,32 @@ async function parseLearningPdfPages(repo:LearningRepository,pageId:string,mater
             continue;
           }
         }
+        context={...context,sourceId,issue:undefined};
         const claimed=repo.database.prepare("UPDATE learning_pdf_requests SET status='submitted',request_context_json=? WHERE document_id=? AND physical_page=? AND status IN ('pending','waiting_resource')").run(JSON.stringify(context),attempt.id,physical).changes;
         if(!claimed)throw new LearningError(409,"pdf_parser_outcome_unknown");
         const response=await transport(`${config.url}/parse-pdf`,{method:"POST",redirect:"error",cache:"no-store",signal:AbortSignal.timeout(4*60*1000),
           headers:{Authorization:`Bearer ${config.token}`,"Content-Type":"application/json"},body:JSON.stringify({request_id:row.request_id,document_id:materialId,
-            pdf_base64:original.bytes!.toString("base64"),sha256:original.material.pdf!.sha256,page_range:{start:physical,end:physical},recognition_profile:"png_nested_formulas",
+            source_id:sourceId,sha256:original.material.pdf!.sha256,page_range:{start:physical,end:physical},recognition_profile:"png_nested_formulas",
             ...context.serviceEpoch?{expected_service_epoch:context.serviceEpoch,expected_instance:context.instance}:{}})});
         // Bound response memory. No returned error body is exposed or logged.
         raw=await boundedParserJson(response);
+        const sourceRejected=z.object({accepted:z.literal(false),error:z.enum(["transport_busy","source_not_found","source_not_ready","source_deleted","source_expired","source_binding_mismatch"]),
+          request_id:safeIdentity,document_id:LearningId,sha256:z.string(),pages:z.array(z.number().int().positive()).length(1),service_epoch:serviceEpoch,instance:serviceInstance}).safeParse(raw);
+        if(!response.ok&&response.status>=400&&response.status<500&&sourceRejected.success
+          &&sourceRejected.data.request_id===row.request_id&&sourceRejected.data.document_id===materialId
+          &&sourceRejected.data.sha256===original.material.pdf!.sha256&&sourceRejected.data.pages[0]===physical
+          &&sourceRejected.data.service_epoch===context.serviceEpoch&&sourceRejected.data.instance===context.instance){
+          assertOwner();
+          const issue=sourceRejected.data.error==="transport_busy"?"pdf_parser_busy":"pdf_source_unavailable";
+          repo.database.prepare("UPDATE learning_pdf_requests SET status='pending',request_context_json=? WHERE document_id=? AND physical_page=? AND status='submitted'")
+            .run(JSON.stringify({...context,issue}),attempt.id,physical);
+          throw new LearningError(409,issue);
+        }
         // Headers alone are not a complete receipt. Keep the server result
         // available for explicit recovery when the response body was interrupted.
         // Direct server requests must finish under the identity saved before
         // upload. A mismatched success is unknown, not a receipt safe to publish/delete.
-        if(response.ok&&config.discoverInstance){
+        if(response.ok){
           const identity=raw as {request_id?:string;service_epoch?:string;instance?:string};
           if(identity.request_id!==row.request_id||identity.service_epoch!==context.serviceEpoch||identity.instance!==context.instance)
             throw new LearningError(409,"pdf_parser_outcome_unknown");
@@ -374,11 +420,26 @@ async function parseLearningPdfPages(repo:LearningRepository,pageId:string,mater
   assertOwner();
   if(success.length){
     const first=parts[0];
-    repo.completeParsedDocument(pageId,attempt.id,{...first,coverage:{requested_pages:pages,succeeded_pages:succeeded,failed_pages:failed},pages:[...success,...failed.map(p=>({physical_page:p,printed_label:null,parser_page_index:p-1,parse_status:"failed",failure_code:"parser_error",render:null,issues:[],reading_order:{block_ids:[],origin:"No successful response",reviews:[]},blocks:[]}))]});
+    repo.database.transaction(()=>{
+      assertOwner();
+      repo.completeParsedDocument(pageId,attempt.id,{...first,coverage:{requested_pages:pages,succeeded_pages:succeeded,failed_pages:failed},pages:[...success,...failed.map(p=>({physical_page:p,printed_label:null,parser_page_index:p-1,parse_status:"failed",failure_code:"parser_error",render:null,issues:[],reading_order:{block_ids:[],origin:"No successful response",reviews:[]},blocks:[]}))]});
+      // Retire before releasing the writer lock, so a successor cannot reuse a
+      // handle that this completed attempt is about to remove. Partial/unknown
+      // attempts retain their upload for explicit continuation.
+      if(sourceId&&!failed.length)repo.retirePdfSource(pageId,materialId,sourceId);
+    }).immediate();
   }else repo.failParsedDocument(pageId,attempt.id,failure?"parser_error":"invalid_output");
   return {document:repo.getParsedDocument(pageId,attempt.id),progress:pdfParseProgress(repo,pageId,attempt.id)};
   } finally {
     clearInterval(heartbeat);
     repo.database.prepare("UPDATE learning_parsed_documents SET pdf_execution_token=NULL,pdf_execution_lease_until=0 WHERE id=? AND pdf_execution_token=?").run(attempt.id,token);
+    await cleanupDeletedPdfSources(repo,pageId,materialId,configured,transport);
   }
+}
+
+/** Deletion already committed before this best-effort, account-scoped cleanup. */
+export async function cleanupLearningPdfSources(repo:LearningRepository,pageId:string,materialId?:string){
+  if(!repo.listPdfSourcesPendingCleanup(pageId,materialId).length)return;
+  try{await cleanupDeletedPdfSources(repo,pageId,materialId,pdfParserConfig());}
+  catch{/* Missing configuration retains the metadata-only cleanup intent. */}
 }

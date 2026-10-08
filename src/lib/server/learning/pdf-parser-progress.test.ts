@@ -8,8 +8,8 @@ import type { LearningPdfMetadata } from "@/lib/domain/learning";
 import type { ParsedDocument, ParsedDocumentResult } from "@/lib/domain/learning-parsed-document";
 import { syntheticLearningPdf } from "../../../../scripts/fixtures/learning-pdf.mjs";
 import { LearningRepository } from "./repository";
-import { parseLearningPdf, parseLearningPdfAutomatically, pdfParseProgress } from "./pdf-parser-service";
-import { resumeLearningPdfPreparation } from "./upload-preparation";
+import { parseLearningPdf as parsePdfService, parseLearningPdfAutomatically as parsePdfAutomatically, pdfParseProgress } from "./pdf-parser-service";
+import { prepareLearningUpload, resumeLearningPdfPreparation } from "./upload-preparation";
 import { listLearningPreparations, resumeLearningPreparation, startLearningPreparation } from "./preparation-service";
 import { inspectLearningPdfReadiness } from "./pdf-readiness";
 
@@ -34,8 +34,75 @@ const bytes = syntheticLearningPdf({ pages: 3 }), sha = createHash("sha256").upd
 const metadata: LearningPdfMetadata = { sha256: sha, originalVersion: 1, parsing: "not_parsed", pageCount: 3,
   pages: [1, 2, 3].map(physicalPage => ({ physicalPage, width: 600, height: 800, rotation: 0, view: [0, 0, 600, 800], userUnit: 1 })) };
 const config = { url: "http://127.0.0.1:1", token: "SYNTHETIC", findings: [] };
+const sourceCapability = { version: "v1", upload_method: "PUT", max_bytes: 67108864, max_sources: 8,
+  max_total_bytes: 536870912, ttl_seconds: 7200, upload_timeout_seconds: 600 };
+type SourceReceipt = { source_id:string; document_id:string; sha256:string; bytes:number; physical_page_count:number;
+  service_epoch:string; instance:string; status:string; created_at:string; expires_at:string };
+const remoteSources = new Map<string, SourceReceipt>();
+let sourceCalls: Array<{ method:string; path:string; bytes:number }>, pageBodies: Record<string, unknown>[];
+// Only transport setup is shared. The existing handlers still decide every
+// page outcome, interrupted body, resource admission and recovery response.
+function sourceTransport(handler:typeof fetch, settings:NonNullable<Parameters<typeof parsePdfService>[4]>["config"] = config):typeof fetch {
+  let initialHealth = true;
+  let identity = { service_epoch: settings?.serviceEpoch ?? "e".repeat(64), instance: settings?.instance ?? "session-1" };
+  return async (url, init) => {
+    const pathname = new URL(String(url)).pathname, method = init?.method ?? "GET";
+    if (pathname.endsWith("/health")) {
+      if (initialHealth && !settings?.discoverInstance) {
+        initialHealth = false;
+        return Response.json({ ...identity, ready:true, service_version:"ocr-pdf-trial-0.1", resource_policy_version:"learning-ocr-resource-v1",
+          pdf_source_transport:sourceCapability, admission:{accepting:true}, active_request:null });
+      }
+      initialHealth = false;
+      const response = await handler(url, init);
+      if (!response.ok) return response;
+      const body = await response.clone().json();
+      identity = { service_epoch:body.service_epoch ?? identity.service_epoch, instance:body.instance ?? identity.instance };
+      return Response.json({ service_version:"ocr-pdf-trial-0.1",resource_policy_version:"learning-ocr-resource-v1",pdf_source_transport:sourceCapability,...body }, {status:response.status});
+    }
+    const source = /\/pdf-sources\/([^/]+)$/u.exec(pathname);
+    if (source) {
+      const headers = new Headers(init?.headers);
+      expect(headers.get("authorization")).toBe(`Bearer ${settings?.token}`);
+      expect(init?.redirect).toBe("error");
+      const binary = method === "PUT" ? Buffer.from(await new Response(init?.body).arrayBuffer()) : Buffer.alloc(0);
+      sourceCalls.push({method,path:pathname,bytes:binary.length});
+      if (method === "PUT") {
+        const material = headers.get("X-OCR-Document-ID")!;
+        const original = repo.pdfOriginal(pageId, material);
+        expect(binary.equals(original.bytes!)).toBe(true);
+        expect(headers.get("content-length")).toBe(String(binary.length));
+        expect(headers.get("X-OCR-SHA256")).toBe(original.material.pdf!.sha256);
+        expect(headers.get("X-OCR-Service-Epoch")).toBe(identity.service_epoch);
+        expect(headers.get("X-OCR-Instance")).toBe(identity.instance);
+        const receipt = {source_id:source[1],document_id:material,sha256:original.material.pdf!.sha256,bytes:binary.length,
+          physical_page_count:original.material.pdf!.pageCount,...identity,status:"ready",created_at:new Date().toISOString(),expires_at:new Date(Date.now()+7200000).toISOString()};
+        remoteSources.set(source[1],receipt); return Response.json(receipt);
+      }
+      const receipt = remoteSources.get(source[1]);
+      if (!receipt) return Response.json({error:"source_not_found"},{status:404});
+      if (method === "DELETE") {remoteSources.delete(source[1]);return Response.json({...receipt,status:"deleted"});}
+      return Response.json(receipt);
+    }
+    if (method === "POST" && pathname.endsWith("/parse-pdf")) {
+      const body = JSON.parse(init!.body as string);
+      pageBodies.push(body);
+      expect(body.pdf_base64).toBeUndefined(); expect(body.source_id).toEqual(expect.any(String));
+      expect(remoteSources.get(body.source_id)).toMatchObject({document_id:body.document_id,sha256:body.sha256,status:"ready"});
+      const response = await handler(url, init);
+      if (!response.ok) return response;
+      let value:Record<string,unknown>;
+      try {value=await response.clone().json();} catch {return response;}
+      return Response.json({request_id:body.request_id,...identity,...value},{status:response.status});
+    }
+    return handler(url, init);
+  };
+}
+const parseLearningPdf:typeof parsePdfService = (r,p,m,value,deps={}) => parsePdfService(r,p,m,value,{...deps,fetch:sourceTransport(deps.fetch ?? fetch,deps.config)});
+const parseLearningPdfAutomatically:typeof parsePdfAutomatically = (r,p,m,value,deps={}) => parsePdfAutomatically(r,p,m,value,{...deps,fetch:sourceTransport(deps.fetch ?? fetch,deps.config)});
 let root: string, repo: LearningRepository, pageId: string, materialId: string;
 beforeEach(() => {
+  remoteSources.clear(); sourceCalls=[]; pageBodies=[];
   root = mkdtempSync(join(tmpdir(), "synthetic-learning-pdf-progress-")); repo = new LearningRepository(root, "synthetic-owner");
   pageId = randomUUID(); materialId = randomUUID(); repo.create({ id: pageId, title: "SYNTHETIC" });
   repo.saveMaterials(pageId, [{ id: materialId, title: "SYNTHETIC", kind: "pdf", filename: "synthetic.pdf", bytes, pdf: metadata }]);
@@ -45,10 +112,132 @@ afterEach(() => { expect(fetch).not.toHaveBeenCalled(); vi.unstubAllGlobals(); r
 const input = () => ({ id: randomUUID(), physicalPages: [1, 2, 3] });
 const epochConfig={...config,serviceEpoch:"e".repeat(64),instance:"session-1"};
 const readyHealth=()=>Response.json({service_epoch:epochConfig.serviceEpoch,instance:epochConfig.instance,ready:true,admission:{accepting:true},active_request:null});
+it("uploads the unchanged original once for three bounded page requests and duplicate starts do not upload again",async()=>{
+  const request=input();
+  const transport:typeof fetch=async()=>Response.json({});
+  const result=await parseLearningPdf(repo,pageId,materialId,request,{config,fetch:transport});
+  expect(result.progress.map(p=>p.status)).toEqual(["completed","completed","completed"]);
+  expect(sourceCalls.filter(c=>c.method==="PUT")).toEqual([{method:"PUT",path:expect.stringMatching(/^\/pdf-sources\//u),bytes:bytes.length}]);
+  expect(pageBodies).toHaveLength(3);
+  expect(new Set(pageBodies.map(p=>p.source_id)).size).toBe(1);
+  expect(pageBodies.map(p=>p.page_range)).toEqual([{start:1,end:1},{start:2,end:2},{start:3,end:3}]);
+  for(const body of pageBodies){expect(body).not.toHaveProperty("pdf_base64");expect(Buffer.byteLength(JSON.stringify(body))).toBeLessThan(1024);}
+  const before={sources:sourceCalls.length,pages:pageBodies.length};
+  await parseLearningPdf(repo,pageId,materialId,request,{config,fetch:transport});
+  expect({sources:sourceCalls.length,pages:pageBodies.length}).toEqual(before);
+});
+it("keeps every page pending when original upload outcome is unknown and resumes by its existing handle",async()=>{
+  const request=input(),pageHandler=vi.fn(async()=>Response.json({}));
+  const transport=sourceTransport(pageHandler,config);
+  let uploads=0;
+  const first=await parsePdfService(repo,pageId,materialId,request,{config,fetch:async(u,i)=>{
+    const response=await transport(u,i);
+    if(i?.method==="PUT"){uploads++;throw new Error("SYNTHETIC upload receipt lost");}
+    return response;
+  }});
+  expect(first.document.status).toBe("failed");
+  expect(first.progress.every(p=>p.issue==="pdf_source_outcome_unknown")).toBe(true);
+  expect(pdfParseProgress(repo,pageId,request.id).map(p=>p.status)).toEqual(["pending","pending","pending"]);
+  expect(pageHandler).not.toHaveBeenCalled();expect(pageBodies).toHaveLength(0);expect(uploads).toBe(1);
+  const originalSource=repo.listPdfSources(pageId,materialId)[0];expect(originalSource.status).toBe("unknown");
+  repo.close();repo=new LearningRepository(root,"synthetic-owner");
+  const result=await parseLearningPdf(repo,pageId,materialId,{...input(),resumeFrom:request.id},{config,fetch:pageHandler});
+  expect(result.progress.map(p=>p.status)).toEqual(["completed","completed","completed"]);
+  expect(sourceCalls.filter(c=>c.method==="PUT")).toHaveLength(1);
+  expect(sourceCalls.filter(c=>c.method==="GET")).toHaveLength(1);
+  expect(pageBodies.every(p=>p.source_id===originalSource.sourceId)).toBe(true);
+});
+it("rejects a missing source transport capability before upload or page submission",async()=>{
+  const request=input(),transport=vi.fn(async()=>Response.json({service_epoch:epochConfig.serviceEpoch,instance:epochConfig.instance,
+    ready:true,service_version:"ocr-pdf-trial-0.1",resource_policy_version:"learning-ocr-resource-v1"}));
+  await expect(parsePdfService(repo,pageId,materialId,request,{config,fetch:transport})).rejects.toThrow("pdf_source_transport_unavailable");
+  expect(transport).toHaveBeenCalledTimes(1);
+  expect(pdfParseProgress(repo,pageId,request.id).map(p=>p.status)).toEqual(["pending","pending","pending"]);
+  expect(repo.listPdfSources(pageId,materialId)).toEqual([]);
+});
 function notAccepted(request: {request_id:string;document_id:string;sha256:string;page_range:{start:number}}) {
   return {request_id:request.request_id,document_id:request.document_id,sha256:request.sha256,pages:[request.page_range.start],
     status:"not_accepted",accepted:false,reason:"resource_wait",retry_after_seconds:1,instance:epochConfig.instance,service_epoch:epochConfig.serviceEpoch};
 }
+it.each(["transport_busy","source_expired"])("keeps a fully bound 4xx %s receipt pending without automatic resubmission",async error=>{
+  const request=input(),sleep=vi.fn(),transport=vi.fn(async(_u:unknown,init?:RequestInit)=>{
+    const body=JSON.parse(init!.body as string);
+    return Response.json({accepted:false,error,request_id:body.request_id,document_id:body.document_id,sha256:body.sha256,
+      pages:[body.page_range.start],service_epoch:epochConfig.serviceEpoch,instance:epochConfig.instance},{status:409});
+  });
+  const result=await parseLearningPdf(repo,pageId,materialId,request,{config:epochConfig,fetch:transport,sleep});
+  expect(result.progress.map(p=>p.status)).toEqual(["pending","pending","pending"]);
+  expect(result.progress[0].issue).toBe(error==="transport_busy"?"pdf_parser_busy":"pdf_source_unavailable");
+  expect(transport).toHaveBeenCalledTimes(1);expect(pageBodies).toHaveLength(1);expect(sleep).not.toHaveBeenCalled();
+  await parseLearningPdf(repo,pageId,materialId,request,{config:epochConfig,fetch:transport,sleep});
+  expect(pageBodies).toHaveLength(1);
+});
+it.each(["request_id","document_id","sha256","pages","service_epoch","instance"])("keeps a 4xx non-admission receipt with mismatched %s unknown",async field=>{
+  const sleep=vi.fn(),transport=vi.fn(async(_u:unknown,init?:RequestInit)=>{
+    const body=JSON.parse(init!.body as string),receipt:Record<string,unknown>={accepted:false,error:"transport_busy",request_id:body.request_id,
+      document_id:body.document_id,sha256:body.sha256,pages:[body.page_range.start],service_epoch:epochConfig.serviceEpoch,instance:epochConfig.instance};
+    receipt[field]=field==="pages"?[2]:field==="request_id"?"another-request":field==="document_id"?randomUUID():field==="instance"?"session-2":"d".repeat(64);
+    return Response.json(receipt,{status:409});
+  });
+  const result=await parseLearningPdf(repo,pageId,materialId,input(),{config:epochConfig,fetch:transport,sleep});
+  expect(result.progress.map(p=>p.status)).toEqual(["unknown","pending","pending"]);
+  expect(transport).toHaveBeenCalledTimes(1);expect(sleep).not.toHaveBeenCalled();
+  expect(sourceCalls.filter(c=>c.method==="DELETE")).toHaveLength(0);
+});
+it("rejects a resumed resource wait under a new service identity before another original upload, keeping prior successful pages",async()=>{
+  const request=input();
+  const first=await parseLearningPdf(repo,pageId,materialId,request,{config:epochConfig,resourceWaitMs:0,fetch:async(_u,init)=>{
+    if(init?.method==="DELETE")return Response.json({deleted:true});
+    const body=JSON.parse(init!.body as string);
+    return body.page_range.start===2?Response.json(notAccepted(body),{status:503}):Response.json({});
+  }});
+  expect(first.progress.map(p=>p.status)).toEqual(["completed","waiting_resource","pending"]);
+  const saved=repo.getParsedDocument(pageId,first.document.id),uploads=sourceCalls.filter(c=>c.method==="PUT").length,posts=pageBodies.length;
+  repo.close();repo=new LearningRepository(root,"synthetic-owner");
+  const next={...input(),resumeFrom:first.document.id};
+  const result=await parseLearningPdf(repo,pageId,materialId,next,{config:{...epochConfig,serviceEpoch:"d".repeat(64),instance:"session-2"},
+    fetch:vi.fn(async()=>{throw new Error("SYNTHETIC no new page allowed");})});
+  expect(result.document.coverage).toMatchObject({succeeded_pages:[1],failed_pages:[2,3]});
+  expect(sourceCalls.filter(c=>c.method==="PUT")).toHaveLength(uploads);expect(pageBodies).toHaveLength(posts);
+  expect(repo.getParsedDocument(pageId,first.document.id)).toEqual(saved);
+  expect(pdfParseProgress(repo,pageId,next.id)).toEqual(expect.arrayContaining([expect.objectContaining({physical_page:2,status:"waiting_resource",issue:"pdf_parser_service_changed"})]));
+  expect(repo.pdfOriginal(pageId,materialId).bytes!.equals(bytes)).toBe(true);
+});
+it("cleans the remote source only after all requested pages are published while keeping the local original and results",async()=>{
+  const request=input(),transport=sourceTransport(async()=>Response.json({}),config);
+  let deletedAfterPublication=false;
+  const result=await parsePdfService(repo,pageId,materialId,request,{config,fetch:async(u,i)=>{
+    if(i?.method==="DELETE"&&String(u).includes("/pdf-sources/")){
+      expect(repo.getParsedDocument(pageId,request.id).coverage?.succeeded_pages).toEqual([1,2,3]);
+      expect(pdfParseProgress(repo,pageId,request.id).map(p=>p.status)).toEqual(["completed","completed","completed"]);
+      deletedAfterPublication=true;
+    }
+    return transport(u,i);
+  }});
+  expect(deletedAfterPublication).toBe(true);expect(result.document.status).toBe("completed");
+  expect(sourceCalls.filter(c=>c.method==="DELETE")).toHaveLength(1);expect(remoteSources.size).toBe(0);
+  expect(repo.listPdfSourcesPendingCleanup(pageId,materialId)).toEqual([]);
+  expect(repo.pdfOriginal(pageId,materialId).bytes!.equals(bytes)).toBe(true);
+  repo.close();repo=new LearningRepository(root,"synthetic-owner");
+  expect(repo.getParsedDocument(pageId,request.id)).toEqual(result.document);
+  expect(repo.pdfOriginal(pageId,materialId).bytes!.equals(bytes)).toBe(true);
+});
+it.each(["failed","unknown"])("retains the remote source for a partially completed run ending in %s",async ending=>{
+  const result=await parseLearningPdf(repo,pageId,materialId,input(),{config,fetch:async(_u,init)=>{
+    if(init?.method==="DELETE")return Response.json({deleted:true});
+    const body=JSON.parse(init!.body as string);
+    if(body.page_range.start===2){
+      if(ending==="unknown")throw new Error("SYNTHETIC lost page receipt");
+      return Response.json({request_id:body.request_id,status:"failed"},{status:503});
+    }
+    return Response.json({});
+  }});
+  expect(result.progress.map(p=>p.status)).toEqual(["completed",ending,"pending"]);
+  expect(result.document.coverage?.succeeded_pages).toEqual([1]);
+  expect(sourceCalls.filter(c=>c.method==="DELETE")).toHaveLength(0);expect(remoteSources.size).toBe(1);
+  expect(repo.listPdfSources(pageId,materialId)[0].status).toBe("ready");
+  expect(repo.pdfOriginal(pageId,materialId).bytes!.equals(bytes)).toBe(true);
+});
 it("waits only after a bound non-admission receipt, keeps the same request ID, and duplicate starts cannot own its lease",async()=>{
   let clock=Date.now(),waiting=false;const request=input(),posts:string[]=[];
   const transport:typeof fetch=async(_url,init)=>{
@@ -252,10 +441,15 @@ it("keeps attempted failure and later pending pages distinct, then resumes only 
   const first = await parseLearningPdf(repo, pageId, materialId, input(), { config, fetch: transport });
   expect(first.progress.map(p => p.status)).toEqual(["completed", "failed", "pending"]);
   expect(first.document.coverage).toMatchObject({ succeeded_pages: [1], failed_pages: [2, 3] });
+  const sourceId=pageBodies[0].source_id;
+  repo.close();repo=new LearningRepository(root,"synthetic-owner");
   failing = false;
   const second = await parseLearningPdf(repo, pageId, materialId, { ...input(), resumeFrom: first.document.id }, { config, fetch: transport });
   expect(second.progress.map(p => p.status)).toEqual(["completed", "completed", "completed"]);
   expect(posts).toEqual([1, 2, 2, 3]);
+  expect(sourceCalls.filter(c=>c.method==="PUT")).toHaveLength(1);
+  expect(sourceCalls.filter(c=>c.method==="GET")).toHaveLength(1);
+  expect(pageBodies.every(p=>p.source_id===sourceId)).toBe(true);
   expect(pdfParseProgress(repo, pageId, first.document.id).map(p => p.status)).toEqual(["completed", "failed", "pending"]);
 });
 it("primary Continue resumes the original range, rebinds only its new parser version, and never reparses completed pages",async()=>{
@@ -277,6 +471,84 @@ it("primary Continue resumes the original range, rebinds only its new parser ver
   expect(repo.get(pageId).materials[0].pdfStudy?.documentId).toBe(latest.id);expect(repo.source(pageId,materialId).paragraphs).toHaveLength(3);
   expect(framework).not.toHaveBeenCalled();expect(overview).not.toHaveBeenCalled();
   repo.close();repo=new LearningRepository(root,"synthetic-owner");expect(listLearningPreparations(repo,pageId).at(-1)?.status).toBe("completed");expect(posts).toHaveLength(4);
+});
+it("Continue rebinds each pending upload attempt, then queries the same handle ready without losing the preparation or page request IDs",async()=>{
+  let lookup=0,rejectHealth=false;
+  const pageHandler=vi.fn(async()=>Response.json({}));
+  const parser:typeof parsePdfService=(r,p,m,value)=>{
+    const transport=sourceTransport(pageHandler,config);
+    return parsePdfService(r,p,m,value,{config,fetch:async(u,i)=>{
+      if(rejectHealth&&String(u).endsWith("/health"))return Response.json({ready:true,service_epoch:epochConfig.serviceEpoch,
+        instance:epochConfig.instance,service_version:"ocr-pdf-trial-0.1",resource_policy_version:"learning-ocr-resource-v1"});
+      const response=await transport(u,i);
+      if(i?.method==="PUT")throw new Error("SYNTHETIC upload response lost");
+      if((i?.method??"GET")==="GET"&&String(u).includes("/pdf-sources/")){
+        lookup++;
+        if(lookup===1)return Response.json({...await response.json(),status:"uploading"});
+      }
+      return response;
+    }});
+  };
+  const jobs:Promise<void>[]=[],keep=(job:Promise<void>)=>jobs.push(job),framework=vi.fn(),overview=vi.fn();
+  const prepare:typeof prepareLearningUpload=(r,p,ids,alive)=>prepareLearningUpload(r,p,ids,alive,{
+    pdfConfig:()=>config,pdf:parser,
+    audioConfig:()=>{throw new Error("SYNTHETIC no audio configured");},
+    audio:async()=>{throw new Error("SYNTHETIC audio forbidden");}
+  });
+  const resumePdf=(r:LearningRepository,p:string,m:string)=>resumeLearningPdfPreparation(r,p,m,parser);
+  const deps={prepare,inspect:inspectLearningPdfReadiness,framework,overview,resumePdf};
+  const binding=()=>JSON.parse((repo.database.prepare("SELECT binding_json FROM learning_preparation_runs WHERE id=?").get(run.id) as {binding_json:string}).binding_json)[0].documentId;
+  const run=startLearningPreparation(repo,pageId,[materialId],keep,deps,"prepare");await Promise.all(jobs.splice(0));
+  const first=repo.listParsedDocuments(pageId,materialId).at(-1)!;
+  expect(first.status).toBe("failed");expect(binding()).toBe(first.id);
+  const requestIds=pdfParseProgress(repo,pageId,first.id).map(p=>p.request_id);
+  expect(listLearningPreparations(repo,pageId).at(-1)).toMatchObject({status:"needs_attention",canResume:true});
+  expect(pageBodies).toHaveLength(0);
+  resumeLearningPreparation(repo,pageId,{id:run.id},keep,deps);await Promise.all(jobs.splice(0));
+  const waiting=repo.listParsedDocuments(pageId,materialId).at(-1)!;
+  expect(waiting.id).not.toBe(first.id);expect(waiting.status).toBe("failed");expect(binding()).toBe(waiting.id);
+  expect(pdfParseProgress(repo,pageId,waiting.id).map(p=>p.request_id)).toEqual(requestIds);
+  expect(listLearningPreparations(repo,pageId).at(-1)).toMatchObject({status:"needs_attention",canResume:true});
+  expect(pageBodies).toHaveLength(0);expect(sourceCalls.filter(c=>c.method==="PUT")).toHaveLength(1);
+  rejectHealth=true;
+  resumeLearningPreparation(repo,pageId,{id:run.id},keep,deps);await Promise.all(jobs.splice(0));
+  expect(binding()).toBe(waiting.id);expect(repo.listParsedDocuments(pageId,materialId).at(-1)!.id).toBe(waiting.id);
+  expect(listLearningPreparations(repo,pageId).at(-1)).toMatchObject({status:"needs_attention",canResume:true,error:"pdf_source_transport_unavailable"});
+  expect(pageBodies).toHaveLength(0);expect(lookup).toBe(1);
+  rejectHealth=false;
+  resumeLearningPreparation(repo,pageId,{id:run.id},keep,deps);await Promise.all(jobs.splice(0));
+  const complete=repo.getParsedDocument(pageId,repo.listParsedDocuments(pageId,materialId).at(-1)!.id);
+  expect(complete.status).toBe("completed");
+  expect(binding()).toBe(complete.id);expect(complete.coverage?.succeeded_pages).toEqual([1,2,3]);
+  expect(pdfParseProgress(repo,pageId,complete.id).map(p=>p.request_id)).toEqual(requestIds);
+  expect(pageBodies.map(p=>p.request_id)).toEqual(requestIds);expect(lookup).toBe(2);
+  expect(sourceCalls.filter(c=>c.method==="PUT")).toHaveLength(1);
+  expect(listLearningPreparations(repo,pageId).at(-1)).toMatchObject({status:"completed",error:null});
+  expect(framework).not.toHaveBeenCalled();expect(overview).not.toHaveBeenCalled();
+});
+it("retires the original source after recovering an unknown final page without another upload or parse request",async()=>{
+  const request=input();
+  const first=await parseLearningPdf(repo,pageId,materialId,request,{config:epochConfig,fetch:async(_u,i)=>{
+    if(i?.method==="DELETE")return Response.json({deleted:true});
+    const body=JSON.parse(i!.body as string);
+    if(body.page_range.start===3)throw new Error("SYNTHETIC final page response lost");
+    return Response.json({});
+  }});
+  expect(first.progress.map(p=>p.status)).toEqual(["completed","completed","unknown"]);
+  const originalSource=repo.listPdfSources(pageId,materialId)[0].sourceId;
+  expect(sourceCalls.filter(c=>c.method==="DELETE")).toHaveLength(0);
+  const recovery:string[]=[];
+  const result=await parseLearningPdf(repo,pageId,materialId,{...input(),resumeFrom:request.id},{config:epochConfig,fetch:async(u,i)=>{
+    recovery.push(`${i?.method??"GET"} ${new URL(String(u)).pathname}`);
+    expect(i?.method??"GET").toBe("GET");
+    const identity={request_id:`${request.id}_3`,service_epoch:epochConfig.serviceEpoch,instance:epochConfig.instance};
+    return Response.json(String(u).endsWith("/result")?identity:{...identity,document_id:materialId,sha256:sha,pages:[3],status:"completed",publishable:true});
+  }});
+  expect(result.document.coverage?.succeeded_pages).toEqual([1,2,3]);
+  expect(recovery).toEqual([`GET /requests/${request.id}_3`,`GET /requests/${request.id}_3/result`]);
+  expect(pageBodies).toHaveLength(3);expect(sourceCalls.filter(c=>c.method==="PUT")).toHaveLength(1);
+  expect(sourceCalls.filter(c=>c.method==="DELETE")).toEqual([{method:"DELETE",path:`/pdf-sources/${originalSource}`,bytes:0}]);
+  expect(remoteSources.size).toBe(0);expect(repo.pdfOriginal(pageId,materialId).bytes!.equals(bytes)).toBe(true);
 });
 it("explicit available-parts consent does not turn into an OCR resume",async()=>{
   await parseLearningPdf(repo,pageId,materialId,input(),{config,fetch:async(_u,init)=>{
@@ -304,13 +576,17 @@ it("marks a full response rejected by adaptation failed instead of falsely compl
   const result = await parseLearningPdf(repo, pageId, materialId, input(), { config, fetch: transport });
   expect(result.document.status).toBe("failed");
   expect(result.progress.map(p => p.status)).toEqual(["failed", "pending", "pending"]);
-  expect(repo.database.prepare("SELECT response_json FROM learning_pdf_requests WHERE document_id=? AND physical_page=1").get(result.document.id)).toEqual({ response_json: JSON.stringify({ invalid: true }) });
+  const saved=repo.database.prepare("SELECT response_json FROM learning_pdf_requests WHERE document_id=? AND physical_page=1").get(result.document.id) as {response_json:string};
+  expect(JSON.parse(saved.response_json)).toMatchObject({invalid:true});
   expect(calls).toEqual(["POST", "DELETE"]);
 });
 it("keeps network outcome unknown and never replays the request or allows an unsafe resume", async () => {
   const transport = vi.fn(async () => { throw new Error("SYNTHETIC transport timeout"); }), request = input();
   const result = await parseLearningPdf(repo, pageId, materialId, request, { config, fetch: transport });
   expect(result.progress.map(p => p.status)).toEqual(["unknown", "pending", "pending"]);
+  // Historical records without a service identity cannot be upgraded into
+  // authority to submit the same page again under the new source transport.
+  repo.database.prepare("UPDATE learning_pdf_requests SET request_context_json=NULL WHERE document_id=?").run(request.id);
   await parseLearningPdf(repo, pageId, materialId, request, { config, fetch: transport });
   await expect(parseLearningPdf(repo, pageId, materialId, { ...input(), resumeFrom: request.id }, { config, fetch: transport })).rejects.toThrow("pdf_parser_outcome_unknown");
   expect(transport).toHaveBeenCalledTimes(1);

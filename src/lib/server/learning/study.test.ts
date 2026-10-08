@@ -33,7 +33,7 @@ it("keeps schema5 materials/framework/notes and adds only learning-owned tables"
   const before=framework.view(page),source=learning.source(page,ids[0]);
   learning.database.exec("DROP TABLE learning_answer_notes; DROP TABLE learning_node_turns; DROP TABLE learning_node_conversations; DROP TABLE learning_overview_runs; PRAGMA user_version=5");learning.close();
   learning=new LearningRepository(root,"owner");framework=new LearningFrameworkRepository(learning);
-  expect(learning.database.pragma("user_version",{simple:true})).toBe(10);expect(framework.view(page)).toEqual(before);expect(learning.source(page,ids[0])).toEqual(source);expect(learning.database.pragma("foreign_key_check")).toEqual([]);
+  expect(learning.database.pragma("user_version",{simple:true})).toBe(11);expect(framework.view(page)).toEqual(before);expect(learning.source(page,ids[0])).toEqual(source);expect(learning.database.pragma("foreign_key_check")).toEqual([]);
 });
 it("uses actual material paragraphs for cross-batch relations, commits together and preserves all old edits",async()=>{
   batch(2);const c=framework.view(page).chapters[0];framework.edit(page,{kind:"node",chapterId:c.id,nodeId:c.nodes[0].id,revision:0,title:"用户标题",explanation:"用户解释",note:"不应成为模型上下文的笔记"});const before=framework.view(page);

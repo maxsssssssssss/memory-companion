@@ -266,7 +266,7 @@ describe("ParsedDocument draft sync: recording and necessary conditions only", (
       region: { space: "displayed-page-normalized-top-left", x: 0.1, y: 0.2, width: 0.5, height: 0.25 }, quality: { status: "verified", reason: "No review proof" } }] }));
     const json = JSON.stringify(legacy); repo.database.prepare("UPDATE learning_parsed_documents SET status='completed',result_json=?,result_hash=? WHERE id=?").run(json, createHash("sha256").update(json).digest("hex"), d.id);
     repo.database.exec("ALTER TABLE learning_parsed_documents DROP COLUMN requested_pages; PRAGMA user_version = 2"); repo.close(); repo = second();
-    expect(repo.database.pragma("user_version", { simple: true })).toBe(10);
+    expect(repo.database.pragma("user_version", { simple: true })).toBe(11);
     const saved = repo.getParsedDocument(pageId, d.id); expect(saved.contractVersion).toBe("legacy/1"); expect(saved.pages![0].blocks[0].quality.status).toBe("unverified");
     expect(saved.pages![0].parser_page_index).toBeNull(); expect(saved.pages![0].blocks[0].content.raw).toBe(legacy[0].blocks[0].content);
     expect(repo.database.prepare("SELECT result_json FROM learning_parsed_documents WHERE id=?").get(d.id)).toEqual({ result_json: json }); expect(repo.pdfOriginal(pageId, materialId).bytes).toEqual(bytes);

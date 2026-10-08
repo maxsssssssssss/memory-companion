@@ -86,7 +86,7 @@ describe("PDF original authority and stage-1 migration", () => {
     expect(() => repository.saveMaterials(pageId, [{ ...text(), id: deleted }])).toThrow("material_deleted");
     expect(repository.saveMaterials(pageId, [pdf()]).materialCount).toBe(2);
     repository.close(); repository = new LearningRepository(root, "synthetic-a"); open.push(repository);
-    expect(repository.database.pragma("user_version", { simple: true })).toBe(10);
+    expect(repository.database.pragma("user_version", { simple: true })).toBe(11);
     expect(repository.get(pageId).materials[0].selected).toBe(true);
   });
 });

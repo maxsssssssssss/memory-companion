@@ -8,7 +8,7 @@ import { LearningFrameworkRepository } from "./framework-repository";
 import { LearningQuizRepository } from "./quiz-repository";
 import { LearningRepository } from "./repository";
 import { inspectLearningPdf } from "./pdf-inspect";
-import { parseLearningPdf, pdfParseProgress, pdfParserConfig } from "./pdf-parser-service";
+import { parseLearningPdf as parsePdfService, pdfParseProgress, pdfParserConfig } from "./pdf-parser-service";
 import { adaptPaddleServiceResponse } from "./paddle-parsed-adapter";
 
 // Actual delivered HTTP evidence, replayed offline. NOT a new HTTP/OCR success.
@@ -19,7 +19,72 @@ let metadata:Awaited<ReturnType<typeof inspectLearningPdf>>;
 beforeAll(async()=>{metadata=await inspectLearningPdf(bytes);},30000);
 let root:string,repo:LearningRepository,page:string,material:string;
 const config={url:"http://127.0.0.1:12345",token:"SYNTHETIC_NOT_A_KEY",findings:[]};
-beforeEach(async()=>{root=mkdtempSync(join(tmpdir(),"learning-real-handoff-replay-"));repo=new LearningRepository(root,"isolated-a");page=randomUUID();material=randomUUID();repo.create({id:page,title:"OFFLINE HANDOFF REPLAY"});
+const sourceCapability = { version: "v1", upload_method: "PUT", max_bytes: 67108864, max_sources: 8,
+  max_total_bytes: 536870912, ttl_seconds: 7200, upload_timeout_seconds: 600 };
+type SourceReceipt = { source_id:string; document_id:string; sha256:string; bytes:number; physical_page_count:number;
+  service_epoch:string; instance:string; status:string; created_at:string; expires_at:string };
+const remoteSources = new Map<string, SourceReceipt>();
+let sourceCalls: Array<{ method:string; path:string; bytes:number }>, pageBodies: Record<string, unknown>[];
+// Only transport setup is shared. The existing handlers still decide every
+// page outcome, interrupted body, resource admission and recovery response.
+function sourceTransport(handler:typeof fetch, settings:NonNullable<Parameters<typeof parsePdfService>[4]>["config"] = config):typeof fetch {
+  let initialHealth = true;
+  let identity = { service_epoch: settings?.serviceEpoch ?? "e".repeat(64), instance: settings?.instance ?? "session-1" };
+  return async (url, init) => {
+    const pathname = new URL(String(url)).pathname, method = init?.method ?? "GET";
+    if (pathname.endsWith("/health")) {
+      if (initialHealth && !settings?.discoverInstance) {
+        initialHealth = false;
+        return Response.json({ ...identity, ready:true, service_version:"ocr-pdf-trial-0.1", resource_policy_version:"learning-ocr-resource-v1",
+          pdf_source_transport:sourceCapability, admission:{accepting:true}, active_request:null });
+      }
+      initialHealth = false;
+      const response = await handler(url, init);
+      if (!response.ok) return response;
+      const body = await response.clone().json();
+      identity = { service_epoch:body.service_epoch ?? identity.service_epoch, instance:body.instance ?? identity.instance };
+      return Response.json({ service_version:"ocr-pdf-trial-0.1",resource_policy_version:"learning-ocr-resource-v1",pdf_source_transport:sourceCapability,...body }, {status:response.status});
+    }
+    const source = /\/pdf-sources\/([^/]+)$/u.exec(pathname);
+    if (source) {
+      const headers = new Headers(init?.headers);
+      expect(headers.get("authorization")).toBe(`Bearer ${settings?.token}`);
+      expect(init?.redirect).toBe("error");
+      const binary = method === "PUT" ? Buffer.from(await new Response(init?.body).arrayBuffer()) : Buffer.alloc(0);
+      sourceCalls.push({method,path:pathname,bytes:binary.length});
+      if (method === "PUT") {
+        const material = headers.get("X-OCR-Document-ID")!;
+        const original = repo.pdfOriginal(page, material);
+        expect(binary.equals(original.bytes!)).toBe(true);
+        expect(headers.get("content-length")).toBe(String(binary.length));
+        expect(headers.get("X-OCR-SHA256")).toBe(original.material.pdf!.sha256);
+        expect(headers.get("X-OCR-Service-Epoch")).toBe(identity.service_epoch);
+        expect(headers.get("X-OCR-Instance")).toBe(identity.instance);
+        const receipt = {source_id:source[1],document_id:material,sha256:original.material.pdf!.sha256,bytes:binary.length,
+          physical_page_count:original.material.pdf!.pageCount,...identity,status:"ready",created_at:new Date().toISOString(),expires_at:new Date(Date.now()+7200000).toISOString()};
+        remoteSources.set(source[1],receipt); return Response.json(receipt);
+      }
+      const receipt = remoteSources.get(source[1]);
+      if (!receipt) return Response.json({error:"source_not_found"},{status:404});
+      if (method === "DELETE") {remoteSources.delete(source[1]);return Response.json({...receipt,status:"deleted"});}
+      return Response.json(receipt);
+    }
+    if (method === "POST" && pathname.endsWith("/parse-pdf")) {
+      const body = JSON.parse(init!.body as string);
+      pageBodies.push(body);
+      expect(body.pdf_base64).toBeUndefined(); expect(body.source_id).toEqual(expect.any(String));
+      expect(remoteSources.get(body.source_id)).toMatchObject({document_id:body.document_id,sha256:body.sha256,status:"ready"});
+      const response = await handler(url, init);
+      if (!response.ok) return response;
+      let value:Record<string,unknown>;
+      try {value=await response.clone().json();} catch {return response;}
+      return Response.json({request_id:body.request_id,...identity,...value},{status:response.status});
+    }
+    return handler(url, init);
+  };
+}
+const parseLearningPdf:typeof parsePdfService = (r,p,m,value,deps={}) => parsePdfService(r,p,m,value,{...deps,fetch:sourceTransport(deps.fetch ?? fetch,deps.config)});
+beforeEach(async()=>{remoteSources.clear();sourceCalls=[];pageBodies=[];root=mkdtempSync(join(tmpdir(),"learning-real-handoff-replay-"));repo=new LearningRepository(root,"isolated-a");page=randomUUID();material=randomUUID();repo.create({id:page,title:"OFFLINE HANDOFF REPLAY"});
   const pdf=metadata;repo.saveMaterials(page,[{id:material,title:"Delivered public PDF",kind:"pdf",filename:"source.pdf",bytes,pdf}]);});
 afterEach(()=>{repo.close();rmSync(root,{recursive:true,force:true});});
 function transport(edit?:(v:any)=>void){return vi.fn(async(_url:unknown,init?:RequestInit)=>{if(init?.method==="DELETE")return Response.json({deleted:true});const request=JSON.parse(init!.body as string),v=structuredClone(delivered);v.request_id=request.request_id;v.document.document_id=material;edit?.(v);return Response.json(v);}) as unknown as typeof fetch;}

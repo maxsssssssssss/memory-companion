@@ -4,8 +4,9 @@ import Database from "better-sqlite3";
 import { createHash } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
+import { z } from "zod";
 import {
-  CreateLearningPage, LearningBatch, LearningSelection, LEARNING_BATCH_MAX_BYTES,
+  CreateLearningPage, LearningBatch, LearningSelection, LearningId, LEARNING_BATCH_MAX_BYTES,
   LEARNING_TEXT_MAX_BYTES, LEARNING_AUDIO_MAX_BYTES, LEARNING_AUDIO_BATCH_MAX_BYTES, LEARNING_AUDIO_MAX_SECONDS, LEARNING_PDF_MAX_BYTES, LEARNING_PDF_BATCH_MAX_BYTES, LEARNING_PDF_MAX_PAGES, learningParagraphs,
   type LearningAudioMetadata, type LearningParagraph, type LearningMaterial, type LearningPage, type LearningPageSummary, type LearningSource, type LearningPdfMetadata
 } from "@/lib/domain/learning";
@@ -35,6 +36,46 @@ type MaterialRow = {
   original: Buffer | null; fingerprint: string | null; created_at: string; selected: number; deleted_at: string | null;
   pdf_metadata: string | null; audio_metadata: string | null;
 };
+
+const PdfSourceStatusSchema = z.enum(["pending", "uploading", "unknown", "ready", "failed", "expired"]);
+export type PdfSourceStatus = z.infer<typeof PdfSourceStatusSchema>;
+export type PdfSourceRecord = {
+  sourceId: string; pageId: string; materialId: string; sha256: string; originalVersion: number;
+  serviceUrl: string; serviceEpoch: string; instance: string; status: PdfSourceStatus;
+  byteSize: number; pageCount: number; expiresAt: string | null; deleteRequested: boolean;
+  remoteCleanup: "pending" | "deleted" | "failed" | null; createdAt: string; updatedAt: string;
+};
+const CreatePdfSourceSchema = z.object({
+  sourceId: LearningId, materialId: LearningId, sha256: z.string().regex(/^[a-f0-9]{64}$/u),
+  originalVersion: z.number().int().positive(), byteSize: z.number().int().positive().max(LEARNING_PDF_MAX_BYTES),
+  pageCount: z.number().int().positive().max(LEARNING_PDF_MAX_PAGES),
+  serviceUrl: z.string().max(2048).refine(value => {
+    try {
+      const url = new URL(value);
+      return (url.protocol === "https:" || (url.protocol === "http:" && url.hostname === "127.0.0.1"))
+        && !url.username && !url.password && !url.search && !url.hash;
+    } catch { return false; }
+  }),
+  serviceEpoch: z.string().regex(/^[a-f0-9]{64}$/u), instance: z.string().regex(/^session-[1-9][0-9]*$/u)
+}).strict();
+export type CreatePdfSourceInput = z.infer<typeof CreatePdfSourceSchema>;
+const UpdatePdfSourceSchema = z.object({
+  expectedStatus: z.union([PdfSourceStatusSchema, z.array(PdfSourceStatusSchema).min(1)]),
+  status: PdfSourceStatusSchema, expiresAt: z.string().datetime({ offset: true }).nullable().optional()
+}).strict();
+type PdfSourceRow = {
+  source_id: string; page_id: string; material_id: string; sha256: string; original_version: number;
+  service_url: string; service_epoch: string; instance: string; status: PdfSourceStatus;
+  byte_size: number; page_count: number; expires_at: string | null; delete_requested: number;
+  remote_cleanup: PdfSourceRecord["remoteCleanup"]; created_at: string; updated_at: string;
+};
+function pdfSourceView(row: PdfSourceRow): PdfSourceRecord {
+  return { sourceId: row.source_id, pageId: row.page_id, materialId: row.material_id, sha256: row.sha256,
+    originalVersion: row.original_version, serviceUrl: row.service_url, serviceEpoch: row.service_epoch,
+    instance: row.instance, status: row.status, byteSize: row.byte_size, pageCount: row.page_count,
+    expiresAt: row.expires_at, deleteRequested: Boolean(row.delete_requested), remoteCleanup: row.remote_cleanup,
+    createdAt: row.created_at, updatedAt: row.updated_at };
+}
 type ParsedDocumentRow = {
   id: string; page_id: string; material_id: string; version: number; parser_name: string; parser_version: string;
   original_sha256: string | null; created_at: string; updated_at: string; status: ParsedDocument["status"];
@@ -93,7 +134,7 @@ export class LearningRepository {
     this.database.pragma("journal_mode = DELETE");
     this.database.pragma("synchronous = FULL");
     try { this.database.transaction(() => {
-      if (Number(this.database.pragma("user_version", { simple: true })) > 10) throw new Error("unsupported_learning_schema");
+      if (Number(this.database.pragma("user_version", { simple: true })) > 11) throw new Error("unsupported_learning_schema");
       this.database.exec(`
       CREATE TABLE IF NOT EXISTS learning_pages (
         id TEXT PRIMARY KEY, account_id TEXT NOT NULL, title TEXT NOT NULL,
@@ -179,8 +220,21 @@ export class LearningRepository {
       this.database.exec(`CREATE TABLE IF NOT EXISTS learning_pdf_requests (document_id TEXT NOT NULL REFERENCES learning_parsed_documents(id), material_id TEXT NOT NULL, page_id TEXT NOT NULL, physical_page INTEGER NOT NULL, request_id TEXT NOT NULL, status TEXT NOT NULL, response_json TEXT, remote_cleanup TEXT, PRIMARY KEY(document_id,physical_page));`);
       if (!(this.database.pragma("table_info(learning_pdf_requests)") as Array<{name:string}>).some(c=>c.name==="remote_cleanup")) this.database.exec("ALTER TABLE learning_pdf_requests ADD COLUMN remote_cleanup TEXT");
       if (!(this.database.pragma("table_info(learning_pdf_requests)") as Array<{name:string}>).some(c=>c.name==="request_context_json")) this.database.exec("ALTER TABLE learning_pdf_requests ADD COLUMN request_context_json TEXT");
+      // A source is a remote upload receipt, never another copy of the PDF. Keep
+      // its deletion intent after material removal so cleanup can survive restart.
+      this.database.exec(`CREATE TABLE IF NOT EXISTS learning_pdf_sources (
+        source_id TEXT PRIMARY KEY, page_id TEXT NOT NULL REFERENCES learning_pages(id), material_id TEXT NOT NULL,
+        sha256 TEXT NOT NULL, original_version INTEGER NOT NULL CHECK(original_version > 0),
+        service_url TEXT NOT NULL, service_epoch TEXT NOT NULL, instance TEXT NOT NULL,
+        status TEXT NOT NULL CHECK(status IN ('pending','uploading','unknown','ready','failed','expired')),
+        byte_size INTEGER NOT NULL CHECK(byte_size > 0), page_count INTEGER NOT NULL CHECK(page_count > 0),
+        expires_at TEXT, delete_requested INTEGER NOT NULL DEFAULT 0 CHECK(delete_requested IN (0,1)),
+        remote_cleanup TEXT CHECK(remote_cleanup IN ('pending','deleted','failed')),
+        created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS learning_pdf_source_material ON learning_pdf_sources(page_id,material_id);`);
       this.database.exec(LEARNING_GENERATION_SCHEMA);
-      this.database.pragma("user_version = 10");
+      this.database.pragma("user_version = 11");
     }).immediate(); this.database.pragma("foreign_keys = ON"); } catch (error) { this.database.close(); throw error; }
   }
   close() { this.database.close(); }
@@ -330,6 +384,118 @@ export class LearningRepository {
       if (row.kind !== "pdf" || !row.pdf_metadata) throw new LearningError(404, "pdf_not_found");
       return { material: materialView(row), ...(includeBytes ? { bytes: row.original! } : {}) };
     })();
+  }
+
+  /** Reserve a client-owned upload ID before HTTP. Replays must match every binding. */
+  createPdfSource(pageId: string, input: CreatePdfSourceInput): PdfSourceRecord {
+    const value = CreatePdfSourceSchema.parse(input);
+    return this.database.transaction(() => {
+      const { material } = this.pdfOriginal(LearningId.parse(pageId), value.materialId, false);
+      const pdf = material.pdf!;
+      if (pdf.sha256 !== value.sha256 || pdf.originalVersion !== value.originalVersion
+        || material.byteLength !== value.byteSize || pdf.pageCount !== value.pageCount) throw new LearningError(409, "source_changed");
+      const old = this.database.prepare("SELECT * FROM learning_pdf_sources WHERE source_id=?").get(value.sourceId) as PdfSourceRow | undefined;
+      if (old) {
+        if (old.page_id !== pageId || old.material_id !== value.materialId || old.sha256 !== value.sha256
+          || old.original_version !== value.originalVersion || old.byte_size !== value.byteSize || old.page_count !== value.pageCount
+          || old.service_url !== value.serviceUrl || old.service_epoch !== value.serviceEpoch || old.instance !== value.instance) {
+          throw new LearningError(409, "submission_conflict");
+        }
+        if (old.delete_requested) throw new LearningError(410, "material_deleted");
+        return pdfSourceView(old);
+      }
+      const timestamp = new Date().toISOString();
+      this.database.prepare(`INSERT INTO learning_pdf_sources
+        (source_id,page_id,material_id,sha256,original_version,service_url,service_epoch,instance,status,
+         byte_size,page_count,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,'pending',?,?,?,?)`)
+        .run(value.sourceId, pageId, value.materialId, value.sha256, value.originalVersion, value.serviceUrl,
+          value.serviceEpoch, value.instance, value.byteSize, value.pageCount, timestamp, timestamp);
+      return this.getPdfSource(pageId, value.materialId, value.sourceId);
+    }).immediate();
+  }
+
+  private pdfSourceRow(pageId: string, materialId: string, sourceId: string, cleanup = false): PdfSourceRow {
+    this.pageRow(LearningId.parse(pageId), cleanup);
+    const row = this.database.prepare("SELECT * FROM learning_pdf_sources WHERE source_id=? AND page_id=? AND material_id=?")
+      .get(LearningId.parse(sourceId), pageId, LearningId.parse(materialId)) as PdfSourceRow | undefined;
+    if (!row) throw new LearningError(404, "pdf_source_not_found");
+    if (cleanup) {
+      if (!row.delete_requested) throw new LearningError(409, "pdf_source_cleanup_not_requested");
+      return row;
+    }
+    if (row.delete_requested) throw new LearningError(410, "material_deleted");
+    const { material } = this.pdfOriginal(pageId, materialId, false);
+    if (material.pdf!.sha256 !== row.sha256 || material.pdf!.originalVersion !== row.original_version
+      || material.byteLength !== row.byte_size || material.pdf!.pageCount !== row.page_count) throw new LearningError(409, "source_changed");
+    return row;
+  }
+
+  getPdfSource(pageId: string, materialId: string, sourceId: string): PdfSourceRecord {
+    return this.database.transaction(() => pdfSourceView(this.pdfSourceRow(pageId, materialId, sourceId)))();
+  }
+
+  listPdfSources(pageId: string, materialId: string): PdfSourceRecord[] {
+    return this.database.transaction(() => {
+      this.pdfOriginal(LearningId.parse(pageId), LearningId.parse(materialId), false);
+      const rows = this.database.prepare("SELECT source_id FROM learning_pdf_sources WHERE page_id=? AND material_id=? AND delete_requested=0 ORDER BY created_at,rowid")
+        .all(pageId, materialId) as Array<{ source_id: string }>;
+      return rows.map(row => pdfSourceView(this.pdfSourceRow(pageId, materialId, row.source_id)));
+    })();
+  }
+
+  /** Compare-and-set under the same write lock as material deletion. */
+  updatePdfSource(pageId: string, materialId: string, sourceId: string, input: z.infer<typeof UpdatePdfSourceSchema>): PdfSourceRecord {
+    const value = UpdatePdfSourceSchema.parse(input);
+    return this.database.transaction(() => {
+      const row = this.pdfSourceRow(pageId, materialId, sourceId);
+      const expected = Array.isArray(value.expectedStatus) ? value.expectedStatus : [value.expectedStatus];
+      if (!expected.includes(row.status) || (["failed", "expired"].includes(row.status) && value.status !== row.status)
+        || (row.status === "ready" && !["ready", "failed", "expired"].includes(value.status))) throw new LearningError(409, "source_changed");
+      const expiresAt = value.expiresAt === undefined ? row.expires_at : value.expiresAt;
+      if (value.status === "ready" && expiresAt === null) throw new LearningError(409, "pdf_source_receipt_invalid");
+      const changed = this.database.prepare(`UPDATE learning_pdf_sources SET status=?,expires_at=?,updated_at=?
+        WHERE source_id=? AND page_id=? AND material_id=? AND status=? AND delete_requested=0`)
+        .run(value.status, expiresAt, new Date().toISOString(), sourceId, pageId, materialId, row.status).changes;
+      if (!changed) throw new LearningError(409, "source_changed");
+      return this.getPdfSource(pageId, materialId, sourceId);
+    }).immediate();
+  }
+
+  /** The parser calls this with complete publication under its existing lease.
+   * Release only the remote original cache; the local PDF and results stay live. */
+  retirePdfSource(pageId: string, materialId: string, sourceId: string): void {
+    this.database.transaction(() => {
+      const row = this.pdfSourceRow(pageId, materialId, sourceId);
+      if (row.status !== "ready") throw new LearningError(409, "source_changed");
+      const changed = this.database.prepare(`UPDATE learning_pdf_sources SET status='expired',delete_requested=1,
+        remote_cleanup='pending',updated_at=? WHERE source_id=? AND page_id=? AND material_id=? AND status='ready' AND delete_requested=0`)
+        .run(new Date().toISOString(), sourceId, pageId, materialId).changes;
+      if (!changed) throw new LearningError(409, "source_changed");
+    }).immediate();
+  }
+
+  /** Cleanup can inspect retired receipts even after the local original is deleted. */
+  listPdfSourcesPendingCleanup(pageId?: string, materialId?: string): PdfSourceRecord[] {
+    if (pageId !== undefined) this.pageRow(LearningId.parse(pageId), true);
+    if (materialId !== undefined) LearningId.parse(materialId);
+    const rows = this.database.prepare(`SELECT s.* FROM learning_pdf_sources s
+      JOIN learning_pages p ON p.id=s.page_id WHERE p.account_id=? AND s.delete_requested=1
+      AND (s.remote_cleanup IS NULL OR s.remote_cleanup<>'deleted')
+      AND (? IS NULL OR s.page_id=?) AND (? IS NULL OR s.material_id=?) ORDER BY s.created_at,s.rowid`)
+      .all(this.accountId, pageId ?? null, pageId ?? null, materialId ?? null, materialId ?? null) as PdfSourceRow[];
+    return rows.map(pdfSourceView);
+  }
+
+  markPdfSourceCleanup(pageId: string, materialId: string, sourceId: string, outcome: "deleted" | "failed"): PdfSourceRecord {
+    const value = z.enum(["deleted", "failed"]).parse(outcome);
+    return this.database.transaction(() => {
+      const row = this.pdfSourceRow(pageId, materialId, sourceId, true);
+      // A late failed cleanup must not undo an already confirmed deletion.
+      if (row.remote_cleanup !== "deleted") this.database.prepare(`UPDATE learning_pdf_sources SET remote_cleanup=?,updated_at=?
+        WHERE source_id=? AND delete_requested=1 AND (remote_cleanup IS NULL OR remote_cleanup<>'deleted')`)
+        .run(value, new Date().toISOString(), sourceId);
+      return pdfSourceView(this.pdfSourceRow(pageId, materialId, sourceId, true));
+    }).immediate();
   }
   select(pageId: string, input: { revision: number; materialIds: string[] }): LearningPage {
     const value = LearningSelection.parse(input);
@@ -506,6 +672,9 @@ export class LearningRepository {
         .get(materialId, pageId) as { deleted_at: string | null } | undefined;
       if (!row) throw new LearningError(404, "material_not_found");
       if (!row.deleted_at) {
+        this.database.prepare(`UPDATE learning_pdf_sources SET delete_requested=1,
+          remote_cleanup=CASE WHEN remote_cleanup='deleted' THEN remote_cleanup ELSE 'pending' END,updated_at=?
+          WHERE page_id=? AND material_id=?`).run(new Date().toISOString(), pageId, materialId);
         this.database.prepare("DELETE FROM learning_generation_parts WHERE page_id=? AND EXISTS (SELECT 1 FROM json_each(material_ids) WHERE value=?)").run(pageId, materialId);
         this.database.prepare(`DELETE FROM learning_preparation_runs WHERE page_id=? AND EXISTS
           (SELECT 1 FROM json_each(binding_json) WHERE json_extract(value,'$.materialId')=?)`).run(pageId, materialId);
@@ -541,6 +710,9 @@ export class LearningRepository {
     this.database.transaction(() => {
       const page = this.pageRow(pageId, true);
       if (page.deleted_at) return;
+      this.database.prepare(`UPDATE learning_pdf_sources SET delete_requested=1,
+        remote_cleanup=CASE WHEN remote_cleanup='deleted' THEN remote_cleanup ELSE 'pending' END,updated_at=?
+        WHERE page_id=?`).run(new Date().toISOString(), pageId);
       this.database.prepare("DELETE FROM learning_generation_parts WHERE page_id=?").run(pageId);
       this.database.prepare("DELETE FROM learning_preparation_runs WHERE page_id=?").run(pageId);
       this.database.prepare("DELETE FROM learning_quiz_attempts WHERE page_id=?").run(pageId);

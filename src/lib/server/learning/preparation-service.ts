@@ -219,7 +219,7 @@ async function execute(repo: LearningRepository, row: Row, token: string, deps: 
   } catch (error) {
     // Public errors are codes only. Deletion removes this receipt, so late work cannot restore it.
     const code = safeError(error);
-    const safeResume = ["learning_generation_not_configured","framework_busy","overview_busy","pdf_parser_outcome_unknown","pdf_parser_resource_wait","pdf_parser_service_changed","pdf_parser_busy","pdf_parser_interrupted"].includes(code)
+    const safeResume = ["learning_generation_not_configured","framework_busy","overview_busy","pdf_parser_outcome_unknown","pdf_parser_resource_wait","pdf_parser_service_changed","pdf_parser_busy","pdf_parser_interrupted","pdf_parser_unavailable","pdf_source_transport_unavailable"].includes(code)
       && !repo.database.prepare("SELECT id FROM learning_framework_runs WHERE id=? AND page_id=?").get(row.id,row.page_id);
     try { save(repo,row,token,{ ...run,status:safeResume?"needs_attention":"failed",error:code,canContinue:false,canResume:safeResume },true,false); } catch { /* Deleted or fenced. */ }
   } finally { clearInterval(heartbeat); repo.close(); }

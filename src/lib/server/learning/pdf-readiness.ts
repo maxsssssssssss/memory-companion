@@ -24,6 +24,7 @@ export function inspectLearningPdfReadiness(repo: LearningRepository, pageId: st
   const checkpoints = pdfParseProgress(repo, pageId, doc.id);
   const progress = new Map(checkpoints.map(p => [p.physical_page, p.status]));
   const serviceChanged = checkpoints.some(point => point.issue === "pdf_parser_service_changed");
+  const uploadIssue = checkpoints.find(point => point.issue?.startsWith("pdf_source_"))?.issue;
   const stopped = checkpoints.some(point => point.issue === "pdf_parser_budget_exhausted") ? "budget_exhausted"
     : checkpoints.some(point => point.issue === "pdf_parser_session_expired") ? "session_expired" : undefined;
   const succeeded = new Set(doc.coverage?.succeeded_pages ?? []);
@@ -41,6 +42,10 @@ export function inspectLearningPdfReadiness(repo: LearningRepository, pageId: st
   if (result.pendingPages.length) result.limitations.push(`${result.pendingPages.length} 页尚未处理。`);
   if (result.unknownPages.length) result.limitations.push(`${result.unknownPages.length} 页处理结果待确认，不会自动重新提交。`);
   if (serviceChanged) result.limitations.unshift("上次处理对应的解析服务已变化，需要先核对原请求；已完成页和原件仍保留。");
+  if (uploadIssue) result.limitations.unshift(uploadIssue === "pdf_source_outcome_unknown"
+    ? "PDF 原件上传结果待确认；尚未重复上传或提交新页识别，可稍后继续处理。"
+    : uploadIssue === "pdf_source_capacity_exhausted" ? "PDF 解析服务临时存储空间不足；尚未提交新页识别，已完成页仍保留。"
+    : "PDF 原件的临时解析副本尚未准备好；已完成页保留，可继续处理未完成部分。");
   if (stopped) result.limitations.unshift(stopped === "budget_exhausted" ? "本轮解析额度已用完，已完成页和原件仍保留；未完成页不会自动重试。"
     : "本轮解析服务使用时段已结束，已完成页和原件仍保留；未完成页不会自动重试。");
   if (stopped && !result.unknownPages.length) result.processing = stopped;

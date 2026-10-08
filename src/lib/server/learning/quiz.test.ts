@@ -38,7 +38,7 @@ afterEach(async () => { if (learning.database.open) learning.close(); vi.unstubA
 it("migrates schema6 additively, preserving text and framework exactly", () => {
   framework(); const before = new LearningFrameworkRepository(learning).view(page), source = learning.source(page, material);
   learning.database.exec("DROP TABLE learning_quiz_attempts; DROP TABLE learning_quiz_runs; PRAGMA user_version=6"); learning.close();
-  learning = new LearningRepository(root, "owner"); expect(learning.database.pragma("user_version", { simple: true })).toBe(10);
+  learning = new LearningRepository(root, "owner"); expect(learning.database.pragma("user_version", { simple: true })).toBe(11);
   expect(new LearningFrameworkRepository(learning).view(page)).toEqual(before); expect(learning.source(page, material)).toEqual(source); expect(learning.database.pragma("foreign_key_check")).toEqual([]);
 });
 it("generates directly without framework, saves/reopens, no extra Provider request for answers", async () => {
