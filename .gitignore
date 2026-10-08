@@ -66,9 +66,8 @@ daybrief.html
 # OS metadata
 .DS_Store
 
-# Sensitive local files and collaboration history
+# Sensitive local files
 Tokenhub info.txt
 ASR、区分说话人相关接口文档.pdf
-# Root AGENTS.md is intentionally shared on dev/cloud.
-UPDATE_HISTORY.md
+# Root AGENTS.md and UPDATE_HISTORY.md are intentionally shared on dev/cloud.
 daily-brief  memory-companion 项目交接文档 v1.0.md

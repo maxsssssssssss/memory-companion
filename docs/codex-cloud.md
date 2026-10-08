@@ -73,4 +73,4 @@ Windows SAPI fixture、DPAPI、真实麦克风/设备、历史长录音与私有
 
 源码通过 Git 保存到本次已授权的开发分支；不推 `main/master`、不自动合并或部署。Environment 草稿保存、用户 Publish 和生产发布是独立动作。安装或工具契约变化时，把审阅后的代码 SHA、唯一 `cloud:setup` Install 字段和版本化 Start skill 一起保存；是否 Publish由用户决定。记录实际执行命令、测试数量、退出码、耗时及未执行项；fixture PASS、真实 Provider PASS、生产 PASS分别报告。
 
-`output/`、日志和 `UPDATE_HISTORY.md` 被忽略，不会随普通 Git push 保存；需要的审阅证据应显式另存。协作委派传递目标 SHA、范围、产品边界、验收、预算及禁止事项，子任务反馈不产生新授权。
+根 `UPDATE_HISTORY.md` 是 Windows 与 Cloud 共用、纳入 Git 的唯一变更历史；接着已有记录追加，不覆盖、不另建替代历史，新增内容须脱敏。与代码一起按当次授权提交/推送，冲突时保留双方追加内容。`output/` 和运行日志继续忽略；需要的审阅证据应显式另存。协作委派传递目标 SHA、范围、产品边界、验收、预算及禁止事项，子任务反馈不产生新授权。

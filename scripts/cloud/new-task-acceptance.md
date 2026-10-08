@@ -58,4 +58,4 @@ npm run cloud:build
 
 依据本次实际结果判PASS/CONDITIONAL PASS/FAIL。实际新任务的工具依赖恢复、正确代码、数据隔离、类型检查/目标测试/构建和服务冷启动/停止/重建通过，可作为主要开发可用证据；不可用平台内部snapshot ID不单独构成FAIL。真实Provider NOT RUN也不单独构成普通代码开发FAIL。保留真正失败、未执行项、历史全量失败和平台限制，不宣称全面替代、全量零失败、模型质量或生产验收。
 
-报告当前Git改动、哪些修复仅在本任务、是否需要Environment重新保存/发布，以及开发成果保存下一步。按AGENTS追加本地UPDATE_HISTORY；不要在没有本次授权时自动提交/推送、Publish、合并main/master或部署。
+报告当前Git改动、哪些修复仅在本任务、是否需要Environment重新保存/发布，以及开发成果保存下一步。按AGENTS接着根UPDATE_HISTORY追加脱敏记录；这份共用历史已纳入Git，不另建替代历史。不要在没有本次授权时自动提交/推送、Publish、合并main/master或部署。
