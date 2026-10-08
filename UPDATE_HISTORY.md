@@ -15159,3 +15159,29 @@ cloudEnvironment统一派生.venv/bin、Cloud Redis bin、VIRTUAL_ENV及TMPDIR�
 - 范围与限制：本轮仅维护历史、Git 忽略和开发指令，没有应用代码或依赖改动，因此不重新运行业务测试、构建或服务。此前准确保留的历史 PDF/OCR fixture 缺失、真实 Provider NOT RUN 和 Environment 未 Publish 状态未改变。Git 同步以本次最终 commit/push 实际结果为准；Environment 更新仅保存草稿，后续任务仍需用户从所选 dev/cloud 提交恢复，不能声称已发布到全部未来任务。以后追加不记录凭据、真实用户正文、个人信息或私有访问细节，提交/推送及 Publish 继续按各自授权处理。
 
 - 补充公开同步审阅：另确认原行13103为实际生产Web入口，对该URL脱敏；最终首次导入共六处URL脱敏，上传原件、其他历史内容、公开固定Provider地址及三条Cloud记录保持。首次暂存后默认git diff --cached --check将Windows历史的CRLF识别为trailing whitespace，未据此改写原件或删除旧历史；随后使用Git的cr-at-eol识别规则复验（仍检查普通行尾空白及其他空白错误）。这属于历史行尾格式兼容，不是业务测试失败，本轮应用测试仍NOT RUN。
+
+
+## 2026-10-08：实际新建 Codex Cloud 任务开发环境验收（CONDITIONAL PASS）
+
+按本次用户指定仓库、dev/cloud、期望 SHA 1979bc7ebea30aedaece6ee745028222e4084900，读取 AGENTS.md、docs/codex-cloud.md、scripts/cloud/new-task-acceptance.md 和验证入口说明，在实际恢复后的 /workspace/memory-companion 执行验收。初始工作区 clean，但实际 HEAD 为 fc06fbaa7265fd9c566e853e14a25ac9d8c95877，分支 dev/cloud、非 detached HEAD；是期望提交的直接文档后继，仅共享历史/规则/文档六文件变化，应用源码、Cloud 实现、锁文件与 requirements 未变。保留实际检出，没有 reset 或切换，不把精确 SHA 匹配项写成 PASS。
+
+Debian 13.6 x86_64，cgroup 4 CPU / 16 GiB。通过 cloudEnvironment 的显式工具路径确认 Node 24.19.0（ABI 137，.nvmrc 推荐 24.18.0）、npm 11.9.0、项目 venv Python 3.12.14 / pypdf 6.19.0、better-sqlite3 12.11.1 / SQLite 3.53.2、Redis 8.0.2、项目 FFmpeg 7.0.2 / FFprobe 4.0.2、系统 Chromium 151.0.7922.173 和 Playwright 1.61.1 可运行；原生模块/应用音视频二进制为 Linux ELF。初始 3000/6380 空闲，preview/test/Redis/smoke 应用根不存在，没有复用准备阶段进程或应用数据。只有公开 .env.example，未导入真实配置、用户数据或秘密。锁文件 SHA256 始终为 0f7d643ea8c5eca671ee29a2231e0ba162ff32615bbb011ee793384faec9142d。npm ls 退出 0 但提示锁内 optional @emnapi/runtime 1.10.0 extraneous；按唯一 npm run cloud:setup 重装 210 包（exit 0，10.334s）后，该分类仍可复现，但已安装锁元数据版本/integrity 均匹配。保留提示，不手改依赖或锁、不重复安装制造无告警。未下载 Playwright 浏览器、不依赖 activate.sh。
+
+实际 cloud:check 初次 exit 0 / 32.763s，setup 后 exit 0 / 31.971s，均为 9/9 Cloud 契约加 Next typegen/TypeScript，0 跳过。预先确认指定六文件存在；首次 cloud:test 发现 6 文件（5 过、1 失败），113 用例（112 过、1 失败、0 跳过），exit 1 / 3.461s。session_expired 用例的 DOM 已更新但 useEffect 的 onStatus 回调尚未执行，原精确断言期望“本轮解析会话已结束”，实际仍为“查看材料”。最小测试适配只修改 src/components/learning/learning-preparation.test.tsx，将参数化两暂停状态的原 toHaveBeenLastCalledWith(label) 包在 waitFor 中；不改应用行为、精确期望或其他断言，不 skip。定向 14/14（exit 0 / 1.678s），指定六文件复验 6/6、113/113（exit 0 / 3.360s），无跳过。cloud:build exit 0 / 111.721s，包含修复后类型检查，44/44 static 页面、179 trace，removed=0 / forbidden=0。构建前开发服务数量 0，端口复查空闲；内存密集命令顺序运行，未与 dev 并行，未额外重复 tsc 或全量。
+
+通过 npm run cloud:dev 三次启动实际 node scripts/cloud/run.mjs dev supervisor，分别 PID 2218/2695/2866，ready 耗时 3.520/2.640/2.541s；均 Redis PONG，匿名 /api/auth/me 401，同 preview cloudEnvironment 的健康检查 ok=true、workers=1、storageProbe.status=matched，AI review worker=1，队列无等待/运行/失败任务。两个本任务合成账号各创建/读取一个材料为零的学习页，双向跨账号同 ID 404，匿名页/列表 401，列表不泄露。系统 Chromium 显式启动，浏览首页及四产品入口均 HTTP 200、客户端就绪，pageerror/5xx/外部请求尝试为 0，并阻止非 loopback HTTP/WebSocket。现有 queue-worker-smoke.ts exit 0 / 1.961s，14/14 精确断言 true，remoteProviderCalls=0；独立随机 smoke queue 由脚本清理。重复 npm run cloud:dev 因端口占用 exit 1 / 0.407s（预期拒绝），原 Web/Worker/Redis 保持正常。
+
+生命周期共 96/96 验收断言通过。阶段 1 空数据冷启动建立账号、空学习页、Redis 合成 sentinel 后停机；阶段 2 保留数据重启，验证两个账号/session、SQLite 两页和 AOF sentinel 持久化，删除 A 页后 GET 410/page_deleted、列表无页，B 页保持；阶段 3 停机并核对自有根归属后清理，重启验证旧 session 401、sentinel 不存在，新合成 C 可创建且列表为空。每次向实际 supervisor 单独发送 SIGTERM，stop 耗时 0.270/5.085/0.149s、npm 退出码 143（预期），确认自有 Web/Worker/Redis 子进程退出及 3000/6380 可重新 bind；最终再独立确认业务进程运行数 0、preview/test/Redis/smoke 根均不存在。只清理自己的合成资料，保留脱敏证据，无 broad pkill 或停止平台基础进程。
+
+保留其他真实诊断失败：最小 PATH 初次遗漏实际 Node 安装目录造成 npm ENOENT，加入 process.execPath 目录后独立路径复查通过；默认执行沙箱 loopback bind/ss EPERM，在授权网络执行入口完成验证，未改网络策略。额外 /proc 环境探针在 cold 进程已停止后报 ENOENT，未取得该额外证据；共享存储依据相同 cloudEnvironment 和三次 matched marker，不伪称额外探针成功。平台指定的 /codex/browser/projectless 输出路径在本 Cloud 文件系统不存在，创建时报只读文件系统，附加目标写权限仍失败；最终内联交付，脱敏原始日志和 JSON 留在 work/cloud-acceptance。平台 PID 1 曾保留辅助进程已退出的 zombie，不占服务端口。现有 environment_status 可确认本任务 running/connected/config revision 2，却不暴露已发布 Environment 版本、内部 snapshot ID 或 Only me/锁定设置，均标记不可查询；source_config_version 不冒充 snapshot。network policy 为 restricted 软件源预设、vpn_configured=false，status state=unknown 不冒充 enforced。实际新任务恢复和空目录冷启动构成本任务开发证据，同任务重启不冒充另一个实例还原。
+
+历史事实继续保留：520c4f8 基线全量 540 文件（536 过、2 失败、2 跳过），6167 用例（6157 过、1 失败、9 跳过），历史 PDF collection failure 另有 23 声明病例未执行；后来 Learning 定向 14/14 不等于全量零失败。OCR Python 原始 36 方法中 19 依赖缺失 Windows 历史 runtime-copy 源，25 错误记录含 subtests，17 独立合成方法曾通过。本轮不重跑全量/历史原始 runner，不伪造 PDF/OCR fixture、原件 hash/manifest/provenance 或 C:/ 路径。真实 ASR/LLM/OCR/声纹、生产、真实用户数据库、私有服务、公网隧道全部 NOT RUN（用户明确禁止）；Windows SAPI/DPAPI、真实设备及历史录音保留专用环境。路由和 mock queue 通过不宣称完整 ASR/AI/OCR E2E、模型质量或生产验收。
+
+风险结论：D 未发现阻塞普通开发的工具/服务问题，但精确 SHA 恢复项 FAIL；C 为基线选择差异、当前任务测试等待适配及 npm optional 分类提示；B 为平台身份/可见性不可查询、历史包缺失及真实服务未授权；A 为 Linux 工具路径、系统浏览器、合成 fixture 和 preview server/queue 与 test local/inline 的有意差异。整体 CONDITIONAL PASS，主要开发能力在本任务局部测试修复后可用，不能无条件签署指定 SHA 已恢复。只追加本共用历史，未改应用源码/锁/Cloud 契约或 Environment；没有提交、推送、Publish、合并 main/master 或部署。后续审阅测试修复并在获授权开发分支保存；精确 SHA 要求须明确选择该提交建立新任务复验，若更新 Environment 字段，保存/Publish 按后续授权处理，不保证本任务安装对未来任务自动生效。
+
+
+### 2026-10-08：验收改动审阅与获授权 Git 收口
+
+用户在完成上述验收后另行明确授权，仅提交 session_expired 所在参数化测试的一行 waitFor 修复和共用 UPDATE_HISTORY.md，核对远端并正常推送 dev/cloud，不 force-push、不修改 main、不自动 Publish。复核组件通过 useEffect 发布 onStatus，修复仍使用原精确 toHaveBeenLastCalledWith(label)，只等待该异步回调；不改应用行为、期望值或其他断言。逐字节核对当前历史以前缀保留原 HEAD 内容，只追加本次记录；全文件高置信凭据/私钥/含凭据 URL/隧道及私网地址 URL 扫描无命中，新增记录人工审阅无真实正文、账号资料或私有服务访问细节。git diff --check 通过。原有 14/14、六文件 113/113、构建与 96/96 生命周期、14/14 queue smoke 证据保留，本轮按用户要求不重复安装、全量测试或构建。
+
+本轮实际 ls-remote 确认 dev/cloud 为 fc06fbaa7265fd9c566e853e14a25ac9d8c95877，与本地基线一致；main 为 dd3e1315f19ba428f61f6103ca38211446335c03，仅作为只读核对，不修改该分支。只暂存这两个文件，work/cloud-acceptance 脱敏证据不纳入提交。当前可用 Environment 能力只有运行状态查询，无草稿配置编辑入口；提交/正常 push 完成后交付最终 SHA 的 repository baseline、唯一 Install script 与绑定该 SHA 的 Start skill 配置，供直接应用到草稿，不伪称已保存或 Publish。原先 snapshot/发布身份不可查询和历史失败限制保持；Git 同步结果以本轮实际命令及远端终检为准。

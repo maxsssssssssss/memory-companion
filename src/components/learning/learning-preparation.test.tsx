@@ -85,7 +85,7 @@ it.each([
   vi.mocked(learningApi.preparation).mockResolvedValue({ runs: [run({ status: "needs_attention", materials: [{ materialId: "m", title: "合成课件", kind: "pdf", status: "partial", processing, completed: 2, total: 5, issues: [`pdf_parser_${processing}`] }] })] });
   const onStatus = vi.fn(); render(<LearningPreparation {...props} onStatus={onStatus} />);
   await screen.findByText(`${label} · 已完成 2/5 页`);
-  expect(onStatus).toHaveBeenLastCalledWith(label);
+  await waitFor(() => expect(onStatus).toHaveBeenLastCalledWith(label));
   expect(screen.getByText(/已完成页和原件仍保留，未完成页不会自动重试/)).toBeVisible();
   expect(screen.queryByText("等待解析资源")).not.toBeInTheDocument();
   expect(learningApi.resumePreparation).not.toHaveBeenCalled();
