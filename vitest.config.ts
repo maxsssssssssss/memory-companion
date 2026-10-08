@@ -15,6 +15,8 @@ export default defineConfig({
       // These have their own Node runners, not Vitest suites.
       "scripts/lib/work-review-evaluation-diagnostics.test.mjs",
       "scripts/learning-local/*.test.mjs",
+      "scripts/cloud/*.test.mjs",
+      "scripts/lib/owned-process.test.mjs",
       "scripts/learning-mode-comparison/native-fetch.test.mjs"
     ],
     globals: true,

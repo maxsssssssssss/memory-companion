@@ -57,7 +57,12 @@
     "compact-evidence:benchmark": "tsx scripts/benchmark-compact-evidence.ts",
     "qa-provider:model-benchmark": "tsx scripts/benchmark-qa-provider-models.ts",
     "qa-provider:ds-lifecycle-prompt": "tsx scripts/evaluate-ds-lifecycle-prompt.ts",
-    "voice:smoke": "python tests/e2e/test_voice_pipeline.py"
+    "voice:smoke": "python tests/e2e/test_voice_pipeline.py",
+    "cloud:setup": "bash scripts/cloud/setup.sh",
+    "cloud:check": "node scripts/cloud/run.mjs check",
+    "cloud:test": "node scripts/cloud/run.mjs test",
+    "cloud:build": "node scripts/cloud/run.mjs build",
+    "cloud:dev": "node scripts/cloud/run.mjs dev"
   },
   "dependencies": {
     "better-sqlite3": "^12.11.1",

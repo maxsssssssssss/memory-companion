@@ -12,7 +12,7 @@
 - [验证工具](docs/validation-tools.md)：按任务选择现有命令，区分 fixture、Browser mock、真实 Provider 和环境验证及其副作用。
 - [早期项目交接](docs/project-handoff.md)、[Work Review Wave 1 交接](docs/work-review-v2-core-contract-handoff.md) 和 `docs/superpowers/plans/`：历史背景与设计依据，不是当前待办或自动授权；使用前核对当前实现。
 
-当前机器的 Agent 执行规则见根目录 `AGENTS.md`；修改适用范围内的代码后，仍须在本地 `UPDATE_HISTORY.md` 末尾追加中文记录。`.gitignore` 当前忽略 `AGENTS.md`、`UPDATE_HISTORY.md`、`.agents/` 和 `.codex/`，这些本地规则及 Skills/hooks 不会随 Git 自动共享。
+本分支共享根目录 `AGENTS.md` 执行规则。Cloud 开发请按 [Codex Cloud 启动说明](docs/codex-cloud.md) 使用独立数据和无凭据配置。修改后仍须在当前工作区 `UPDATE_HISTORY.md` 末尾追加中文记录；该历史、`.agents/` 与 `.codex/` 继续忽略，不复制个人 Skills/hooks。
 
 ## 常用命令
 
