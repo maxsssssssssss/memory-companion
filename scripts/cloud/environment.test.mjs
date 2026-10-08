@@ -5,7 +5,7 @@ import os from 'node:os';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { assertCleanConfig, cloudEnvironment } from './environment.mjs';
+import { assertCleanConfig, cloudEnvironment, cloudToolPaths } from './environment.mjs';
 const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 test('drops credentials, remote storage, proxies and injected Node options', () => {
   const env = cloudEnvironment(repo, { PATH: process.env.PATH, OPENAI_API_KEY: 'not-a-real-key', APP_DATA_DIR: '/production', REDIS_URL: 'redis://remote.invalid', NODE_OPTIONS: '--require=bad', HTTPS_PROXY: 'http://remote.invalid' });
@@ -23,6 +23,22 @@ test('preview preserves product gates and queue storage requirements without cre
   assert.equal(env.PIPELINE_EXECUTION_MODE, 'queue');
   assert.equal(env.APP_STORAGE_MODE, 'server'); assert.ok(path.isAbsolute(env.APP_DATA_DIR));
   assert.notEqual(env.APP_DATA_DIR, cloudEnvironment(repo, {}).APP_DATA_DIR);
+});
+test('discovers project Python and Cloud Redis without a task-local activation script', () => {
+  const env = cloudEnvironment(repo, { Path: '/usr/bin', VIRTUAL_ENV: '/unrelated', PYTHONPATH: '/unrelated', TMPDIR: '/tmp' });
+  const paths = cloudToolPaths(repo);
+  assert.equal(env.PATH.split(path.delimiter)[0], paths.venvBin);
+  assert.equal(env.PATH.split(path.delimiter)[1], paths.bin);
+  assert.equal(env.Path, undefined);
+  assert.equal(env.VIRTUAL_ENV, paths.venv);
+  assert.equal(env.PYTHONPATH, undefined);
+  assert.equal(env.TMPDIR, paths.tmp);
+  const python = spawnSync('python', ['-c', 'import sys,pypdf;print(sys.prefix);print(pypdf.__version__)'], { env, encoding: 'utf8' });
+  assert.equal(python.status, 0, python.stderr);
+  assert.equal(python.stdout.trim().split(/\r?\n/u)[0], paths.venv);
+  const redis = spawnSync('redis-server', ['--version'], { env, encoding: 'utf8' });
+  assert.equal(redis.status, 0, redis.stderr);
+  assert.match(redis.stdout, /Redis server/u);
 });
 test('runtime env files are refused while public example is allowed', () => {
   const dir = mkdtempSync(path.join(os.tmpdir(), 'cloud-env-'));

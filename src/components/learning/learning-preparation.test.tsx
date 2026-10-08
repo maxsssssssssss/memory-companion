@@ -60,7 +60,7 @@ it("shows resource waiting and exact completed pages, then continues only after 
   const onStatus = vi.fn(), ui = render(<LearningPreparation {...props} onStatus={onStatus} />);
   await screen.findByText("等待解析资源 · 已完成 2/5 页");
   expect(screen.queryByText("本次整理未完成")).not.toBeInTheDocument();
-  expect(onStatus).toHaveBeenLastCalledWith("等待解析资源");
+  await waitFor(() => expect(onStatus).toHaveBeenLastCalledWith("等待解析资源"));
   ui.rerender(<LearningPreparation {...props} refreshKey={1} onStatus={onStatus} />);
   await waitFor(() => expect(learningApi.preparation).toHaveBeenCalledTimes(2));
   fireEvent.focus(window);

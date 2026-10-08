@@ -35,6 +35,8 @@ async function freePort(port) {
   await new Promise((resolve, reject) => { const server = net.createServer(); server.once('error', reject); server.listen(port, '127.0.0.1', () => server.close(resolve)); });
 }
 try {
+  await mkdir(env.TMPDIR, { recursive: true });
+  await run(['scripts/cloud/preflight.mjs']);
   if (mode === 'check') {
     console.log('[cloud check] 1/2 migration contracts');
     await run(['--test', 'scripts/cloud/environment.test.mjs', 'scripts/lib/owned-process.test.mjs']);

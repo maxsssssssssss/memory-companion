@@ -355,4 +355,12 @@ async function main() {
   if (!pass) process.exitCode = 1;
 }
 
-await main();
+// The Python runner reads a single JSON report from stdout. Keep production
+// benchmark diagnostics visible on stderr without changing the bridge logger.
+const originalInfo = console.info;
+console.info = console.error.bind(console);
+try {
+  await main();
+} finally {
+  console.info = originalInfo;
+}

@@ -14,8 +14,6 @@ export function localDataDirectory(env,trial=false) {
   return path.resolve(trial?'output/learning-input-scope-20260924/data':env.APP_DATA_DIR?.trim()||env.DATA_DIR?.trim()||'.data');
 }
 const sleep=ms=>new Promise(r=>setTimeout(r,ms)),slash=p=>p.replaceAll('\\','/');
-const ngrok=path.join(process.env.USERPROFILE,'Downloads/ngrok-v3-stable-windows-amd64/ngrok.exe');
-const ngrokConfig=path.join(process.env.LOCALAPPDATA,'ngrok/ngrok.yml');
 export function localEnvironment(cfg,secure,audioOrigin,ocrToken,trial=false,ocrIdentity) {
   // Keep existing product configuration; only storage/queue execution and the
   // learning-specific input/Provider settings are scoped to this local trial.
@@ -38,6 +36,10 @@ export function localEnvironment(cfg,secure,audioOrigin,ocrToken,trial=false,ocr
 }
 async function freePort(port) {await new Promise((r,j)=>{const s=net.createServer();s.once('error',j);s.listen(port,'127.0.0.1',()=>s.close(r));});}
 export async function preflight(ocr=false,trial=false) {
+  assert.equal(process.platform,'win32','Local Learning launcher requires Windows DPAPI and ngrok');
+  assert(process.env.USERPROFILE&&process.env.LOCALAPPDATA,'Windows USERPROFILE and LOCALAPPDATA are required');
+  const ngrok=path.join(process.env.USERPROFILE,'Downloads/ngrok-v3-stable-windows-amd64/ngrok.exe');
+  const ngrokConfig=path.join(process.env.LOCALAPPDATA,'ngrok/ngrok.yml');
   const cfg=parseEnv(fs.readFileSync('.env.local','utf8')),secure=vault('read');
   const data=localDataDirectory({...process.env,...cfg},trial);
   assert(cfg.OPENAI_API_KEY&&new URL(cfg.OPENAI_BASE_URL).hostname==='tokenhub.vision-intelligence.tech','Learning TokenHub config absent');
@@ -49,7 +51,7 @@ export async function preflight(ocr=false,trial=false) {
   const findings=JSON.parse(fs.readFileSync('output/learning-synthetic-course-20260923/known-findings.json','utf8'));assert(Array.isArray(findings));
   const hand=ocr?localOcrPreflight():null;
   for(const port of[37941,37942,37943,...ocr?[37913]:[]])await freePort(port);
-  return {cfg,secure,receipt:{dataRoot:data,dataProfile:trial?'learning-trial':'configured',portsFree:true,secureConfigured:true,companyAsrConfigured:true,learningGenerationConfigured:true,ocrFiles:hand?.verifiedFiles??null}};
+  return {cfg,secure,ngrok,ngrokConfig,receipt:{dataRoot:data,dataProfile:trial?'learning-trial':'configured',portsFree:true,secureConfigured:true,companyAsrConfigured:true,learningGenerationConfigured:true,ocrFiles:hand?.verifiedFiles??null}};
 }
 export function cleanupLocalOcr(ownedOcr,record,{explicitStop=false}={}) {
   if(!ownedOcr||explicitStop)return;
@@ -61,7 +63,7 @@ export function stopConfiguredOcr(saved,record,stopRemote=stopOcr) {
   return stopRemote({record,binding:saved.ocr.binding});
 }
 async function start(ocr,trial=false) {
-  fs.mkdirSync(root,{recursive:true});const {cfg,secure,receipt}=await preflight(ocr,trial),run=Date.now(),runRoot=root+'/runs/'+run;
+  fs.mkdirSync(root,{recursive:true});const {cfg,secure,ngrok,ngrokConfig,receipt}=await preflight(ocr,trial),run=Date.now(),runRoot=root+'/runs/'+run;
   fs.mkdirSync(runRoot,{recursive:true});const record=(f,v)=>{fs.writeFileSync(runRoot+'/'+f,JSON.stringify(v,null,2));if(f==='ocr-binding.json')fs.writeFileSync(root+'/ocr-binding.json',JSON.stringify(v,null,2));};record('preflight.json',receipt);
   const secrets=[...Object.entries(cfg).filter(([k])=>/KEY|SECRET|TOKEN|PASSWORD/.test(k)).map(([,v])=>v),...Object.values(secure)].filter(v=>typeof v==='string'&&v.length>7);
   const redact=s=>{for(const v of secrets)s=s.replaceAll(v,'[REDACTED]');return s.replace(/capability=[^\s"&<>]+/g,'capability=[REDACTED]');};

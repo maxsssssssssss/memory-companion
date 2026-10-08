@@ -2,10 +2,16 @@
 import fs from 'node:fs';import path from 'node:path';import http from 'node:http';import net from 'node:net';import {fileURLToPath} from 'node:url';
 import {randomBytes,createHmac,timingSafeEqual,createHash} from 'node:crypto';import {parseEnv} from 'node:util';import {spawn,spawnSync} from 'node:child_process';import assert from 'node:assert/strict';
 export const root=path.resolve('output/learning-synthetic-course-20260923'),repo=process.cwd();
-export const privateFile=path.join(process.env.LOCALAPPDATA,'DailyBriefLearningTrial','course-20260923.dpapi');
+export const privateFile=process.platform==='win32'&&process.env.LOCALAPPDATA?path.join(process.env.LOCALAPPDATA,'DailyBriefLearningTrial','course-20260923.dpapi'):null;
+function requirePrivateFile(){
+ if(process.platform!=='win32')throw Error('secure_config_requires_windows_dpapi');
+ if(!privateFile)throw Error('secure_config_localappdata_missing');
+ return privateFile;
+}
 export function vault(action,value){
+ const vaultFile=requirePrivateFile();
  const ps=`$ErrorActionPreference='Stop'; Add-Type -AssemblyName System.Security; $p=[Environment]::GetEnvironmentVariable('LEARNING_TRIAL_VAULT'); if('${action}' -eq 'write') { $text=[Console]::In.ReadToEnd(); $bytes=[Text.Encoding]::UTF8.GetBytes($text); $sealed=[Security.Cryptography.ProtectedData]::Protect($bytes,$null,[Security.Cryptography.DataProtectionScope]::CurrentUser); [IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($p)) | Out-Null; [IO.File]::WriteAllBytes($p,$sealed); } else { $clear=[Security.Cryptography.ProtectedData]::Unprotect([IO.File]::ReadAllBytes($p),$null,[Security.Cryptography.DataProtectionScope]::CurrentUser); [Console]::Out.Write([Text.Encoding]::UTF8.GetString($clear)); }`;
- const r=spawnSync('powershell.exe',['-NoProfile','-NonInteractive','-EncodedCommand',Buffer.from(ps,'utf16le').toString('base64')],{env:{...process.env,LEARNING_TRIAL_VAULT:privateFile},input:value?JSON.stringify(value):undefined,windowsHide:true,encoding:'utf8'});if(r.status!==0){let message=r.stderr??r.error?.code??'';for(const v of Object.values(value??{}))if(typeof v==='string')message=message.replaceAll(v,'[REDACTED]');save('vault-error.json',{action,exitCode:r.status,errorCode:r.error?.code,stderr:message.slice(0,5000)});throw Error('secure_config_'+action+'_failed');}return action==='read'?JSON.parse(r.stdout):undefined;
+ const r=spawnSync('powershell.exe',['-NoProfile','-NonInteractive','-EncodedCommand',Buffer.from(ps,'utf16le').toString('base64')],{env:{...process.env,LEARNING_TRIAL_VAULT:vaultFile},input:value?JSON.stringify(value):undefined,windowsHide:true,encoding:'utf8'});if(r.status!==0){let message=r.stderr??r.error?.code??'';for(const v of Object.values(value??{}))if(typeof v==='string')message=message.replaceAll(v,'[REDACTED]');save('vault-error.json',{action,exitCode:r.status,errorCode:r.error?.code,stderr:message.slice(0,5000)});throw Error('secure_config_'+action+'_failed');}return action==='read'?JSON.parse(r.stdout):undefined;
 }
 export const save=(f,v)=>fs.writeFileSync(root+'/'+f,JSON.stringify(v,null,2));
 const sleep=ms=>new Promise(r=>setTimeout(r,ms)),slash=p=>p.replaceAll('\\','/');
@@ -14,11 +20,12 @@ if(path.resolve(process.argv[1]??'')!==fileURLToPath(import.meta.url)) { /* impo
 else if(cmd==='status'){
  const s=fs.existsSync(root+'/runtime.json')?JSON.parse(fs.readFileSync(root+'/runtime.json','utf8')):null;
  let online=false;if(s)try{online=(await fetch(s.base+'/api/auth/session',{signal:AbortSignal.timeout(2000)})).status<500;}catch{}
- console.log(JSON.stringify({runtime:s,online,secureConfigPresent:fs.existsSync(privateFile),counts:{ds:fs.readdirSync(root).filter(f=>/^ds-request-\d+\.json$/.test(f)).length,asrSubmits:fs.readdirSync(root).filter(f=>/^asr-submit-learning_.*\.json$/.test(f)).length,ocrPages:fs.readdirSync(root).filter(f=>/^ocr-claim-/.test(f)).length}}));
+ console.log(JSON.stringify({runtime:s,online,secureConfigPresent:privateFile!==null&&fs.existsSync(privateFile),counts:{ds:fs.readdirSync(root).filter(f=>/^ds-request-\d+\.json$/.test(f)).length,asrSubmits:fs.readdirSync(root).filter(f=>/^asr-submit-learning_.*\.json$/.test(f)).length,ocrPages:fs.readdirSync(root).filter(f=>/^ocr-claim-/.test(f)).length}}));
 }else if(cmd==='stop'){fs.writeFileSync(root+'/stop','stop');console.log('Stop requested for this course runtime only');}
 else if(cmd==='start')await start();
 else if(cmd==='credentials')throw Error('Credentials are never printed. Use: node scripts/learning-synthetic-course/open.mjs');
 async function start(){
+ requirePrivateFile();
  const live=process.argv.includes('--live'),production=process.argv.includes('--production'),cfg={...parseEnv(fs.readFileSync('.env.local','utf8')),...process.env};
  assert(cfg.OPENAI_API_KEY&&new URL(cfg.OPENAI_BASE_URL).hostname==='tokenhub.vision-intelligence.tech');assert(cfg.SPEAKER_ASR_BASE_URL);
  if(!fs.existsSync(privateFile))vault('write',{secret:randomBytes(48).toString('base64url'),email:'course-'+randomBytes(6).toString('hex')+'@synthetic.invalid',password:randomBytes(24).toString('base64url'),invite:randomBytes(24).toString('base64url')});

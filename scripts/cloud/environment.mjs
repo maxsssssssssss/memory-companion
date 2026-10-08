@@ -1,5 +1,10 @@
 import path from 'node:path';
 import { readdirSync } from 'node:fs';
+export function cloudToolPaths(repo) {
+  const tools = path.resolve(repo, '..', '.cloud-tools');
+  return { tools, bin: path.join(tools, 'bin'), tmp: path.join(tools, 'tmp'),
+    venv: path.join(repo, '.venv'), venvBin: path.join(repo, '.venv', process.platform === 'win32' ? 'Scripts' : 'bin') };
+}
 export function assertCleanConfig(repo) {
   const files = readdirSync(repo).filter(name => /^\.env(?:\.|$)/u.test(name) && name !== '.env.example');
   if (files.length) throw Error('Cloud checkout contains runtime .env files; use a fresh checkout, never import production configuration');
@@ -10,6 +15,12 @@ export function cloudEnvironment(repo, input = process.env, preview = false) {
   for (const [key, value] of Object.entries(input)) {
     if (/^(path|home|lang|lc_all|tmpdir|temp|tmp|systemroot|windir|comspec|pathext|userprofile|localappdata|appdata|homedrive|homepath|xdg_cache_home|playwright_browsers_path)$/iu.test(key) && value !== undefined) env[key] = value;
   }
+  const paths = cloudToolPaths(repo);
+  const inheritedPath = Object.entries(env).find(([key]) => key.toLowerCase() === 'path')?.[1];
+  for (const key of Object.keys(env)) if (key.toLowerCase() === 'path') delete env[key];
+  env.PATH = [paths.venvBin, paths.bin, inheritedPath].filter(Boolean).join(path.delimiter);
+  env.VIRTUAL_ENV = paths.venv;
+  env.TMPDIR = paths.tmp;
   const data = path.join(repo, 'output', 'codex-cloud', preview ? 'preview-data' : 'test-data');
   Object.assign(env, { APP_DATA_DIR: data, DATA_DIR: data, APP_STORAGE_MODE: preview ? 'server' : 'local',
     PIPELINE_EXECUTION_MODE: preview ? 'queue' : 'inline', REDIS_URL: 'redis://127.0.0.1:6380',
