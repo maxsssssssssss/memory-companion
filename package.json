@@ -62,7 +62,9 @@
     "cloud:check": "node scripts/cloud/run.mjs check",
     "cloud:test": "node scripts/cloud/run.mjs test",
     "cloud:build": "node scripts/cloud/run.mjs build",
-    "cloud:dev": "node scripts/cloud/run.mjs dev"
+    "cloud:dev": "node scripts/cloud/run.mjs dev",
+    "cloud:dev:providers": "node scripts/cloud/run.mjs providers",
+    "cloud:providers:check": "node scripts/cloud/provider-check.mjs"
   },
   "dependencies": {
     "better-sqlite3": "^12.11.1",

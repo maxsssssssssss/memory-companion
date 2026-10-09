@@ -5,11 +5,17 @@ import { mkdir } from 'node:fs/promises';
 import { setTimeout as delay } from 'node:timers/promises';
 import { spawnOwned, stopOwned, completion } from '../lib/owned-process.mjs';
 import { assertCleanConfig, cloudEnvironment } from './environment.mjs';
+import { providerEnvironment, providerConfigurationReport, assertProviderTransport } from './providers.mjs';
+import { providerLogRedactor } from './redact.mjs';
 const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const [mode, ...args] = process.argv.slice(2);
-if (!['check', 'test', 'build', 'dev'].includes(mode)) throw Error('Expected check, test, build or dev');
+if (!['check', 'test', 'build', 'dev', 'providers'].includes(mode)) throw Error('Expected check, test, build, dev or providers');
+const providers = mode === 'providers';
+if (providers && args.some(arg => arg !== '--verify-no-calls')) throw Error('Provider mode accepts only --verify-no-calls');
 assertCleanConfig(repo);
-const env = cloudEnvironment(repo, process.env, mode === 'dev');
+const env = providers ? providerEnvironment(repo, process.env, { verifyNoCalls: args.includes('--verify-no-calls') })
+  : cloudEnvironment(repo, process.env, mode === 'dev');
+if (providers) assertProviderTransport(env);
 const children = [];
 let stopping;
 async function stop() {
@@ -24,7 +30,11 @@ async function stop() {
 }
 for (const signal of ['SIGINT', 'SIGTERM']) process.once(signal, () => { void stop().then(() => process.exit(signal === 'SIGINT' ? 130 : 143), () => process.exit(1)); });
 function launch(command, values) {
-  const child = spawnOwned(command, values, { cwd: repo, env, stdio: 'inherit' });
+  const child = spawnOwned(command, values, { cwd: repo, env, stdio: providers ? ['inherit', 'pipe', 'pipe'] : 'inherit' });
+  if (providers) {
+    child.stdout.pipe(providerLogRedactor(env)).pipe(process.stdout, { end: false });
+    child.stderr.pipe(providerLogRedactor(env)).pipe(process.stderr, { end: false });
+  }
   children.push(child);
   const done = completion(child);
   void done.catch(() => {});
@@ -50,11 +60,19 @@ try {
     await run(['node_modules/next/dist/bin/next', 'build']);
     await run(['scripts/sanitize-next-traces.mjs']);
   } else {
-    await freePort(3000); await freePort(6380);
-    const redisDir = path.join(repo, 'output/codex-cloud/redis');
+    const webPort = providers ? 3001 : 3000, redisPort = providers ? 6381 : 6380;
+    // Both profiles share .next; refuse concurrent development without taking
+    // over any existing service, even though their data/Redis are independent.
+    await freePort(3000); await freePort(3001); await freePort(redisPort);
+    const redisDir = path.join(repo, 'output/codex-cloud', providers ? 'provider-redis' : 'redis');
     await mkdir(redisDir, { recursive: true });
+    if (providers) {
+      console.log('[cloud providers] configuration metadata (no values or requests)');
+      console.log(JSON.stringify(providerConfigurationReport(repo)));
+      if (args.includes('--verify-no-calls')) console.log('[cloud providers] external calls blocked for startup verification');
+    }
     console.log('[cloud preview] 1/3 isolated Redis');
-    const redis = launch('redis-server', ['--bind', '127.0.0.1', '--port', '6380', '--dir', redisDir,
+    const redis = launch('redis-server', ['--bind', '127.0.0.1', '--port', String(redisPort), '--dir', redisDir,
       '--appendonly', 'yes', '--appendfsync', 'everysec', '--maxmemory-policy', 'noeviction', '--daemonize', 'no']);
     const { default: Redis } = await import('ioredis');
     const client = new Redis(env.REDIS_URL, { lazyConnect: true, retryStrategy: () => null, connectTimeout: 1000 });
@@ -69,8 +87,8 @@ try {
     } finally { client.disconnect(); }
     console.log('[cloud preview] 2/3 project Worker');
     const worker = launch(process.execPath, ['node_modules/tsx/dist/cli.mjs', 'src/worker/pipeline-worker.ts']);
-    console.log('[cloud preview] 3/3 Next.js on port 3000; synthetic data only; fixture invite: cloud-synthetic-only');
-    const web = launch(process.execPath, ['node_modules/next/dist/bin/next', 'dev', '--hostname', '0.0.0.0', '-p', '3000']);
+    console.log(`[cloud preview] 3/3 Next.js on port ${webPort}; synthetic data only; fixture invite: cloud-synthetic-only`);
+    const web = launch(process.execPath, ['node_modules/next/dist/bin/next', 'dev', '--hostname', '0.0.0.0', '-p', String(webPort)]);
     await Promise.race([redis.done, worker.done, web.done]);
     throw Error('A preview service exited; stopping owned services');
   }
