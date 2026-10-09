@@ -1,10 +1,10 @@
 import { Transform } from 'node:stream';
 import { StringDecoder } from 'node:string_decoder';
-import { providerSecretAliases } from './providers.mjs';
+import { providerSecretAliases, providerLocalSecretKeys } from './providers.mjs';
 
 export function providerLogRedactor(env) {
   const values = new Set();
-  for (const key of [...Object.keys(providerSecretAliases), ...Object.values(providerSecretAliases),
+  for (const key of [...Object.keys(providerSecretAliases), ...Object.values(providerSecretAliases), ...providerLocalSecretKeys,
     'HTTP_PROXY', 'HTTPS_PROXY', 'http_proxy', 'https_proxy']) {
     const value = env[key];
     if (value) { values.add(value); values.add(value.trim()); }
@@ -17,7 +17,7 @@ export function providerLogRedactor(env) {
     }
   }
   const secrets = [...values].filter(Boolean).sort((a, b) => b.length - a.length);
-  const overlap = Math.max(1, ...secrets.map(value => value.length)) - 1;
+  const overlap = Math.max(12, ...secrets.map(value => value.length)) - 1;
   const decoder = new StringDecoder('utf8');
   let pending = '';
   const replace = text => {
@@ -34,7 +34,7 @@ export function providerLogRedactor(env) {
     }
     let output = '', cursor = 0;
     for (const [start, end] of ranges) { output += text.slice(cursor, start) + '[REDACTED]'; cursor = end; }
-    return output + text.slice(cursor);
+    return (output + text.slice(cursor)).replace(/(\b(?:capability|token)=)[^\s"'&<>\\]+/giu, '$1[REDACTED]');
   };
   return new Transform({
     transform(chunk, encoding, callback) {
@@ -50,6 +50,11 @@ export function providerLogRedactor(env) {
             if (at + value.length > end) end = at;
             at = pending.indexOf(value, at + 1);
           }
+        }
+        // Signed audio URLs are credentials too. Retain a query value that
+        // crosses chunks until its delimiter arrives; never emit its prefix.
+        for (const match of pending.matchAll(/\b(?:capability|token)=[^\s"'&<>\\]*/giu)) {
+          if (match.index < end && match.index + match[0].length >= end) end = match.index;
         }
       } while (previous !== end);
       if (end) { this.push(replace(pending.slice(0, end))); pending = pending.slice(end); }

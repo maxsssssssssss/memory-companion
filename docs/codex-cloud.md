@@ -50,6 +50,23 @@ Provider模式需要Node>=24.5（当前24.19）；离线入口最低Node22.13保
 
 supervisor对Web/Worker/Redis输出流脱敏，包括跨chunk凭据及代理认证；报告只含配置名称/状态。缺少模型、凭据、Learning opt-in参数、ASR可达音频入口或OCR实例/known-findings材料时保留实际配置失败，不通过共享fallback或历史mock补齐。Windows私有OCR/公网音频入口不属于普通Cloud启动前提。
 
+### 复用现有 Learning ASR/OCR
+
+应用侧继续复用 `learning/audio-service.ts`、`transcription/speaker-asr-provider.ts` 及 Learning PDF parser/source transport；不运行依赖 Windows DPAPI、SSH 和 ngrok 的本地启动器，不导入 Windows `.env.local`、真实数据或旧隧道。`SPEAKER_ASR_BASE_URL` 保留用户提供的完整 HTTP/HTTPS 地址、端口和路径，不自动改成 HTTPS。ASR 的 HTTP fetch 和 OCR 原生 HTTPS PUT 均使用上述原生代理配置；两条实际应用传输路径已通过仅监听 loopback 的合成代理验证。HTTPS 保留 CA/TLS 校验，HTTP ASR 不使用 TLS 开关伪装成 HTTPS。
+
+| 配置 | 来源及用途 |
+|---|---|
+| `SPEAKER_ASR_BASE_URL` | 普通环境变量；已有兼容 ASR 服务的原始地址 |
+| `LEARNING_ASR_AUDIO_BASE_URL` | 普通环境变量；ASR 可达的 Learning 音频入口 origin，不能带路径；缺省可使用 `SPEAKER_ASR_AUDIO_BASE_URL` |
+| `LEARNING_ASR_AUDIO_CAPABILITY_SECRET` | 独立原始运行时签名秘密，至少32字符；Cloud入口只在内存转交Web/Worker并脱敏，默认不生成、不写文件、不借用其他产品秘密 |
+| `LEARNING_PDF_SERVICE_URL` | 普通环境变量；兼容 OCR 服务前缀，应用接受 HTTPS 或既有本机127.0.0.1 HTTP适配器 |
+| `DAILY_BRIEF_LEARNING_PDF_SERVICE_TOKEN` | Network secret，仅绑定实际OCR的HTTPS主机；在子进程内映射到 `LEARNING_PDF_SERVICE_TOKEN` |
+| `LEARNING_PDF_KNOWN_FINDINGS_FILE` | 审阅过的非敏感 findings 文件；路径被规范化为checkout内可读普通文件，拒绝越界和文件符号链接；不自动创建空文件替代历史证据 |
+
+本地 HMAC 签名依赖稳定的原始秘密，而 Network secret 的运行时值可能是仅供指定 HTTPS 目标替换的 placeholder；不要把签名秘密登记为此类代理绑定。当前配置工具只暴露 Network secret 声明，尚未证明能安全注入长期原始本地签名秘密；普通入口需要受支持的安全运行时注入方式，不贴聊天或保存到代码/日志。没有该前提时保留 ASR 配置缺口，不自动生成重启即失效的秘密。对于当次明确授权的临时合成验收，可由任务父进程在内存生成独立高强度秘密，经环境注入Web、Worker与网关，并在必要重启期间保持同值；结束停止自有进程并释放秘密，不将此临时状态当成后续任务配置。现有 ASR 客户端提交/查询没有通用 API Key 请求头；`SPEAKER_ASR_AUDIO_ACCESS_TOKEN` 属于旧取音链路。若 HTTP ASR 服务需要额外鉴权，应明确其契约，不将 OCR/TokenHub Key复用到该服务；Network secret 的 HTTPS 替换不能用于 HTTP。
+
+ASR 需要两条独立可达路径：Cloud经平台代理请求ASR，ASR再访问上述音频origin上的Learning签名GET/HEAD路由。音频入口必须到达本任务Web及其合成文件；Windows旧ngrok、本机loopback、其他账号/生产入口均不自动满足。普通入口不自动启动公网隧道、不改DNS/反向代理/服务器；当次明确授权的临时隧道仅允许签名音频GET/HEAD，测试后关闭并清理，不公开整个网站。服务目标、最小主机权限及私网/VPN需求须由用户明确，平台拒绝时不得绕过或扩大为All domains。OCR必须保留现有health、实例身份、原件PUT/GET/DELETE与逐页解析回执契约；HTTPS实例Epoch/Instance由应用health发现，配置检查不把缺省实例值误报成必填缺口。未知服务身份和历史PDF原包仍不能由合成测试替代。
+
 `scripts/cloud/setup.sh` 是唯一安装实现；`scripts/cloud/environment.mjs` 为运行进程发现项目 `.venv/bin`、Cloud 工具目录和所需临时目录。正式入口不要求手工 `source /workspace/.cloud-tools/activate.sh`，也不依赖准备阶段的临时启动脚本。Redis 动态库需求放在执行包装脚本内，不能靠继承业务进程的 `LD_LIBRARY_PATH`。
 
 本版安装器限定已验证的 Debian 13 / x86_64。系统 Chromium、make/g++ 和 Python venv/ensurepip 为系统前提；缺少时须有 root 或可用的非交互 sudo，否则明确报平台前提失败。当前快照已提供这些工具，正常复用不需要 sudo。Redis 可用官方签名 apt 软件包在 Cloud 工具目录提取重建；不绕过包签名或 TLS。

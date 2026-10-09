@@ -1,5 +1,5 @@
 import path from 'node:path';
-import { accessSync, constants } from 'node:fs';
+import { accessSync, constants, lstatSync, realpathSync } from 'node:fs';
 import { cloudEnvironment } from './environment.mjs';
 
 // Exact application contracts only. Never inherit arbitrary app, storage,
@@ -20,6 +20,7 @@ export const providerConfigKeys = Object.freeze([
   'MEMORY_RELEVANCE_BASE_URL', 'MEMORY_RELEVANCE_TIMEOUT_MS',
   'LEARNING_AI_PROVIDER', 'LEARNING_AI_MODEL', 'LEARNING_AI_MAX_INPUT_CHARS',
   'LEARNING_AI_MAX_OUTPUT_TOKENS', 'LEARNING_AI_REQUEST_TIMEOUT_MS',
+  'LEARNING_ASR_AUDIO_BASE_URL', 'LEARNING_PDF_KNOWN_FINDINGS_FILE',
   'LEARNING_PDF_SERVICE_URL', 'LEARNING_PDF_SERVICE_EPOCH', 'LEARNING_PDF_SERVICE_INSTANCE',
   'WORK_REVIEW_TARGET_INPUT_TOKENS_PER_WINDOW', 'WORK_REVIEW_MAX_INPUT_TOKENS_PER_WINDOW',
   ...['EXTRACTOR', 'VERIFIER', 'WEEKLY_SYNTHESIZER', 'WEEKLY_VERIFIER',
@@ -38,6 +39,9 @@ export const providerSecretAliases = Object.freeze({
   SPEAKER_ASR_AUDIO_ACCESS_TOKEN: 'DAILY_BRIEF_SPEAKER_ASR_AUDIO_ACCESS_TOKEN',
   LEARNING_PDF_SERVICE_TOKEN: 'DAILY_BRIEF_LEARNING_PDF_SERVICE_TOKEN'
 });
+// HMAC is computed locally: this requires an independently injected raw runtime
+// secret, not a Network-secret placeholder or a credential/configuration file.
+export const providerLocalSecretKeys = Object.freeze(['LEARNING_ASR_AUDIO_CAPABILITY_SECRET']);
 const transportKeys = ['HTTP_PROXY', 'HTTPS_PROXY', 'http_proxy', 'https_proxy',
   'NODE_EXTRA_CA_CERTS', 'SSL_CERT_FILE', 'SSL_CERT_DIR', 'REQUESTS_CA_BUNDLE', 'CURL_CA_BUNDLE'];
 const present = value => typeof value === 'string' && value.trim().length > 0;
@@ -67,6 +71,22 @@ export function providerEnvironment(repo, input = process.env, { verifyNoCalls =
     if (present(value)) env[target] = value;
     if (present(input[alias])) env[alias] = input[alias];
   }
+  for (const key of providerLocalSecretKeys) {
+    if (!present(input[key])) continue;
+    if (input[key].trim().length < 32) throw Error(`Cloud local signing secret is too short: ${key}`);
+    env[key] = input[key];
+  }
+  if (env.LEARNING_PDF_KNOWN_FINDINGS_FILE) {
+    const file = path.resolve(repo, env.LEARNING_PDF_KNOWN_FINDINGS_FILE);
+    const root = realpathSync(repo);
+    try {
+      const relative = path.relative(root, realpathSync(file));
+      if (!relative || relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)
+        || !lstatSync(file).isFile()) throw Error();
+      accessSync(file, constants.R_OK);
+    } catch { throw Error('Cloud OCR findings must be a readable regular file inside the checkout'); }
+    env.LEARNING_PDF_KNOWN_FINDINGS_FILE = file;
+  }
   // CA errors must fail before launching services, rather than silently losing trust.
   for (const key of ['NODE_EXTRA_CA_CERTS', 'SSL_CERT_FILE', 'REQUESTS_CA_BUNDLE', 'CURL_CA_BUNDLE']) {
     if (env[key]) {
@@ -94,6 +114,7 @@ export function providerConfigurationReport(repo, input = process.env) {
     credentials: Object.entries(providerSecretAliases).map(([target, alias]) => ({
       target, networkSecretVariable: alias, present: present(env[target]), aliasPresent: present(env[alias])
     })),
+    localSigningSecrets: providerLocalSecretKeys.map(name => ({ name, present: present(env[name]) })),
     transport: { httpProxy: present(env.HTTP_PROXY ?? env.http_proxy),
       httpsProxy: present(env.HTTPS_PROXY ?? env.https_proxy), extraCa: present(env.NODE_EXTRA_CA_CERTS),
       tlsVerification: true, loopbackBypassesProxy: true },
@@ -102,8 +123,10 @@ export function providerConfigurationReport(repo, input = process.env) {
       learningGeneration: missing(['OPENAI_BASE_URL', 'OPENAI_API_KEY', 'LEARNING_AI_PROVIDER',
         'LEARNING_AI_MODEL', 'LEARNING_AI_MAX_INPUT_CHARS', 'LEARNING_AI_MAX_OUTPUT_TOKENS']),
       speakerAsr: missing(['SPEAKER_ASR_BASE_URL', 'SPEAKER_ASR_AUDIO_BASE_URL']),
+      learningAsr: [...missing(['SPEAKER_ASR_BASE_URL', 'LEARNING_ASR_AUDIO_CAPABILITY_SECRET']),
+        ...(!present(env.LEARNING_ASR_AUDIO_BASE_URL ?? env.SPEAKER_ASR_AUDIO_BASE_URL) ? ['LEARNING_ASR_AUDIO_BASE_URL'] : [])],
       pdfOcr: missing(['LEARNING_PDF_SERVICE_URL', 'LEARNING_PDF_SERVICE_TOKEN',
-        'LEARNING_PDF_SERVICE_EPOCH', 'LEARNING_PDF_SERVICE_INSTANCE'])
+        'LEARNING_PDF_KNOWN_FINDINGS_FILE'])
     }
   };
 }

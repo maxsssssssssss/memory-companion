@@ -5,7 +5,7 @@ import os from 'node:os';
 import http from 'node:http';
 import https from 'node:https';
 import net from 'node:net';
-import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, symlinkSync } from 'node:fs';
 import { spawn, spawnSync, execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { Readable } from 'node:stream';
@@ -44,6 +44,82 @@ test('Network secret aliases preserve proxy placeholders and reject ambiguous cr
   assert.equal(providerEnvironment(repo, { OPENAI_API_KEY: placeholder }).OPENAI_API_KEY, placeholder);
   assert.throws(() => providerEnvironment(repo, { OPENAI_API_KEY: placeholder,
     DAILY_BRIEF_OPENAI_API_KEY: 'another-synthetic-placeholder' }), /Conflicting Provider credential sources/);
+});
+
+test('Learning ASR retains HTTP and shares a raw local signing secret across both child roles', () => {
+  const env = providerEnvironment(repo, { SPEAKER_ASR_BASE_URL: 'http://asr.synthetic.invalid:8300/gateway',
+    LEARNING_ASR_AUDIO_BASE_URL: 'https://audio.synthetic.invalid',
+    LEARNING_ASR_AUDIO_CAPABILITY_SECRET: 'SYNTHETIC_ONLY_LOCAL_SIGNING_32_CHARACTERS' }, { verifyNoCalls: true });
+  for (const role of ['web', 'worker']) {
+    const child = spawnSync(process.execPath, ['--import', 'tsx', '--input-type=module', '-e', `
+      import a from 'node:assert/strict';
+      import {learningAsrConfig,learningAudioUrl,verifyLearningAudioUrl} from './src/lib/server/learning/audio-service.ts';
+      a.equal(process.env.SPEAKER_ASR_BASE_URL,'http://asr.synthetic.invalid:8300/gateway');
+      const config=learningAsrConfig();
+      const address={userId:'synthetic',pageId:'synthetic-page',runId:'synthetic-run',materialId:'synthetic-material',index:0};
+      const url=new URL(learningAudioUrl(config,address));
+      a.equal(url.origin,'https://audio.synthetic.invalid');
+      a.ok(verifyLearningAudioUrl(config.secret,address,url.searchParams));
+    `], { cwd: repo, env, encoding: 'utf8' });
+    assert.equal(child.status, 0, `${role} Learning ASR configuration mismatch`);
+  }
+  assert.deepEqual(providerConfigurationReport(repo, env).missing.learningAsr, []);
+  assert.throws(() => providerEnvironment(repo, { LEARNING_ASR_AUDIO_CAPABILITY_SECRET: 'too-short' }), /signing secret is too short/);
+});
+
+test('OCR alias and reviewed findings path reach the real application config without invented instance values', () => {
+  mkdirSync(path.join(repo, 'output'), { recursive: true });
+  const dir = mkdtempSync(path.join(repo, 'output', 'cloud-ocr-config-'));
+  const findings = path.join(dir, 'synthetic-config-findings.json');
+  // Config-only synthetic schema fixture; no OCR quality or historical evidence claim.
+  writeFileSync(findings, '[]');
+  try {
+    const env = providerEnvironment(repo, { LEARNING_PDF_SERVICE_URL: 'https://ocr.synthetic.invalid/internal/ocr',
+      DAILY_BRIEF_LEARNING_PDF_SERVICE_TOKEN: 'synthetic-ocr-proxy-placeholder',
+      LEARNING_PDF_KNOWN_FINDINGS_FILE: findings }, { verifyNoCalls: true });
+    for (const role of ['web', 'worker']) {
+      const child = spawnSync(process.execPath, ['--import', 'tsx', '--input-type=module', '-e', `
+        import a from 'node:assert/strict';
+        import {pdfParserConfig} from './src/lib/server/learning/pdf-parser-service.ts';
+        a.equal(process.env.LEARNING_PDF_SERVICE_TOKEN,process.env.DAILY_BRIEF_LEARNING_PDF_SERVICE_TOKEN);
+        const config=pdfParserConfig();
+        a.equal(config.token,'synthetic-ocr-proxy-placeholder');
+        a.equal(config.url,'https://ocr.synthetic.invalid/internal/ocr');
+        a.equal(config.discoverInstance,true);
+        a.equal(config.serviceEpoch,undefined);
+      `], { cwd: repo, env, encoding: 'utf8' });
+      assert.equal(child.status, 0, `${role} OCR configuration mismatch`);
+    }
+    assert.deepEqual(providerConfigurationReport(repo, env).missing.pdfOcr, []);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('OCR findings reject unavailable, external and symlinked paths without reading secrets', () => {
+  mkdirSync(path.join(repo, 'output'), { recursive: true });
+  const dir = mkdtempSync(path.join(repo, 'output', 'cloud-ocr-path-'));
+  const outside = mkdtempSync(path.join(os.tmpdir(), 'cloud-ocr-outside-'));
+  const file = path.join(outside, 'synthetic.json'); writeFileSync(file, '[]');
+  const link = path.join(dir, 'link.json'); symlinkSync(file, link);
+  try {
+    for (const value of [file, link, dir, path.join(dir, 'missing.json')]) {
+      assert.throws(() => providerEnvironment(repo, { LEARNING_PDF_KNOWN_FINDINGS_FILE: value }), /readable regular file inside/);
+    }
+  } finally { rmSync(dir, { recursive: true, force: true }); rmSync(outside, { recursive: true, force: true }); }
+});
+
+test('local signing secrets and signed audio query credentials are redacted across chunks', async () => {
+  const secret = 'SYNTHETIC_ONLY_LOCAL_SIGNING_32_CHARACTERS';
+  const redactor = providerLogRedactor({ LEARNING_ASR_AUDIO_CAPABILITY_SECRET: secret });
+  let output = ''; redactor.on('data', value => { output += value; });
+  const input = `${secret} https://audio.synthetic.invalid/file?capability=${'a'.repeat(64)}&expires=123 token=synthetic-query-token end`;
+  await new Promise((resolve, reject) => {
+    redactor.once('end', resolve); redactor.once('error', reject);
+    Readable.from([...Buffer.from(input)].map(value => Buffer.from([value]))).pipe(redactor);
+  });
+  assert.ok(!output.includes(secret)); assert.ok(!output.includes('a'.repeat(64)));
+  assert.ok(!output.includes('synthetic-query-token'));
+  assert.ok(output.includes('capability=[REDACTED]&expires=123'));
+  assert.ok(output.endsWith('token=[REDACTED] end'));
 });
 
 test('offline entry continues to discard business settings, aliases, proxies and CA settings', () => {
@@ -168,26 +244,61 @@ test('native fetch, HTTP and HTTPS use a local proxy, respect bypass, and requir
   const cert = execFileSync('bash', ['-c', 'cat | openssl req -x509 -key /dev/stdin -days 1 -subj /CN=provider.invalid -addext subjectAltName=DNS:provider.invalid'],
     { input: key, stdio: ['pipe', 'pipe', 'ignore'], encoding: 'utf8' });
   const ca = path.join(dir, 'public-ca.pem'); writeFileSync(ca, cert);
-  const sockets = new Set(); let connectRequests = 0, httpRequests = 0, authorizedRequests = 0;
+  const sockets = new Set(); let connectRequests = 0, httpRequests = 0, authorizedRequests = 0, asrRequests = 0, ocrUploads = 0;
   const target = https.createServer({ key, cert }, (request, response) => {
+    if (request.method === 'PUT') {
+      assert.equal(request.headers.authorization, 'Bearer synthetic-ocr-platform-placeholder');
+      assert.equal(request.headers['content-length'], '4');
+      const chunks = [];
+      request.on('data', value => chunks.push(value));
+      request.on('end', () => {
+        assert.deepEqual(Buffer.concat(chunks), Buffer.from([37, 80, 68, 70]));
+        ocrUploads++; response.writeHead(201, { 'content-type': 'application/json' });
+        response.end('{"status":"ready"}');
+      });
+      return;
+    }
     if (request.headers.authorization === 'Bearer synthetic-platform-placeholder') authorizedRequests++;
     response.end('tls-ok');
   });
   const loopback = http.createServer((request, response) => response.end('loopback-ok'));
-  const proxy = http.createServer((request, response) => { httpRequests++; response.end('proxy-ok'); });
-  for (const server of [target, loopback, proxy]) server.on('connection', socket => { sockets.add(socket); socket.on('close', () => sockets.delete(socket)); });
+  const serveAsr = (request, response) => {
+    if (request.url === '/gateway/api/ai/non-realtime-asr'
+      || request.url === 'http://asr.synthetic.invalid:8300/gateway/api/ai/non-realtime-asr') {
+      assert.equal(request.method, 'POST');
+      const chunks = []; request.on('data', value => chunks.push(value));
+      request.on('end', () => {
+        const body = JSON.parse(Buffer.concat(chunks).toString());
+        assert.equal(body.req_id, 'synthetic-request');
+        assert.equal(body.audio_url, 'https://audio.synthetic.invalid/learning?capability=synthetic-signed-url');
+        asrRequests++; response.setHeader('content-type', 'application/json');
+        response.end(JSON.stringify({ code: 0, data: { asr_result: { sentences: [
+          { text: '[合成] ASR代理返回', timestamp: [{ start: 0, end: 100 }] }
+        ] } } }));
+      });
+      return;
+    }
+    response.writeHead(404); response.end();
+  };
+  const asrTarget = http.createServer(serveAsr);
+  const proxy = http.createServer((request, response) => {
+    if (request.url?.startsWith('http://asr.synthetic.invalid:8300/')) return serveAsr(request, response);
+    httpRequests++; response.end('proxy-ok');
+  });
+  for (const server of [target, loopback, proxy, asrTarget]) server.on('connection', socket => { sockets.add(socket); socket.on('close', () => sockets.delete(socket)); });
   const listen = server => new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
   const run = (script, env) => new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, ['-e', script], { env, stdio: ['ignore', 'pipe', 'pipe'] });
+    const child = spawn(process.execPath, ['--import', 'tsx', '-e', script], { cwd: repo, env, stdio: ['ignore', 'pipe', 'pipe'] });
     let output = ''; child.stderr.on('data', value => { output += value; });
     child.once('error', reject); child.once('exit', code => code === 0 ? resolve() : reject(Error(`Local proxy test child failed (${code}): ${output}`)));
   });
   try {
-    await Promise.all([target, loopback, proxy].map(listen));
+    await Promise.all([target, loopback, proxy, asrTarget].map(listen));
     proxy.on('connect', (request, socket, head) => {
-      assert.equal(request.url, `provider.invalid:${target.address().port}`);
+      const plainAsr = request.url === 'asr.synthetic.invalid:8300';
+      if (!plainAsr) assert.equal(request.url, `provider.invalid:${target.address().port}`);
       connectRequests++;
-      const upstream = net.connect(target.address().port, '127.0.0.1', () => {
+      const upstream = net.connect(plainAsr ? asrTarget.address().port : target.address().port, '127.0.0.1', () => {
         socket.write('HTTP/1.1 200 Connection Established\r\n\r\n');
         if (head.length) upstream.write(head); socket.pipe(upstream); upstream.pipe(socket);
       });
@@ -195,7 +306,9 @@ test('native fetch, HTTP and HTTPS use a local proxy, respect bypass, and requir
       upstream.on('error', () => socket.destroy()); socket.on('error', () => upstream.destroy());
     });
     const input = { HTTPS_PROXY: `http://127.0.0.1:${proxy.address().port}`, HTTP_PROXY: `http://127.0.0.1:${proxy.address().port}`,
-      DAILY_BRIEF_OPENAI_API_KEY: 'synthetic-platform-placeholder', NODE_EXTRA_CA_CERTS: ca };
+      DAILY_BRIEF_OPENAI_API_KEY: 'synthetic-platform-placeholder', NODE_EXTRA_CA_CERTS: ca,
+      DAILY_BRIEF_LEARNING_PDF_SERVICE_TOKEN: 'synthetic-ocr-platform-placeholder',
+      SPEAKER_ASR_BASE_URL: 'http://asr.synthetic.invalid:8300/gateway' };
     const url = `https://provider.invalid:${target.address().port}/status`;
     await run(`
       const a=require('node:assert/strict');
@@ -205,14 +318,24 @@ test('native fetch, HTTP and HTTPS use a local proxy, respect bypass, and requir
         a.equal(await request(require('node:https'),${JSON.stringify(url)}),'tls-ok');
         a.equal(await request(require('node:http'),'http://provider.invalid/status'),'proxy-ok');
         a.equal(await (await fetch('http://127.0.0.1:${loopback.address().port}/')).text(),'loopback-ok');
+        const {requestCompanyAsr}=await import('./src/lib/server/transcription/speaker-asr-provider.ts');
+        const asr=await requestCompanyAsr({requestId:'synthetic-request',materialId:'synthetic-material',userId:'synthetic-user',
+          audioUrl:'https://audio.synthetic.invalid/learning?capability=synthetic-signed-url',resume:false,signal:AbortSignal.timeout(5000)});
+        a.equal(asr.asr_result.sentences[0].text,'[合成] ASR代理返回');
+        const {pdfParserTransport}=await import('./src/lib/server/learning/pdf-source-http.ts');
+        const upload=await pdfParserTransport(${JSON.stringify(url)}, {method:'PUT',body:new Uint8Array([37,80,68,70]),
+          headers:{Authorization:'Bearer '+process.env.LEARNING_PDF_SERVICE_TOKEN,'Content-Length':'4','Content-Type':'application/pdf'},
+          signal:AbortSignal.timeout(5000)});
+        a.equal(upload.status,201);a.deepEqual(await upload.json(),{status:'ready'});
       })().catch(()=>process.exit(1));
     `, providerEnvironment(repo, input));
     assert.equal(authorizedRequests, 1); assert.ok(connectRequests >= 2); assert.equal(httpRequests, 1);
+    assert.equal(asrRequests, 1); assert.equal(ocrUploads, 1);
     await run(`require('node:assert/strict').rejects(fetch(${JSON.stringify(url)})).catch(()=>process.exit(1))`,
       providerEnvironment(repo, { ...input, NODE_EXTRA_CA_CERTS: undefined }));
   } finally {
     for (const socket of sockets) socket.destroy();
-    await Promise.all([target, loopback, proxy].map(server => new Promise(resolve => server.close(resolve))));
+    await Promise.all([target, loopback, proxy, asrTarget].map(server => new Promise(resolve => server.close(resolve))));
     rmSync(dir, { recursive: true, force: true });
   }
 });
