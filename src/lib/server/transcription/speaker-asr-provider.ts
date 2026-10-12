@@ -14,6 +14,7 @@ import {
 import { ChunkTranscriptionError, type ChunkTranscriptionAdapter } from "./chunks/adapter";
 import { createTranscriptChunkFromLocalSegments } from "./chunks/transcript-merge";
 import type { AudioAccessPolicy, TranscriptionProvider } from "./provider";
+import { speakerAsrFetch } from "./speaker-asr-transport";
 
 const SpeakerAsrTimestampPointSchema = z.object({
   start: z.number().finite().nullable().optional(),
@@ -350,7 +351,7 @@ async function submitSpeakerAsr(input: {
   reqId: string;
   signal?: AbortSignal;
 }) {
-  const response = await fetch(`${requireBaseUrl()}/api/ai/non-realtime-asr`, {
+  const response = await speakerAsrFetch(`${requireBaseUrl()}/api/ai/non-realtime-asr`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     signal: input.signal,
@@ -378,7 +379,7 @@ async function submitSpeakerAsr(input: {
 }
 
 async function querySpeakerAsr(reqId: string, signal?: AbortSignal) {
-  const response = await fetch(`${requireBaseUrl()}/api/ai/non-realtime-asr/query?reqid=${encodeURIComponent(reqId)}`, {
+  const response = await speakerAsrFetch(`${requireBaseUrl()}/api/ai/non-realtime-asr/query?reqid=${encodeURIComponent(reqId)}`, {
     signal
   });
   const payload: SpeakerAsrQueryResponse = await parseJsonResponse(response);

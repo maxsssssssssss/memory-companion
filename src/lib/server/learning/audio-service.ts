@@ -5,8 +5,18 @@ import { requestCompanyAsr } from "@/lib/server/transcription/speaker-asr-provid
 import { prepareLearningAudio, learningAudioTempPath } from "./audio-files";
 import { AudioScope, LearningAudioRepository, TimedText } from "./audio-repository";
 import { LearningError, type LearningRepository } from "./repository";
+import { cosConfig, type CosConfig } from "./audio-cos-client";
+import { cleanupLearningCos, releaseLearningCosChunk, uploadLearningCosChunk } from "./audio-cos";
 
-export function learningAsrConfig(env: Readonly<Record<string, string | undefined>> = process.env) {
+type LearningAsrConfiguration = { secret: string; origin: string; cos?: CosConfig };
+export function learningAsrConfig(env: Readonly<Record<string, string | undefined>> = process.env): LearningAsrConfiguration {
+  if (env.DAILY_BRIEF_CLOUD_LEARNING_AUDIO === "cos-synthetic") {
+    try {
+      const service = new URL(env.SPEAKER_ASR_BASE_URL ?? "");
+      if (!["http:", "https:"].includes(service.protocol) || service.username || service.password || service.search || service.hash) throw Error();
+      return { secret: "", origin: "", cos: cosConfig(env) };
+    } catch { throw new LearningError(503, "learning_asr_not_configured"); }
+  }
   const secret = env.LEARNING_ASR_AUDIO_CAPABILITY_SECRET?.trim();
   let origin: URL; let service: URL;
   try { origin = new URL(env.LEARNING_ASR_AUDIO_BASE_URL ?? env.SPEAKER_ASR_AUDIO_BASE_URL ?? ""); service = new URL(env.SPEAKER_ASR_BASE_URL ?? ""); }
@@ -45,7 +55,8 @@ export function companyTimedText(data: Awaited<ReturnType<typeof requestCompanyA
 }
 
 export async function transcribeLearningAudio(learning: LearningRepository, pageId: string, input: unknown,
-  dependencies = { configure: learningAsrConfig, prepare: prepareLearningAudio, request: requestCompanyAsr }) {
+  dependencies: { configure: () => LearningAsrConfiguration; prepare: typeof prepareLearningAudio; request: typeof requestCompanyAsr;
+    cosTransport?: typeof fetch } = { configure: learningAsrConfig, prepare: prepareLearningAudio, request: requestCompanyAsr }) {
   const scope = AudioScope.parse(input); const repository = new LearningAudioRepository(learning);
   const existing = repository.list(pageId).find((r) => r.id === scope.id);
   if (existing) {
@@ -70,13 +81,25 @@ export async function transcribeLearningAudio(learning: LearningRepository, page
             { directory: learningAudioTempPath(learning.accountDataRoot, pageId, materialId), assertWritable: () => repository.assertActive(pageId, scope.id, materialId) }));
         for (const planned of repository.chunks(pageId, materialId)) {
           if (planned.state === "completed") continue;
-          const chunk = repository.claimChunk(pageId, scope.id, materialId, planned.chunk_index);
           const address = { userId: learning.accountId, pageId, runId: scope.id, materialId, index: planned.chunk_index };
-          const result = await dependencies.request({ requestId: chunk.requestId, materialId, userId: learning.accountId,
-            audioUrl: learningAudioUrl(config, address), resume: chunk.resume,
-            signal: AbortSignal.any([controller.signal, AbortSignal.timeout(10 * 60000)]) });
-          repository.completeChunk(pageId, scope.id, materialId, planned.chunk_index, chunk.requestId,
-            companyTimedText(result, planned.start_seconds, planned.end_seconds));
+          try {
+            // Upload intent is durable before PUT. ASR intent is claimed only
+            // after upload+identity verification. Submitted chunks query only.
+            const audioUrl = config.cos
+              ? planned.state === "submitted" ? "" : (await uploadLearningCosChunk(learning, address, config.cos, controller.signal, dependencies.cosTransport)).url
+              : learningAudioUrl(config, address);
+            const chunk = repository.claimChunk(pageId, scope.id, materialId, planned.chunk_index);
+            const result = await dependencies.request({ requestId: chunk.requestId, materialId, userId: learning.accountId,
+              audioUrl, resume: chunk.resume,
+              signal: AbortSignal.any([controller.signal, AbortSignal.timeout(10 * 60000)]) });
+            repository.completeChunk(pageId, scope.id, materialId, planned.chunk_index, chunk.requestId,
+              companyTimedText(result, planned.start_seconds, planned.end_seconds));
+          } finally {
+            if (config.cos) {
+              releaseLearningCosChunk(learning, materialId, planned.chunk_index);
+              await cleanupLearningCos(learning, config.cos, dependencies.cosTransport);
+            }
+          }
         }
         repository.publish(pageId, scope.id, materialId);
       } catch (error) {

@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { isDeepStrictEqual } from "node:util";
 import { z } from "zod";
 import { v5 as uuidv5 } from "uuid";
 import { PARSED_CONTRACT_VERSION, ParsedDocumentResult, type ParsedBlock, type ParsedDocument, type ParsedIssue } from "@/lib/domain/learning-parsed-document";
@@ -91,7 +92,8 @@ const serviceResponse = z.object({
   coverage:z.object({requested_pages:z.number(),completed_pages:z.number(),partial:z.literal(false),failures:z.array(z.unknown()).length(0),semantic_completeness:z.literal("unverified")}),
   parser:z.object({paddleocr:z.string(),paddlex:z.string(),model:z.string(),backend:z.string(),profile:z.record(z.unknown())}),authorization:z.string()
 });
-export type PaddleServiceFinding = { originalSha256:string; physicalPage:number; serviceVersion:string; model:string; code:string; message:string; evidenceRef:string; severity:"warning"|"blocked" };
+export type PaddleServiceFinding = { originalSha256:string; physicalPage:number; serviceVersion:string; model:string; code:string; message:string; evidenceRef:string; severity:"warning"|"blocked";
+  parserScope?:{backend:string;paddleocr:string;paddlex:string;profile:Record<string,unknown>} };
 
 /** Actual delivered HTTP shape. Account/material identity is supplied by the authenticated repository. */
 export function adaptPaddleServiceResponse(input:unknown,binding:{attempt:ParsedDocument;original:LearningPdfMetadata;requestId:string;upstreamDocumentId?:string;physicalPages:number[];findings?:PaddleServiceFinding[]}):ParsedDocumentResult {
@@ -123,7 +125,11 @@ export function adaptPaddleServiceResponse(input:unknown,binding:{attempt:Parsed
         source_member_ids:regions.map(r=>r.member_id),source_regions:regions,quality:{status:signals.some(s=>s.severity==="blocked")?"blocked":signals.length?"warning":"unverified",reason:"HTTP completion is not semantic verification",automatic_signals:signals,text_layer_signals:[],reviews:[]}};
     });
     const issues:ParsedIssue[]=p.coverage.issues.map((x,i)=>issue(`parser_coverage_${i}`,JSON.stringify(x).slice(0,500),"blocked"));
-    for(const f of binding.findings??[])if(f.originalSha256===original.sha256&&f.physicalPage===p.physical_page&&f.serviceVersion===v.service_version&&f.model===v.parser.model)
+    // Legacy lists retain their original matching contract. Transferred lists
+    // can bind the exact backend, package versions and profile; model names alone
+    // do not establish that a native Paddle finding applies to a vLLM response.
+    for(const f of binding.findings??[])if(f.originalSha256===original.sha256&&f.physicalPage===p.physical_page&&f.serviceVersion===v.service_version&&f.model===v.parser.model
+      &&(!f.parserScope||isDeepStrictEqual(f.parserScope,{backend:v.parser.backend,paddleocr:v.parser.paddleocr,paddlex:v.parser.paddlex,profile:v.parser.profile})))
       issues.push({code:f.code,origin:"prior_visual_review",severity:f.severity,message:f.message,scope:{physical_pages:[p.physical_page],block_ids:[]},evidence_refs:[f.evidenceRef]});
     return {physical_page:p.physical_page,printed_label:null,parser_page_index:p.page_index,parse_status:"succeeded" as const,failure_code:null,
       render:{width_px:p.render_size.width,height_px:p.render_size.height,rotation:g.rotation,crop_pdf:g.view as [number,number,number,number],frame:"displayed_pdf_crop" as const},

@@ -39,3 +39,20 @@ Playwright显式选择安装检查确认的系统Chromium executablePath（当�
 开发恢复验收使用`scripts/cloud/new-task-acceptance.md`。用户实际新建任务中，确认目标SHA、工具/依赖恢复、隔离数据以及冷启动/停止/清空重启，即可形成该任务开发可用证据。平台发布版本/内部snapshot ID能查询则记录，不能查询如实说明，不把该字段作为唯一通过门槛；同会话进程重启也不能冒充跨实例还原。
 
 停止进程不保存Git成果。按本次授权提交/推送开发分支；Environment保存草稿、用户Publish和生产部署分别处理，不从前一次授权推断本次发布权。记录实际版本、命令、数量、退出码、耗时、证据层级、未执行或阻塞项。根`UPDATE_HISTORY.md`是Windows与Cloud共用、纳入Git的唯一变更历史；以后接着这份追加脱敏记录，不覆盖旧历史、不另建替代历史。历史里的旧指令不产生当前授权。按本次授权随开发成果同步；并行冲突保留双方追加记录。output/运行日志继续忽略。
+
+独立 COS→ASR 合成链路验证使用 `scripts/cloud/asr-trial.md` 与 `npm run cloud:asr`，不是 Learning 页面的 COS 接入。只有当次明确授权且运行时网络规则已生效时才执行真实调用；最多一次提交、30 次查询、约 60 秒，提交不明不重提。普通安装/启动不自动执行这项付费验证，按需用 `cloud:asr:setup` 准备离线普通话工具。独立 CLI 只接收其明确配置；页面 COS 模式按下述显式选择转交 Web/Worker。保留原应用 HMAC 路由。签名 URL 不落盘或日志，结束核验自有对象删除；保留脱敏 journal，未知上传/清理不得写成成功或通过删除 journal 重获额度。
+
+当前平台代理对HTTP ASR的native fetch CONNECT路径与标准HTTP正向代理行为不同；正式Cloud Provider入口及独立cloud:asr工具复用ASR专属Node HTTP正向代理，HTTPS COS仍用fetch。真实独立合成验收完成后必须保留journal计数，不自动重放；该历史试验不代表当前页面真实端到端或生产验收。
+
+正式ASR代理适配：Cloud Provider入口针对HTTP SPEAKER_ASR_BASE_URL自动派生DAILY_BRIEF_CLOUD_ASR_HTTP_BASE_URL，完整base绑定同时传给Web/Worker；这是内部变量，不接受继承覆盖，不要求用户另填。应用提交和查询使用ASR专属Node HTTP正向代理，默认Windows/服务器及HTTPS仍fetch；不全局替换fetch，不影响OCR/AI。HTTP_PROXY必须存在，禁止直连fallback/重定向/自动重试，取消终止所属请求。独立cloud:asr工具复用同一底层实现，已消费journal不重置。页面 COS 按下述新模式验证，OCR 真实验收仍须补齐配置及当次预算；不因传输适配通过而声称真实端到端完成。
+
+页面 COS 生命周期接入见 docs/cloud-learning-providers.md。仅当用户选择 Cloud 合成音频开发时设置 LEARNING_ASR_AUDIO_DELIVERY=cos-synthetic；五项 DAILY_BRIEF_COS_* 配置由 Provider 入口传入 Web/Worker，原始签名秘密仅安全进程注入，不用 Network-secret 占位值。内部 DAILY_BRIEF_CLOUD_LEARNING_AUDIO 自动派生，不手填。该模式不需要 ngrok/应用 HMAC；默认 Windows/服务器仍为原签名路由。无付费启动仍带 --verify-no-calls，不因配置存在自动请求 COS/ASR。用户已接受仅合成模式最多300秒的旧链接窗口和 COS Range206；不将其描述为默认路由的逐次状态检查或生产撤销等价。
+
+SQLite schema12新增持久对象意图：先记录上传，再验证一次PUT/HEAD，随后claim ASR；未知PUT不重传，submitted只查询原ID，不续签或重提。正常结束/取消/删除尝试删除所属版本；失败和未知上传保留清理记录。下次同账号已鉴权Learning API请求恢复清理（每次至多3对象、失败间隔60秒），不自动续跑ASR；没有后续请求不表示对象已经删除。URL过期不等于对象删除，禁止清空未知清理日志。上传到ASR claim之间崩溃保守失败，不能自动重置。旧版不能读取schema12，绝不拿生产数据库测试迁移。新任务真实调用需新的明确预算；原已消耗ASR journal不重置。
+
+OCR继续复用现有客户端及DAILY_BRIEF_LEARNING_PDF_SERVICE_TOKEN别名。当前独立测试base是https://daydiary.vision-intelligence.tech/internal/ocr/cloud-test-20261012，必须保留完整路径；Token只绑定daydiary.vision-intelligence.tech。新前缀不依赖固定出口，原入口的来源限制不变；平台自身域名许可/Token绑定仍需实际生效。本次Token仅允许health，北京时间2026-10-14 11:19:23到期；不自动探测health或业务方法，存在凭据不是调用授权。后续单页合成试验须新授权并由运维登记PDF哈希/字节数/document/source/request ID后开启业务权限：PDF最多1MiB、PUT1、POST1、原件状态/请求状态/结果GET合计10、所属source/result各DELETE1，失败尝试也计数。过期需运维处理，不自动续签、换ID或清账本。
+
+交付包已导入output/cloud-ocr-handoff-20261012-v1，LEARNING_PDF_KNOWN_FINDINGS_FILE指向其quality/known-findings.json的实际绝对路径。31文件/30项manifest哈希及9条实际Zod验证通过，清单SHA256=58282bae46dd6e31333ef40fdac63fd414d37eba3b0912cda5e097ee42796eac；原样保留scope。实际adapter对交付声明的vllm0.11.1/PaddleOCR3.7.0/PaddleX3.7.2、PaddleOCR-VL-1.6及PNG嵌套公式profile匹配7条，非嵌套配置另2条不能混用。21条原生历史记录另存、不直接套用；普通正文仍unverified。包内不含完整原PDF/历史响应，离线匹配不是今天真实复现；session/epoch由获授权的health发现，不固定session-2。fetch/原生PUT完整前缀本地代理回归通过，真实Cloud链路仍未验证。该包在Git忽略output中，未来发布前确认文件系统保留或校验后重新导入，不能用空清单补缺，也不执行包内服务器脚本。Windows历史PDF测试缺包仍未解决。Install仍唯一cloud:setup；提交、草稿、Publish、新任务恢复分别核验。
+
+
+OCR 质量包的当前环境保留副本在 `/workspace/.cloud-artifacts/learning-ocr-20261012-v1/`：包含原 ZIP、`extracted/` 原字节目录和 `backup-manifest.json`，不进入公开 Git。ZIP SHA-256 为 `a3027b7babb1ad2162fc8ccfda7d0131a17cf2bcbeed394606dcec7dddbf4dd5`；findings SHA-256 为 `58282bae46dd6e31333ef40fdac63fd414d37eba3b0912cda5e097ee42796eac`。新任务先检查已配置的 output 目录；若不存在，可在核对 ZIP 固定哈希、包内 manifest 及上述清单哈希后，从 `extracted/` 恢复整个包到同名 output 目录。目标已有不同字节时停止并报告，不覆盖、不执行包内脚本、不写空清单；若副本也缺失，需重新提供原已审阅附件。它是需随准备文件系统保留的资料，不是 Git 安装依赖；`cloud:setup` 不联网下载或生成历史质量证据。Publish 后必须在独立新任务检查实际保留结果，当前副本存在不能证明平台内部快照或跨任务恢复。已消费的 ASR journal 继续保留；新任务缺失旧 journal 也不授予新调用额度。

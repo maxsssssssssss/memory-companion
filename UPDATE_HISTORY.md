@@ -15238,3 +15238,148 @@ Debian 13.6 x86_64，cgroup 4 CPU / 16 GiB。通过 cloudEnvironment 的显式�
 - 复用既有实际回归证据：Provider16/16、精确六文件92/92、cloud:check 9/9及类型检查、cloud:build 44/44和179 trace禁入0、合成启动以及本地HTTPS音频链路76/76均通过；此次仅调整文档默认范围，不重复安装、全量测试或构建，不改写已记录的首次失败和历史PDF/OCR缺源限制。
 - 账号与平台实际状态：用户已准备ngrok账号，但当前运行环境仍只有既有模型Network secret，未收到ngrok身份；当前网络未应用草稿内的ngrok控制主机。无状态变化时不重复已拒绝的控制节点探测，不声明账号准备等于隧道可用。官方管理API可通过HTTPS API Key创建并撤销agent credential，返回authtoken可留在进程内存；该API Key权限更广且credential没有自动TTL，未把这条备选视为已授权，未添加API主机/秘密要求或调用管理API。
 - 交付边界：按已有授权正常提交并推送dev/cloud，先核对远端不冲突，不force-push、不修改main/master。Environment草稿应同步准确提交与完整Start skill，Install script仍为npm run cloud:setup，既有业务变量/秘密/最小网络权限保留。草稿保存不等于应用或Publish；实际公网隧道、ASR下载和付费ASR请求仍NOT RUN。本次无新增计费Provider调用，既有单次Learning模型请求预算不转用于ASR。
+
+## 2026-10-09 直接 Authtoken 注入与真实 ngrok 控制连接验证
+
+- 用户完成平台配置与发布后继续本次已授权的临时合成音频入口验证。实际 checkout 为 dev/cloud@efd056cbfa88daf0d79e4df50faf5178adb99cc9，锁文件 SHA256 为0f7d643ea8c5eca671ee29a2231e0ba162ff32615bbb011ee793384faec9142d；没有 reset、切换基线、改业务源码或依赖。平台普通变量元数据为 vault_secret/direct_environment_variable，NGROK_AUTHTOKEN 在当前父进程中存在且无首尾空白、换行或粘贴命令，仅经环境传给所属 CLI，不传 Web/Worker，不写配置、argv、日志或 Git。旧 API Key 需求及 api.ngrok.com 已从已发布配置移除；未创建、撤销账号凭据，用户既有 Authtoken 保留。绑定和存在性不等于远端认证成功，不宣称已证明平台内部加密或快照机制。
+- 恢复任务不保留此前 /tmp 工具，重新通过官方固定镜像 digest 取出静态 ngrok3.39.8，二进制 SHA256 e42bc30eec4ed9337ea5a69023d654c4fc78416e44f36eb4e0e4f31bc9087d95。仅使用未启动、network=none 的自有提取容器并删除它；不运行会把 Authtoken 写入文件的镜像 entrypoint。无秘密 v3 配置继承平台 HTTP 代理、完整公开 CA，config check/version 通过；保持 TLS、hostname、CRL 校验，关闭更新、远程管理、检查界面和 pooling。此恢复过程不成为另一套项目安装器，Install script 继续 npm run cloud:setup。
+- 连接证据：一次无认证 CONNECT200、TLS1.3 校验通过，188ms；独立无认证证书核验246ms，peer issuer及X509签名均确认来自平台代理公开CA，证明该 TLS 段由平台签发，但不单独证明 muxado 不受支持。最新状态接口 observations_current=true、spec22，但 network/variables 为unknown，不将声明写成ready/enforced；实际限制策略包含所需精确主机，TCP grants为空，未扩大权限、直连、All domains 或关闭TLS。
+- 实际 CLI 共四次有界启动：前两次84ms/51ms被临时诊断器对nil类字段的误判提前结束，不能作为协议或凭据错误证据；修正后第三次2956ms记录发送鉴权/会话关闭，末次再修正stdout/stderr分流、EOF flush、close等待和标准错误码采集后3011ms，仍为failed_to_send_authentication及session_closed，没有ERR_NGROK码或HTTP拒绝回执，未认证、未绑定公网listener。末次执行exit1、实际公网断言0，不描述为测试通过或Token无效。此后停止agent重试；按官方muxado编码仅再发一次无认证12字节DATA+SYN/heartbeat开场，经同一CONNECT/TLS路径1079ms后stream ended、无回应。该探测完成exit0不是隧道PASS；不能精确归因关闭来自平台代理或上游，不申请更宽API Key或绕过平台。
+- 公网签名GET/HEAD、ASR服务端下载BLOCKED/NOT RUN；本轮没有启动业务Web/Worker/Redis或生成新账号/音频。既有本地HTTPS合成链路76/76仍只是本地签名、归属、删除和重启证据，不代替公网成功。真实ASR/OCR/模型计费请求0，未购买资源、未查询账单、不访问生产。对象存储只读复核没有bucket/region/endpoint/授权签名身份，公开身份manifest connections为空；代理placeholder不用于本地签名。现有Learning固定拼接签名路由，对象预签名URL不能直接填音频origin，替代接入需独立私有测试资源、短期GET/HEAD及清理能力，并做Learning专用URL/删除fencing适配，不声称备选已可用。
+- 清理和交付：所属agent/网关全部停止，3000/3001/6380/6381/37942/37943实际重新bind成功，provider-data/provider-redis不存在，HMAC随临时父进程结束释放；没有长期公网入口。检查30份本轮/既有脱敏JSON及临时源码/无秘密配置无Authtoken精确值命中。输出证据仍在忽略的output/cloud-audio-tunnel-20261009，不提交秘密、原始日志、数据库或helper。仅追加本历史；Start skill已保存真实控制连接阻塞及停止重试边界，保存成功但requires_publish=true，尚未再次Publish。Install、既有业务绑定及最小网络保持原样；没有commit/push、修改main/master或部署。下次继续须有受支持的控制传输条件变化或获授权的独立对象存储资源。
+
+## 2026-10-09 ngrok 上游 TLS/ALPN 阻断的进一步诊断
+
+- 用户继续授权诊断连接关闭，仅在当前dev/cloud隔离任务进行；保留已有未提交历史，不改业务、依赖、锁文件、main/master或生产。只用当前获准控制主机和既有HTTP代理，不扩大网络、All domains或TCP grants，不直连/8088，不关闭TLS，不读取Windows配置或真实业务数据。
+- 诊断方法修正：此前12字节心跳开场没有nonce/完整Auth，EOF不足以定位。读取官方Rust与ngrok配置/OpenSSL说明共四个必要请求（其中一个header路径404），确认Auth streamtype0、Version[3,2]、SNI与独立RPC格式。从本地缓存固定digest官方镜像提取并校验原3.39.8 CLI，network=none/pull=never且不启动entrypoint，提取容器已删除。普通HTTPS元数据没有代理日志/trace入口；网络state仍unknown，不宣称全局enforced/ready。
+- 本地协议控制：CLI子进程只收到合成Token、不转发的loopback代理及临时公开测试CA，真实Token未传给子进程；完整Auth捕获最终133ms、exit0，实际Go字段Authtoken（区别Rust命名）匹配合成值，stream3/type0后发送完整JSON。对外RPC先将Authtoken、Cookie、ClientId、Fingerprint、Metadata置空，Hostname设合成值；独立只读审阅确认完整JSON无真实账号/session标识。ClientHello独立观察最终171ms、exit0，SNI匹配控制主机，offered ALPN=[]；不能由第一版negotiated=null直接推断offered。测试TLS私钥仅内存/管道，公开CA临时文件不含私钥或HMAC。
+- 保留本地诊断器失败：直接OpenSSL读取Node stdin socket不可fopen（两种路径均失败），改用Python FIFO管道后成功，不保存私钥。首次捕获读取AuthToken而非Go Authtoken，导致合成值匹配false，外联前已修正且清空正确字段。ClientHello窥探后再包装TLS一次超时8391ms，随后只观察Hello避免影响TLS流；该观察器首次exitCode布尔值导致exit1，改为数字后通过。失败摘要保留，不把这些临时helper问题归因应用或Token。
+- 实际同路径探测：只发送一次完整空凭据Auth RPC、无Bind，CONNECT200/TLS1.3验证、1231字节发送后1182ms EOF，回应0字节；四次有界无认证HTTP GET用于503原因定位，均经原代理，无付费/业务API，最终307ms确认Server=envoy、HTTP503、upstream connect error/disconnect-reset before headers/connection failure/TLS_error，公开错误码TLSV1_ALERT_NO_APPLICATION_PROTOCOL。前两版采集缺少TLS细节/正则先匹配OPENSSL_前缀，最终修正为准确内部enum，不保存原始响应正文。该结果明确定位HTTP控制请求proxy→ngrok的上游TLS应用协议协商失败，发生于该请求应用处理前；真实agent会话关闭与之高度相关，尚不能证明唯一根因相同或观察实际代理/服务端ALPN列表。名称TLSV1不代表TLS1.0，已测TLS1.3仅属Cloud→代理段。用户Token有效性仍NOT VERIFIED，不宣布有效/无效。
+- 修复范围结论：官方现有CLI配置没有控制平台代理独立上游ALPN的字段，proxy_url/connect_cas/connect_url各自不能修正该握手，Web app_protocol也不是控制通道。缺少受支持的平台代理传输配置入口，不能在仓库代码或仅换Key/Publish中修复已观察到的协议阻断；停止隧道重试，不要求更宽管理Key。后续须平台提供受支持的ngrok控制路径，或独立私有对象存储及经审阅的Learning URL/清理适配；不自行借用资源、改生产或部署公开服务。
+- 本轮用户Authtoken对外发送0，真实ASR/OCR/模型计费请求0，无隧道/账号凭据/业务Web或Worker/Redis启动，未购买资源或查询账单；公网签名下载和ASR取音保持BLOCKED/NOT RUN，历史本地76/76仍非公网证据。所属临时CLI、模拟监听和请求全部结束，清理本轮工具/公开CA/无秘密配置/RPC和helper；脱敏证据保留在忽略的output/cloud-audio-tunnel-20261009。仅追加本历史；Start skill已保存新错误及证据边界草稿，Install仍npm run cloud:setup，未再次Publish、commit/push或部署。现有主Cloud代码/离线开发入口保持可用范围。
+
+
+## 2026-10-09 COS 私有合成音频测试桶接入准备
+
+- 用户选择对象存储替代已阻断的 ngrok，并提供独立上海测试桶及精确 HTTPS 域名。当前只准备配置、最小权限和只读连通性，未导入凭据、真实数据或访问生产。保持已有未提交历史，不修改业务源码、依赖、锁文件、main/master，不提交推送或 Publish。
+- 核对官方 Node SDK 的 PutObject/GetObject/HeadObject/DeleteObject 动作，为测试桶 cloud-asr/* 准备单资源 CAM 策略；不授予列举、桶管理或其他桶权限。非敏感策略和诊断产物置于忽略的 output/cloud-cos-20261009，JSON 与精确权限范围校验通过。两次官方源码旧路径返回404，改用 sdk/base.js 核对；不把文档读取当成服务鉴权通过。
+- Cloud 草稿保存并读回精确桶域名、三个非敏感配置及两个原始运行时签名凭据需求；仅新增该域名，保留既有规则、软件源预设、Install script 和仓库基线。COS 本地签名不得使用 Network-secret placeholder，不将真实值写入 suggested_value/文件/日志/Git；需用户在平台 Environment variables 安全界面填入限定子用户凭据。Start skill 明确 COS 仍是待接入方案，不能把桶地址直接当作应用音频 origin；草稿保存不等于运行时应用或 Publish。
+- 一次真实匿名 HEAD 到随机不存在的合成路径：现有 HTTP 代理 CONNECT200、TLS 与主机名严格校验通过，COS 返回403且具有源站响应标识，总耗时990ms、诊断退出0。该退出码只表示 HTTPS 可达，不能证明凭据有效、桶私有或对象读写成功。首次临时 helper 因变量重名语法错误退出1、未联网，修正后才执行上述请求。未重复已失败隧道尝试，不绕过代理、扩大 TCP 或关闭 TLS。
+- COS 凭据尚缺；私有 ACL、版本控制/生命周期、对象 PUT/GET/DELETE、签名篡改/过期和清理、Learning 集成及 ASR 下载均未验证。上传0，ASR/OCR/模型调用0；一次COS元数据请求未查询账单，不保证零存储请求费用。没有业务进程、隧道或临时音频遗留。仅配置与文档变更，不运行无关全仓测试或构建；后续先凭据及合成存储验证，再按产品删除与恢复合同接入。
+
+
+## 2026-10-09 COS 合成音频签名下载与删除实测通过
+
+- 用户完成专用配置后继续验证。当前Cloud状态observations_current=true，五项COS变量ready、精确主机网络enforced；实际进程检查配置匹配与凭据存在性，不输出值。沿用原HTTP代理、系统/平台CA及TLS校验，只访问获准独立测试目录；不访问生产、ASR/OCR/模型或其他存储资源。
+- 在当前任务专属/tmp目录安装官方cos-nodejs-sdk-v5 3.0.0，ignore-scripts且不向npm子进程转交业务凭据；与registry声明及本地锁元数据核对integrity。初次安装exit1但stderr未保留足够诊断，原因未精确确认；切换任务专用npm cache、关闭用户npm配置后安装成功。未修改项目依赖或锁，SHA256仍为0f7d643ea8c5eca671ee29a2231e0ba162ff32615bbb011ee793384faec9142d。辅助脚本与脱敏结果在忽略的output/cloud-cos-20261009，不是正式应用安装实现。
+- 本地签名方法/对象/时间/版本绑定与合成WAV校验10/10，真实COS验收21/21、0失败、退出0、19.766秒。一次上传32044字节纯程序合成1秒16kHz WAV，共16次存储请求，无自动重试；初始对象404，PUT/HEAD200，签名GET200且SHA256一致、独立HEAD200；匿名、签名篡改、对象篡改、错误请求方法、过期签名及实际等待短期链接过期均403。签名有效期有界，完整URL与凭据只在内存中使用。
+- 上传成功回执已收到，DELETE204、删除后HEAD404、仍有效旧URL GET404/NoSuchKey；本任务对象日志为deleted_verified，无音频文件落本地，不遗留长期公网入口。产物及辅助源码按真实凭据精确匹配扫描无命中。未启动业务Web/Worker/Redis或隧道，ASR/OCR/模型请求0；16次COS请求可能有少量存储/流量费用，未查询账单或保证零费用。
+- 必须保留能力边界：COS对有效GET链接Range实测206，与现有Learning网关416不同；COS不检查应用账号/活跃任务/删除状态。Learning应用及Web/Worker白名单尚未接入COS，仍需产品专用URL供应、归属、撤销、上传结果未知/晚到及恢复适配；不能直接将桶域名填入现有音频origin。ASR服务器实际下载NOT RUN，无可复用的付费ASR预算；没有审计整个CAM、桶ACL/版本/生命周期，也未验证新任务恢复。
+- Start skill保存实际结果和限制，保留安装脚本/网络/绑定/仓库；保存说明草稿不等于再次Publish。按本次配置验收风险未运行全仓测试或production build，不改写历史fixture失败。未改业务源码、main/master、生产，不提交推送。
+
+
+## 2026-10-09 Learning 服务器交接与 Cloud COS 兼容边界核对
+
+- 用户担心Cloud接入COS改变服务器行为，先暂停业务接入并提供本地只读交接。本轮只在dev/cloud@efd056cbfa88daf0d79e4df50faf5178adb99cc9核对已有Git对象、相关源码及离线合成回归，不连接服务器、不读取生产秘密/数据、不调用COS/ASR/OCR/模型。用户资料记录的服务器405b1f8加未提交PDF补丁不是今天实际版本证明。
+- 十个相关文件与本地main@dd3e131完整blob一致10/10；相对旧部署405b1f8为9/10，唯一差异是preparation-service.ts为两个PDF不可用错误增加safeResume，四个核心音频文件一致。纠正此前表述：Learning音频在Web及其FFmpeg子进程运行，after()保持后台处理，不走BullMQ Worker；Web/Worker配置一致不意味着改变Learning进程职责。
+- 确认COS应位于Learning专属分片URL供应边界，共享requestCompanyAsr接口已接受audioUrl；但不能把异步上传直接放在claimChunk之后并在失败时重置submitted。上传意图必须与ASR提交意图区分；恢复仍只查询原request_id。正式默认HMAC路由、300秒签名、账号/任务状态校验、Range416、原件/检查点和删除晚到限制均未修改。
+- 明确保留兼容阻断：COS直链不读取Learning活跃状态，数据库删除/进程退出不自动撤销对象URL；finally删除或TTL不等于现有即时拒绝，且COS实测Range206不同于原路由416。因此本轮不直接接管正式下载路径，COS现阶段仅已验证独立合成存储能力；Cloud专用ASR验证工具与Learning页面/生产兼容验收必须分别报告。严格同契约接入还需能执行授权检查的下载入口及清理/恢复设计，不擅自部署服务或放宽产品断言。
+- 实际运行cloud:test精确四文件：audio.test.ts 15项、app/api/learning/audio-routes.test.ts 4项、upload-preparation.test.ts 7项、speaker-asr-provider.test.ts 14项，总40/40、4/4文件、0失败/跳过、退出0，Vitest耗时2.82秒。坏音频validation_failed日志为预期拒绝。初次读取错误测试目录未找到，使用rg定位正确文件后运行；未以零测试或缺项声明成功。未改业务源码或依赖，不重复全仓/构建。脱敏完整对照在忽略的output/cloud-cos-20261009/COMPATIBILITY_REVIEW.md；保留既有历史，不提交推送、修改main/master或生产。
+
+
+## 2026-10-09 独立 Cloud COS→ASR 单次合成验证工具
+
+- 用户批准开始独立合成链路验证，并明确额度为最多一次真实 ASR 提交、最多30次查询、约一分钟、不自动重试或续测。保留当前 dev/cloud@efd056cbfa88daf0d79e4df50faf5178adb99cc9 和既有未提交历史；本轮新增的是隔离 CLI，不接管 Learning 页面下载，不改变 Web/Worker 职责、原 HMAC 路由、共享 ASR 实现、数据库、main/master 或生产。未提交推送、合并部署。
+- 新增 package.json 的 cloud:asr:setup/cloud:asr 入口及 scripts/cloud/asr-trial-setup.sh、asr-trial-run.mjs、asr-trial.ts、asr-trial-core.ts、asr-trial-core.test.ts、asr-trial.md；更新日志脱敏器、对应 Provider 回归和 Start skill。核心工具复用已有 Learning 音频校验/规范化及 requestCompanyAsr；固定合成文本、单片/时长/字节上限、随机所属对象及原音 hash、提交前持久化意图和计数、最多1 POST/30查询/60秒、无重提、无重定向、响应大小上限。COS签名按官方协议并用经完整性校验的官方SDK向量交叉核对，新增运行时依赖0、锁文件未改。原始COS凭据仅进入独立CLI进程，不传Web/Worker、不写文件/日志；签名URL只在内存流转。
+- 清理实现限定所属对象及返回的精确version ID，上传前记录意图、收到成功回执后才允许宣称删除确认；DELETE后HEAD及旧URL验证。未确认PUT的晚到风险不能用404冒充排除，保留unknown及journal；COS请求预算16，不自动扩大清理/调用范围。COS Range及即时任务撤销语义仍不同于应用HMAC路由，这只是合成验证工具，不是正式Learning COS集成，也不把识别工具成功当作页面/生产验收。
+- 可选普通话工具从签名Debian软件包提取至工作区相邻.cloud-tools/asr-tts，不安装npm依赖、不使用线上TTS。安装诊断先遇到系统APT配置文件不可读，使用隔离APT配置与官方签名源；首轮提取后因libsonic.so.0缺失退出127，补充libsonic0后通过（espeak-ng 1.52.0）。首次及阶段定位复验prepare失败：espeak stdout的流式WAV长度占位被原FFmpeg严格校验拒绝；改为生成完整临时WAV，保持业务断言不变。最终离线prepare退出0、93ms，合成9.572秒/38816字节MP3；FFprobe核验mono/16000Hz/32000bps，原WAV及处理中间文件已删除。当前合成MP3与计数journal暂留忽略目录output/codex-cloud/asr-trial，供本次尚未消耗的授权试验使用，不是未来任务配置。
+- 真实前提检查：实际进程缺少ASR地址，运行时精确白名单没有指定ASR主机。一开始经原代理进行一次无提交HEAD探测，约1026ms后UND_ERR_SOCKET，无POST/查询，不证明服务或凭据失效。随后核对平台当前spec25及启动网络策略均未列出ASR主机，停止重复探测；保存草稿添加用户已批准的精确主机及保持原HTTP/端口的非秘密地址变量，Start skill另存工具/预算/状态说明。保存成功requires_publish=true，不等于配置应用；收尾接口observations_current=true仍未列出该主机/变量，运行时状态unknown。真实COS→ASR本轮BLOCKED，ASR提交0/查询0、COS请求0/上传0、LLM/OCR调用0，无本轮远端对象需清理，不查询账单。此前COS真实21/21证据不冒充本轮ASR已下载。
+- 实际验证：cloud:test指定新core、共享ASR、Learning audio和音频route四文件，4/4文件、54/54项、0失败/跳过、exit0、2.63秒；增加带version查询的官方签名向量后core定向复验21/21、exit0、0.390秒。node --test scripts/cloud/providers.test.mjs为17/17、0失败/跳过、exit0、2.141秒，包含单字节分段COS凭据/签名脱敏与本地代理/CA。cloud:check首次9项契约通过但新增CLI/测试的ProcessEnv NODE_ENV类型错误导致tsc退出2，修正环境参数类型和离线子进程NODE_ENV后复验9/9及Next typegen/TypeScript全部通过、exit0；bash语法及git diff --check通过。未重复全仓/production build，历史PDF fixture限制未改写。
+- 脱敏检查扫描改动文件、未跟踪实现和本次JSON：初始仅命中公开的固定loopback NO_PROXY常量，经变量名核对不是秘密泄露；排除此公开常量后真实凭据精确值无命中。没有运行时.env，包锁SHA256仍为0f7d643ea8c5eca671ee29a2231e0ba162ff32615bbb011ee793384faec9142d。未启动业务Web/Worker/Redis、公网隧道或长期入口。Install script仍为npm run cloud:setup，普通安装/启动不得自动执行付费试验；草稿和仓库Start skill均已保存，但本轮实现尚未进入远端Git或重新Publish。下一步仅在用户将精确网络/地址配置实际应用后，沿用本次未使用的单次授权完成真实验证；不得清空已尝试journal来增加额度。
+
+
+## 2026-10-09 发布后完成一次真实 Cloud COS→ASR 合成验证
+
+- 用户确认Environment已发布后继续上一条明确预算，无新增额度。运行时spec28、observations_current=true，指定ASR主机网络enforced、地址及五项COS变量ready；进程实际地址匹配且原journal仍prepared、提交/查询/COS操作均0，checkout与锁hash保持既有基线。此处仅确认本次实际运行配置恢复，不证明平台内部快照机制。
+- 发布后首次run在ASR HEAD前提检查退出1、1031ms，尚未上传或提交。定位时同一获准地址、同一平台代理：curl标准HTTP HEAD为405（728ms），Node native fetch HEAD仍UND_ERR_SOCKET（1022ms），Node原生http.request HEAD为405（360ms）。没有改HTTPS、端口、目标或权限，不绕过代理。此前本地代理允许HTTP CONNECT，不能证明当前平台也支持；问题缩小到HTTP传输路径差异，不归因为ASR停服或凭据无效。
+- 最小修复只在独立CLI：asr-trial-core.ts增加限定同一origin、保留HTTP的http.request传输，沿用Node --use-env-proxy，拒绝重定向、限制响应128KiB、支持Abort；asr-trial.ts的HTTP前提检查和共享ASR接口调用走此路径，HTTPS COS仍native fetch。新增实际loopback正向代理回归，显式拒绝CONNECT，并验证HEAD、redirect拒绝、过大响应拒绝和既有requestCompanyAsr只提交一次/查询一次。未修改任何src业务实现或Web/Worker Provider启动方式；本次CLI修复不意味着Learning页面的HTTP ASR代理或COS集成也已完成。
+- 修复后本地core为22/22、1/1文件、0失败/跳过、exit0、0.536秒；cloud:check的9/9契约及Next typegen/TypeScript通过、exit0。沿用上一轮相关业务/Provider回归证据，不重复无关全仓或production build；历史PDF限制未改写。
+- 实际真实验证exit0，总耗时17400ms（包含前提检查、COS、ASR及清理）：9.572秒/38816字节离线合成普通话MP3；COS随机所属key初始404，上传有成功回执，匿名拒绝、签名下载200且hash一致后才提交。真实ASR恰好1 POST、2 GET查询，返回一条sentence，companyTimedText原时间戳检查通过；结果18字符，三角形/面积字面关键词匹配，除以二未按字面匹配。原始响应及不满足保守日志字符集的转写不落盘，不能据此重建差异原因或宣称完整准确率通过；没有为了查看原文继续查询、续测或重提。真实返回结果支持ASR成功消费本次COS合成音频，范围仅独立链路，不是页面或生产验收。
+- 本次COS共7次操作；上传已确认，删除后HEAD404及旧签名URL404，cleanup=confirmed，本地合成MP3已删除，journal保留asr_completed与1/2计数，不能删除journal换取新额度。当前会话本轮合计无提交HEAD探测5次（首次run、三种传输对比、最终run）；真实ASR提交1/查询2，LLM/OCR0，无自动重试、无服务器访问或隧道。费用只可报告一次ASR及少量COS存储/请求/流量，未读取账单，无法确认实际金额；ASR无Token用量回执，不把它描述为LLM Token消耗。
+- 完整脱敏结果在忽略目录output/codex-cloud/asr-trial/run-result.json及RESULT.md，密钥/完整签名URL不写文件、日志或Git。源代码、锁文件、服务器默认音频契约和main/master未改，新增工具及历史仍未提交推送。原环境发布已由用户完成；本轮代码修复和结果说明需随后按授权保存Git/环境，不宣称自动进入远端或所有未来任务。
+- 收尾：最新Start skill结果及HTTP传输边界已成功保存为Environment草稿，requires_publish=true；这是用户刚发布版本之后的新草稿，不宣称再次发布。15个改动/结果文件按当前真实凭据精确扫描0命中，audio文件0、所属lock目录已释放；git diff --check通过。后续固化应先按授权提交工具，再审核保存最新草稿并Publish，本次已完成的真实请求不得因此重跑。
+
+
+## 2026-10-09 正式 Cloud Provider 入口接入 HTTP ASR 正向代理
+
+- 用户在收到本地只读兼容核对后要求开始，按已明确的第一项完成正式应用HTTP ASR代理适配及离线验证；本轮不新增真实ASR/OCR/模型调用，不处理尚未确定撤销窗口的Learning COS页面生命周期，不连接生产、不修改main/master、不提交推送或Publish。保留所有既有未提交CLI和历史记录，工作基线仍为dev/cloud@efd056cbfa88daf0d79e4df50faf5178adb99cc9。
+- 当前需要与选择依据：已实测平台对HTTP native fetch的CONNECT路径失败、HTTP正向代理可用。原应用提交/查询共用fetch，仅CLI修复不能解决Web调用；直接替换全局fetch会扩大到OCR/AI。新增ASR专属speaker-asr-transport.ts并仅改speaker-asr-provider.ts两个网络调用点；Cloud Provider包装器从已白名单允许的SPEAKER_ASR_BASE_URL派生内部DAILY_BRIEF_CLOUD_ASR_HTTP_BASE_URL，完整base含网关前缀绑定，Web/Worker一致传递，不接受继承覆盖，不要求新增用户配置。内部选择值仅为这项已证实的平台差异提供显式启用；普通Windows/服务器启动及HTTPS ASR保留原fetch，不新增生产依赖或跨产品数据路径。
+- 实现细节：Node>=24.5才启用HTTP正向代理，显式http.Agent proxyEnv固定继承的平台代理并禁止目标NO_PROXY绕过；缺代理、base改变、非ASR提交/查询路径及重定向均失败，不直连、不fallback、不自动重试、不修改全局fetch/agent。保持HTTP、端口、gateway前缀、原请求字段、持久request ID及query-only resume。取消能在响应头/响应体阶段终止所属连接；传输和代理错误仅固定错误码，不包含代理凭据/完整URL/Abort理由。保留标准压缩JSON响应解码及原HTTP错误状态，不把CLI的128KiB响应预算施加到正式应用。现有调用的材料/账号/HMAC/数据库/分片/删除规则未修改。
+- 复用与防重提：独立asr-trial-core.ts删除另一份HTTP实现，复用同一底层并传入自身128KiB预算。正式应用新增的传输选择可能绕过独立CLI的fetch计数，因此CLI及guard在意外继承应用选择变量时立即拒绝，官方包装器继续过滤它；23项core回归保留1 POST/30 query限制。既有真实journal仍asr_completed、submissions=1、queries=2、cleanup=confirmed，无新COS操作或额度重置。
+- 验证失败及修复：首轮三文件55项为47过/8失败；其中7项新测试被既有Vitest非loopback逻辑目标防护在到达本地代理前拒绝，改为同样loopback的合成逻辑目标并继续断言所有absolute-form代理请求，不关闭防护；另1项揭示重定向destroy先触发aborted、覆盖拒绝错误码，调整为先拒绝再关闭。第二轮两文件41项40过/1失败，是新分片fixture缺createdAt等必填字段；首次cloud:check的9项契约通过但tsc因同一不完整fixture断言退出2。补齐严格AudioChunk必填状态/时间/metadata并去掉类型强转，保持产品schema与断言不变。
+- 最终相关回归：七文件76/76（新transport19、provider5、Learning audio15、Learning route4、Daily Reflection upload13、chunk orchestration13、Work Review policy7），0失败/跳过、exit0、2.94秒；共享speaker-asr-provider原14项本轮已通过。CLI core最终23/23、exit0、0.420秒；Cloud Provider独立回归18/18、exit0、1.350秒，包含拒绝HTTP CONNECT的代理、本地HTTPS/CA/OCR PUT、白名单、Web/Worker一致性、verify-no-calls及脱敏。修复后的cloud:check 9/9与Next typegen/TypeScript通过、exit0。
+- 实际启动：使用原providers supervisor及verify-no-calls、合成ASR地址、无业务Key，运行Web3001/Redis6381/Worker；7.442秒内匿名auth401、首页和四产品路由全部200，所属Web/Worker进程配置绑定/独立数据路径/外联拦截一致，队列health ok、实际workers=1、storageProbe matched。角色进程各2是launcher与运行子进程，不是2个队列worker。无外联尝试或Provider调用；supervisor正常SIGTERM退出143，3001/6381释放，确认原先不存在的自有provider-data/provider-redis已清理，不碰未知数据。
+- 构建：启动检查结束且端口释放后运行cloud:build，exit0、78.612秒，44/44静态页，179 trace、removed0、forbidden0。没有重复全仓测试，历史Windows PDF/OCR原包限制不改写；本地模拟+启动+构建不是正式页面真实ASR/COS端到端或Windows实机/生产验收。
+- 交付：更新docs/codex-cloud.md、仓库Start skill、CLI说明和共用历史；新增源码/测试无包依赖或锁变更，敏感值扫描及git diff --check通过。脱敏startup/build证据置于忽略的output/cloud-asr-app-20261009。本轮正式HTTP代理项完成；Learning COS页面状态/清理/撤销语义、OCR安全配置/来源放行与真实验收、最终版本化及全新任务恢复仍独立待办。使用现有ASR地址与HTTP_PROXY，无需用户再添加业务Key或网络目标；新增真实调用仍须新预算。
+
+
+## 2026-10-12：Learning 页面 Cloud COS 生命周期接入与 OCR 配置收口
+
+背景与边界：用户要求继续完成 Learning 页面 COS 接入及 OCR 配置/真实验收；保留 dev/cloud@efd056cb 的既有未提交 ASR 代理、独立合成工具和历史。用户明确接受仅 Cloud 合成模式取消/删除后最多300秒的旧链接窗口，已开始的下载不可收回；不将此差异套用默认服务器HMAC路由，不更改生产或Worker职责。历史一次ASR与一次模型预算已消费，本轮真实外部Provider/COS调用为0。
+
+调查与实现：读取原音频Web/Next after/SQLite调用链、持久claim和PDF source清理模式，确认直接改COS域名或仅finally删除不足以处理进程退出和晚到PUT。将原独立CLI已验证的COS v5签名原语移到Learning专属audio-cos-client.ts供两处复用，CLI再限制自己的对象命名空间，不新增npm依赖。新增audio-cos-schema.ts/audio-cos.ts：schema11→12只增加账号归属、原件/分片哈希、随机对象身份、版本、上传及清理状态，不落盘秘密/URL。PUT意图先落盘，单次私有PUT经MD5/ETag及HEAD元数据/长度/版本确认后，audio-service.ts才调用原claimChunk并提交ASR；submitted恢复只查询原ID、不重新上传或续签。未知PUT/上传后claim前崩溃保守失败，不能误记ASR执行或自动重传。
+
+取消/删除与恢复：repository.ts在材料/页面删除事务内保留对象清理意图；每片正常/失败结束和已鉴权Learning API的finally尝试清理。late PUT回执能更新对象版本并再次清理，但活跃检查阻止后续ASR/结果发布。DELETE+HEAD404仅在已确认PUT时标记confirmed，未知PUT即使404仍为unknown。页面删后日志仍在；重启后同账号下一次Learning请求至多清理3个对象，失败至少间隔60秒，不自动续跑ASR。URL至多300秒且不刷新，COS Range206与原路由416分开；URL到期不等于删除，日志不能丢弃。没有后续请求/凭据时不会自动清理，未知PUT私有残留仍需明确处理；这也是当前合成模式的能力上限，真实数据或强即时撤销需求出现时必须重新设计/验收，不能提前声称等价。
+
+配置与文件：providers.mjs新增显式LEARNING_ASR_AUDIO_DELIVERY=cos-synthetic，派生不可继承覆盖的内部模式变量，仅此时将已有COS配置/原始签名秘密一致传入Web和Worker并脱敏；普通模式/离线不传，原服务器HMAC模式保留。更新providers.test.mjs、audio-service.ts、route-utils.ts、新增audio-cos.test.ts/audio-cos-routes.test.ts；六个既有迁移测试仅将最终schema断言11更新为12，原数据/外键断言保留。新增docs/cloud-learning-providers.md并同步docs/codex-cloud.md、scripts/cloud/start-skill.md。新增持久对象日志是支持删除/崩溃恢复的必要最小authority，不存原音、用户正文或提供跨产品入口；旧代码拒绝schema12，仅在合成临时库实测迁移，不给旧版本直接使用升级库。
+
+验证证据：首轮3文件52/52、exit0、1.88s；扩展16文件15通过/1收集失败、已执行281用例全过、0跳过、exit1、5.65s。失败为pdf-parser-service.test.ts依赖缺失Windows历史source.pdf，未执行其用例，未改历史断言/伪造fixture。最终新增COS及页面API2文件19/19、exit0、1.90s，覆盖实际FFmpeg/SQLite、上传/Next after/转写协议/保存刷新删除、跨账号、版本删除、晚到上传、取消、未知结果、崩溃孤儿、schema迁移及有界清理；远端为mock。独立Provider20/20、exit0、2.735s，含默认隔离、原始秘密转交/日志脱敏及OCR fetch/原生HTTPS PUT本地代理/CA。cloud:check的9项及Next typegen/TypeScript通过；实际Cloud Provider合成启动7.531s，首页和四产品200，Worker1/Redis/队列/共享marker匹配，所属服务停净、3001/6381释放、自有数据移除。开发服务停止后cloud:build exit0、79.357s、44/44静态页、179 trace、禁入引用0。锁文件SHA256保持0f7d643ea8c5eca671ee29a2231e0ba162ff32615bbb011ee793384faec9142d；已消费ASR journal保持1提交/2查询、清理confirmed。未重跑全量/历史Windows runner，没有全面全绿或真实页面Provider通过声明。
+
+OCR与环境状态：当前进程缺URL、Token及reviewed findings；既有别名映射和协议/代理可复用，真实health/PUT/parse/delete、网关Cloud来源及质量验收BLOCKED，未接触服务器。没有创建空历史清单。已保存Environment Start skill、COS模式建议、OCR网关地址建议、findings配置项和Token Network-secret需求；只添加获准OCR精确主机，不扩大All domains。Install仍唯一cloud:setup；工具确认saved/requires_publish=true，草稿不等于运行时生效或Publish。用户仍须安全配置Token、交付审阅findings和来源条件并明确新测试预算。本轮未提交、push或Publish。脱敏结果在output/cloud-learning-cos-20261012，不能代替Git版本化或全新任务恢复证据。
+
+
+### 2026-10-12 — Learning OCR Cloud 离线接入收口与历史清单适用范围
+
+背景和范围：沿用 dev/cloud@efd056cbfa88daf0d79e4df50faf5178adb99cc9，保留此前全部未提交 COS 页面、ASR 代理及工具实现。本轮只处理 OCR 离线/mock 接入，不连接网关或服务器，不调用真实 Provider、不提交/推送/合并/部署/Publish。Server deploy 提供的恢复 ready/鉴权记录属于服务器侧交接，不证明 Cloud 可达；实例身份继续由 health 发现，不写死交接快照。没有新增外部调用额度。
+
+调查与复用：现有 providers.mjs 已将 DAILY_BRIEF_LEARNING_PDF_SERVICE_TOKEN 映射给应用，Web/Worker 同一白名单保留平台代理/CA，并启用 Node >=24.5 的 --use-env-proxy --use-system-ca。pdf-source-http.ts 的原生 HTTPS PUT 已能走该入口，不需要新 agent、全局 fetch 替换或第二套 OCR 客户端。扩展 providers.test.mjs 的本地 TLS/代理测试，分别覆盖保留 /internal/ocr 前缀的 health、PUT/GET/DELETE 原件、POST parse、GET 状态/结果、DELETE 结果共八项路径/方法；检查 placeholder、原始字节、Content-Length 和四项绑定头。缺 CA 时 fetch 与原生 PUT 均拒绝且无 HTTP 请求到达。该测试只连 loopback，不证明真实平台 Token 替换或服务端来源放行。
+
+实现：pdf-parser-service.ts 的 findings 读取复用有大小和普通文件检查的读取器，保持相对路径兼容、256KiB/500条及安全错误；Finding 增加可选 parserScope（backend/paddleocr/paddlex/完整 profile）。paddle-parsed-adapter.ts 对提供 scope 的条目增加精确深比较，对象键顺序不影响匹配，原件哈希、物理页、服务和模型约束仍在。旧无 scope 清单保留原四项匹配，不等于后端适用性已验证；Cloud 新清单须逐条审阅并补充准确 scope。没有新增依赖、持久化 schema、全局开关或后台服务。
+
+证据与测试：新增 pdf-parser-synthetic.test.ts，明确生成的是协议测试响应，不是历史 OCR 结果；使用真实 Learning repository/adapter 和合成单页 PDF，验证源/请求 ID 在网络前保存、实例发现、一次 PUT/POST、结果转换、所属清理及重复启动零网络，另测空清单正文仍 unverified、所有绑定差异不匹配及旧契约兼容。首轮两文件64例中63通过/1失败，exit1、0.465s，原因是新增测试误把文档完成状态写为 succeeded，按已有 completed/request_id 契约修正，未更改应用状态。最终 cloud:test 精确7文件205/205、0跳过、exit0、3.34s：pdf-parser-config 52、pdf-parser-synthetic 12、pdf-parser-progress 54、pdf-source-http 6、pdf-source-transfer 15、pdf-source-repository 21、parsed-document 45。已有回归覆盖未知结果原ID查询、实例变化不重提、取消/删除晚到、账号隔离、原件单次上传及清理。node --test scripts/cloud/providers.test.mjs 20/20、0跳过、exit0、1.770s。cloud:check 首次9项通过但新fixture originalVersion被推导为number引起两处TS2322，外层exit1/tsc exit2；加 LearningPdfMetadata 类型后复验exit0，9/9及Next typegen/TypeScript通过。
+
+未执行和限制：不重复全量或历史 Windows runner；pdf-parser-service.test.ts 缺历史 source.pdf/response.json 的既有阻断未解决，没有伪造 fixture/删断言。当前改动为局部 parser/config/helper 测试，不改环境注入/Next路由，未运行无关 build 或页面真实E2E。本轮真实 health/PUT/解析/状态/清理均 NOT RUN，外部 Provider/COS/ASR 调用为0。已有资源等待 accepted:false 的再请求契约保留；将来拟议一次 POST smoke 必须按实际发出次数封顶，不能只数成功页。21条视觉复核与哈希索引未交付，不把 artifact_sha256 当原 PDF 哈希，不将 native Paddle 问题直接套给 vLLM，不把空数组描述为已交付或通过。
+
+配置与交付：更新 docs/cloud-learning-providers.md 的精确域名/路径/方法、传输与CA要求、受限Token供应、证据映射及待授权预算，并同步 scripts/cloud/start-skill.md。Environment Start 草稿 revision35 已保存且回读一致，Install 保持 npm run cloud:setup；URL/findings需求及OCR域名仅在此前草稿中，受限Token has_saved_binding=false。没有变更当前网络规则、没有Publish，当前运行环境仍缺OCR配置/受控来源路径，内部代理或一次性出口不能白名单化。需要Server deploy提供获准Cloud的非敏感入口/来源条件、权限和能力说明，以及审阅后的21条证据映射；凭据仅由用户在Network secrets配置。所有本轮实现仍未提交。脱敏日志与完整命令、工作区状态保存在output/cloud-learning-ocr-20261012；不能据此声称生产闭环或跨任务发布已完成。
+
+
+### 2026-10-12 — 导入 Cloud OCR 独立测试交付包与真实质量清单
+
+背景与边界：用户交付 cloud-ocr-handoff-20261012-v1.zip，要求沿用 dev/cloud@efd056cbfa88daf0d79e4df50faf5178adb99cc9 的未提交实现，只做包导入、配置对齐及离线验证。本轮没有真实health/PUT/parse/query/delete、ASR/LLM/COS调用，没有访问服务器、执行附件运维脚本、提交/推送或Publish。交接文件中的服务器操作和已有调用证据不产生Cloud操作授权。
+
+导入与审阅：ZIP SHA256=a3027b7babb1ad2162fc8ccfda7d0131a17cf2bcbeed394606dcec7dddbf4dd5。校验路径无越界/重复/符号链接、总解压大小有界；31文件逐字节导入Git忽略的output/cloud-ocr-handoff-20261012-v1，脚本不赋执行权限。file-manifest覆盖其余30文件，30/30字节数和SHA256一致。quality/known-findings.json SHA256=58282bae46dd6e31333ef40fdac63fd414d37eba3b0912cda5e097ee42796eac，9条保持原样。独立只读审阅确认9/9证据引用及原件hash/页/service/model/scope/code/severity/message一致，10/10块来源绑定和坐标范围一致、3/3裁剪图哈希一致。21条native记录全部application_scope_eligible=false，15条有历史区域、6条缺精确区域；不作为vLLM应用清单。
+
+实际应用验证：用现有providerEnvironment及合成占位Token测试别名/完整路径，然后直接调用当前pdfParserConfig，9/9通过实际Zod读取，未修改schema或scope。使用明确标注的内存合成协议外壳调用真实adaptPaddleServiceResponse，未伪造/保存历史PDF或OCR输出。对交付声明的PaddleOCR-VL-1.6、vllm0.11.1、PaddleOCR3.7.0、PaddleX3.7.2及PNG/retain_nested_formulas=true匹配7条（2warning/5blocked），排除另外2条；false配置只匹配另2条。native后端、profile多字段、原件hash不符均不继承；空或无匹配正文仍unverified。一次性验证脚本和日志在output/cloud-ocr-import-20261012，不新增长期业务工具。
+
+最小修改：pdf-parser-config.test.ts增加完整独立前缀及尾斜线规范化2项；providers.test.mjs复用同一个本地TLS/代理测试，分别验证原前缀和新增完整前缀的8种路径/方法及fetch/原生PUT、绑定头、CA失败。docs/cloud-learning-providers.md与scripts/cloud/start-skill.md更新入口、已导入清单、Token权限/到期和发布条件，停止沿用“未有受控入口/清单尚未交付”的旧状态。没有改应用客户端、别名映射、代理实现、依赖、锁文件、数据库或COS工具。
+
+验证结果：一次性实际schema/adapter导入验证25/25、exit0、0.254秒；npm run cloud:test精确pdf-parser-config.test.ts与pdf-parser-synthetic.test.ts两文件66/66、0失败/跳过、exit0、0.595秒；node --test scripts/cloud/providers.test.mjs 21/21、0失败/跳过、exit0、2.176秒；npm run cloud:check exit0，9/9契约和Next typegen/TypeScript通过；本轮没有测试失败。完整命令、日志和导入结果留在output/cloud-ocr-import-20261012。没有扩大到无关build、全量、浏览器或真实Provider验收。
+
+配置状态：独立Cloud测试入口保留 /internal/ocr/cloud-test-20261012 全部路径，原网关来源限制不变。新前缀以独立到期Bearer准入，不再以固定出口缺失作为服务器侧阻断；该Token识别持有者，不证明Codex平台身份。Start和URL/findings建议已保存且回读草稿revision36；Install仍唯一cloud:setup、网络清单未改，OCR域名仅在草稿中。当前运行spec28未含OCR域名，相关进程变量不存在，OCR Network secret has_saved_binding=false。未Publish或令当前环境生效；密钥只由用户安全填写且仅绑定获准主机，不写文件/聊天/Git。
+
+剩余条件与证据边界：服务器Token仅health，北京时间2026-10-14 11:19:23到期，本轮也不自动调用health。未来单页测试需新明确授权并由运维登记PDF SHA/字节数/document/source/request ID后开放业务方法；PDF最多1MiB/1页、PUT1、POST1、原件状态/请求状态/结果GET合计10、所属source/result各DELETE1，所有上游失败/拒绝尝试均计数。health总100包含运维使用，不代表Cloud剩余100；不自动续签或重置账本。附件未含5份完整原PDF、完整历史artifact/vLLM响应，无法在Cloud独立重算这些外部原件哈希或证明当前部署重现；health示例未给出完整backend/package/model，7条是声明配置的离线匹配。历史Windows完整PDF回放仍缺包。包在忽略output目录，未来发布须确认快照保留或校验后重新导入，不能宣称已经进入Git或未来任务自动具备；不能替换为空数组。
+
+
+## 2026-10-12：Cloud Learning Provider 版本化与 Environment 发布前收口
+
+背景与授权：用户在审阅发布前待办后明确要求开始，授权审阅、提交并正常推送当前 dev/cloud 实现、更新 Environment 草稿基线；不授权 Publish、main/master、部署、服务器或新真实 Provider 调用。先冻结35个已有待保存文件和完整tracked补丁，fetch后本地/远端均为efd056cbfa88daf0d79e4df50faf5178adb99cc9，ahead/behind为0/0，保留所有既有改动。
+
+审阅与范围：独立复查Learning COS上传意图/删除/取消/晚到/恢复和账号隔离，以及正式HTTP ASR代理绑定、abort、脱敏、独立CLI额度账本与默认Windows/服务器兼容；未发现阻断版本化的代码问题。OCR复用既有客户端，保留完整网关前缀、原生PUT与fetch分开验证、parserScope精确匹配及普通正文unverified。修正scripts/cloud/asr-trial.md仍称页面未接入COS的旧说明：页面合成模式已实现并离线验证，真实页面闭环尚未验收。此次收口未重写已完成业务实现，不增加依赖、锁文件或新的安装流程。
+
+质量资料保留：原31文件交付包和ZIP均在准备文件系统保留，另复制到仓库外/workspace/.cloud-artifacts/learning-ocr-20261012-v1，32文件逐字节核对；原ZIP固定哈希与清单固定哈希不变。docs/cloud-learning-providers.md和scripts/cloud/start-skill.md保存具体恢复位置及校验流程，冲突不覆盖、缺包不写空清单；附件、裁剪图、账本、output和日志不纳入公开Git。该副本只是当前实例证据，Publish后须用独立新任务验证恢复，不宣称证明平台内部快照身份。
+
+本轮实际验证：npm run cloud:test指定18个已确认存在的ASR/CLI/COS/音频API/OCR/迁移测试文件，18/18文件、367/367用例通过，0失败/0跳过，exit0，Vitest8.03秒/命令8.672秒。node --test scripts/cloud/providers.test.mjs通过21/21，0失败/跳过，exit0，1.89秒，含两种完整OCR前缀及原生PUT/fetch的本地代理/CA覆盖。npm run cloud:check通过9/9契约和Next typegen/TypeScript，exit0，22.329秒。开发端口全部空闲后cloud:build通过，exit0，77.797秒；未重复安装依赖。先前本实例无外联的Web/Worker/Redis启动、四产品入口200、Worker1和共享marker matched、停止/清理证据继续保留；本次未重复该服务试验。证据在忽略的output/cloud-release-20261012。
+
+差异与敏感信息：35文件扫描未发现密钥模式或当前运行凭据值；package-lock.json SHA256仍为0f7d643ea8c5eca671ee29a2231e0ba162ff32615bbb011ee793384faec9142d，所有既有历史字节保持不变。提交仅包含已审阅的源码、测试、文档、脚本及本历史，不包含数据库、环境秘密或未审阅资料。提交/远端最终SHA和草稿保存回读结果另在交付记录中给出，不能在提交生成前虚构。
+
+已知限制：未重跑全量；此前Windows历史PDF fixture缺失和原包回放限制未解决，不宣称全绿。Learning COS真实页面闭环、真实Cloud OCR health/原生PUT/解析/清理均NOT RUN；新增真实调用为0，旧ASR POST1/查询2/COS7账本不重置。保留COS最多300秒链接撤销窗口、在途下载不可收回、未知PUT人工处理及下次同账号请求触发清理等限制。OCR草稿revision37已保存主机限定Token绑定，但其权限仅health且北京时间2026-10-14 11:19:23到期；存在配置或发布环境不开放上传/解析权限，也不授予调用额度。安装仍唯一cloud:setup；后续仅保存新SHA和完整Start草稿，Publish与全新任务验收由用户后续执行。

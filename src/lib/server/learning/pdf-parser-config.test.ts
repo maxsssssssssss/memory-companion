@@ -19,6 +19,9 @@ function connection(overrides:Record<string,unknown>={}){
 it.each([base,base+"/","https://ocr.synthetic.invalid:443/internal/ocr/"])("preserves one normalized authenticated gateway prefix: %s",url=>{
   expect(pdfParserConfig(environment(url))).toMatchObject({url:base,token,discoverInstance:true});
 });
+it.each(["https://ocr.synthetic.invalid/internal/ocr/cloud-test-20261012","https://ocr.synthetic.invalid/internal/ocr/cloud-test-20261012/"])("preserves the complete dedicated Cloud test prefix: %s",url=>{
+  expect(pdfParserConfig(environment(url))).toMatchObject({url:"https://ocr.synthetic.invalid/internal/ocr/cloud-test-20261012",discoverInstance:true});
+});
 it.each(["https://ocr.synthetic.invalid","https://ocr.synthetic.invalid/","http://127.0.0.1:37913/"])("retains existing origin and loopback behavior: %s",url=>{
   expect(pdfParserConfig(environment(url)).url).toBe(new URL(url).origin);
 });
@@ -58,4 +61,31 @@ it("reads current key bytes on each operation, allowing server rotation without 
 it.each(["SYNTHETIC\u0000TOKEN","SYNTHETIC中文TOKEN","SYNTHETIC\u007fTOKEN"])("rejects non-header token bytes before transport or checkpoints are possible",badToken=>{
   expect(()=>pdfParserConfig({...environment(),LEARNING_PDF_SERVICE_TOKEN:badToken})).toThrow("pdf_parser_config_invalid");
   const {env,key}=connection();writeFileSync(key,badToken);expect(()=>pdfParserConfig(env)).toThrow("pdf_parser_config_invalid");
+});
+
+const finding = { originalSha256:"a".repeat(64),physicalPage:1,serviceVersion:"ocr-pdf-trial-0.1",model:"SYNTHETIC_MODEL",
+  code:"synthetic_review",message:"Synthetic evidence only",evidenceRef:"synthetic-review.json#/0",severity:"warning",
+  parserScope:{backend:"SYNTHETIC_BACKEND",paddleocr:"synthetic-1",paddlex:"synthetic-2",profile:{recognition_profile:"png_nested_formulas",options:{synthetic:true}}} };
+it("reads reviewed parser scope without changing the legacy list contract",()=>{
+  writeFileSync(findings,JSON.stringify([finding]));expect(pdfParserConfig(environment()).findings).toEqual([finding]);
+  const {parserScope:_,...legacy}=finding;writeFileSync(findings,JSON.stringify([legacy]));
+  expect(pdfParserConfig(environment()).findings).toEqual([legacy]);
+});
+it.each([
+  {...finding,originalSha256:undefined,artifact_sha256:"b".repeat(64)},
+  {...finding,physicalPage:0}, {...finding,severity:"verified"}, {...finding,serviceVersion:"unreviewed-version"},
+  {...finding,parserScope:{backend:"vllm"}}, {...finding,parserScope:{...finding.parserScope,backend:""}},
+  {...finding,parserScope:{...finding.parserScope,unexpected:true}}, {...finding,unknownEvidence:true},
+])("rejects malformed or unconverted evidence without disclosing contents %#",entry=>{
+  writeFileSync(findings,JSON.stringify([entry]));expect(()=>pdfParserConfig(environment())).toThrow("pdf_parser_findings_invalid");
+});
+it.each(["missing","directory","malformed","oversize","too-many"])("bounds findings input and reports a safe error: %s",kind=>{
+  const env=environment();
+  if(kind==="missing")rmSync(findings);
+  if(kind==="directory")env.LEARNING_PDF_KNOWN_FINDINGS_FILE=root;
+  if(kind==="malformed")writeFileSync(findings,"SYNTHETIC_PRIVATE_EVIDENCE");
+  if(kind==="oversize")writeFileSync(findings," ".repeat(256*1024+1));
+  if(kind==="too-many")writeFileSync(findings,JSON.stringify(Array.from({length:501},()=>finding)));
+  try{pdfParserConfig(env);throw Error("unexpected_success");}
+  catch(error){expect((error as Error).message).toBe("pdf_parser_findings_invalid");}
 });

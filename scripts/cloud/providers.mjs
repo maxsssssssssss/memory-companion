@@ -41,7 +41,9 @@ export const providerSecretAliases = Object.freeze({
 });
 // HMAC is computed locally: this requires an independently injected raw runtime
 // secret, not a Network-secret placeholder or a credential/configuration file.
-export const providerLocalSecretKeys = Object.freeze(['LEARNING_ASR_AUDIO_CAPABILITY_SECRET']);
+export const providerLocalSecretKeys = Object.freeze(['LEARNING_ASR_AUDIO_CAPABILITY_SECRET',
+  'DAILY_BRIEF_COS_SECRET_ID', 'DAILY_BRIEF_COS_SECRET_KEY']);
+const cosConfigKeys = ['DAILY_BRIEF_COS_BUCKET', 'DAILY_BRIEF_COS_REGION', 'DAILY_BRIEF_COS_PREFIX'];
 const transportKeys = ['HTTP_PROXY', 'HTTPS_PROXY', 'http_proxy', 'https_proxy',
   'NODE_EXTRA_CA_CERTS', 'SSL_CERT_FILE', 'SSL_CERT_DIR', 'REQUESTS_CA_BUNDLE', 'CURL_CA_BUNDLE'];
 const present = value => typeof value === 'string' && value.trim().length > 0;
@@ -55,6 +57,7 @@ export function assertProviderNode(version = process.versions.node) {
 
 export function assertProviderTransport(env) {
   if (!present(env.HTTPS_PROXY ?? env.https_proxy)) throw Error('Cloud Provider mode requires the platform HTTPS_PROXY');
+  if (env.DAILY_BRIEF_CLOUD_ASR_HTTP_BASE_URL && !present(env.HTTP_PROXY ?? env.http_proxy)) throw Error('Cloud HTTP ASR requires the platform HTTP_PROXY');
   if (env.NO_PROXY.split(',').some(value => value.trim() === '*')) throw Error('Cloud Provider mode refuses a wildcard proxy bypass');
 }
 
@@ -63,6 +66,15 @@ export function providerEnvironment(repo, input = process.env, { verifyNoCalls =
   if (input.NODE_TLS_REJECT_UNAUTHORIZED === '0') throw Error('Cloud Provider mode refuses disabled TLS verification');
   const env = cloudEnvironment(repo, input, true);
   for (const key of [...providerConfigKeys, ...transportKeys]) if (present(input[key])) env[key] = input[key];
+  if (env.SPEAKER_ASR_BASE_URL) {
+    let base;
+    try { base = new URL(env.SPEAKER_ASR_BASE_URL.trim()); }
+    catch { throw Error('Cloud ASR base URL is invalid'); }
+    if (base.protocol === 'http:') {
+      if (base.username || base.password || base.search || base.hash) throw Error('Cloud HTTP ASR base URL must not contain credentials, query or fragment');
+      env.DAILY_BRIEF_CLOUD_ASR_HTTP_BASE_URL = env.SPEAKER_ASR_BASE_URL.trim().replace(/\/+$/, '');
+    }
+  }
   for (const [target, alias] of Object.entries(providerSecretAliases)) {
     if (present(input[target]) && present(input[alias]) && input[target] !== input[alias]) {
       throw Error(`Conflicting Provider credential sources for ${target}`);
@@ -72,9 +84,19 @@ export function providerEnvironment(repo, input = process.env, { verifyNoCalls =
     if (present(input[alias])) env[alias] = input[alias];
   }
   for (const key of providerLocalSecretKeys) {
+    if (key.startsWith('DAILY_BRIEF_COS_')) continue;
     if (!present(input[key])) continue;
     if (input[key].trim().length < 32) throw Error(`Cloud local signing secret is too short: ${key}`);
     env[key] = input[key];
+  }
+  if (present(input.LEARNING_ASR_AUDIO_DELIVERY) && !['app', 'cos-synthetic'].includes(input.LEARNING_ASR_AUDIO_DELIVERY))
+    throw Error('Cloud Learning audio delivery must be app or cos-synthetic');
+  if (input.LEARNING_ASR_AUDIO_DELIVERY === 'cos-synthetic') {
+    const keys = [...cosConfigKeys, 'DAILY_BRIEF_COS_SECRET_ID', 'DAILY_BRIEF_COS_SECRET_KEY'];
+    if (keys.some(key => !present(input[key]))) throw Error('Cloud synthetic COS configuration is incomplete');
+    if (input.DAILY_BRIEF_COS_PREFIX !== 'cloud-asr/') throw Error('Cloud COS prefix must be cloud-asr/');
+    for (const key of keys) env[key] = input[key];
+    env.DAILY_BRIEF_CLOUD_LEARNING_AUDIO = 'cos-synthetic';
   }
   if (env.LEARNING_PDF_KNOWN_FINDINGS_FILE) {
     const file = path.resolve(repo, env.LEARNING_PDF_KNOWN_FINDINGS_FILE);
@@ -115,16 +137,19 @@ export function providerConfigurationReport(repo, input = process.env) {
       target, networkSecretVariable: alias, present: present(env[target]), aliasPresent: present(env[alias])
     })),
     localSigningSecrets: providerLocalSecretKeys.map(name => ({ name, present: present(env[name]) })),
+    learningAudioDelivery: env.DAILY_BRIEF_CLOUD_LEARNING_AUDIO ?? 'app',
     transport: { httpProxy: present(env.HTTP_PROXY ?? env.http_proxy),
       httpsProxy: present(env.HTTPS_PROXY ?? env.https_proxy), extraCa: present(env.NODE_EXTRA_CA_CERTS),
+      speakerAsrHttpForward: present(env.DAILY_BRIEF_CLOUD_ASR_HTTP_BASE_URL),
       tlsVerification: true, loopbackBypassesProxy: true },
     missing: {
       openaiCompatible: missing(['OPENAI_BASE_URL', 'OPENAI_API_KEY']),
       learningGeneration: missing(['OPENAI_BASE_URL', 'OPENAI_API_KEY', 'LEARNING_AI_PROVIDER',
         'LEARNING_AI_MODEL', 'LEARNING_AI_MAX_INPUT_CHARS', 'LEARNING_AI_MAX_OUTPUT_TOKENS']),
       speakerAsr: missing(['SPEAKER_ASR_BASE_URL', 'SPEAKER_ASR_AUDIO_BASE_URL']),
-      learningAsr: [...missing(['SPEAKER_ASR_BASE_URL', 'LEARNING_ASR_AUDIO_CAPABILITY_SECRET']),
-        ...(!present(env.LEARNING_ASR_AUDIO_BASE_URL ?? env.SPEAKER_ASR_AUDIO_BASE_URL) ? ['LEARNING_ASR_AUDIO_BASE_URL'] : [])],
+      learningAsr: env.DAILY_BRIEF_CLOUD_LEARNING_AUDIO === 'cos-synthetic' ? missing(['SPEAKER_ASR_BASE_URL'])
+        : [...missing(['SPEAKER_ASR_BASE_URL', 'LEARNING_ASR_AUDIO_CAPABILITY_SECRET']),
+          ...(!present(env.LEARNING_ASR_AUDIO_BASE_URL ?? env.SPEAKER_ASR_AUDIO_BASE_URL) ? ['LEARNING_ASR_AUDIO_BASE_URL'] : [])],
       pdfOcr: missing(['LEARNING_PDF_SERVICE_URL', 'LEARNING_PDF_SERVICE_TOKEN',
         'LEARNING_PDF_KNOWN_FINDINGS_FILE'])
     }

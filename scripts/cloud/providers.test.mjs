@@ -46,6 +46,18 @@ test('Network secret aliases preserve proxy placeholders and reject ambiguous cr
     DAILY_BRIEF_OPENAI_API_KEY: 'another-synthetic-placeholder' }), /Conflicting Provider credential sources/);
 });
 
+test('Cloud pins HTTP ASR to the configured base and never inherits a transport override', () => {
+  const input = { SPEAKER_ASR_BASE_URL: 'http://asr.synthetic.invalid:8300/gateway/',
+    DAILY_BRIEF_CLOUD_ASR_HTTP_BASE_URL: 'http://unapproved.invalid', HTTPS_PROXY: 'http://proxy.invalid' };
+  const env = providerEnvironment(repo, input);
+  assert.equal(env.DAILY_BRIEF_CLOUD_ASR_HTTP_BASE_URL, 'http://asr.synthetic.invalid:8300/gateway');
+  assert.throws(() => assertProviderTransport(env), /HTTP_PROXY/);
+  assertProviderTransport({ ...env, HTTP_PROXY: 'http://proxy.invalid' });
+  assert.equal(providerEnvironment(repo, { ...input, SPEAKER_ASR_BASE_URL: 'https://asr.synthetic.invalid' }).DAILY_BRIEF_CLOUD_ASR_HTTP_BASE_URL, undefined);
+  assert.equal(cloudEnvironment(repo, input).DAILY_BRIEF_CLOUD_ASR_HTTP_BASE_URL, undefined);
+  assert.throws(() => providerEnvironment(repo, { SPEAKER_ASR_BASE_URL: 'http://synthetic:secret@asr.invalid' }), /must not contain credentials/);
+});
+
 test('Learning ASR retains HTTP and shares a raw local signing secret across both child roles', () => {
   const env = providerEnvironment(repo, { SPEAKER_ASR_BASE_URL: 'http://asr.synthetic.invalid:8300/gateway',
     LEARNING_ASR_AUDIO_BASE_URL: 'https://audio.synthetic.invalid',
@@ -55,6 +67,7 @@ test('Learning ASR retains HTTP and shares a raw local signing secret across bot
       import a from 'node:assert/strict';
       import {learningAsrConfig,learningAudioUrl,verifyLearningAudioUrl} from './src/lib/server/learning/audio-service.ts';
       a.equal(process.env.SPEAKER_ASR_BASE_URL,'http://asr.synthetic.invalid:8300/gateway');
+      a.equal(process.env.DAILY_BRIEF_CLOUD_ASR_HTTP_BASE_URL,process.env.SPEAKER_ASR_BASE_URL);
       const config=learningAsrConfig();
       const address={userId:'synthetic',pageId:'synthetic-page',runId:'synthetic-run',materialId:'synthetic-material',index:0};
       const url=new URL(learningAudioUrl(config,address));
@@ -94,6 +107,41 @@ test('OCR alias and reviewed findings path reach the real application config wit
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
+test('COS delivery is explicit, Cloud-only and consistent in Web/Worker; offline and ordinary modes discard its secrets', () => {
+  const input = { LEARNING_ASR_AUDIO_DELIVERY: 'cos-synthetic', SPEAKER_ASR_BASE_URL: 'http://asr.synthetic.invalid:8790',
+    DAILY_BRIEF_COS_BUCKET: 'synthetic-123456', DAILY_BRIEF_COS_REGION: 'ap-shanghai', DAILY_BRIEF_COS_PREFIX: 'cloud-asr/',
+    DAILY_BRIEF_COS_SECRET_ID: 'SYNTHETIC_COS_ID', DAILY_BRIEF_COS_SECRET_KEY: 'SYNTHETIC_COS_KEY' };
+  const env = providerEnvironment(repo, input, { verifyNoCalls: true });
+  for (const role of ['web', 'worker']) {
+    const child = spawnSync(process.execPath, ['--import', 'tsx', '--input-type=module', '-e', `
+      import a from 'node:assert/strict';
+      import {learningAsrConfig} from './src/lib/server/learning/audio-service.ts';
+      const config=learningAsrConfig();
+      a.equal(config.cos.secretKey,'SYNTHETIC_COS_KEY');
+      a.equal(config.cos.bucket,'synthetic-123456');
+      a.equal(config.secret,'');
+    `], { cwd: repo, env, encoding: 'utf8' });
+    assert.equal(child.status, 0, `${role} COS configuration mismatch`);
+  }
+  const report = providerConfigurationReport(repo, input);
+  assert.deepEqual(report.missing.learningAsr, []);
+  assert.equal(report.learningAudioDelivery, 'cos-synthetic');
+  for (const clean of [cloudEnvironment(repo, input), providerEnvironment(repo, { ...input, LEARNING_ASR_AUDIO_DELIVERY: 'app',
+    DAILY_BRIEF_CLOUD_LEARNING_AUDIO: 'cos-synthetic' })]) {
+    assert.equal(clean.DAILY_BRIEF_COS_SECRET_KEY, undefined); assert.equal(clean.DAILY_BRIEF_CLOUD_LEARNING_AUDIO, undefined);
+  }
+  assert.throws(() => providerEnvironment(repo, { ...input, DAILY_BRIEF_COS_SECRET_KEY: '' }), /incomplete/);
+  assert.throws(() => providerEnvironment(repo, { ...input, DAILY_BRIEF_COS_PREFIX: 'production/' }), /prefix/);
+});
+
+test('COS local signing credentials and split signed URL fields never appear in supervised output', async () => {
+  const env = { DAILY_BRIEF_COS_SECRET_ID: 'SYNTHETIC_COS_ID', DAILY_BRIEF_COS_SECRET_KEY: 'SYNTHETIC_COS_KEY' };
+  const chunks = ['SYNTHETIC_COS_', 'KEY SYNTHETIC_COS_ID https://synthetic.invalid/a?q-sign', 'ature=private-synthetic-value&q-ak=SYNTHETIC_COS_ID'];
+  let output = '';
+  for await (const chunk of Readable.from(chunks).pipe(providerLogRedactor(env))) output += chunk;
+  for (const secret of [...Object.values(env), 'private-synthetic-value']) assert.ok(!output.includes(secret));
+});
+
 test('OCR findings reject unavailable, external and symlinked paths without reading secrets', () => {
   mkdirSync(path.join(repo, 'output'), { recursive: true });
   const dir = mkdtempSync(path.join(repo, 'output', 'cloud-ocr-path-'));
@@ -120,6 +168,19 @@ test('local signing secrets and signed audio query credentials are redacted acro
   assert.ok(!output.includes('synthetic-query-token'));
   assert.ok(output.includes('capability=[REDACTED]&expires=123'));
   assert.ok(output.endsWith('token=[REDACTED] end'));
+});
+
+test('COS signing credentials and query tokens are redacted across single-byte chunks', async () => {
+  const env = { DAILY_BRIEF_COS_SECRET_ID: 'SYNTHETIC_COS_ID', DAILY_BRIEF_COS_SECRET_KEY: 'SYNTHETIC_COS_KEY' };
+  const redactor = providerLogRedactor(env, Object.keys(env));
+  let output = ''; redactor.on('data', value => { output += value; });
+  const input = `${env.DAILY_BRIEF_COS_SECRET_KEY} https://synthetic.invalid/audio?q-ak=${env.DAILY_BRIEF_COS_SECRET_ID}&q-signature=${'b'.repeat(40)}&x-cos-security-token=synthetic-session end`;
+  await new Promise((resolve, reject) => {
+    redactor.once('end', resolve); redactor.once('error', reject);
+    Readable.from([...Buffer.from(input)].map(value => Buffer.from([value]))).pipe(redactor);
+  });
+  for (const secret of [...Object.values(env), 'b'.repeat(40), 'synthetic-session']) assert.ok(!output.includes(secret));
+  assert.ok(output.includes('q-signature=[REDACTED]&x-cos-security-token=[REDACTED] end'));
 });
 
 test('offline entry continues to discard business settings, aliases, proxies and CA settings', () => {
@@ -163,13 +224,16 @@ test('configuration reporting contains names and status only', () => {
 
 test('startup verification blocks external requests even with proxy credentials present', () => {
   const env = providerEnvironment(repo, { HTTPS_PROXY: 'http://proxy.invalid',
+    HTTP_PROXY: 'http://proxy.invalid', SPEAKER_ASR_BASE_URL: 'http://asr.synthetic.invalid',
     DAILY_BRIEF_OPENAI_API_KEY: 'synthetic-placeholder' }, { verifyNoCalls: true });
-  const child = spawnSync(process.execPath, ['-e', `
+  const child = spawnSync(process.execPath, ['--import', 'tsx', '-e', `
     const assert = require('node:assert/strict');
     (async () => {
       await assert.rejects(fetch('https://provider.invalid/v1/responses'), /External network access/);
       assert.throws(() => require('node:https').get('https://provider.invalid/'), /External network access/);
       assert.throws(() => require('node:net').connect({host:'proxy.invalid',port:443}), /external socket blocked/);
+      const {speakerAsrFetch}=require('./src/lib/server/transcription/speaker-asr-transport.ts');
+      await assert.rejects(speakerAsrFetch('http://asr.synthetic.invalid/api/ai/non-realtime-asr',{method:'POST',body:'{}'}), /asr_http_transport_failed/);
     })().catch(() => process.exit(1));
   `], { env, encoding: 'utf8' });
   assert.equal(child.status, 0, child.stderr);
@@ -178,7 +242,8 @@ test('startup verification blocks external requests even with proxy credentials 
 test('Web and Worker children receive the same explicitly selected Provider configuration', () => {
   const env = providerEnvironment(repo, { OPENAI_TEXT_MODEL: 'synthetic-model',
     WORK_REVIEW_WEEKLY_VERIFIER_TIMEOUT_MS: '30000', DAILY_BRIEF_OPENAI_API_KEY: 'synthetic-placeholder',
-    HTTPS_PROXY: 'http://proxy.invalid' }, { verifyNoCalls: true });
+    HTTPS_PROXY: 'http://proxy.invalid', HTTP_PROXY: 'http://proxy.invalid',
+    SPEAKER_ASR_BASE_URL: 'http://asr.synthetic.invalid:8300/gateway' }, { verifyNoCalls: true });
   for (const role of ['web', 'worker']) {
     const child = spawnSync(process.execPath, ['-e', `
       const a=require('node:assert/strict');
@@ -186,6 +251,7 @@ test('Web and Worker children receive the same explicitly selected Provider conf
       a.equal(process.env.OPENAI_TEXT_MODEL,'synthetic-model');
       a.equal(process.env.WORK_REVIEW_WEEKLY_VERIFIER_TIMEOUT_MS,'30000');
       a.equal(process.env.HTTPS_PROXY,'http://proxy.invalid');
+      a.equal(process.env.DAILY_BRIEF_CLOUD_ASR_HTTP_BASE_URL,'http://asr.synthetic.invalid:8300/gateway');
       a.equal(process.env.APP_DATA_DIR,${JSON.stringify(env.APP_DATA_DIR)});
       a.equal(process.env.PIPELINE_QUEUE_NAME,'daily-brief-cloud-providers');
     `], { env, encoding: 'utf8' });
@@ -233,7 +299,8 @@ test('overlapping credential tokens are redacted as a complete range', async () 
   assert.equal(output, 'prefix [REDACTED] suffix');
 });
 
-test('native fetch, HTTP and HTTPS use a local proxy, respect bypass, and require CA trust', { timeout: 20000 }, async () => {
+for (const ocrPrefix of ['/internal/ocr', '/internal/ocr/cloud-test-20261012'])
+test(`native fetch, HTTP and HTTPS use a local proxy, respect bypass, and require CA trust (${ocrPrefix})`, { timeout: 20000 }, async () => {
   const dir = mkdtempSync(path.join(os.tmpdir(), 'cloud-proxy-ca-'));
   // This synthetic TLS private key never goes to disk or logs. Only the public
   // certificate is written for NODE_EXTRA_CA_CERTS, then removed.
@@ -245,10 +312,28 @@ test('native fetch, HTTP and HTTPS use a local proxy, respect bypass, and requir
     { input: key, stdio: ['pipe', 'pipe', 'ignore'], encoding: 'utf8' });
   const ca = path.join(dir, 'public-ca.pem'); writeFileSync(ca, cert);
   const sockets = new Set(); let connectRequests = 0, httpRequests = 0, authorizedRequests = 0, asrRequests = 0, ocrUploads = 0;
+  const ocrRequests = [];
   const target = https.createServer({ key, cert }, (request, response) => {
+    if (request.url.startsWith('/internal/ocr/')) {
+      assert.equal(request.headers.authorization, 'Bearer synthetic-ocr-platform-placeholder');
+      ocrRequests.push(`${request.method} ${request.url}`);
+      if (request.method !== 'PUT') {
+        const chunks = []; request.on('data', value => chunks.push(value));
+        request.on('end', () => {
+          if (request.method === 'POST') assert.deepEqual(JSON.parse(Buffer.concat(chunks).toString()), { source_id: 'synthetic-source', request_id: 'synthetic-request' });
+          response.setHeader('content-type', 'application/json'); response.end('{"mock":true}');
+        });
+        return;
+      }
+    }
     if (request.method === 'PUT') {
+      assert.equal(request.url, `${ocrPrefix}/pdf-sources/synthetic-source`);
       assert.equal(request.headers.authorization, 'Bearer synthetic-ocr-platform-placeholder');
       assert.equal(request.headers['content-length'], '4');
+      assert.equal(request.headers['x-ocr-document-id'], 'synthetic-material');
+      assert.equal(request.headers['x-ocr-sha256'], 'a'.repeat(64));
+      assert.equal(request.headers['x-ocr-service-epoch'], 'e'.repeat(64));
+      assert.equal(request.headers['x-ocr-instance'], 'session-7');
       const chunks = [];
       request.on('data', value => chunks.push(value));
       request.on('end', () => {
@@ -296,6 +381,7 @@ test('native fetch, HTTP and HTTPS use a local proxy, respect bypass, and requir
     await Promise.all([target, loopback, proxy, asrTarget].map(listen));
     proxy.on('connect', (request, socket, head) => {
       const plainAsr = request.url === 'asr.synthetic.invalid:8300';
+      if (plainAsr) { socket.destroy(); return; }
       if (!plainAsr) assert.equal(request.url, `provider.invalid:${target.address().port}`);
       connectRequests++;
       const upstream = net.connect(plainAsr ? asrTarget.address().port : target.address().port, '127.0.0.1', () => {
@@ -308,7 +394,8 @@ test('native fetch, HTTP and HTTPS use a local proxy, respect bypass, and requir
     const input = { HTTPS_PROXY: `http://127.0.0.1:${proxy.address().port}`, HTTP_PROXY: `http://127.0.0.1:${proxy.address().port}`,
       DAILY_BRIEF_OPENAI_API_KEY: 'synthetic-platform-placeholder', NODE_EXTRA_CA_CERTS: ca,
       DAILY_BRIEF_LEARNING_PDF_SERVICE_TOKEN: 'synthetic-ocr-platform-placeholder',
-      SPEAKER_ASR_BASE_URL: 'http://asr.synthetic.invalid:8300/gateway' };
+      SPEAKER_ASR_BASE_URL: 'http://asr.synthetic.invalid:8300/gateway',
+      LEARNING_PDF_SERVICE_URL: `https://provider.invalid:${target.address().port}${ocrPrefix}` };
     const url = `https://provider.invalid:${target.address().port}/status`;
     await run(`
       const a=require('node:assert/strict');
@@ -323,16 +410,36 @@ test('native fetch, HTTP and HTTPS use a local proxy, respect bypass, and requir
           audioUrl:'https://audio.synthetic.invalid/learning?capability=synthetic-signed-url',resume:false,signal:AbortSignal.timeout(5000)});
         a.equal(asr.asr_result.sentences[0].text,'[合成] ASR代理返回');
         const {pdfParserTransport}=await import('./src/lib/server/learning/pdf-source-http.ts');
-        const upload=await pdfParserTransport(${JSON.stringify(url)}, {method:'PUT',body:new Uint8Array([37,80,68,70]),
-          headers:{Authorization:'Bearer '+process.env.LEARNING_PDF_SERVICE_TOKEN,'Content-Length':'4','Content-Type':'application/pdf'},
+        const base=process.env.LEARNING_PDF_SERVICE_URL,headers={Authorization:'Bearer '+process.env.LEARNING_PDF_SERVICE_TOKEN};
+        a.equal((await pdfParserTransport(base+'/health',{headers,redirect:'error',signal:AbortSignal.timeout(5000)})).status,200);
+        const upload=await pdfParserTransport(base+'/pdf-sources/synthetic-source', {method:'PUT',body:new Uint8Array([37,80,68,70]),
+          headers:{...headers,'Content-Length':'4','Content-Type':'application/pdf','X-OCR-Document-ID':'synthetic-material',
+            'X-OCR-SHA256':'a'.repeat(64),'X-OCR-Service-Epoch':'e'.repeat(64),'X-OCR-Instance':'session-7'},
           signal:AbortSignal.timeout(5000)});
         a.equal(upload.status,201);a.deepEqual(await upload.json(),{status:'ready'});
+        for(const [method,path] of [['GET','/pdf-sources/synthetic-source'],['POST','/parse-pdf'],
+          ['GET','/requests/synthetic-request'],['GET','/requests/synthetic-request/result'],
+          ['DELETE','/results/synthetic-request'],['DELETE','/pdf-sources/synthetic-source']]){
+          const result=await pdfParserTransport(base+path,{method,headers,redirect:'error',signal:AbortSignal.timeout(5000),
+            ...(method==='POST'?{body:JSON.stringify({source_id:'synthetic-source',request_id:'synthetic-request'})}:{})});
+          a.deepEqual(await result.json(),{mock:true});
+        }
       })().catch(()=>process.exit(1));
     `, providerEnvironment(repo, input));
     assert.equal(authorizedRequests, 1); assert.ok(connectRequests >= 2); assert.equal(httpRequests, 1);
     assert.equal(asrRequests, 1); assert.equal(ocrUploads, 1);
-    await run(`require('node:assert/strict').rejects(fetch(${JSON.stringify(url)})).catch(()=>process.exit(1))`,
+    assert.deepEqual(ocrRequests, ['GET /health','PUT /pdf-sources/synthetic-source',
+      'GET /pdf-sources/synthetic-source','POST /parse-pdf','GET /requests/synthetic-request',
+      'GET /requests/synthetic-request/result','DELETE /results/synthetic-request','DELETE /pdf-sources/synthetic-source']
+      .map(value => value.replace(' /', ` ${ocrPrefix}/`)));
+    await run(`(async()=>{
+      const a=require('node:assert/strict'),{pdfParserTransport}=await import('./src/lib/server/learning/pdf-source-http.ts');
+      await a.rejects(pdfParserTransport(process.env.LEARNING_PDF_SERVICE_URL+'/health',{signal:AbortSignal.timeout(5000)}));
+      await a.rejects(pdfParserTransport(process.env.LEARNING_PDF_SERVICE_URL+'/pdf-sources/synthetic-source',
+        {method:'PUT',body:new Uint8Array([37,80,68,70]),signal:AbortSignal.timeout(5000)}));
+    })().catch(()=>process.exit(1))`,
       providerEnvironment(repo, { ...input, NODE_EXTRA_CA_CERTS: undefined }));
+    assert.equal(ocrRequests.length, 8); // Untrusted TLS sends no HTTP requests, on either transport.
   } finally {
     for (const socket of sockets) socket.destroy();
     await Promise.all([target, loopback, proxy, asrTarget].map(server => new Promise(resolve => server.close(resolve))));

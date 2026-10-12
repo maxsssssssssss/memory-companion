@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { ZodError } from "zod";
 import { isUnauthenticatedError, requireAuthContext } from "@/lib/server/auth/request-context";
 import { LearningError, LearningRepository } from "@/lib/server/learning/repository";
+import { cleanupLearningCos } from "@/lib/server/learning/audio-cos";
 
 export function learningJson(value: unknown, status = 200) {
   return NextResponse.json(value, { status, headers: { "Cache-Control": "private, no-store", Vary: "Cookie" } });
@@ -33,7 +34,13 @@ export async function withLearning(request: Request, work: (repository: Learning
     if (error instanceof ZodError || error instanceof SyntaxError) return learningJson({ error: "invalid_input" }, 400);
     // Never return/log source text, paths, SQL errors or credentials.
     return learningJson({ error: "learning_storage_unavailable" }, 503);
-  } finally { repository?.close(); }
+  } finally {
+    if (repository) {
+      try { await cleanupLearningCos(repository); }
+      catch { /* Durable cleanup intents remain; do not replace the API result. */ }
+      finally { repository.close(); }
+    }
+  }
 }
 
 export async function boundedLearningBody(request: Request, limit: number, limitCode = "batch_too_large"): Promise<Uint8Array> {

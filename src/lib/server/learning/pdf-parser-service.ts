@@ -28,12 +28,13 @@ const NotAccepted = z.object({ request_id: safeIdentity, status:z.literal("not_a
 const contextOf = (row: Pick<Checkpoint,"request_context_json">): RequestContext => row.request_context_json ? JSON.parse(row.request_context_json) as RequestContext : {};
 const PDF_LEASE_MS = 45_000;
 const Finding = z.object({originalSha256:z.string().regex(/^[a-f0-9]{64}$/u),physicalPage:z.number().int().positive(),serviceVersion:z.literal("ocr-pdf-trial-0.1"),
-  model:z.string().min(1),code:z.string().min(1).max(500),message:z.string().min(1).max(500),evidenceRef:z.string().min(1).max(500),severity:z.enum(["warning","blocked"])}).strict();
+  model:z.string().min(1),code:z.string().min(1).max(500),message:z.string().min(1).max(500),evidenceRef:z.string().min(1).max(500),severity:z.enum(["warning","blocked"]),
+  parserScope:z.object({backend:z.string().min(1),paddleocr:z.string().min(1),paddlex:z.string().min(1),profile:z.record(z.unknown())}).strict().optional()}).strict();
 export function pdfParserConfig(env:Readonly<Record<string,string|undefined>>=process.env) {
   let endpoint=env.LEARNING_PDF_SERVICE_URL,token=env.LEARNING_PDF_SERVICE_TOKEN;
   const connectionFile=env.LEARNING_PDF_SERVICE_CONFIG_FILE,tokenFile=env.LEARNING_PDF_SERVICE_TOKEN_FILE;
-  const readConfigFile=(file:string,maxBytes:number)=>{
-    if(!isAbsolute(file))throw new Error("absolute_path_required");
+  const readConfigFile=(file:string,maxBytes:number,absolute=true)=>{
+    if(absolute&&!isAbsolute(file))throw new Error("absolute_path_required");
     const fd=openSync(file,"r");
     try{const stat=fstatSync(fd);if(!stat.isFile()||stat.size>maxBytes)throw new Error("invalid_file");
       const bytes=readFileSync(fd);if(bytes.length>maxBytes)throw new Error("invalid_file");return bytes.toString("utf8");
@@ -68,7 +69,7 @@ export function pdfParserConfig(env:Readonly<Record<string,string|undefined>>=pr
   let findings:PaddleServiceFinding[]=[];
   if(!env.LEARNING_PDF_KNOWN_FINDINGS_FILE)throw new LearningError(503,"pdf_parser_findings_invalid");
   if(env.LEARNING_PDF_KNOWN_FINDINGS_FILE) {
-    try { const bytes=readFileSync(env.LEARNING_PDF_KNOWN_FINDINGS_FILE);if(bytes.length>256*1024)throw new Error();findings=z.array(Finding).max(500).parse(JSON.parse(bytes.toString("utf8"))); }
+    try { findings=z.array(Finding).max(500).parse(JSON.parse(readConfigFile(env.LEARNING_PDF_KNOWN_FINDINGS_FILE,256*1024,false))); }
     catch { throw new LearningError(503,"pdf_parser_findings_invalid"); }
   }
   const epoch=env.LEARNING_PDF_SERVICE_EPOCH,instance=env.LEARNING_PDF_SERVICE_INSTANCE;

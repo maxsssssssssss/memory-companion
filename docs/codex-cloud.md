@@ -52,7 +52,9 @@ supervisor对Web/Worker/Redis输出流脱敏，包括跨chunk凭据及代理认�
 
 ### 复用现有 Learning ASR/OCR
 
-应用侧继续复用 `learning/audio-service.ts`、`transcription/speaker-asr-provider.ts` 及 Learning PDF parser/source transport；不运行依赖 Windows DPAPI、SSH 和 ngrok 的本地启动器，不导入 Windows `.env.local`、真实数据或旧隧道。`SPEAKER_ASR_BASE_URL` 保留用户提供的完整 HTTP/HTTPS 地址、端口和路径，不自动改成 HTTPS。ASR 的 HTTP fetch 和 OCR 原生 HTTPS PUT 均使用上述原生代理配置；两条实际应用传输路径已通过仅监听 loopback 的合成代理验证。HTTPS 保留 CA/TLS 校验，HTTP ASR 不使用 TLS 开关伪装成 HTTPS。
+页面 COS 合成开发接入及 OCR 验收前提见 [Cloud Learning Provider 说明](cloud-learning-providers.md)。显式设置 `LEARNING_ASR_AUDIO_DELIVERY=cos-synthetic` 后，Web/Worker 才接收 COS 配置；默认服务器 HMAC 下载模式和离线入口不变。
+
+应用侧继续复用 `learning/audio-service.ts`、`transcription/speaker-asr-provider.ts` 及 Learning PDF parser/source transport；不运行依赖 Windows DPAPI、SSH 和 ngrok 的本地启动器，不导入 Windows `.env.local`、真实数据或旧隧道。`SPEAKER_ASR_BASE_URL` 保留用户提供的完整 HTTP/HTTPS 地址、端口和路径，不自动改成 HTTPS。Cloud Provider 入口会为 HTTP ASR 派生内部 `DAILY_BRIEF_CLOUD_ASR_HTTP_BASE_URL`，绑定完整 base（包括网关路径），对 Web/Worker 同时生效；该内部值不接受继承覆盖，也不需要用户在平台手填。提交和查询通过 ASR 专属传输选择调用 Node 原生 HTTP 正向代理，显式代理 agent 不受 ASR 目标的 NO_PROXY 绕过；代理缺失、目标变化或重定向会失败，不直连、不自动重试。普通 Windows/服务器启动及 HTTPS ASR 仍使用原 fetch，不替换全局 fetch，不影响 OCR/AI。独立 cloud:asr 工具复用该传输实现并保留自己的单次调用和响应大小预算，正式应用不套用试验的128KiB上限。HTTP(S)平台代理地址与CA/TLS仍保留；OCR原生HTTPS PUT继续走Node原生环境代理，其Cloud真实上传仍需独立验收。
 
 | 配置 | 来源及用途 |
 |---|---|

@@ -164,7 +164,7 @@ it("adds source receipts to an old schema without changing saved materials or pa
   const before = repo.get(pageId);
   repo.database.exec("DROP TABLE learning_pdf_sources; PRAGMA user_version=10;");
   repo.close(); repo = new LearningRepository(root, "synthetic-owner");
-  expect(repo.database.pragma("user_version", { simple: true })).toBe(11);
+  expect(repo.database.pragma("user_version", { simple: true })).toBe(12);
   expect(repo.get(pageId)).toEqual(before); expect(repo.pdfOriginal(pageId, materialId).bytes).toEqual(bytes);
   expect(repo.getParsedDocument(pageId, parsed.id)).toEqual(parsed);
   expect(repo.listPdfSources(pageId, materialId)).toEqual([]);

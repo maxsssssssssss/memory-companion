@@ -64,7 +64,9 @@
     "cloud:build": "node scripts/cloud/run.mjs build",
     "cloud:dev": "node scripts/cloud/run.mjs dev",
     "cloud:dev:providers": "node scripts/cloud/run.mjs providers",
-    "cloud:providers:check": "node scripts/cloud/provider-check.mjs"
+    "cloud:providers:check": "node scripts/cloud/provider-check.mjs",
+    "cloud:asr:setup": "bash scripts/cloud/asr-trial-setup.sh",
+    "cloud:asr": "node scripts/cloud/asr-trial-run.mjs"
   },
   "dependencies": {
     "better-sqlite3": "^12.11.1",

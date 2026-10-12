@@ -1,3 +1,4 @@
+import { LEARNING_AUDIO_COS_SCHEMA } from "./audio-cos-schema";
 import { PdfStudySelection, type ParsedTextBinding } from "@/lib/domain/learning-pdf-study";
 import { parsedLearningSource } from "./parsed-learning";
 import Database from "better-sqlite3";
@@ -134,7 +135,7 @@ export class LearningRepository {
     this.database.pragma("journal_mode = DELETE");
     this.database.pragma("synchronous = FULL");
     try { this.database.transaction(() => {
-      if (Number(this.database.pragma("user_version", { simple: true })) > 11) throw new Error("unsupported_learning_schema");
+      if (Number(this.database.pragma("user_version", { simple: true })) > 12) throw new Error("unsupported_learning_schema");
       this.database.exec(`
       CREATE TABLE IF NOT EXISTS learning_pages (
         id TEXT PRIMARY KEY, account_id TEXT NOT NULL, title TEXT NOT NULL,
@@ -234,7 +235,8 @@ export class LearningRepository {
       );
       CREATE INDEX IF NOT EXISTS learning_pdf_source_material ON learning_pdf_sources(page_id,material_id);`);
       this.database.exec(LEARNING_GENERATION_SCHEMA);
-      this.database.pragma("user_version = 11");
+      this.database.exec(LEARNING_AUDIO_COS_SCHEMA);
+      this.database.pragma("user_version = 12");
     }).immediate(); this.database.pragma("foreign_keys = ON"); } catch (error) { this.database.close(); throw error; }
   }
   close() { this.database.close(); }
@@ -672,6 +674,8 @@ export class LearningRepository {
         .get(materialId, pageId) as { deleted_at: string | null } | undefined;
       if (!row) throw new LearningError(404, "material_not_found");
       if (!row.deleted_at) {
+        this.database.prepare("UPDATE learning_audio_cos_objects SET delete_requested=1,next_cleanup_at=0 WHERE account_id=? AND page_id=? AND material_id=?")
+          .run(this.accountId, pageId, materialId);
         this.database.prepare(`UPDATE learning_pdf_sources SET delete_requested=1,
           remote_cleanup=CASE WHEN remote_cleanup='deleted' THEN remote_cleanup ELSE 'pending' END,updated_at=?
           WHERE page_id=? AND material_id=?`).run(new Date().toISOString(), pageId, materialId);
@@ -710,6 +714,8 @@ export class LearningRepository {
     this.database.transaction(() => {
       const page = this.pageRow(pageId, true);
       if (page.deleted_at) return;
+      this.database.prepare("UPDATE learning_audio_cos_objects SET delete_requested=1,next_cleanup_at=0 WHERE account_id=? AND page_id=?")
+        .run(this.accountId, pageId);
       this.database.prepare(`UPDATE learning_pdf_sources SET delete_requested=1,
         remote_cleanup=CASE WHEN remote_cleanup='deleted' THEN remote_cleanup ELSE 'pending' END,updated_at=?
         WHERE page_id=?`).run(new Date().toISOString(), pageId);
