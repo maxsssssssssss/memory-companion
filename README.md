@@ -9,10 +9,11 @@
 - [长录音 ASR 分片](docs/architecture/long-recording-asr-chunks.md)：AudioChunk、TranscriptChunk、ASR checkpoint 与 Transcript Merge。
 - [统一 Chunk 模型](docs/architecture/unified-chunk-model.md)：AudioChunk、TranscriptChunk、AnalysisChunk 的领域约束。
 - [服务器部署](docs/deployment/server-deployment.md)：仅在用户明确授权的服务器任务中使用，涵盖 Redis、PM2、端口和共享 `APP_DATA_DIR`。
+- [Codex Cloud 代码开发](docs/codex-cloud.md)：安装与离线验证入口，以及 Cloud 开发、Windows 真实验收与发布的协作流程。
 - [验证工具](docs/validation-tools.md)：按任务选择现有命令，区分 fixture、Browser mock、真实 Provider 和环境验证及其副作用。
 - [早期项目交接](docs/project-handoff.md)、[Work Review Wave 1 交接](docs/work-review-v2-core-contract-handoff.md) 和 `docs/superpowers/plans/`：历史背景与设计依据，不是当前待办或自动授权；使用前核对当前实现。
 
-当前机器的 Agent 执行规则见根目录 `AGENTS.md`；修改适用范围内的代码后，仍须在本地 `UPDATE_HISTORY.md` 末尾追加中文记录。`.gitignore` 当前忽略 `AGENTS.md`、`UPDATE_HISTORY.md`、`.agents/` 和 `.codex/`，这些本地规则及 Skills/hooks 不会随 Git 自动共享。
+项目协作规则见根目录 `AGENTS.md`；每次完成改动后，在 Windows 与 Cloud 共用的 `UPDATE_HISTORY.md` 末尾追加中文记录。两个根文件随 Git 共享；`.agents/`、`.codex/` 等个人 Skills/hooks 和凭据继续忽略，不随 Git 搬运。
 
 ## 常用命令
 

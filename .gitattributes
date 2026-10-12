@@ -1,0 +1,3 @@
+# Cloud shell entry points must remain executable by bash after Windows checkout.
+scripts/cloud/*.sh text eol=lf
+.nvmrc text eol=lf
