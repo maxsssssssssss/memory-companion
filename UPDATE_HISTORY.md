@@ -15383,3 +15383,18 @@ OCR与环境状态：当前进程缺URL、Token及reviewed findings；既有别�
 差异与敏感信息：35文件扫描未发现密钥模式或当前运行凭据值；package-lock.json SHA256仍为0f7d643ea8c5eca671ee29a2231e0ba162ff32615bbb011ee793384faec9142d，所有既有历史字节保持不变。提交仅包含已审阅的源码、测试、文档、脚本及本历史，不包含数据库、环境秘密或未审阅资料。提交/远端最终SHA和草稿保存回读结果另在交付记录中给出，不能在提交生成前虚构。
 
 已知限制：未重跑全量；此前Windows历史PDF fixture缺失和原包回放限制未解决，不宣称全绿。Learning COS真实页面闭环、真实Cloud OCR health/原生PUT/解析/清理均NOT RUN；新增真实调用为0，旧ASR POST1/查询2/COS7账本不重置。保留COS最多300秒链接撤销窗口、在途下载不可收回、未知PUT人工处理及下次同账号请求触发清理等限制。OCR草稿revision37已保存主机限定Token绑定，但其权限仅health且北京时间2026-10-14 11:19:23到期；存在配置或发布环境不开放上传/解析权限，也不授予调用额度。安装仍唯一cloud:setup；后续仅保存新SHA和完整Start草稿，Publish与全新任务验收由用户后续执行。
+
+
+## 2026-10-12：独立 Cloud 恢复交接归档与一次真实 OCR health 验收
+
+背景与授权：用户提供全新任务恢复报告后要求执行保存记录和一次OCR health检查。当前准备工作区仍为dev/cloud@66c8ac28f69096310feabb282b40367c460eb071且初始干净，fetch后远端同SHA。另一任务的work/cloud-restore-20261012/evidence及未提交历史追加不在本工作区，不能直接读取或冒充已复核；以下新任务统计明确引用用户提供的交接报告，另追加本任务实际health证据。未复跑整套迁移验收，不把本会话恢复当作跨环境验证。
+
+独立任务交接结果（用户提供，本轮未读取其原始证据）：实际branch/SHA匹配上述提交，锁SHA256保持0f7d643ea8c5eca671ee29a2231e0ba162ff32615bbb011ee793384faec9142d；Linux工具、项目venv和210锁包版本恢复，31/31配置及两个秘密别名存在。质量包manifest30/30、备份32/32通过，9条实际schema记录按7+2 scope匹配。cloud:check9/0/0及类型通过（78.553秒）；指定5文件104/0/0（14.598秒）；Provider21/0/0（7.314秒）；schema/adapter25/0/0（2.840秒）；build44/44（327.625秒）、179trace禁入引用0。离线及verify-no-calls分别完成冷启动、持久化重启、清空重建（123.010秒、113.999秒），四入口200、Redis/Worker1/共享marker/SQLite队列隔离通过，最终服务/端口/合成数据清理。报告保留临时验收脚本比较/采样失败及定向复验，真实调用0、全量未重跑、内部snapshot身份不可核验，结论CONDITIONAL PASS。此处归档报告不修改原测试或夸大证据层级。
+
+本轮实际OCR验证：读取当前Cloud网络/凭据元数据，配置存在但平台readiness仍unknown；通过现有providerEnvironment建立带原生环境代理和CA的独立子进程，复用pdfParserConfig别名与findings读取、pdfParserTransport非PUT路径，只对批准的独立测试前缀发出一次GET health。正式resolvePdfParserInstance未导出，因此不调用会继续上传/解析的业务入口；一次性脚本核对同一health字段并直接复用PdfSourceCapability schema。保留5秒超时、禁止跳转和重试、64KiB响应上限；网络前以排他写入保存一次尝试账本，不打印Token、完整响应或配置对象，不改变TLS/网络策略。
+
+实测结果：北京时间2026-10-12 15:04:43开始，GET1、HTTP200、ready=true，1462毫秒，exit0。service_version与resource_policy_version符合应用合同，运行epoch/instance从实际响应发现，原件传输v1能力校验通过；findings仍9条，业务Token别名映射一致。这证明本次HTTPS fetch经平台代理、CA及受限鉴权的health链路可用；不证明原生PUT或模型解析已验收，不从服务能力声明扩张20MiB业务上限或未来1MiB试验额度。公开历史不保存访问凭据、网关访问细节或完整实例身份，脱敏结果及响应哈希仅放忽略的output/cloud-ocr-health-20261012。
+
+后续材料准备：复用仓库syntheticLearningPdf({pages:1})，生成2251字节单页合成PDF，只在本地用项目pypdf检查页数、无加密、零旋转、零裁切偏移及预期文本层。未上传，文本层可读不等于OCR识别成功，不能替代历史PDF fixture。材料哈希及待登记资料保存在同一忽略目录。
+
+剩余边界：本轮真实health1，PUT/parse/query/delete/ASR/LLM/COS均0；既有ASR/AI消费账本未重置。当前Token仍按交接仅health且北京时间2026-10-14 11:19:23到期。真实单页上传、解析及所属缓存清理仍需服务器登记固定身份并开放权限，再取得明确新调用预算；页面ASR仍需新额度。未连接SSH、改服务器、生产数据、main/master或Environment，未Publish。只追加本文档，无应用、测试或依赖改动，因此不重复类型/构建/全量；本轮验证为真实一次health、离线PDF检查、追加完整性、敏感信息及diff检查。迁移开发可用结论保持，真实业务/历史原包验收限制保留。
