@@ -8,20 +8,23 @@ import Database from 'better-sqlite3';
 import { chromium, expect as baseExpect } from '@playwright/test';
 import { chromiumLaunchOptions } from './browser-launch.mjs';
 import { studentOption } from './student-policy.mjs';
+import { verifyManualLearning, openUnsavedNoteDraft } from './manual-learning-browser.mjs';
 const phase = process.argv[2];
-assert(['before-restart', 'after-restart', 'faults', 'crash-before', 'crash-after', 'inspect'].includes(phase), 'a2_browser_phase_required');
+assert(['before-restart', 'after-restart', 'faults', 'crash-before', 'crash-after', 'inspect', 'manual'].includes(phase), 'a2_browser_phase_required');
 const subcase = process.env.AGENT_TRIAL_SUBCASE;
-assert(subcase === undefined || subcase === 'known' && phase === 'faults', 'invalid_a2_subcase');
-const cases = process.env.AGENT_TRIAL_CASES?.split(',') ?? (subcase ? ['F'] : ['A', 'B', 'C', 'D', 'E', 'F']);
-assert(cases.length > 0 && cases.every(key => ['A', 'B', 'C', 'D', 'E', 'F'].includes(key)), 'invalid_a2_case_filter');
-assert(!subcase || cases.every(key => key === 'F'), 'known_subcase_only_runs_F');
+assert(subcase === undefined || subcase === 'known' && phase === 'faults' || subcase === 'draft' && ['before-restart', 'after-restart'].includes(phase), 'invalid_a2_subcase');
+const cases = process.env.AGENT_TRIAL_CASES?.split(',') ?? (phase === 'manual' ? ['M'] : subcase === 'draft' ? ['B'] : subcase === 'known' ? ['F'] : ['A', 'B', 'C', 'D', 'E', 'F']);
+assert(cases.length > 0 && cases.every(key => (phase === 'manual' ? ['M'] : ['A', 'B', 'C', 'D', 'E', 'F']).includes(key)), 'invalid_a2_case_filter');
+assert(!subcase || cases.every(key => key === (subcase === 'draft' ? 'B' : 'F')), 'subcase_account_filter_conflict');
+const bKey = subcase === 'draft' ? 'B-draft' : 'B';
+const reportName = `a2-${phase}${subcase === 'draft' ? '-draft' : ''}`;
 const root = path.resolve(process.env.AGENT_TRIAL_DIR ?? 'output/agent-a2-offline');
 const runId = new Date().toISOString().replace(/[:.]/g, '-') + '-' + process.pid;
 const archive = path.join(root, 'runs', runId);
 const read = name => JSON.parse(fs.readFileSync(path.join(root, name), 'utf8'));
 const save = (name, value) => {
   const text = JSON.stringify(value, null, 2); fs.writeFileSync(path.join(root, name), text);
-  if (name === `a2-${phase}-result.json` || name === `a2-${phase}-checks.json`) fs.writeFileSync(path.join(archive, name), text);
+  if (name === `${reportName}-result.json` || name === `${reportName}-checks.json` || name.startsWith('a3-B-')) fs.writeFileSync(path.join(archive, name), text);
 };
 const runtime = read('runtime.json'), accounts = read('synthetic-accounts.json');
 assert.equal(runtime.evidenceMode, 'offline', 'this_fault_acceptance_runner_is_offline_only');
@@ -29,22 +32,23 @@ assert.equal(path.resolve(runtime.dataRoot), path.join(root, 'data'));
 assert(['127.0.0.1', 'localhost', '[::1]'].includes(new URL(runtime.base).hostname));
 fs.mkdirSync(archive, { recursive: true });
 for (const suffix of ['result', 'checks']) {
-  const prior = path.join(root, `a2-${phase}-${suffix}.json`);
-  if (fs.existsSync(prior)) fs.copyFileSync(prior, path.join(archive, `prior-a2-${phase}-${suffix}.json`));
+  const prior = path.join(root, `${reportName}-${suffix}.json`);
+  if (fs.existsSync(prior)) fs.copyFileSync(prior, path.join(archive, `prior-${reportName}-${suffix}.json`));
 }
 const state = fs.existsSync(path.join(root, 'a2-state.json')) ? read('a2-state.json') : { tasks: {} };
 const expect = baseExpect.configure({ timeout: 30000 }), checks = [], failures = [];
 fs.mkdirSync(path.join(root, 'screenshots'), { recursive: true });
+fs.mkdirSync(path.join(archive, 'screenshots'), { recursive: true });
 const persist = () => save('a2-state.json', state);
 const readDb = (filename, fn) => { const db = new Database(filename, { readonly: true }); try { return fn(db); } finally { db.close(); } };
 const calls = () => readDb(path.join(root, 'offline-provider.sqlite'), db => db.prepare('SELECT count(*) n FROM requests').get().n);
 const business = (account, fn) => readDb(path.join(runtime.dataRoot, 'users', account.userId, 'learning-organizer.sqlite'), fn);
-const pass = (key, message) => { checks.push({ key, message }); save(`a2-${phase}-checks.json`, checks); console.log(`[A2 ${phase} ${key}] ${message}; simulated requests=${calls()}, real Provider=0`); };
+const pass = (key, message) => { checks.push({ key, message }); save(`${reportName}-checks.json`, checks); console.log(`[A2 ${phase} ${key}] ${message}; simulated requests=${calls()}, real Provider=0`); };
 const controlFaults = faults => save('offline-control.json', { version: 1, faults });
 const browser = await chromium.launch(chromiumLaunchOptions());
 async function session(key, work) {
   if (!cases.includes(key)) return;
-  const account = accounts.find(account => account.key === key); assert(account, 'seed_a2_six_accounts_required');
+  const account = accounts.find(account => account.key === key); assert(account, key === 'M' ? 'seed_manual_account_required_use_seed_manual' : 'seed_a2_six_accounts_required');
   const context = await browser.newContext({ viewport: { width: 1440, height: 1050 }, serviceWorkers: 'block' });
   await context.route('**/*', route => new URL(route.request().url()).origin === runtime.base ? route.continue() : route.abort());
   const page = await context.newPage(), errors = [];
@@ -61,7 +65,7 @@ async function session(key, work) {
     await page.getByRole('navigation', { name: '学习任务' }).getByRole('button', { name: '自适应复习·试用', exact: true }).click();
     await expect(panel()).toBeVisible();
   };
-  const snapshot = label => page.screenshot({ path: path.join(root, 'screenshots', `a2-${phase}-${key}-${label}.png`), fullPage: true });
+  const snapshot = label => page.screenshot({ path: path.join(root, 'screenshots', `${reportName}-${key}-${label}.png`), fullPage: true });
   const settle = async (id, predicate = task => !['ready', 'running'].includes(task.status)) => {
     const deadline = Date.now() + 120000; let marker;
     while (Date.now() < deadline) {
@@ -112,7 +116,9 @@ async function session(key, work) {
 }
 
 try {
-  if (phase === 'before-restart') {
+  if (phase === 'manual') {
+    await session('M', h => verifyManualLearning(h, { runtime, root, expect, pass: message => pass('M', message), save, calls, state, persist }));
+  } else if (phase === 'before-restart') {
     await session('A', async h => {
       let task = await h.start('A', read('frozen-inputs.json').goals.A, true);
       task = await h.settle(task.id);
@@ -165,28 +171,41 @@ try {
       pass('A', 'actual UI quiz scoring → read-back explanation → preview/confirm narrower goal+scope; same task/versioned budget retained');
     });
     await session('B', async h => {
-      let task = await h.start('B', '[A2:note] 请解释交集概念，再提出追加个人笔记的建议；等待我批准。', true);
+      const before = state[bKey]?.notes ?? await h.notes();
+      let task = await h.start(bKey, '[A2:note] 请解释交集概念，再提出追加个人笔记的建议；等待我批准。', true);
       task = await h.settle(task.id); assert.equal(task.approval?.status, 'pending');
       await h.open(task.id); await expect(h.panel().getByRole('region', { name: '待确认笔记', exact: true })).toBeVisible();
-      const before = await h.notes(); assert(before.every(node => node.note === ''));
-      state.B = { approval: task.approval, notes: before, process: { childPid: runtime.childPid, startedAt: runtime.startedAt } }; persist();
+      assert.deepEqual(await h.notes(), before, 'unapproved_proposal_must_not_change_existing_notes');
+      state[bKey] = { approval: task.approval, notes: before, process: { childPid: runtime.childPid, startedAt: runtime.startedAt } }; persist();
       await h.quiet(task.id, 'B approval waiting'); await h.snapshot('approval-before-restart');
       pass('B', 'proposed note displayed exact target/content; unapproved note untouched; ready for external process restart');
     });
   } else if (phase === 'after-restart') {
     await session('B', async h => {
-      const saved = state.B; assert(saved); assert.notEqual(runtime.childPid, saved.process.childPid); assert.notEqual(runtime.startedAt, saved.process.startedAt);
-      let task = await h.current(state.tasks.B); assert.equal(task.approval?.id, saved.approval.id); assert.deepEqual(await h.notes(), saved.notes);
+      const saved = state[bKey]; assert(saved); assert.notEqual(runtime.childPid, saved.process.childPid); assert.notEqual(runtime.startedAt, saved.process.startedAt);
+      let task = await h.current(state.tasks[bKey]); assert.equal(task.approval?.id, saved.approval.id); assert.deepEqual(await h.notes(), saved.notes);
       await h.open(task.id); await h.quiet(task.id, 'B approval persisted across restart');
       await h.open(task.id);
+      const draft = await openUnsavedNoteDraft(h, { runtime, root: archive, expect, task, calls });
+      try {
       const response = h.page.waitForResponse(r => r.url().endsWith('/agent') && r.request().method() === 'PATCH');
       await h.panel().getByRole('button', { name: '批准追加到个人笔记', exact: true }).click();
       const accepted = await response; assert.equal(accepted.status(), 202); const event = accepted.request().postDataJSON();
       task = await h.settle(task.id, t => t.status === 'ended' && t.actions.some(action => action.tool === 'learning.append_note' && action.status === 'succeeded'));
-      const written = await h.notes(); assert.equal(written.filter(node => node.note.includes(saved.approval.content)).length, 1);
+      const written = await h.notes();
+      assert.equal(written.length, saved.notes.length);
+      const changed = written.filter(node => node.note !== saved.notes.find(prior => prior.nodeId === node.nodeId)?.note);
+      assert.equal(changed.length, 1, 'approval_must_append_to_exactly_one_existing_node');
+      const target = changed[0], original = saved.notes.find(node => node.nodeId === target.nodeId); assert(original);
+      assert.equal(target.note, [original.note, saved.approval.content].filter(Boolean).join('\n\n'));
+      assert.equal(target.revision, original.revision + 1);
+      assert.deepEqual(written.map(node => ({ ...node, revision: saved.notes.find(prior => prior.nodeId === node.nodeId)?.revision, note: node.nodeId === target.nodeId ? original.note : node.note })), saved.notes);
       const before = calls(); assert.equal((await h.api('/agent', 'PATCH', event)).status, 202); await h.page.waitForTimeout(300);
       assert.deepEqual(await h.notes(), written); assert.equal(calls(), before); await h.snapshot('approved-once');
       pass('B', 'normal restart kept pending approval; actual UI approve appended once; duplicate event preserved exact note/revision');
+      const proof = await draft.verifyAfterApproval(); save(`a3-${bKey}-unsaved-draft.json`, proof);
+      pass('B', 'actual second-page unsaved note draft survived Agent approval; stale save returned 409 without overwriting approved note');
+      } finally { await draft.close(); }
     });
   } else if (phase === 'faults') {
     await session('C', async h => {
@@ -307,5 +326,5 @@ try {
   } else for (const key of ['A', 'B', 'C', 'D', 'E', 'F']) await session(key, async h => { save(`a2-inspect-${key}.json`, (await h.api()).value); await h.snapshot('inspect'); });
 } finally {
   await browser.close(); process.exitCode = failures.length ? 1 : 0;
-  save(`a2-${phase}-result.json`, { runId, phase, subcase, status: process.exitCode ? 'FAIL' : 'PASS', evidence: 'offline_fixed_provider_real_business_sqlite_api_browser', cases, checks, failures, simulatedRequests: calls(), actualProviderNetworkRequests: 0, exitCode: process.exitCode });
+  save(`${reportName}-result.json`, { runId, phase, subcase, status: process.exitCode ? 'FAIL' : 'PASS', evidence: 'offline_fixed_provider_real_business_sqlite_api_browser', cases, checks, failures, simulatedRequests: calls(), actualProviderNetworkRequests: 0, exitCode: process.exitCode });
 }

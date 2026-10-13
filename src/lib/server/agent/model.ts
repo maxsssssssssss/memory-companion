@@ -48,10 +48,12 @@ export function createAgentDecisionProvider(configure: () => AgentModelConfig): 
         return { value, usage: { inputTokens: diagnostics?.inputTokens, outputTokens: diagnostics?.outputTokens } };
       } catch (error) {
         if (error instanceof AgentFailure) throw error;
-        // A complete response that violates the action schema is a known failure;
-        // a timeout/incomplete transport is unknown and never automatically retried.
-        throw new AgentFailure(diagnostics?.responseStatus === "completed" ? "known_failure" : "unknown",
-          diagnostics?.responseStatus === "completed" ? "agent_action_invalid_result" : "agent_decision_result_unknown");
+        // Parsing starts only after a valid response.completed envelope. A failed
+        // or incomplete event cannot prove completion through its nested status.
+        const completed = diagnostics?.responseStatus === "completed" && diagnostics.parseResult !== "not_started";
+        throw new AgentFailure(completed ? "known_failure" : "unknown",
+          completed ? "agent_action_invalid_result" : "agent_decision_result_unknown",
+          diagnostics ? { inputTokens: diagnostics.inputTokens, outputTokens: diagnostics.outputTokens } : undefined);
       }
     });
   };

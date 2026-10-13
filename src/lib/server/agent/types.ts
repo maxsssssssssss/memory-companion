@@ -47,7 +47,9 @@ export interface AgentDecisionInput {
 export type AgentDecisionProvider = (input: AgentDecisionInput, context: AgentContext) => Promise<AgentDecision>;
 
 export class AgentFailure extends Error {
-  constructor(public readonly code: "forbidden" | "invalid_action" | "known_failure" | "unknown" | "budget" | "inactive" | "source_changed" | "conflict", message: string) {
+  constructor(public readonly code: "forbidden" | "invalid_action" | "known_failure" | "unknown" | "budget" | "inactive" | "source_changed" | "conflict", message: string,
+    /** Reported usage remains a billing fact even when the result is unusable. */
+    public readonly usage?: AgentCallUsage) {
     super(message); this.name = "AgentFailure";
   }
 }

@@ -1,5 +1,7 @@
 # Daily Brief Agent A0/A1：Windows 接手与真实验收
 
+> 历史阶段记录。最终 Agent V1 请统一执行 [Windows 验收计划](agent-v1-windows.md)，不重复四个阶段的任务，也不继承旧调用额度。
+
 Windows 真实验收状态：**PENDING**。本文件是接手步骤，不是验收通过记录。Cloud 只交付代码、离线测试和开发分支；Windows 负责获授权的真实 Provider、浏览器与设备验收，随后按另行授权合并 `main` 或部署。此前 Cloud 的 18 次调用属于历史试验，不能替代本次 Windows 验收，也不证明最终提交已通过真实闭环。
 
 ## 1. 锁定独立 checkout 与验收提交

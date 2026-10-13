@@ -7,14 +7,14 @@ import type { AgentContext, AgentDecisionInput } from "./types";
 
 afterEach(() => vi.unstubAllGlobals());
 
-function fixture(responseValue: unknown) {
+function fixture(responseValue: unknown, eventType = "response.completed") {
   // Capture the actual SDK request at fetch; no socket or Provider is involved.
   const requests: Array<{ input: Array<{ role: string; content: string }> }> = [];
   const fetch = vi.fn<typeof globalThis.fetch>(async (input, init) => {
     const request = new Request(input, init);
     expect(request.url).toBe("https://synthetic-provider.invalid/v1/responses");
     requests.push(await request.json());
-    const event = { type: "response.completed", response: {
+    const event = { type: eventType, response: {
       status: "completed", error: null, incomplete_details: null,
       usage: { input_tokens: 9, output_tokens: 4 },
       output: [{ type: "message", role: "assistant", content: [{ type: "output_text", text: JSON.stringify(responseValue) }] }]
@@ -65,9 +65,18 @@ describe("Agent structured action request contract", () => {
     { tool: "synthetic.read", args: {}, finish: "Two actions are forbidden." },
     { wait: { kind: "feedback", message: "Question", extra: true } },
     { tool: "synthetic.read", args: "invalid parameters shape" }
-  ])("rejects invalid action shape %j without schema relaxation or retry", async (action) => {
+  ])("retains known usage while rejecting invalid action shape %j without retry", async (action) => {
     const h = fixture(action);
-    await expect(h.invoke()).rejects.toMatchObject({ code: "known_failure", message: "agent_action_invalid_result" });
+    await expect(h.invoke()).rejects.toMatchObject({ code: "known_failure", message: "agent_action_invalid_result",
+      usage: { inputTokens: 9, outputTokens: 4 } });
+    expect(h.fetch).toHaveBeenCalledOnce();
+    expect(h.call).toHaveBeenCalledOnce();
+  });
+
+  it.each(["response.failed", "response.incomplete"])("keeps %s with misleading completed metadata unknown", async (eventType) => {
+    const h = fixture({ finish: "This malformed terminal event must not be accepted." }, eventType);
+    await expect(h.invoke()).rejects.toMatchObject({ code: "unknown", message: "agent_decision_result_unknown",
+      usage: { inputTokens: 9, outputTokens: 4 } });
     expect(h.fetch).toHaveBeenCalledOnce();
     expect(h.call).toHaveBeenCalledOnce();
   });

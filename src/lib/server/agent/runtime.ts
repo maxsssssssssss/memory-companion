@@ -165,6 +165,16 @@ export class AgentRuntime {
             if (!previous) store.saveApproval(accountId, taskId, lease.token, { ...confirmation, id: action.id, actionId: action.id, taskVersion: input.expectedVersion,
               tool: action.tool, fingerprint, status: "pending", createdAt: new Date().toISOString() });
             store.recordRecovery(accountId, taskId, lease.token, input);
+            const consumed = store.latestEvent(accountId, taskId);
+            if (previous?.status === "approved" && consumed?.kind === "approval" && consumed.refId === previous.id &&
+              consumed.decision === "approve" && consumed.fingerprint === fingerprint) {
+              // Inspection must not wait for an approval already consumed before
+              // pause/crash, nor execute it. Explicit continuation uses the same
+              // prepared action and revalidates this binding at execution time.
+              store.setState(accountId, taskId, lease.token, "ready", { recovery: { kind: "not_started", actionId: action.id,
+                message: "原提案已获批准且尚未执行，可以继续原行动，无需再次批准。", allowedControls: ["adjust", "cancel"] } });
+              return store.getTask(accountId, taskId);
+            }
             store.setState(accountId, taskId, lease.token, "waiting", { wait: { kind: "confirmation", refId: action.id, message: confirmation.title.slice(0, 200) },
               recovery: { kind: "not_started", actionId: action.id, message: "提案尚未执行，已恢复原提案的确认等待。", allowedControls: ["adjust", "cancel"] } });
             return store.getTask(accountId, taskId);
@@ -216,7 +226,7 @@ export class AgentRuntime {
         } catch (error) {
           // A thrown network/parse error is not evidence the provider did nothing.
           const known = error instanceof AgentFailure && ["known_failure", "forbidden", "invalid_action", "budget"].includes(error.code);
-          store.finishCall(callId, known ? "failed" : "unknown");
+          store.finishCall(callId, known ? "failed" : "unknown", error instanceof AgentFailure ? error.usage : undefined);
           throw error;
         }
         // A complete response remains a known billing fact even when pause,
@@ -359,10 +369,8 @@ export class AgentRuntime {
         await validate(ctx);
         const approval = store.approval(accountId, taskId, state.actionId);
         if (!approval || !["approved", "rejected"].includes(approval.status) || approval.fingerprint !== accepted.fingerprint) throw new AgentFailure("conflict", "确认已经失效。");
-        store.consumeEvent(taskId, eventId);
-        store.setState(accountId, taskId, lease.token, "running");
+        store.continueEvent(accountId, taskId, lease.token, eventId);
         if (approval.status === "rejected") {
-          store.markAction(accountId, taskId, lease.token, state.actionId, "failed", { summary: "用户拒绝了这项提案，未执行。" });
           return { next: "decide" as const };
         }
         await this.verifyApproval(accountId, taskId, state.actionId, context(state.actionId));
@@ -377,8 +385,7 @@ export class AgentRuntime {
         await validate(ctx);
         await scenario.validateEvent?.(accepted, ctx);
         await validate(ctx);
-        store.consumeEvent(taskId, eventId);
-        store.setState(accountId, taskId, lease.token, "running");
+        store.continueEvent(accountId, taskId, lease.token, eventId);
         return { next: "decide" as const };
       }, { retryPolicy: { maxAttempts: 1 } })
       .addEdge(START, "decide")
@@ -393,6 +400,18 @@ export class AgentRuntime {
       await validate(context());
       const version = original.version ?? 1;
       const config = { configurable: { thread_id: version === 1 ? taskId : `${taskId}:v${version}` }, callbacks: [], recursionLimit: original.budget.maxSteps * 4 + 5, durability: "sync" as const, signal: controller.signal };
+      if (original.status === "ready" && original.approval) {
+        const approval = original.approval;
+        const consumed = store.latestEvent(accountId, taskId);
+        const action = store.action(accountId, taskId, approval.actionId);
+        if (consumed?.kind === "approval" && consumed.refId === approval.id && consumed.fingerprint === approval.fingerprint &&
+          ((approval.status === "approved" && action.status === "prepared") || (approval.status === "rejected" && action.status === "failed"))) {
+          // Pause can fence the confirm node after its durable event transition
+          // but before its checkpoint. Continue that exact decision; approved
+          // execution still rechecks the proposal and never replays unknown work.
+          await graph.updateState(config, { taskId, actionId: action.id, next: approval.status === "approved" ? "execute" : "decide" }, "confirm");
+        }
+      }
       if (original.status === "ready" && original.recovery?.actionId && ["not_started", "known_failed"].includes(original.recovery.kind)) {
         const retry = store.action(accountId, taskId, original.recovery.actionId);
         if (retry.status === "prepared" && (retry.version ?? 1) === version) {

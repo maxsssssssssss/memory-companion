@@ -118,9 +118,18 @@ export function createLearningAgentScenario(learning: LearningRepository,
           const value = await deps.generate(config, name, prompt, input, schema, AbortSignal.any([signal, ctx.signal]), d => { captured = d; diagnostics?.(d); });
           return { value, usage: { inputTokens: captured?.inputTokens, outputTokens: captured?.outputTokens } };
         } catch (error) {
-          if (error instanceof AgentFailure || error instanceof LearningError) throw error;
-          if (captured?.responseStatus && ["completed", "failed", "incomplete", "cancelled"].includes(captured.responseStatus)) throw new AgentFailure("known_failure", "agent_generation_invalid_result");
-          throw new AgentFailure("unknown", "agent_generation_result_unknown");
+          const usage = captured ? { inputTokens: captured.inputTokens, outputTokens: captured.outputTokens } : undefined;
+          if (error instanceof AgentFailure) throw new AgentFailure(error.code, error.message, error.usage ?? usage);
+          if (error instanceof LearningError) {
+            if (!captured) throw error; // Local preflight, before any response diagnostics.
+            const failure = safeFailure(error);
+            throw new AgentFailure(failure.code, failure.message, usage);
+          }
+          // A failed/incomplete event may carry a misleading nested status. The
+          // transport begins JSON parsing only after a valid completion envelope.
+          const completed = captured?.responseStatus === "completed" && captured.parseResult !== "not_started";
+          throw new AgentFailure(completed ? "known_failure" : "unknown",
+            completed ? "agent_generation_invalid_result" : "agent_generation_result_unknown", usage);
         }
       });
       // Record a completed response's known usage before source/cancellation

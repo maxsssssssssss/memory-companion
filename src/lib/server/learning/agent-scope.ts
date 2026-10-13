@@ -25,12 +25,19 @@ function currentScope(learning: LearningRepository, pageId: string, selection: L
     return { materialId: id, title: source.material.title, kind: source.material.kind, scopeNotice: source.scopeNotice,
       paragraphs: selected };
   });
-  const allowed = new Map(materials.map(m => [m.materialId, new Set(m.paragraphs.map(p => p.number))]));
+  const allowed = new Map(materials.map(m => [m.materialId, new Map(m.paragraphs.map(p => [p.number, p]))]));
   // Navigation is only an address book. Generated explanations are not evidence.
   const navigation = view.chapters.flatMap(c => {
     const nodes = c.nodes.filter(n => (selection.chapterIds.includes(c.id) || selection.nodeIds.includes(n.id)
       || n.sources.some(s => selection.materialIds.includes(s.materialId)))
-      && n.sources.length > 0 && n.sources.every(s => allowed.get(s.materialId)?.has(s.paragraph))).map(n => ({
+      && n.sources.length > 0 && n.sources.every((s, index) => {
+        const paragraph = allowed.get(s.materialId)?.get(s.paragraph);
+        // Whole-material authorization does not rebind an old framework node
+        // to the same paragraph number in a newer parsed document.
+        if (!paragraph || JSON.stringify(paragraph.parsed) !== JSON.stringify(s.parsed)) return false;
+        try { framework.source(pageId, c.id, n.id, index); return true; }
+        catch (error) { if (error instanceof LearningError) return false; throw error; }
+      })).map(n => ({
       id: n.id, title: n.title, sources: n.sources.map(s => ({ materialId: s.materialId, paragraph: s.paragraph })),
       ...(selection.includeNotes && n.note ? { note: n.note } : {}),
       ...(selection.includeSupplements && n.supplement ? { supplement: n.supplement } : {})

@@ -1,5 +1,7 @@
 # Daily Brief Agent A2：Windows 接手与验收
 
+> 历史阶段记录。最终 Agent V1 请统一执行 [Windows 验收计划](agent-v1-windows.md)，不重复四个阶段的任务，也不继承旧调用额度。
+
 本文件是执行交接，不是验收通过记录。A2 的 Windows 真实模型、生成质量和最终提交验收均为 **PENDING**；Cloud 只提供合成数据、离线 Provider、真实业务代码与本地测试证据。实际通过项目、命令退出码及最终 SHA 以本轮最终报告为准。
 
 ## 1. 版本与独立工作区

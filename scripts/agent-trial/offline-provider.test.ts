@@ -49,6 +49,15 @@ it("offline explanation carries only supplied material and official source bindi
   expect(GeneratedNodeAnswer.parse(fixture.explanation(input))).toMatchObject({ supplements: [], items: [{ materialId, paragraph: 3 }] });
   expect(() => fixture.respond({ arbitrary: true })).toThrow("offline_unexpected_provider_request");
 });
+it("manual Learning question fixture uses only the explicitly supplied synthetic definitions", () => {
+  const payload = { materials: [{ materialId, paragraphs: [{ number: 2, text: "集合定义" }, { number: 3, text: "已授权交集定义" }, { number: 4, text: "已授权并集定义" }] }],
+    taskContext: { node: { title: "交集与并集的归属条件" }, question: "【离线手动追问】共同元素为什么也在并集中？", materialCatalog: [{ materialId, displayTitle: "合成教材 · 集合、交集与并集" }] } };
+  const response = fixture.respond(payload);
+  expect(response.kind).toBe("manual_node_qa_fixture");
+  expect(GeneratedNodeAnswer.parse(response.value)).toMatchObject({ supplements: [], items: [{ materialId, paragraph: 3 }, { materialId, paragraph: 4 }] });
+  expect(response.value.materialAnswer).toContain("已授权交集定义"); expect(response.value.materialAnswer).not.toContain("集合定义");
+  expect(() => fixture.respond({ ...payload, taskContext: { ...payload.taskContext, question: "未冻结的其他提问" } })).toThrow("offline_manual_question_not_frozen");
+});
 
 it("preloaded response fixture makes zero network requests and socket/API bypasses remain denied", () => {
   const root = mkdtempSync(path.join(tmpdir(), "agent-offline-preload-"));

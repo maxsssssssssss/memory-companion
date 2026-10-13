@@ -75,9 +75,20 @@ function explanation(payload) {
     items: payload.materials.map(material => ({ materialId: material.materialId, paragraph: material.paragraph })) };
 }
 
+function manualNodeAnswer(payload) {
+  assert(payload.taskContext?.question === '【离线手动追问】共同元素为什么也在并集中？', 'offline_manual_question_not_frozen');
+  assert(payload.taskContext.materialCatalog?.every(material => material.displayTitle === '合成教材 · 集合、交集与并集'), 'offline_manual_synthetic_material_required');
+  const references = payload.materials.flatMap(material => material.paragraphs.map(paragraph => ({ materialId: material.materialId, paragraph: paragraph.number, text: paragraph.text })))
+    .filter(paragraph => [3, 4].includes(paragraph.paragraph));
+  assert(references.length > 0 && references.every(paragraph => typeof paragraph.text === 'string'), 'offline_manual_authorized_definitions_required');
+  return { materialAnswer: '【离线手动追问fixture，非模型质量证据】\n' + references.map(ref => ref.text).join('\n'), supplements: [],
+    items: references.map(({ materialId, paragraph }) => ({ materialId, paragraph })) };
+}
+
 function respond(payload) {
   if (payload.tools && payload.observation && payload.results) return { kind: 'decision_fixture', value: decision(payload) };
   if (payload.taskContext?.count || payload.count) return { kind: 'quiz_generation_fixture', value: quiz(payload) };
+  if (payload.taskContext?.node && payload.taskContext?.question && Array.isArray(payload.materials)) return { kind: 'manual_node_qa_fixture', value: manualNodeAnswer(payload) };
   if (payload.question && Array.isArray(payload.materials)) return { kind: 'explanation_generation_fixture', value: explanation(payload) };
   throw Error('offline_unexpected_provider_request_no_network_fallback');
 }

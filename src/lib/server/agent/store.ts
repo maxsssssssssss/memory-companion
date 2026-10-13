@@ -300,11 +300,28 @@ export class AgentStore {
   }
   latestEvent(accountId: string, taskId: string) {
     const task = this.row(accountId, taskId);
-    const row = this.database.prepare("SELECT event_json FROM agent_events WHERE task_id=? AND version=? AND consumed=1 ORDER BY created_at DESC LIMIT 1").get(taskId, task.version) as { event_json: string } | undefined;
+    const row = this.database.prepare("SELECT event_json FROM agent_events WHERE task_id=? AND version=? AND consumed=1 ORDER BY created_at DESC,rowid DESC LIMIT 1").get(taskId, task.version) as { event_json: string } | undefined;
     return row ? JSON.parse(row.event_json) as AgentEvent : undefined;
   }
-  consumeEvent(taskId: string, eventId: string) {
-    this.database.prepare("UPDATE agent_events SET consumed=1 WHERE task_id=? AND id=?").run(taskId, eventId);
+  consumeEvent(accountId: string, taskId: string, token: string, eventId: string) {
+    return this.database.transaction(() => {
+      const task = this.assertLease(accountId, taskId, token);
+      const updated = this.database.prepare("UPDATE agent_events SET consumed=1 WHERE task_id=? AND id=? AND version=?")
+        .run(taskId, eventId, task.version ?? 1);
+      if (!updated.changes) throw new AgentFailure("forbidden", "当前版本的恢复事件不存在。");
+    }).immediate();
+  }
+  continueEvent(accountId: string, taskId: string, token: string, eventId: string) {
+    return this.database.transaction(() => {
+      this.consumeEvent(accountId, taskId, token, eventId);
+      const event = this.getEvent(accountId, taskId, eventId)!;
+      if (event.kind === "approval" && event.decision === "reject") {
+        this.markAction(accountId, taskId, token, event.refId!, "failed", { summary: "用户拒绝了这项提案，未执行。" });
+      }
+      // Consumption and leaving the wait form one transition. A concurrent pause
+      // must see either the pending event or a task that no longer awaits it.
+      this.setState(accountId, taskId, token, "running");
+    }).immediate();
   }
   pendingEvent(accountId: string, taskId: string) {
     const task = this.row(accountId, taskId);

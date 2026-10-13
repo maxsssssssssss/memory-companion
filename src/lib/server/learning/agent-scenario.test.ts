@@ -288,6 +288,7 @@ it.each(["quiz", "explanation"] as const)("explicitly retries a known failed %s 
     expect(retried.status).toBe("waiting");
     expect(retried.actions[0]).toMatchObject({ id: originalAction.id, status: "succeeded" });
     expect(retried.actions).toHaveLength(1); expect(calls).toBe(2); expect(retried.usage.calls).toBe(2);
+    expect(retried.usage).toMatchObject({ inputTokens: 62, outputTokens: 34, unknownUsageCalls: 0 });
     expect(decision).toHaveBeenCalledTimes(kind === "quiz" ? 2 : 3);
     const records = new LearningAgentRepository(learning).list(pageId, task.id);
     expect(records).toHaveLength(1); expect(records[0]).toMatchObject({ id: originalArtifact.id, state: "completed" });
@@ -310,5 +311,26 @@ it("never sends another Learning generation for an unknown result even when retr
     expect(retried.status).toBe("needs_attention"); expect(retried.recovery?.kind).toBe("unknown");
     expect(generate).toHaveBeenCalledTimes(1); expect(retried.usage.calls).toBe(1);
     expect(new LearningQuizRepository(learning).list(pageId)).toHaveLength(1);
+  } finally { runtime.close(); store.close(); }
+});
+
+it.each(["failed", "incomplete", "completed"])("retains reported usage but does not retry an uncompleted %s generation envelope", async (responseStatus) => {
+  const generate = vi.fn(async (...args: Parameters<typeof generateStudyJson>) => {
+    args[6]?.({ responseStatus, responseTextLength: 0, parseResult: "not_started", validationResult: "not_started", inputTokens: 31, outputTokens: 17 });
+    throw Error("[模拟] 未收到合法完成事件");
+  }) as unknown as typeof generateStudyJson;
+  const scene = createLearningAgentScenario(learning, { configure: () => config, generate }), store = AgentStore.open(join(root, "terminal-agent.sqlite"));
+  const task = store.createTask({ accountId: "owner", scenario: scene.id, resourceId: pageId, goal: "[合成] 完成与计费事实分离", scope: freezeLearningAgentScope(learning, pageId, selection()) });
+  const runtime = new AgentRuntime({ store, checkpointPath: join(root, "terminal-checkpoints.sqlite"), scenario: scene,
+    decision: async () => ({ tool: "learning.explain", args: { question: "[模拟] 解释前提", sources: [{ materialId, paragraph: 1 }] } }) });
+  try {
+    const result = await runtime.advance("owner", task.id);
+    expect(result.status).toBe("needs_attention"); expect(result.actions[0].status).toBe("unknown");
+    expect(result.usage).toMatchObject({ calls: 1, inputTokens: 31, outputTokens: 17, unknownUsageCalls: 0 });
+    expect(store.database.prepare("SELECT status,input_tokens,output_tokens FROM agent_calls WHERE task_id=?").all(task.id))
+      .toEqual([{ status: "unknown", input_tokens: 31, output_tokens: 17 }]);
+    expect(new LearningAgentRepository(learning).list(pageId, task.id)[0]).toMatchObject({ state: "unknown", body_json: null });
+    const retried = await runtime.recover("owner", task.id, { expectedVersion: 1, mode: "retry", eventId: randomUUID() });
+    expect(retried.recovery?.kind).toBe("unknown"); expect(generate).toHaveBeenCalledTimes(1);
   } finally { runtime.close(); store.close(); }
 });

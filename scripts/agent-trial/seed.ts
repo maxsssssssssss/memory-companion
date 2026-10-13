@@ -5,13 +5,18 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { LearningRepository } from "../../src/lib/server/learning/repository";
 import { LearningFrameworkRepository } from "../../src/lib/server/learning/framework-repository";
+import { assertEvidenceDirectory } from "./evidence-directory.cjs";
 
-const a2 = process.argv.includes("--a2");
-const root = path.resolve(process.env.AGENT_TRIAL_DIR ?? (a2 ? "output/agent-a2-offline" : "output/agent-a0-a1-offline"));
-const runtime = JSON.parse(readFileSync(path.join(root, "runtime.json"), "utf8")) as { base: string; dataRoot: string; inviteCode: string };
+const real = process.argv.includes("--real"), legacy = process.argv.includes("--a1"), manual = process.argv.includes("--manual");
+assert(!(legacy && process.argv.includes("--a2")), "choose_one_seed_stage");
+assert(!(real && manual), "manual_regression_seed_is_offline_only");
+const root = path.resolve(process.env.AGENT_TRIAL_DIR ?? (real ? "output/agent-a2-windows" : legacy ? "output/agent-a0-a1-offline" : "output/agent-a2-offline"));
+assertEvidenceDirectory(root, real ? "real" : "offline");
+assert(existsSync(path.join(root, "runtime.json")), "trial_not_started_run_launch_start_with_the_same_AGENT_TRIAL_DIR");
+const runtime = JSON.parse(readFileSync(path.join(root, "runtime.json"), "utf8")) as { base: string; dataRoot: string; inviteCode: string; evidenceMode?: string };
+assert.equal(runtime.evidenceMode, real ? "real" : "offline", "seed_evidence_mode_mismatch");
 assert(["127.0.0.1", "localhost", "[::1]"].includes(new URL(runtime.base).hostname), "loopback_only");
 assert.equal(path.resolve(runtime.dataRoot), path.join(root, "data"), "isolated_data_required");
-mkdirSync(path.join(root, "screenshots"), { recursive: true });
 const paragraphs = [
   "合成教材：集合、交集与并集。本材料由验收脚本手工编写，仅用于隔离软件验证；不是教学效果研究或真实学生资料。以下定义与算例按通常的有限集合约定。",
   "集合由确定的元素组成，花括号表示一个集合。同一元素重复写出不会增加元素个数，元素的书写顺序不影响集合。例如 {1, 2, 2} 与 {2, 1} 都是含两个元素的集合。空集 ∅ 不含任何元素。",
@@ -31,22 +36,39 @@ const frozen = {
 };
 const frozenPath = path.join(root, "frozen-inputs.json");
 if (existsSync(frozenPath)) assert.deepEqual(JSON.parse(readFileSync(frozenPath, "utf8")), frozen, "frozen_fixture_changed");
-else writeFileSync(frozenPath, JSON.stringify(frozen, null, 2));
-writeFileSync(path.join(root, "synthetic-course.txt"), source);
+const coursePath = path.join(root, "synthetic-course.txt"), resultPath = path.join(root, "seed-result.json");
+if (existsSync(coursePath)) assert.equal(readFileSync(coursePath, "utf8"), source, "frozen_material_file_changed");
+const prior = existsSync(resultPath) ? JSON.parse(readFileSync(resultPath, "utf8")) as { status: string; sourceSha256: string; accounts: Array<{ key: string; userId: string; pageId: string; materialId: string; chapterId?: string; nodeIds?: string[] }> } : null;
+if (prior) { assert.equal(prior.status, "PASS"); assert.equal(prior.sourceSha256, frozen.sourceSha256, "prior_seed_source_changed"); assert(existsSync(frozenPath) && existsSync(coursePath), "prior_seed_frozen_files_missing"); }
 
-type AccountKey = "A" | "B" | "C" | "D" | "E" | "F";
+type AccountKey = "A" | "B" | "C" | "D" | "E" | "F" | "M";
 type Account = { key: AccountKey; email: string; password: string; userId?: string; pageId: string; materialId: string; frameworkId: string; chapterId?: string; nodeIds?: string[] };
 const accountsPath = path.join(root, "synthetic-accounts.json");
-const accountKeys: AccountKey[] = a2 ? ["A", "B", "C", "D", "E", "F"] : ["A", "B"];
-const accounts: Account[] = existsSync(accountsPath) ? JSON.parse(readFileSync(accountsPath, "utf8")) : accountKeys.map(key => ({
-  key, email: `agent-${a2 ? "a2" : "a0-a1"}-${key.toLowerCase()}-${randomUUID()}@synthetic.invalid`, password: `synthetic-only-${randomUUID()}`,
+const accountKeys: AccountKey[] = real || legacy ? ["A", "B"] : ["A", "B", "C", "D", "E", "F"];
+if (manual) accountKeys.push("M");
+const newAccount = (key: AccountKey): Account => ({
+  key, email: `agent-${legacy ? "a0-a1" : "a2"}-${key.toLowerCase()}-${randomUUID()}@synthetic.invalid`, password: `synthetic-only-${randomUUID()}`,
   pageId: randomUUID(), materialId: randomUUID(), frameworkId: randomUUID(),
-}));
-assert.deepEqual(accounts.map(account => account.key), accountKeys, "existing_trial_accounts_do_not_match_requested_stage_use_a_separate_directory");
+});
+const accounts: Account[] = existsSync(accountsPath) ? JSON.parse(readFileSync(accountsPath, "utf8")) : accountKeys.map(newAccount);
+assert(new Set(accounts.map(account => account.key)).size === accounts.length, "duplicate_seed_accounts");
+assert(accounts.every(account => accountKeys.includes(account.key) || account.key === "M" && !real && !legacy), "existing_trial_accounts_do_not_match_requested_stage_use_a_separate_directory");
+for (const key of accountKeys) if (!accounts.some(account => account.key === key)) {
+  assert(key === "M" && manual, "existing_trial_accounts_incomplete_use_a_separate_directory"); accounts.push(newAccount(key));
+}
+const completed = (account: Account) => Boolean(account.userId && account.chapterId && account.nodeIds?.length && prior?.accounts.some(saved => saved.key === account.key && saved.userId === account.userId && saved.pageId === account.pageId && saved.materialId === account.materialId && saved.chapterId === account.chapterId && JSON.stringify(saved.nodeIds) === JSON.stringify(account.nodeIds)));
+if (accountKeys.every(key => completed(accounts.find(account => account.key === key)!))) {
+  console.log("Frozen seed already complete; existing courses, deletions, selections, notes, quizzes and tasks retained; no API/database writes.");
+  process.exit(0);
+}
+mkdirSync(path.join(root, "screenshots"), { recursive: true });
+if (!existsSync(frozenPath)) writeFileSync(frozenPath, JSON.stringify(frozen, null, 2));
+if (!existsSync(coursePath)) writeFileSync(coursePath, source);
 const save = () => writeFileSync(accountsPath, JSON.stringify(accounts, null, 2), { mode: 0o600 });
 save();
 
 for (const [index, account] of accounts.entries()) {
+  if (!accountKeys.includes(account.key) || completed(account)) { console.log(`[seed ${index + 1}/${accounts.length}] synthetic account ${account.key}: previously completed fixture retained without writes`); continue; }
   let cookie = "";
   async function api(route: string, method = "GET", data?: unknown) {
     const url = new URL(route, runtime.base);
@@ -110,4 +132,4 @@ for (const [index, account] of accounts.entries()) {
   await api("/api/auth/logout", "POST");
   console.log(`[seed ${index + 1}/${accounts.length}] synthetic account ${account.key}: course and hand-authored framework saved; zero Provider calls`);
 }
-writeFileSync(path.join(root, "seed-result.json"), JSON.stringify({ status: "PASS", evidence: "synthetic_fixture", accounts: accounts.map(({ key, userId, pageId, materialId, chapterId, nodeIds }) => ({ key, userId, pageId, materialId, chapterId, nodeIds })), sourceSha256: frozen.sourceSha256, providerRequests: 0 }, null, 2));
+writeFileSync(resultPath, JSON.stringify({ status: "PASS", evidence: "synthetic_fixture", accounts: accounts.map(({ key, userId, pageId, materialId, chapterId, nodeIds }) => ({ key, userId, pageId, materialId, chapterId, nodeIds })), sourceSha256: frozen.sourceSha256, providerRequests: 0 }, null, 2));

@@ -6,14 +6,17 @@ import { chromium } from '@playwright/test';
  * local system paths are fallback discovery, never a browser download. */
 export function chromiumLaunchOptions(env = process.env, platform = process.platform) {
   const explicit = env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH;
-  if (explicit && !fs.existsSync(explicit)) throw Error('PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH does not exist');
+  const isFile = filename => { try { return fs.statSync(filename).isFile(); } catch { return false; } };
+  if (explicit && !isFile(explicit)) throw Error('PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH must name an existing browser executable');
   let executablePath = explicit;
-  if (!executablePath && !fs.existsSync(chromium.executablePath())) {
-    const candidates = platform === 'win32' ? [env.PROGRAMFILES, env['ProgramFiles(x86)'], env.LOCALAPPDATA].filter(Boolean).flatMap(directory => [
-      path.join(directory, 'Google', 'Chrome', 'Application', 'chrome.exe'), path.join(directory, 'Microsoft', 'Edge', 'Application', 'msedge.exe'),
+  if (!executablePath && !isFile(chromium.executablePath())) {
+    const envValue = name => Object.entries(env).find(([key]) => key.toLowerCase() === name.toLowerCase())?.[1];
+    const candidates = platform === 'win32' ? [envValue('ProgramFiles'), envValue('ProgramFiles(x86)'), envValue('LocalAppData')].filter(Boolean).flatMap(directory => [
+      path.win32.join(directory, 'Google', 'Chrome', 'Application', 'chrome.exe'), path.win32.join(directory, 'Microsoft', 'Edge', 'Application', 'msedge.exe'),
     ]) : platform === 'darwin' ? ['/Applications/Google Chrome.app/Contents/MacOS/Google Chrome', '/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge']
       : ['/usr/bin/chromium', '/usr/bin/chromium-browser', '/usr/bin/google-chrome'];
-    executablePath = candidates.find(candidate => fs.existsSync(candidate));
+    executablePath = candidates.find(candidate => isFile(candidate));
+    if (!executablePath) throw Error('No installed Chromium/Chrome/Edge found; set PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH to an existing local browser');
   }
   return { headless: true, ...(executablePath ? { executablePath } : {}), ...(platform === 'linux' ? { args: ['--no-sandbox'] } : {}) };
 }

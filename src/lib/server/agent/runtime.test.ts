@@ -93,6 +93,27 @@ describe("shared LangGraph execution with a non-Learning business scene", () => 
     expect(rejected.status).toBe("needs_attention");
     expect(h.decision).toHaveBeenCalledTimes(1);
   });
+  it.each(["before", "after"] as const)("does not lose an accepted feedback when pause races %s its consumption", async (timing) => {
+    const h = setup([{ tool: "synthetic.create", args: {} }, { finish: "stop after actual feedback" }]);
+    const waiting = await h.runtime.advance("alice", h.task.id);
+    h.business.get(waiting.wait!.refId!)!.feedback = "saved application feedback";
+    const event = { id: "pause-at-consume", kind: "submitted", refId: waiting.wait!.refId };
+    await h.runtime.submitEvent("alice", h.task.id, event, { expectedVersion: 1, defer: true });
+    const other = AgentStore.open(h.dbPath);
+    resources.push(() => other.close());
+    const consume = h.store.continueEvent.bind(h.store);
+    vi.spyOn(h.store, "continueEvent").mockImplementationOnce((...args) => {
+      if (timing === "before") other.control("alice", h.task.id, "pause", 1);
+      const result = consume(...args);
+      if (timing === "after") other.control("alice", h.task.id, "pause", 1);
+      return result;
+    });
+    expect((await h.runtime.advance("alice", h.task.id)).status).toBe("paused");
+    expect(h.store.acceptedEvent("alice", h.task.id, event)?.consumed).toBe(timing === "after");
+    h.runtime.control("alice", h.task.id, "resume", 1);
+    expect((await h.runtime.advance("alice", h.task.id)).status).toBe("ended");
+    expect(h.decision).toHaveBeenCalledTimes(2); expect(h.create).toHaveBeenCalledTimes(1);
+  });
   it("ignores an old submitted event while waiting for a different record and resumes an accepted pending event", async () => {
     const h = setup([{ tool: "synthetic.create", args: {} }, { tool: "synthetic.create", args: {} }, { finish: "end" }]);
     const first = await h.runtime.advance("alice", h.task.id);
@@ -239,6 +260,18 @@ describe("shared LangGraph execution with a non-Learning business scene", () => 
     expect(stopped.usage.unknownUsageCalls).toBe(1);
     expect(readFileSync(uncertain.dbPath).toString("latin1")).not.toContain("timeout body should not be saved");
   });
+  it.each(["known_failure", "unknown"] as const)("retains received usage for a %s response without changing its retry classification", async (code) => {
+    const h = setup([]);
+    h.decision.mockImplementation(async (_input, ctx) => ctx.call({ kind: "decision", inputChars: 30, maxOutputTokens: 20 }, async () => {
+      throw new AgentFailure(code, "Synthetic response rejected by the action protocol", { inputTokens: 17, outputTokens: 8 });
+    }));
+    const result = await h.runtime.advance("alice", h.task.id);
+    expect(result).toMatchObject({ status: "needs_attention", usage: { calls: 1, inputTokens: 17, outputTokens: 8, unknownUsageCalls: 0 } });
+    expect(result.recovery?.allowedControls.includes("retry")).toBe(code === "known_failure");
+    expect(h.store.database.prepare("SELECT status,input_tokens,output_tokens FROM agent_calls WHERE task_id=?").get(h.task.id))
+      .toEqual({ status: code === "known_failure" ? "failed" : "unknown", input_tokens: 17, output_tokens: 8 });
+    expect(h.decision).toHaveBeenCalledTimes(1);
+  });
   it("counts nested generation independently and blocks the next network call at the shared budget", async () => {
     const actual = vi.fn(async () => ({ value: "generated" }));
     const h = setup([{ tool: "synthetic.generate", args: {} }], { calls: 2, tools: {
@@ -360,6 +393,54 @@ describe("A2 versioned changes, confirmation and recovery with no product depend
     await expect(reopened.resolveApproval("alice", h.task.id, { ...input, eventId: "tampered-new-event", fingerprint: "different" })).rejects.toMatchObject({ code: "conflict" });
     await expect(reopened.resolveApproval("alice", h.task.id, { ...input, eventId: "opposite-new-event", decision: "reject" })).rejects.toMatchObject({ code: "conflict" });
     expect(h.write).toHaveBeenCalledTimes(1);
+  });
+  it.each([["before", "approve"], ["after", "approve"], ["before", "reject"], ["after", "reject"]] as const)("preserves confirmation when pause races %s consumption of %s", async (timing, decision) => {
+    const h = confirming(), waiting = await h.runtime.advance("alice", h.task.id);
+    const input = { approvalId: waiting.approval!.id, expectedVersion: 1, fingerprint: waiting.approval!.fingerprint, decision, eventId: "pause-confirm", defer: true };
+    await h.runtime.resolveApproval("alice", h.task.id, input);
+    const other = AgentStore.open(h.dbPath);
+    resources.push(() => other.close());
+    const consume = h.store.continueEvent.bind(h.store);
+    vi.spyOn(h.store, "continueEvent").mockImplementationOnce((...args) => {
+      if (timing === "before") other.control("alice", h.task.id, "pause", 1);
+      const result = consume(...args);
+      if (timing === "after") other.control("alice", h.task.id, "pause", 1);
+      return result;
+    });
+    expect((await h.runtime.advance("alice", h.task.id)).status).toBe("paused");
+    expect(h.write).not.toHaveBeenCalled();
+    h.runtime.control("alice", h.task.id, "resume", 1);
+    expect((await h.runtime.advance("alice", h.task.id)).status).toBe("ended");
+    expect(h.write).toHaveBeenCalledTimes(decision === "approve" ? 1 : 0); expect(h.decision).toHaveBeenCalledTimes(decision === "approve" ? 1 : 2);
+    await h.runtime.resolveApproval("alice", h.task.id, input);
+    expect(h.write).toHaveBeenCalledTimes(decision === "approve" ? 1 : 0);
+  });
+  it("inspects a consumed approval after reopening without re-waiting or executing until explicit continuation", async () => {
+    const h = confirming(), waiting = await h.runtime.advance("alice", h.task.id);
+    await h.runtime.resolveApproval("alice", h.task.id, { approvalId: waiting.approval!.id, expectedVersion: 1,
+      fingerprint: waiting.approval!.fingerprint, decision: "approve", eventId: "approved-before-pause", defer: true });
+    const consume = h.store.continueEvent.bind(h.store);
+    vi.spyOn(h.store, "continueEvent").mockImplementationOnce((...args) => {
+      const result = consume(...args);
+      h.store.control("alice", h.task.id, "pause", 1);
+      return result;
+    });
+    const paused = await h.runtime.advance("alice", h.task.id);
+    expect(paused.status).toBe("paused"); expect(h.write).not.toHaveBeenCalled();
+    h.runtime.close(); h.store.close();
+    const store = AgentStore.open(h.dbPath);
+    const runtime = new AgentRuntime({ store, checkpointPath: h.checkpointPath, scenario: h.scene, decision: h.decision });
+    resources.push(() => { runtime.close(); store.close(); });
+    const request = { expectedVersion: 1, mode: "inspect" as const, eventId: "inspect-consumed-approval" };
+    const inspected = await runtime.recover("alice", h.task.id, request);
+    expect(inspected).toMatchObject({ status: "ready", recovery: { kind: "not_started", actionId: waiting.approval!.actionId } });
+    expect(inspected.wait).toBeUndefined(); expect(inspected.usage.calls).toBe(paused.usage.calls);
+    expect(h.write).not.toHaveBeenCalled(); expect(h.decision).toHaveBeenCalledTimes(1);
+    expect((await runtime.recover("alice", h.task.id, request)).status).toBe("ready");
+    expect(h.write).not.toHaveBeenCalled(); expect(h.decision).toHaveBeenCalledTimes(1);
+    const continued = await runtime.advance("alice", h.task.id);
+    expect(continued.status).toBe("ended"); expect(continued.actions[0].id).toBe(waiting.approval!.actionId);
+    expect(h.write).toHaveBeenCalledTimes(1); expect(h.decision).toHaveBeenCalledTimes(1);
   });
   it("rejects altered fingerprints and changed targets, and rejects a proposal without executing it", async () => {
     const h = confirming(), waiting = await h.runtime.advance("alice", h.task.id);

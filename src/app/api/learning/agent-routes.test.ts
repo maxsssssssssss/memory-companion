@@ -98,7 +98,7 @@ function waitForFeedback(taskId: string, event?: AgentEvent, consumed = false) {
   stores((_learning, store) => {
     const lease = store.claim("owner", taskId)!;
     store.setState("owner", taskId, lease.token, "waiting", { wait: { kind: "feedback", message: "[合成] 还有哪里不明白？" } });
-    if (event) { store.acceptEvent("owner", taskId, lease.token, event); if (consumed) store.consumeEvent(taskId, event.id); }
+    if (event) { store.acceptEvent("owner", taskId, lease.token, event); if (consumed) store.consumeEvent("owner", taskId, lease.token, event.id); }
     store.release("owner", taskId, lease);
   });
 }
