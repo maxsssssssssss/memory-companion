@@ -9,8 +9,9 @@ import styles from "./learning.module.css";
 import resultStyles from "./quiz-results.module.css";
 import { useLearningUnsaved } from "./use-learning-unsaved";
 
-export function LearningQuiz({ pageId, materials, selected, disabled, saveSelection, onSource }: {
+export function LearningQuiz({ pageId, materials, selected, disabled, saveSelection, onSource, openQuizId, openQuizRequest }: {
   pageId: string; materials: LearningMaterial[]; selected: string[]; disabled: boolean;
+  openQuizId?: string; openQuizRequest?: number;
   saveSelection: () => Promise<void>; onSource: (id: string, paragraph: number, parsed?: import("@/lib/domain/learning-pdf-study").ParsedTextBinding) => void;
 }) {
   const open = true;
@@ -28,6 +29,7 @@ export function LearningQuiz({ pageId, materials, selected, disabled, saveSelect
   const currentPage = useRef(pageId); currentPage.current = pageId;
   const pendingGeneration = useRef<{ id: string; settings: QuizConfig } | null>(null), pendingAction = useRef<QuizActionInput | null>(null);
   const pendingStart = useRef<{ id: string; quizId: string; mode: "practice" | "test" } | null>(null);
+  const requestedQuiz = useRef<string | null>(null);
   const key = `learning-quiz-pending:${pageId}`;
   useLearningUnsaved(Boolean(pendingAction.current));
   const rememberPosition = (id: string, question: number) => { const url = new URL(window.location.href); url.searchParams.set("view", "quiz"); url.searchParams.set("attempt", id); url.searchParams.set("question", String(question)); window.history.replaceState(window.history.state, "", url); };
@@ -56,11 +58,25 @@ export function LearningQuiz({ pageId, materials, selected, disabled, saveSelect
       }
       const completed=pendingGeneration.current && r.quizzes.find(q=>q.id===pendingGeneration.current!.id&&q.status!=="generating");
       if(completed){if(completed.status==="completed"){setChosen(completed);setStage(s=>s==="prepare"?"ready":s);}pendingGeneration.current=null;sessionStorage.removeItem(key);}
+      if (requestedQuiz.current && !pendingAction.current && !pendingStart.current) {
+        const requested = requestedQuiz.current;
+        const quiz = r.quizzes.find(item => item.id === requested);
+        if (quiz?.status === "completed") {
+          if (quiz.attemptId) {
+            const saved = (await learningApi.quizAttempt(pageId, quiz.attemptId)).attempt;
+            if (!mounted.current || n !== seq.current || requestedQuiz.current !== requested) return;
+            currentId.current = saved.id; restored.current = true; setAttempt(saved);
+            const next = Math.max(0, saved.questions.findIndex(item => !item.progress.submitted && !item.progress.skipped && !item.progress.revealed));
+            setIndex(next); setStage(saved.completed ? "results" : "answer"); rememberPosition(saved.id, next);
+          } else { currentId.current = null; setAttempt(null); setChosen(quiz); setStage("ready"); }
+          requestedQuiz.current = null; setSourceText("");
+        } else if (!quiz) { requestedQuiz.current = null; setStage("history"); setNotice("这份题组已不可用，可以继续使用其他题组。"); }
+      }
     } catch (e) { if (mounted.current && n === seq.current) { setError(learningErrorMessage(e)); if (e instanceof LearningApiError && [401,404,410].includes(e.status)) { setRuns([]); setAttempt(null); setSourceText(""); } } }
   }, [pageId, key]);
   useEffect(() => {
     mounted.current = true;
-    const query = new URLSearchParams(window.location.search); currentId.current = query.get("attempt");
+    const query = new URLSearchParams(window.location.search); currentId.current = query.get("attempt"); requestedQuiz.current = currentId.current ? null : query.get("quiz");
     try { const saved = sessionStorage.getItem(key + ":action"); if (saved) pendingAction.current = JSON.parse(saved); } catch { /* Optional receipt only. */ }
     try { const saved = sessionStorage.getItem(key); if (saved) {
       const p = JSON.parse(saved) as { id: string; settings: QuizConfig }; pendingGeneration.current = p;
@@ -69,6 +85,11 @@ export function LearningQuiz({ pageId, materials, selected, disabled, saveSelect
     } } catch { /* No original content in this optional recovery receipt. */ }
     return () => { mounted.current = false; seq.current++; };
   }, [key]);
+  useEffect(() => {
+    if (!openQuizId) return;
+    requestedQuiz.current = openQuizId;
+    if (!pendingAction.current && !pendingStart.current && !locked.current) { currentId.current = null; void load(); }
+  }, [openQuizId, openQuizRequest, load]);
   useEffect(() => {
     if (!open) return; void load();
     const focus = () => { if (!locked.current) void load(); };
@@ -126,9 +147,9 @@ export function LearningQuiz({ pageId, materials, selected, disabled, saveSelect
     if (busy || pendingAction.current) return;
     // Explicit navigation wins over an in-flight restoration of the old URL.
     // load() below fences the earlier read; saved attempts remain in history.
-    currentId.current = null; restored.current = true;
+    currentId.current = null; requestedQuiz.current = null; restored.current = true;
     setStage("history"); setSourceText("");
-    const url = new URL(window.location.href); url.searchParams.delete("attempt"); url.searchParams.delete("question"); window.history.replaceState(window.history.state, "", url);
+    const url = new URL(window.location.href); url.searchParams.delete("attempt"); url.searchParams.delete("question"); url.searchParams.delete("quiz"); window.history.replaceState(window.history.state, "", url);
     void load();
   };
   const closeDelete = useCallback(() => { if (!locked.current) { setDeleting(null); setDeleteError(""); } }, []);

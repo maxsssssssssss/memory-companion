@@ -20,6 +20,24 @@ beforeEach(() => {
   vi.mocked(learningApi.startQuiz).mockImplementation(async () => ({ attempt: structuredClone(a) })); vi.mocked(learningApi.quizAttempt).mockImplementation(async () => ({ attempt: structuredClone(a) }));
 });
 afterEach(cleanup);
+it("opens an Agent-created group through the existing quiz preparation and answer contracts", async () => {
+  render(<LearningQuiz pageId="p" materials={materials} selected={["m"]} disabled={false} saveSelection={save} onSource={vi.fn()} openQuizId="q" openQuizRequest={1} />);
+  await screen.findByRole("button", { name: "开始作答" });
+  expect(learningApi.startQuiz).not.toHaveBeenCalled();
+  expect(learningApi.generateQuiz).not.toHaveBeenCalled();
+  fireEvent.click(screen.getByRole("button", { name: "开始作答" }));
+  await screen.findByText("合成问题");
+  expect(learningApi.startQuiz).toHaveBeenCalledExactlyOnceWith("p", expect.any(String), "q", "practice");
+});
+it("reopens a linked Agent quiz after a refresh using its saved attempt without creating another", async () => {
+  window.history.replaceState(null, "", "/learning/p?view=quiz&quiz=q");
+  vi.mocked(learningApi.quizzes).mockResolvedValue({ quizzes: [{ ...run, attemptId: "a" }] });
+  render(<LearningQuiz pageId="p" materials={materials} selected={["m"]} disabled={false} saveSelection={save} onSource={vi.fn()} />);
+  await screen.findByText("合成问题");
+  expect(learningApi.startQuiz).not.toHaveBeenCalled();
+  expect(learningApi.generateQuiz).not.toHaveBeenCalled();
+  expect(new URLSearchParams(window.location.search).get("attempt")).toBe("a");
+});
 it("confirms the complete group deletion scope and leaves everything untouched on cancel", async () => {
   await mount(); fireEvent.click(screen.getByRole("button", { name: "题组与历史" }));
   fireEvent.click(await screen.findByRole("button", { name: "删除题组 合成题组" }));

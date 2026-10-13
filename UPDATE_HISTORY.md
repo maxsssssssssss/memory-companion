@@ -15480,3 +15480,22 @@ OCR与环境状态：当前进程缺URL、Token及reviewed findings；既有别�
 - Environment将以本提交保存唯一cloud:setup Install及精简Start/仓库基线，移除自定义业务出站域名。配置工具不能删除现有变量/Network-secret绑定，已独立列出需要界面删除的31个旧业务变量、1个待填ASR建议和2个Network secrets；工具过滤不能冒充平台凭据已删除。草稿保存不等于Publish，最终生效及全新任务恢复由后续操作确认。
 - 此提交仅新开发基础分支；产品修复和真实Windows验收另行交付，不自动修改main、部署服务器或Publish。一次默认tracking切换因旧clone只配置master fetch映射而被Git拒绝，随后从同一已核实remote SHA创建本地分支并设置跟踪；没有reset/force-push或覆盖工作。
 - 补充检查：默认暂存差异检查把导入的历史Windows CRLF视为行尾空白；保持旧历史字节不变，以 git -c core.whitespace=cr-at-eol diff --cached --check 检查后0问题、退出0。当前注入秘密值匹配/私钥标记扫描无命中，src与锁文件未暂存变动。
+
+
+## 2026-10-13：Daily Brief Agent A0/A1 共享执行底座与 Learning 自适应复习试用
+
+背景与授权：本轮从 `/workspace/memory-companion` 的 `dev/cloud-code@1b8cdae34ab362c17149ba6a0c9feafdd22090bd` 开始，保留当前实现。用户后续将验收改为 Cloud 完整开发/离线验证、Windows 真实 Provider/设备验收，并明确要求功能分支提交推送；据此在相同工作区创建 `feat/learning-agent-a0-a1`，没有 reset/clean/stash、worktree、main 修改或部署。四个产品边界不变，未修改 Work/Date/Daily 业务。本文是原共用历史的追加记录。
+
+调查与选择：实际比较 LangGraph JS、OpenAI Agents JS core 0.20.0 与 Vercel AI 7.0.138 的源码、测试、版本和相关修复；一条路线做兼容验证。采用正式 MIT 包 `@langchain/langgraph@1.5.0`、`@langchain/langgraph-checkpoint-sqlite@1.1.0`、`@langchain/core@1.2.17`，Graph/Saver 上游提交 `4510774dd362264f44efd34b29b4f5648eeb4c4c`，保留包内许可证，无复制引擎或 fork。新增20个依赖包，既有包版本不变；读取发布实现确认 interrupt/resume 写入、task_path 排序和序列化安全修复确已包含。选择原因是公开 StateGraph/interrupt/Command/SqliteSaver 可直接复用现有 Node/SQLite，而其他候选仍需补自定义模型/持久恢复或引入另一 durable runtime。不要求托管服务、Python、Postgres或向量库。详细版本/文件/PR与未采用能力见 `docs/agent-a0-a1.md`。
+
+共享机制与持久权威：新增 `src/lib/domain/agent.ts`、`src/lib/server/agent/{types,model,store,runtime}.ts`，复用 SDK 串行图与 SQLite checkpoint；共享层不导入 Learning。模型正式协议仅 `structured_action_v1`，现有 Responses 流式传输返回严格校验的单一动作，无隐式原生/JSON回退。既有手动学习没有共享Agent决策配置，故新增独立决策与工具生成配置，未更改手动默认模型。新增账号隔离 `agent-tasks.sqlite` 负责固定授权、任务状态、行动/调用收据、去重事件和 fenced lease；SDK `agent-checkpoints.sqlite` 只负责执行位置/中断引用，不保存整份材料/工具原文，不充当另一任务权威。原服务没有持久用户等待与Agent收据，因此增加当前闭环需要的最小表，而非未来平台表。每次执行/发布重查账号、范围、来源和任务状态；稳定行动身份与业务operation key、原结果查询避免通知丢失时重复副作用；unknown停止，非自动重试。暂停/取消/来源失效后的迟到结果不推进，但完整已知usage仍记账。统一统计决策与嵌套生成、输入输出和计算时间，等待时间分离，未知usage为null，未伪造金额。禁用四项LangSmith/LangChain trace标记；仅callbacks=[]不足的负向试验已修正。
+
+Learning与UI：新增 `agent-scope.ts`、`agent-repository.ts`、`agent-scenario.ts`、`agent-decision-config.ts`、`agent-api-service.ts`、Learning域类型及认证 `/api/learning/pages/[pageId]/agent` 路由；7个learning工具窄包装范围/导航历史/原文/Quiz/已提交作答/解释/用户反馈。Quiz与评分沿用现有业务服务，任务解释与结果引用保存在原Learning库新表，不自动写个人笔记或覆盖框架。显式固定材料/章节/知识点与历史/笔记/补充选择，来源指纹变更后旧观察不复用；材料删除使artifact失效并清正文。疑题事件排除本任务内相关评分判断，不改原答案和成绩。现有学习页增加「自适应复习·试用」面板及API客户端，展示目标、范围、动作、等待、结果和用量，支持暂停/继续/取消、原Quiz打开、提交后明确恢复、刷新/重登。GET轮询不推进；稳定事件/任务ID和已接受未消费事件处理覆盖重试与并发恢复。
+
+隔离验收与实际轨迹：新增 `scripts/agent-trial/`，默认离线、外部socket阻断，只在Responses边界替换标注fixture；实际认证、API、LangGraph、Learning业务、SQLite及浏览器执行。手工合成课程与冻结学生策略独立于模型输入，模拟学生通过原Quiz组件choose/finish保存，不向数据库注入分数。A任务 `f1b1735a-f7fa-4506-8828-9033c8e501c2` 实际创建题组，正常等待重启后提交0/2，读取已存作答后回源并保存解释，再等待反馈；B任务 `f7641f84-370c-4f34-b9ce-f42fcc9d694a` 先回源解释，收到用户反馈后创建题组，提交2/2后读取作答并等待反馈，随后UI取消保留题组/成绩。两阶段浏览器分别7/14项检查PASS，退出0；跨账号拒绝、暂停恢复零新增、持久等待、重登、重复事件、取消及旧框架/Quiz可达通过。20次受控离线响应、实际Provider网络0，usage未知。正常停止dev、以production启动相同数据完成恢复；结束已停本轮应用并保留合成资料。真实与离线模式对称拒绝混用账本/runtime，拒绝前不改原文件，8个子进程负向检查通过。
+
+测试与失败记录：最终 `npm run cloud:test --` 指定13个文件，共173用例PASS、退出0；包含共享运行时19、Learning场景14、API10、面板11、原Quiz26、学习页16、原Quiz服务22、来源12、请求恢复5、study19、repository10、离线Provider7、模拟学生策略2。非Learning合成场景复用相同图、存储、预算与权限；覆盖非法工具/越范围/跨账号、真实结果回传、无反馈零调用、重启、重复/延迟事件、并发fence、取消/删除/晚到、明确失败与unknown、嵌套预算及虚假完成不改变真实结果。`cloud:check` 的9项环境契约及完整Next typegen/TypeScript最终退出0；production build及trace检查通过（forbidden=0）。首次类型检查曾发现JSON传输参数、UI类型/ES库及测试NODE_ENV类型问题，均修正后复验。API未交卷事件错误映射由503修正为409并补测。浏览器曾因缺少Playwright专用可执行文件而启动失败，改用现有系统Chromium；曾因恢复后读到旧paused状态与受控radio异步保存触发check()竞态失败，修复测试等待，保留失败证据及已保存答案后通过。最终新测试NODE_ENV字面量被推宽导致TypeScript失败，显式ProcessEnv后复验通过。stage diff检查发现文件末尾多余空行，已修复。未跑全仓历史测试、缺失PDF fixture、真实设备/音频验收，不借历史结果称本轮全量PASS。
+
+真实调用边界：协作合同更新前按原用户授权已发生18次真实试验请求（协议5次），其中原生首轮工具选择可见，但回传轮未完整完成，重建请求HTTP400；结构化协议完成两步兼容试验，业务只到部分生成/等待，未完成最终版本的作答后真实闭环。16次已知usage合计输入29017/输出4466 tokens，另2次未知，不计作完整总量或精确费用。新Cloud协作合同生效后真实Provider请求0，旧隔离进程停止，历史合成证据原目录保留；Windows须在交付SHA独立验收，不能据此标真实PASS。
+
+交接与上限：`docs/agent-a0-a1-windows.md` 提供开源复用、唯一动作协议、无秘密值的变量名称、自动幂等迁移、默认离线启动/seed、离线测试、显式真实协议入口、两阶段业务浏览器、重复事件/来源删除/取消/unknown及停止保留数据步骤。Cloud离线工程验收PASS；Windows真实Provider与业务验收PENDING；生产部署NOT RUN。原型固定目标/范围、串行执行；正常等待重启可恢复，运行中异常崩溃/unknown保守交回needs_attention，不承诺exactly-once、生产稳定、自动质量核验或长期掌握。仅在后续任务明确需要中途目标/权限变更、审批/长期调度或运行中崩溃对账时进入A2；多场景真实复用、跨产品权限与长期可靠性留A3，本轮不提前建设。最终完整Commit SHA、开发分支推送结果和实际验证退出码由同轮对话交付；不合并main、不部署。

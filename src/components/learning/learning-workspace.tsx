@@ -13,6 +13,7 @@ import { LearningAudio } from "./learning-audio";
 import { LearningFramework } from "./learning-framework";
 import { LearningPdfStudy } from "./learning-pdf-study";
 import { LearningQuiz } from "./learning-quiz";
+import { LearningAgentPanel } from "./learning-agent-panel";
 import { LearningPreparation } from "./learning-preparation";
 import styles from "./learning.module.css";
 import { useLearningUnsaved } from "./use-learning-unsaved";
@@ -49,6 +50,8 @@ function LearningWorkspaceContent({ pageId }: { pageId: string }) {
   const [attempt, setAttempt] = useState(0);
   const [area, setArea] = useState("read");
   const [visitedQuiz, setVisitedQuiz] = useState(false);
+  const [visitedAgent, setVisitedAgent] = useState(false);
+  const [agentQuiz, setAgentQuiz] = useState<{ id: string; request: number } | null>(null);
   const [expandedSource, setExpandedSource] = useState(false);
   const initialized = useRef(false);
   const scrollPositions = useRef<Record<string, number>>({});
@@ -127,7 +130,7 @@ function LearningWorkspaceContent({ pageId }: { pageId: string }) {
   }, []);
   const changeArea = (next: string) => {
     scrollPositions.current[area] = window.scrollY;
-    setArea(next); if (next === "quiz") setVisitedQuiz(true);
+    setArea(next); if (next === "quiz") setVisitedQuiz(true); if (next === "agent") setVisitedAgent(true);
     const url = new URL(window.location.href); url.searchParams.set("view", next);
     window.history.replaceState(window.history.state, "", url);
     if (next !== "read") requestAnimationFrame(() => window.scrollTo(0, scrollPositions.current[next] ?? 0));
@@ -142,11 +145,11 @@ function LearningWorkspaceContent({ pageId }: { pageId: string }) {
         publish(value); setError("");
         if (!initialized.current) {
           const next = query.get("view");
-          const initialArea = next === "quiz" || next === "materials" ? next : value.materialCount ? "read" : "materials";
+          const initialArea = next === "quiz" || next === "materials" || next === "agent" ? next : value.materialCount ? "read" : "materials";
           setArea(initialArea);
           const url = new URL(window.location.href); url.searchParams.set("view", initialArea);
           window.history.replaceState(window.history.state, "", url);
-          setVisitedQuiz(next === "quiz"); initialized.current = true;
+          setVisitedQuiz(next === "quiz"); setVisitedAgent(next === "agent"); initialized.current = true;
         }
       }
     }).catch((reason) => {
@@ -214,7 +217,7 @@ function LearningWorkspaceContent({ pageId }: { pageId: string }) {
         </div>
       </header>
       <nav className={styles.taskNav} aria-label="学习任务">
-        {[['read', '阅读框架'], ['quiz', 'Quiz 练习']].map(([id, label]) => <button key={id} type="button" aria-pressed={area === id} onClick={() => changeArea(id)}>{label}</button>)}
+        {[['read', '阅读框架'], ['quiz', 'Quiz 练习'], ['agent', '自适应复习·试用']].map(([id, label]) => <button key={id} type="button" aria-pressed={area === id} onClick={() => changeArea(id)}>{label}</button>)}
         <button className={styles.materialsEntry} type="button" aria-pressed={area === "materials"} onClick={() => changeArea("materials")}>材料</button>
       </nav>
       <LearningPreparation pageId={pageId} refreshKey={preparationEpoch} onUpdated={preparationUpdated} onActive={setPreparationActive} onStatus={setPreparationStatus}
@@ -233,7 +236,14 @@ function LearningWorkspaceContent({ pageId }: { pageId: string }) {
       </div>
       <div hidden={area !== "quiz"}>
       {visitedQuiz ? <LearningQuiz pageId={pageId} materials={page.materials} selected={selected} disabled={busy} onSource={viewSource}
-        saveSelection={saveSelection} /> : null}
+        saveSelection={saveSelection} openQuizId={agentQuiz?.id} openQuizRequest={agentQuiz?.request} /> : null}
+      </div>
+      <div hidden={area !== "agent"}>
+      {visitedAgent ? <LearningAgentPanel pageId={pageId} materials={page.materials} selected={selected} disabled={busy || preparationActive} active={area === "agent"}
+        saveSelection={saveSelection} onSource={viewSource} onQuiz={id => {
+          setAgentQuiz(previous => ({ id, request: (previous?.request ?? 0) + 1 })); changeArea("quiz");
+          const url = new URL(window.location.href); url.searchParams.set("quiz", id); url.searchParams.delete("attempt"); url.searchParams.delete("question"); window.history.replaceState(window.history.state, "", url);
+        }} /> : null}
       </div>
       <div hidden={area !== "materials"}>
       <section className={styles.section} aria-labelledby="saved-materials-title">

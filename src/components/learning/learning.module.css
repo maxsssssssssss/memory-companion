@@ -125,7 +125,7 @@ pre.original { padding: 24px; border-radius: var(--db-radius-card); background: 
 .pageHeader p { margin: 0; }
 .pageMore { position: relative; }
 .pageMore > button { display: block; }
-.taskNav { display: flex; gap: 8px; border-bottom: 1px solid var(--db-border); padding-bottom: 12px; }
+.taskNav { display: flex; flex-wrap: wrap; gap: 8px; border-bottom: 1px solid var(--db-border); padding-bottom: 12px; }
 .taskNav button { border-color: transparent; font-weight: 600; }
 .taskNav .materialsEntry { margin-left: auto; font-weight: 400; }
 .preparation { padding: 16px 0; border-bottom: 1px solid var(--db-border); }
@@ -219,6 +219,14 @@ pre.original { padding: 24px; border-radius: var(--db-radius-card); background: 
 .quizAttempt, .quizResults, .quizReady, .quizSettings { max-width: 800px; margin-inline: auto; }
 .quizReady { padding: 24px 0; }
 .quizReady fieldset { border: 0; padding: 0; }
+.agentPanel { max-width: 800px; margin-inline: auto; overflow-wrap: anywhere; }
+.agentPanel > label, .agentFeedback > label { display: grid; gap: 8px; }
+.agentPanel select { min-height: var(--db-touch-target); padding: 8px; font: inherit; color: var(--db-text); background: var(--db-surface); border: 1px solid var(--db-border-strong); border-radius: var(--db-radius-control); }
+.agentFeedback, .agentExplanation, .agentLog { margin-top: 24px; padding-top: 20px; border-top: 1px solid var(--db-border); }
+.agentFeedback > button { margin-top: 12px; }
+.agentExplanation summary, .agentLog summary { min-height: var(--db-touch-target); align-content: center; cursor: pointer; }
+.agentLog li { margin-block: 16px; }
+.agentLog li p { margin-block: 6px; }
 .quizOption span { display: grid; gap: 6px; }
 .quizOption small { line-height: 1.6; color: var(--db-text-secondary); }
 .quizAttempt { margin-top: 16px; }
