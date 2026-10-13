@@ -41,7 +41,7 @@ export function createAgentDecisionProvider(configure: () => AgentModelConfig): 
         const client = new OpenAI({ apiKey: config.apiKey, baseURL: config.baseURL, organization: null, project: null,
           timeout: config.requestTimeoutMs, maxRetries: 0, logLevel: "off", fetchOptions: { redirect: "error" } });
         const value = await parseStructuredJsonResponse({ client, model: config.model, name: "agent_action", schema: Action,
-          mode: "json", stream: true, store: false, jsonInstruction: "按受限行动协议只输出JSON。", maxOutputTokens: config.maxOutputTokens, maxResponseBytes: 200000,
+          mode: "json", stream: true, store: false, jsonRootField: null, jsonInstruction: "按受限行动协议只输出JSON。", maxOutputTokens: config.maxOutputTokens, maxResponseBytes: 200000,
           reasoning: { effort: "none" } as never, requestInput: messages,
           requestOptions: { maxRetries: 0, timeout: config.requestTimeoutMs, signal: AbortSignal.any([ctx.signal, AbortSignal.timeout(config.requestTimeoutMs)]) },
           onDiagnostics: d => { diagnostics = d; } });

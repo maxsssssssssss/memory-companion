@@ -380,14 +380,15 @@ function responseMetadata(response: ResponseTextCandidate, safeLabelsOnly = fals
   };
 }
 
-export function jsonOnlyInstruction(instruction: string, rootField: "items" | "results" | "chapters" = "items") {
+export function jsonOnlyInstruction(instruction: string, rootField: "items" | "results" | "chapters" | null = "items") {
   return (
     `${instruction}\n` +
-    `只输出一个合法 JSON 对象，不要输出 Markdown，不要输出解释文字。JSON 根对象必须包含 ${rootField} 字段。`
+    "只输出一个合法 JSON 对象，不要输出 Markdown，不要输出解释文字。" +
+    (rootField === null ? "" : `JSON 根对象必须包含 ${rootField} 字段。`)
   );
 }
 
-function withJsonInstruction(input: ResponseInput, instruction: string, rootField?: "items" | "results" | "chapters"): ResponseInput {
+function withJsonInstruction(input: ResponseInput, instruction: string, rootField?: "items" | "results" | "chapters" | null): ResponseInput {
   const jsonInstruction = jsonOnlyInstruction(instruction, rootField);
 
   if (Array.isArray(input)) {
@@ -410,8 +411,8 @@ export async function parseStructuredJsonResponse<TSchema extends z.ZodTypeAny>(
   schema: TSchema;
   requestInput: ResponseInput;
   jsonInstruction: string;
-  /** Legacy callers use items; the Memory relevance contract uses results. */
-  jsonRootField?: "items" | "results" | "chapters";
+  /** Omitted means legacy items. Explicit null leaves root fields to the caller's schema and instructions. */
+  jsonRootField?: "items" | "results" | "chapters" | null;
   store?: boolean;
   maxResponseBytes?: number;
   mode?: StructuredJsonResponseMode;

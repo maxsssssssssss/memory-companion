@@ -59,19 +59,42 @@ describe("JSON root field instruction", () => {
     expect(jsonOnlyInstruction("Return JSON.")).toBe("Return JSON.\n只输出一个合法 JSON 对象，不要输出 Markdown，不要输出解释文字。JSON 根对象必须包含 items 字段。");
   });
 
-  it.each(["text", "messages"])("uses the results contract in the actual %s request", async (kind) => {
-    const fixture = streamingClient([completedEvent({ output: [
-      { type: "message", role: "assistant", content: [{ type: "output_text", text: '{"results":[]}' }] }
-    ] })]);
-    const result = await parseStructuredJsonResponse({ ...streamingInput, client: fixture.client,
-      schema: z.object({ results: z.array(z.unknown()) }).strict(), jsonRootField: "results",
-      requestInput: kind === "text" ? "input" : [{ role: "user", content: "input" }]
+  it("omits only the fixed field requirement when null is explicit", () => {
+    expect(jsonOnlyInstruction("Return JSON.", null)).toBe("Return JSON.\n只输出一个合法 JSON 对象，不要输出 Markdown，不要输出解释文字。");
+  });
+
+  describe.each([undefined, "items", "results", "chapters"] as const)("root setting %s", (setting) => {
+    it.each(["text", "messages"])("preserves the contract in the actual %s request", async (kind) => {
+      const root = setting ?? "items", value = { [root]: [] };
+      const fixture = streamingClient([completedEvent({ output: [
+        { type: "message", role: "assistant", content: [{ type: "output_text", text: JSON.stringify(value) }] }
+      ] })]);
+      const result = await parseStructuredJsonResponse({ ...streamingInput, client: fixture.client,
+        schema: z.object({ [root]: z.array(z.unknown()) }).strict(), jsonRootField: setting,
+        requestInput: kind === "text" ? "input" : [{ role: "user", content: "input" }]
+      });
+      expect(result).toEqual(value);
+      const request = JSON.stringify(fixture.create.mock.calls[0]![0].input);
+      expect(request).toContain(`JSON 根对象必须包含 ${root} 字段。`);
+      for (const other of ["items", "results", "chapters"].filter(field => field !== root))
+        expect(request).not.toContain(`JSON 根对象必须包含 ${other} 字段。`);
+      expect(fixture.create).toHaveBeenCalledTimes(1);
     });
-    expect(result).toEqual({ results: [] });
-    const request = fixture.create.mock.calls[0]![0];
-    expect(JSON.stringify(request.input)).toContain("JSON 根对象必须包含 results 字段。");
-    expect(JSON.stringify(request.input)).not.toContain("JSON 根对象必须包含 items 字段。");
-    expect(fixture.create).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(["text", "messages"])("omits fixed root fields in the actual %s action request", async (kind) => {
+    const action = { tool: "synthetic.read", args: {} };
+    const fixture = streamingClient([completedEvent({ output: [
+      { type: "message", role: "assistant", content: [{ type: "output_text", text: JSON.stringify(action) }] }
+    ] })]);
+    await expect(parseStructuredJsonResponse({ ...streamingInput, client: fixture.client, jsonRootField: null,
+      schema: z.object({ tool: z.literal("synthetic.read"), args: z.object({}).strict() }).strict(),
+      requestInput: kind === "text" ? "Choose an action." : [{ role: "user", content: "Choose an action." }]
+    })).resolves.toEqual(action);
+    const request = JSON.stringify(fixture.create.mock.calls[0]![0].input);
+    expect(request).toContain("只输出一个合法 JSON 对象，不要输出 Markdown，不要输出解释文字。");
+    expect(request).not.toContain("JSON 根对象必须包含");
+    expect(fixture.create).toHaveBeenCalledOnce();
   });
 });
 

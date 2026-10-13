@@ -15499,3 +15499,12 @@ Learning与UI：新增 `agent-scope.ts`、`agent-repository.ts`、`agent-scenari
 真实调用边界：协作合同更新前按原用户授权已发生18次真实试验请求（协议5次），其中原生首轮工具选择可见，但回传轮未完整完成，重建请求HTTP400；结构化协议完成两步兼容试验，业务只到部分生成/等待，未完成最终版本的作答后真实闭环。16次已知usage合计输入29017/输出4466 tokens，另2次未知，不计作完整总量或精确费用。新Cloud协作合同生效后真实Provider请求0，旧隔离进程停止，历史合成证据原目录保留；Windows须在交付SHA独立验收，不能据此标真实PASS。
 
 交接与上限：`docs/agent-a0-a1-windows.md` 提供开源复用、唯一动作协议、无秘密值的变量名称、自动幂等迁移、默认离线启动/seed、离线测试、显式真实协议入口、两阶段业务浏览器、重复事件/来源删除/取消/unknown及停止保留数据步骤。Cloud离线工程验收PASS；Windows真实Provider与业务验收PENDING；生产部署NOT RUN。原型固定目标/范围、串行执行；正常等待重启可恢复，运行中异常崩溃/unknown保守交回needs_attention，不承诺exactly-once、生产稳定、自动质量核验或长期掌握。仅在后续任务明确需要中途目标/权限变更、审批/长期调度或运行中崩溃对账时进入A2；多场景真实复用、跨产品权限与长期可靠性留A3，本轮不提前建设。最终完整Commit SHA、开发分支推送结果和实际验证退出码由同轮对话交付；不合并main、不部署。
+
+
+## 2026-10-13：A2 独立修复 Agent JSON 根字段约束冲突
+
+背景：Windows 已在 A1 提交 c0786b48947cdc059052c6b07d421f290cc3f1d1 验证 structured_action_v1 的 read_scope→真实空库存→request_material 最小协议，但这不代表完整 Learning Agent 业务通过。用户要求 A2 首先独立修复共享 JSON 默认 items 与严格 tool/args、wait、finish 根对象的冲突，Cloud 本轮真实 Provider 请求必须为0。实际工作区从该 A1 提交创建 feat/learning-agent-a2，保留A1分支和已有工作。
+
+实现：追踪所有 parseStructuredJsonResponse/jsonOnlyInstruction 调用后，为 jsonRootField 增加显式 null；省略仍保持原 items，显式 items/results/chapters 保持原要求。null 只取消固定根字段提示，仍要求合法 JSON 和调用方严格 schema。修改 src/lib/server/openai/structured-json.ts 及测试，产品 src/lib/server/agent/model.ts 与 scripts/agent-trial/protocol-structured.ts 均明确传 null；新增 model.test.ts 截获实际 SDK 请求验证无矛盾字段，未修改 structured_action_v1、未包新嵌套对象、未放宽额外字段、未引入协议回退或新依赖。
+
+验证：npm run cloud:test -- src/lib/server/openai/structured-json.test.ts src/lib/server/agent/model.test.ts src/lib/server/agent/runtime.test.ts src/lib/server/openai/tokenhub-deepseek-flash.test.ts src/lib/server/learning/framework-generator.test.ts，5文件154用例通过、退出0；覆盖旧根字段语义、合法三种行动、混合/额外字段/非法shape拒绝及运行时非法工具/越范围拒绝。首次 cloud:check 因新增测试的通用 vi.fn 回调被推为 Promise<unknown> 报 TS2322，改为有类型参数的普通 ctx.call 与调用记录spy后，model测试8/8通过，完整 cloud:check（9项Cloud契约及Next typegen/TypeScript）通过、退出0；git diff --check通过。未运行真实Provider、原生tool calling或音频/OCR；该修复无构建路径变化，独立阶段未跑build，A2整体验证统一执行。本记录对应独立JSON修复提交，后续A2业务改动另行提交；新SHA的Windows最小协议及完整业务仍需复验，不套用旧SHA的PASS。

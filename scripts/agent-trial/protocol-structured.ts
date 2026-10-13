@@ -12,7 +12,7 @@ const schema=z.object({tool:z.enum(['read_scope','request_material']),args:z.rec
 const prompt='You are a restricted learning agent. Return JSON {"tool":"read_scope|request_material","args":{}} selecting one action. read_scope reads the authorized course inventory; request_material asks the user to provide material and args must have message. First inspect the actual course; when its real result is provided, use it to select the next action. Never invent materials.';
 const report:{protocol:string;calls:StructuredJsonDiagnostics[];actions:unknown[];passed:boolean;failure?:string}={protocol:'structured_action_v1',calls:[],actions:[],passed:false};
 async function decide(input:unknown){return parseStructuredJsonResponse({client,model:'deepseek-v4-pro',name:'agent_protocol',schema,
-  mode:'json',stream:true,store:false,jsonInstruction:'Return the single restricted action JSON.',maxOutputTokens:1500,maxResponseBytes:200000,
+  mode:'json',stream:true,store:false,jsonRootField:null,jsonInstruction:'Return the single restricted action JSON.',maxOutputTokens:1500,maxResponseBytes:200000,
   reasoning:{effort:'none'} as never,requestInput:[{role:'system',content:prompt},{role:'user',content:JSON.stringify(input)}],
   requestOptions:{maxRetries:0,timeout:120000,signal:AbortSignal.timeout(120000)},onDiagnostics:d=>report.calls.push(d)});}
 try{
