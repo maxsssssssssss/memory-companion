@@ -227,6 +227,11 @@ pre.original { padding: 24px; border-radius: var(--db-radius-card); background: 
 .agentExplanation summary, .agentLog summary { min-height: var(--db-touch-target); align-content: center; cursor: pointer; }
 .agentLog li { margin-block: 16px; }
 .agentLog li p { margin-block: 6px; }
+.agentAdjustment, .agentApproval, .agentRecovery { margin-block: 24px; padding-block: 20px; border-block: 1px solid var(--db-border); }
+.agentBudget { padding: 12px 16px; background: var(--db-surface-inset); border-left: 3px solid var(--db-accent); }
+.agentChangePreview { margin-block: 20px; }
+.agentChangePreview > div { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 270px), 1fr)); gap: 20px; }
+.agentChangePreview > div > section { border-top: 1px solid var(--db-border); }
 .quizOption span { display: grid; gap: 6px; }
 .quizOption small { line-height: 1.6; color: var(--db-text-secondary); }
 .quizAttempt { margin-top: 16px; }

@@ -9,15 +9,17 @@ import styles from "./learning.module.css";
 import resultStyles from "./quiz-results.module.css";
 import { useLearningUnsaved } from "./use-learning-unsaved";
 
-export function LearningQuiz({ pageId, materials, selected, disabled, saveSelection, onSource, openQuizId, openQuizRequest }: {
+export function LearningQuiz({ pageId, materials, selected, disabled, saveSelection, onSource, openQuizId, openQuizRequest, onReturnToAgent }: {
   pageId: string; materials: LearningMaterial[]; selected: string[]; disabled: boolean;
   openQuizId?: string; openQuizRequest?: number;
+  onReturnToAgent?: () => void;
   saveSelection: () => Promise<void>; onSource: (id: string, paragraph: number, parsed?: import("@/lib/domain/learning-pdf-study").ParsedTextBinding) => void;
 }) {
   const open = true;
   const [stage, setStage] = useState<"prepare" | "history" | "ready" | "answer" | "results">("prepare");
   const [chosen, setChosen] = useState<QuizRunSummary | null>(null);
   const [pollStopped, setPollStopped] = useState(false);
+  const [agentContext, setAgentContext] = useState(false);
   const restored = useRef(false);
   const [runs, setRuns] = useState<QuizRunSummary[]>([]), [chapters, setChapters] = useState<FrameworkChapter[]>([]);
   const [scope, setScope] = useState("materials"), [chapterIds, setChapterIds] = useState<string[]>([]), [nodeIds, setNodeIds] = useState<string[]>([]);
@@ -77,6 +79,7 @@ export function LearningQuiz({ pageId, materials, selected, disabled, saveSelect
   useEffect(() => {
     mounted.current = true;
     const query = new URLSearchParams(window.location.search); currentId.current = query.get("attempt"); requestedQuiz.current = currentId.current ? null : query.get("quiz");
+    setAgentContext(query.has("agent"));
     try { const saved = sessionStorage.getItem(key + ":action"); if (saved) pendingAction.current = JSON.parse(saved); } catch { /* Optional receipt only. */ }
     try { const saved = sessionStorage.getItem(key); if (saved) {
       const p = JSON.parse(saved) as { id: string; settings: QuizConfig }; pendingGeneration.current = p;
@@ -204,7 +207,8 @@ export function LearningQuiz({ pageId, materials, selected, disabled, saveSelect
   </div> : null;
   return <section className={styles.section} aria-label="单选 Quiz">
     <div className={styles.sectionHeader}><h2>{stage === "results" ? "本次结果" : stage === "answer" ? attempt?.mode === "practice" ? "练习" : "测验" : stage === "history" ? "题组与历史" : "Quiz"}</h2>
-      <div className={styles.row}>{stage !== "history" ? <button type="button" disabled={busy || Boolean(pendingAction.current)} onClick={history}>题组与历史</button> : <button type="button" onClick={() => setStage("prepare")}>生成另一组</button>}</div></div>
+      <div className={styles.row}>{onReturnToAgent && (agentContext || openQuizId) ? <button type="button" disabled={busy || Boolean(pendingAction.current)} onClick={onReturnToAgent}>返回本轮复习</button> : null}
+        {stage !== "history" ? <button type="button" disabled={busy || Boolean(pendingAction.current)} onClick={history}>题组与历史</button> : <button type="button" onClick={() => setStage("prepare")}>生成另一组</button>}</div></div>
     {error ? <p role="alert" className={styles.error}>{error}</p> : null}
     {stage !== "answer" && (busy || notice) ? <p role="status">{busy ? "正在保存或处理，请稍候…" : notice}</p> : null}
     {!busy && pendingAction.current ? <><p role="alert">这次作答的保存结果尚未确认，请重试后再切题或返回。</p><button onClick={() => void act(pendingAction.current!.action)}>核对并重试同一作答操作</button></> : null}
@@ -287,6 +291,7 @@ export function LearningQuiz({ pageId, materials, selected, disabled, saveSelect
     {stage === "results" && attempt ? <div className={`${styles.quizResults} ${resultStyles.results}`} aria-label="本次结果">
       <header className={resultStyles.header}><h3>{attempt.title}</h3>{attempt.score ? <><p className={`${styles.resultScore} ${resultStyles.score}`}>本次答对 {attempt.score.correct}/{attempt.score.total} 题</p><p className={resultStyles.stats}>无提示答对 {attempt.score.unassistedCorrect} 题 · 使用提示 {attempt.score.hinted} 题 · 看答案 {attempt.score.revealed} 题 · 跳过 {attempt.score.skipped} 题</p></> : null}</header>
       <p className={styles.muted}>成绩只表示这次练习的作答情况，不代表课程掌握率。AI 题目与解析可能有误，请结合来源判断。</p>
+      {onReturnToAgent && (agentContext || openQuizId) ? <p>作答已保存。返回本轮复习后，可明确继续，让复习任务读取这次结果。</p> : null}
       <button type="button" onClick={() => { history(); setStage("prepare"); }}>生成另一组</button>
       <p className={resultStyles.reviewHint}>逐题回顾 · 展开查看答案、解析与来源</p>
       <div className={resultStyles.questions}>{attempt.questions.map((question,i) => {

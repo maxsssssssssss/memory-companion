@@ -6,15 +6,25 @@ import { agentModelConfig } from "@/lib/server/learning/agent-decision-config";
 import { AgentFailure } from "@/lib/server/agent/types";
 import { LearningError } from "@/lib/server/learning/repository";
 import { freezeLearningAgentScope } from "@/lib/server/learning/agent-scope";
-import { createLearningAgentScenario, learningAgentGenerationConfig } from "@/lib/server/learning/agent-scenario";
-import { openLearningAgentStore, projectLearningAgentTask, advanceLearningAgent, learningAgentFailure } from "@/lib/server/learning/agent-api-service";
+import { learningAgentGenerationConfig } from "@/lib/server/learning/agent-scenario";
+import { LearningAgentRepository } from "@/lib/server/learning/agent-repository";
+import { openLearningAgentStore, projectLearningAgentTask, advanceLearningAgent, learningAgentFailure, openLearningAgentRuntime } from "@/lib/server/learning/agent-api-service";
 import { learningJson, learningJsonBody, withLearning } from "../../../route-utils";
-import type { AgentContext } from "@/lib/server/agent/types";
 export const runtime = "nodejs";
 type Context = { params: Promise<{ pageId: string }> };
 const Start = z.object({ id: LearningId, goal: z.string().trim().min(1).max(2000), scope: LearningAgentSelection }).strict();
-const Control = z.object({ id: LearningId, action: z.enum(["pause", "resume", "cancel", "feedback"]), eventId: LearningId,
-  feedback: z.string().trim().min(1).max(2000).optional(), attemptId: LearningId.optional() }).strict();
+const identity = { id: LearningId, eventId: LearningId };
+const version = z.number().int().positive();
+const Control = z.union([
+  z.object({ ...identity, action: z.enum(["pause", "resume", "cancel", "feedback"]), expectedVersion: version.optional(),
+    feedback: z.string().trim().min(1).max(2000).optional(), attemptId: LearningId.optional() }).strict(),
+  z.object({ ...identity, action: z.literal("adjust"), expectedVersion: version,
+    goal: z.string().trim().min(1).max(2000), scope: LearningAgentSelection }).strict(),
+  z.object({ ...identity, action: z.literal("approval"), expectedVersion: version, approvalId: z.string().min(1).max(180),
+    fingerprint: z.string().min(1).max(128), decision: z.enum(["approve", "reject"]) }).strict(),
+  z.object({ ...identity, action: z.literal("recover"), expectedVersion: version, mode: z.enum(["inspect", "retry"]) }).strict(),
+  z.object({ ...identity, action: z.literal("end"), expectedVersion: version }).strict()
+]);
 export async function GET(request: Request, context: Context) {
   return withLearning(request, async learning => {
     const pageId = LearningId.parse((await context.params).pageId); learning.get(pageId);
@@ -45,23 +55,58 @@ export async function PATCH(request: Request, context: Context) {
       let task = store.getTask(learning.accountId, value.id);
       if (task.resourceId !== pageId) throw new LearningError(404, "agent_not_found");
       const root = learning.accountDataRoot, accountId = learning.accountId;
+      // A1 clients may omit the version only while the task remains at v1.
+      // A stale browser cannot pause, submit feedback or approve a new goal.
+      const expectedVersion = value.expectedVersion ?? 1;
+      if (value.action !== "adjust" && expectedVersion !== (task.version ?? 1)) throw new AgentFailure("conflict", "agent_version_conflict");
       let scheduled = false;
       if (value.action === "feedback") {
-        const event = { id: value.eventId, kind: value.attemptId ? (value.feedback ? "quiz_dispute" : "quiz_submission") : "feedback", refId: value.attemptId, message: value.feedback };
+        const event = { id: value.eventId, kind: value.attemptId ? (value.feedback ? "quiz_dispute" : "quiz_submission") : "feedback", refId: value.attemptId, message: value.feedback,
+          ...(value.expectedVersion === undefined ? {} : { version: expectedVersion }) };
         // Repeated accepted events are read-only receipts, including after the
         // task reached a different wait or ended. Never trigger another decision.
         const accepted = store.acceptedEvent(accountId, task.id, event);
         if (!accepted?.consumed) {
           if (task.status !== "waiting") throw new LearningError(409, "agent_feedback_not_ready");
-          await createLearningAgentScenario(learning).validateEvent!(event, {
-            task, actionId: "api-validation", signal: new AbortController().signal,
-            assertActive: async () => undefined, call: async () => { throw new AgentFailure("forbidden", "api_validation_has_no_model_calls"); }
-          } as AgentContext);
-          after(() => advanceLearningAgent(root, accountId, task.id, event).then(() => undefined));
-          scheduled = true;
+          const runtime = openLearningAgentRuntime(learning, store);
+          try { task = await runtime.submitEvent(accountId, task.id, event, { expectedVersion, defer: true }); }
+          finally { runtime.close(); }
+          const receipt = store.acceptedEvent(accountId, task.id, event);
+          if (!receipt) throw new LearningError(409, "agent_busy");
+          if (!receipt.consumed) {
+            after(() => advanceLearningAgent(root, accountId, task.id).then(() => undefined)); scheduled = true;
+          }
+        }
+      } else if (["adjust", "approval", "recover", "end"].includes(value.action)) {
+        const runtime = openLearningAgentRuntime(learning, store);
+        try {
+          if (value.action === "adjust") {
+            const scope = freezeLearningAgentScope(learning, pageId, value.scope);
+            task = await runtime.adjust(accountId, task.id, { expectedVersion, goal: value.goal, scope, eventId: value.eventId });
+            new LearningAgentRepository(learning).invalidateNotePreviews(pageId, task.id, task.version ?? 1);
+          } else if (value.action === "approval") {
+            task = await runtime.resolveApproval(accountId, task.id, { expectedVersion, approvalId: value.approvalId,
+              fingerprint: value.fingerprint, decision: value.decision, eventId: value.eventId, defer: true });
+            if (value.decision === "reject") new LearningAgentRepository(learning).invalidateNotePreviews(pageId, task.id);
+            const receipt = store.acceptedEvent(accountId, task.id, { id: value.eventId, kind: "approval", refId: value.approvalId,
+              version: expectedVersion, fingerprint: value.fingerprint, decision: value.decision });
+            if (!receipt) throw new LearningError(409, "agent_busy");
+            scheduled = !receipt.consumed;
+          } else if (value.action === "recover") {
+            if (value.mode === "retry" && !task.recovery?.allowedControls.includes("retry")) throw new LearningError(409, "agent_retry_unavailable");
+            task = await runtime.recover(accountId, task.id, { expectedVersion, mode: value.mode, eventId: value.eventId, defer: true });
+          } else if (value.action === "end") {
+            task = await runtime.end(accountId, task.id, { expectedVersion, eventId: value.eventId });
+            new LearningAgentRepository(learning).invalidateNotePreviews(pageId, task.id);
+          }
+        } finally { runtime.close(); }
+        if (scheduled || (task.status === "ready" && (value.action !== "recover" || value.mode === "retry"))) {
+          after(() => advanceLearningAgent(root, accountId, task.id).then(() => undefined)); scheduled = true;
         }
       } else {
-        task = store.control(accountId, task.id, value.action);
+        // The version check is repeated inside the transaction by the store.
+        task = store.control(accountId, task.id, value.action as "pause" | "resume" | "cancel", expectedVersion);
+        if (value.action === "cancel") new LearningAgentRepository(learning).invalidateNotePreviews(pageId, task.id);
         if (value.action === "resume" && task.status === "ready") { after(() => advanceLearningAgent(root, accountId, task.id).then(() => undefined)); scheduled = true; }
       }
       return learningJson({ task: projectLearningAgentTask(learning, task), scheduled }, 202);

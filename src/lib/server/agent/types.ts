@@ -1,5 +1,5 @@
 import type { z } from "zod";
-import type { AgentAction, AgentEvent, AgentResultRef, AgentTask, AgentWait } from "@/lib/domain/agent";
+import type { AgentAction, AgentConfirmation, AgentEvent, AgentResultRef, AgentTask, AgentWait } from "@/lib/domain/agent";
 
 export interface AgentCallRequest { kind: string; inputChars: number; maxOutputTokens: number; model?: string }
 export interface AgentCallUsage { inputTokens?: number | null; outputTokens?: number | null }
@@ -11,11 +11,15 @@ export interface AgentContext {
   assertActive(): Promise<void>;
   call<T>(request: AgentCallRequest, invoke: () => Promise<{ value: T; usage?: AgentCallUsage }>): Promise<T>;
 }
-export interface AgentToolResult { ref?: AgentResultRef; summary: string; wait?: AgentWait }
+export interface AgentToolResult { ref?: AgentResultRef; summary: string; wait?: AgentWait; handoff?: string }
 export interface AgentTool {
   description: string;
   parameters: z.ZodType;
   execute(args: unknown, context: AgentContext): Promise<AgentToolResult>;
+  /** Re-read or prepare a stable proposal; must not re-generate content on approval. */
+  confirmation?(args: unknown, context: AgentContext): Promise<AgentConfirmation | null>;
+  /** Verify an authorized write's exact postcondition before ending this scope. */
+  validateResult?(result: AgentToolResult, context: AgentContext): Promise<void>;
   /** Re-read authorized business records; receipt/checkpoint is never source evidence. */
   readResult?(receipt: AgentAction, context: AgentContext): Promise<unknown>;
   /** Resolve an interrupted operation by stable identity without issuing another external request. */
@@ -43,7 +47,7 @@ export interface AgentDecisionInput {
 export type AgentDecisionProvider = (input: AgentDecisionInput, context: AgentContext) => Promise<AgentDecision>;
 
 export class AgentFailure extends Error {
-  constructor(public readonly code: "forbidden" | "invalid_action" | "known_failure" | "unknown" | "budget" | "inactive" | "source_changed", message: string) {
+  constructor(public readonly code: "forbidden" | "invalid_action" | "known_failure" | "unknown" | "budget" | "inactive" | "source_changed" | "conflict", message: string) {
     super(message); this.name = "AgentFailure";
   }
 }

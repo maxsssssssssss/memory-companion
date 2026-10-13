@@ -6,7 +6,8 @@ import path from "node:path";
 import { LearningRepository } from "../../src/lib/server/learning/repository";
 import { LearningFrameworkRepository } from "../../src/lib/server/learning/framework-repository";
 
-const root = path.resolve(process.env.AGENT_TRIAL_DIR ?? "output/agent-a0-a1-offline");
+const a2 = process.argv.includes("--a2");
+const root = path.resolve(process.env.AGENT_TRIAL_DIR ?? (a2 ? "output/agent-a2-offline" : "output/agent-a0-a1-offline"));
 const runtime = JSON.parse(readFileSync(path.join(root, "runtime.json"), "utf8")) as { base: string; dataRoot: string; inviteCode: string };
 assert(["127.0.0.1", "localhost", "[::1]"].includes(new URL(runtime.base).hostname), "loopback_only");
 assert.equal(path.resolve(runtime.dataRoot), path.join(root, "data"), "isolated_data_required");
@@ -33,12 +34,15 @@ if (existsSync(frozenPath)) assert.deepEqual(JSON.parse(readFileSync(frozenPath,
 else writeFileSync(frozenPath, JSON.stringify(frozen, null, 2));
 writeFileSync(path.join(root, "synthetic-course.txt"), source);
 
-type Account = { key: "A" | "B"; email: string; password: string; userId?: string; pageId: string; materialId: string; frameworkId: string; chapterId?: string; nodeIds?: string[] };
+type AccountKey = "A" | "B" | "C" | "D" | "E" | "F";
+type Account = { key: AccountKey; email: string; password: string; userId?: string; pageId: string; materialId: string; frameworkId: string; chapterId?: string; nodeIds?: string[] };
 const accountsPath = path.join(root, "synthetic-accounts.json");
-const accounts: Account[] = existsSync(accountsPath) ? JSON.parse(readFileSync(accountsPath, "utf8")) : (["A", "B"] as const).map(key => ({
-  key, email: `agent-a0-a1-${key.toLowerCase()}-${randomUUID()}@synthetic.invalid`, password: `synthetic-only-${randomUUID()}`,
+const accountKeys: AccountKey[] = a2 ? ["A", "B", "C", "D", "E", "F"] : ["A", "B"];
+const accounts: Account[] = existsSync(accountsPath) ? JSON.parse(readFileSync(accountsPath, "utf8")) : accountKeys.map(key => ({
+  key, email: `agent-${a2 ? "a2" : "a0-a1"}-${key.toLowerCase()}-${randomUUID()}@synthetic.invalid`, password: `synthetic-only-${randomUUID()}`,
   pageId: randomUUID(), materialId: randomUUID(), frameworkId: randomUUID(),
 }));
+assert.deepEqual(accounts.map(account => account.key), accountKeys, "existing_trial_accounts_do_not_match_requested_stage_use_a_separate_directory");
 const save = () => writeFileSync(accountsPath, JSON.stringify(accounts, null, 2), { mode: 0o600 });
 save();
 
@@ -104,6 +108,6 @@ for (const [index, account] of accounts.entries()) {
   // Authenticated read-back proves the normal API sees the saved fixture.
   assert.equal((await api(pagePath + "/framework")).framework.chapters.length, 1);
   await api("/api/auth/logout", "POST");
-  console.log(`[seed ${index + 1}/2] synthetic account ${account.key}: course and hand-authored framework saved; zero Provider calls`);
+  console.log(`[seed ${index + 1}/${accounts.length}] synthetic account ${account.key}: course and hand-authored framework saved; zero Provider calls`);
 }
 writeFileSync(path.join(root, "seed-result.json"), JSON.stringify({ status: "PASS", evidence: "synthetic_fixture", accounts: accounts.map(({ key, userId, pageId, materialId, chapterId, nodeIds }) => ({ key, userId, pageId, materialId, chapterId, nodeIds })), sourceSha256: frozen.sourceSha256, providerRequests: 0 }, null, 2));

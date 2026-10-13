@@ -1,13 +1,15 @@
-// Explicit A0/A1 trial only. Fail closed, one persistent ledger across processes.
+// Explicit Windows trial only. Fail closed, one persistent ledger across processes.
 // It is not a product Provider, and never writes request/response bodies or secrets.
 const path = require('node:path');
 const fs = require('node:fs');
 const Database = require('better-sqlite3');
 const { assertEvidenceDirectory } = require('./evidence-directory.cjs');
+const { realTrialBudget } = require('./request-budget.cjs');
 const root = process.env.AGENT_TRIAL_DIR;
 if (!root || !path.isAbsolute(root)) throw Error('agent_trial_directory_required');
 if (process.env.AGENT_TRIAL_MODE === 'offline') throw Error('agent_trial_evidence_mode_conflict');
 assertEvidenceDirectory(root, 'real');
+const requestBudget = realTrialBudget(process.env);
 globalThis.__DAILY_BRIEF_AGENT_TRIAL_GUARD__ = true;
 fs.mkdirSync(root, { recursive: true });
 const db = new Database(path.join(root, 'network-ledger.sqlite'));
@@ -16,8 +18,8 @@ db.pragma('synchronous = FULL');
 db.exec(`CREATE TABLE IF NOT EXISTS requests(id INTEGER PRIMARY KEY, phase TEXT, started TEXT, state TEXT,
  model TEXT, input_chars INTEGER, output_limit INTEGER, status INTEGER, input_tokens INTEGER, output_tokens INTEGER)`);
 const reserve = db.transaction((phase, body, chars) => {
-  if (db.prepare('SELECT count(*) n FROM requests').get().n >= 36) throw Error('trial_total_budget_exhausted');
-  if (phase === 'protocol' && db.prepare("SELECT count(*) n FROM requests WHERE phase='protocol'").get().n >= 6)
+  if (db.prepare('SELECT count(*) n FROM requests').get().n >= requestBudget.total) throw Error('trial_total_budget_exhausted');
+  if (phase === 'protocol' && db.prepare("SELECT count(*) n FROM requests WHERE phase='protocol'").get().n >= requestBudget.protocol)
     throw Error('trial_protocol_budget_exhausted');
   return db.prepare('INSERT INTO requests(phase,started,state,model,input_chars,output_limit) VALUES(?,?,?,?,?,?)')
     .run(phase, new Date().toISOString(), 'dispatched', body.model, chars, body.max_output_tokens).lastInsertRowid;

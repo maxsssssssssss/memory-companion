@@ -289,3 +289,278 @@ describe("shared LangGraph execution with a non-Learning business scene", () => 
     expect(outbound).not.toHaveBeenCalled();
   });
 });
+
+describe("A2 versioned changes, confirmation and recovery with no product dependency", () => {
+  const proposal = () => ({ title: "确认追加合成记录", summary: "仅追加当前授权记录", target: "synthetic/allowed", content: "PRIVATE_PROPOSAL_CONTENT", sourceFingerprint: "scope-v1:target-rev-1" });
+  function confirming() {
+    const write = vi.fn(async () => ({ ref: { kind: "synthetic.receipt", id: "one-write" }, summary: "已保存合成追加记录", handoff: "写入已完成；请重新确认后续范围。" }));
+    const confirmation = vi.fn(async () => proposal());
+    const h = setup([{ tool: "synthetic.append", args: { target: "allowed" } }], { tools: {
+      "synthetic.append": { description: "append with explicit confirmation", parameters: z.object({ target: z.literal("allowed") }),
+        confirmation, execute: write, validateResult: async () => {} },
+    } });
+    return { ...h, write, confirmation };
+  }
+  it("adjusts goal/scope with CAS, preserves cumulative budget, and ignores old results and feedback", async () => {
+    const h = setup([{ tool: "synthetic.read", args: { id: "allowed" } }, { tool: "synthetic.create", args: {} }, { finish: "revised objective" }]);
+    const old = await h.runtime.advance("alice", h.task.id);
+    const input = { expectedVersion: 1, goal: "A different authorized goal", scope: { record: "allowed", narrowed: true }, eventId: "adjust-1" };
+    const revised = await h.runtime.adjust("alice", h.task.id, input);
+    expect(revised).toMatchObject({ version: 2, status: "ready", goal: input.goal, usage: { calls: 2, steps: 2 } });
+    expect(revised.budget).toEqual(old.budget); expect(revised.currentAction).toBeUndefined();
+    expect((await h.runtime.adjust("alice", h.task.id, input)).version).toBe(2);
+    await expect(h.runtime.adjust("alice", h.task.id, { ...input, eventId: "stale-update" })).rejects.toMatchObject({ code: "conflict" });
+    await expect(h.runtime.advance("alice", h.task.id, { id: "old-feedback", kind: "submitted", refId: old.wait!.refId, version: 1 })).rejects.toMatchObject({ code: "conflict" });
+    const ended = await h.runtime.advance("alice", h.task.id);
+    expect(ended.status).toBe("ended"); expect(ended.usage.calls).toBe(3);
+    expect(h.decision.mock.calls[2][0].results).toEqual([]);
+    expect(h.decision.mock.calls[2][0].task.actions).toEqual([]);
+    expect(h.decision.mock.calls[2][0].event).toBeUndefined();
+    expect(h.create).toHaveBeenCalledTimes(1);
+  });
+  it("allows only one concurrent scope change and fences a late old-version response while retaining its usage", async () => {
+    let release!: () => void, entered!: () => void;
+    const response = new Promise<void>(resolve => { release = resolve; }), started = new Promise<void>(resolve => { entered = resolve; });
+    const h = setup([{ tool: "synthetic.delayed", args: {} }], { tools: {
+      "synthetic.delayed": { description: "late synthetic response", parameters: z.object({}), execute: async (_args, ctx) => {
+        await ctx.call({ kind: "late", inputChars: 1, maxOutputTokens: 10 }, async () => { entered(); await response; return { value: "late", usage: { inputTokens: 7, outputTokens: 3 } }; });
+        return { ref: { kind: "synthetic.late", id: "old" }, summary: "must not publish" };
+      } },
+    } });
+    const running = h.runtime.advance("alice", h.task.id); await started;
+    const changes = await Promise.allSettled([
+      h.runtime.adjust("alice", h.task.id, { expectedVersion: 1, goal: "new one", scope: {} }),
+      h.runtime.adjust("alice", h.task.id, { expectedVersion: 1, goal: "new two", scope: {} }),
+    ]);
+    expect(changes.filter(item => item.status === "fulfilled")).toHaveLength(1);
+    release(); const current = await running;
+    expect(current.version).toBe(2); expect(current.status).toBe("ready"); expect(current.currentAction).toBeUndefined();
+    expect(current.actions[0].resultRef).toBeUndefined();
+    expect(current.usage).toMatchObject({ calls: 2, inputTokens: 17, outputTokens: 8, unknownUsageCalls: 0 });
+    expect(() => h.store.control("alice", h.task.id, "cancel", 1)).toThrow();
+  });
+  it("persists confirmation without a shared content copy, then executes the exact approved action once after reopening", async () => {
+    const h = confirming();
+    const waiting = await h.runtime.advance("alice", h.task.id);
+    expect(waiting).toMatchObject({ status: "waiting", wait: { kind: "confirmation" }, approval: { status: "pending", taskVersion: 1, content: "" } });
+    expect(h.write).not.toHaveBeenCalled(); expect(h.decision).toHaveBeenCalledTimes(1);
+    expect(JSON.stringify(h.store.database.prepare("SELECT * FROM agent_approvals").all())).not.toContain("PRIVATE_PROPOSAL_CONTENT");
+    const input = { approvalId: waiting.approval!.id, expectedVersion: 1, fingerprint: waiting.approval!.fingerprint, decision: "approve" as const, eventId: "approval-1", defer: true };
+    await h.runtime.resolveApproval("alice", h.task.id, input);
+    expect(h.write).not.toHaveBeenCalled();
+    h.runtime.close();
+    const reopened = new AgentRuntime({ store: h.store, checkpointPath: h.checkpointPath, scenario: h.scene, decision: h.decision });
+    resources.push(() => reopened.close());
+    const ended = await reopened.advance("alice", h.task.id);
+    expect(ended.status).toBe("ended"); expect(h.write).toHaveBeenCalledTimes(1); expect(h.decision).toHaveBeenCalledTimes(1);
+    expect(ended.actions[0].id).toBe(waiting.approval!.actionId);
+    await reopened.resolveApproval("alice", h.task.id, input);
+    expect(h.write).toHaveBeenCalledTimes(1);
+    await reopened.resolveApproval("alice", h.task.id, { ...input, eventId: "same-approval-new-event" });
+    await expect(reopened.resolveApproval("alice", h.task.id, { ...input, eventId: "tampered-new-event", fingerprint: "different" })).rejects.toMatchObject({ code: "conflict" });
+    await expect(reopened.resolveApproval("alice", h.task.id, { ...input, eventId: "opposite-new-event", decision: "reject" })).rejects.toMatchObject({ code: "conflict" });
+    expect(h.write).toHaveBeenCalledTimes(1);
+  });
+  it("rejects altered fingerprints and changed targets, and rejects a proposal without executing it", async () => {
+    const h = confirming(), waiting = await h.runtime.advance("alice", h.task.id);
+    const input = { approvalId: waiting.approval!.id, expectedVersion: 1, fingerprint: waiting.approval!.fingerprint, decision: "approve" as const, eventId: "approval-1", defer: true };
+    await expect(h.runtime.resolveApproval("alice", h.task.id, { ...input, fingerprint: "tampered" })).rejects.toMatchObject({ code: "conflict" });
+    expect(h.store.getTask("alice", h.task.id).status).toBe("waiting");
+    h.confirmation.mockImplementation(async () => ({ ...proposal(), sourceFingerprint: "target-rev-2" }));
+    await expect(h.runtime.resolveApproval("alice", h.task.id, input)).rejects.toMatchObject({ code: "source_changed" });
+    expect(h.store.getTask("alice", h.task.id)).toMatchObject({ status: "needs_attention", approval: { status: "invalidated" }, recovery: { kind: "source_invalid" } });
+    expect(h.write).not.toHaveBeenCalled();
+    const rejected = confirming(), pending = await rejected.runtime.advance("alice", rejected.task.id);
+    const result = await rejected.runtime.resolveApproval("alice", rejected.task.id, { approvalId: pending.approval!.id, expectedVersion: 1, fingerprint: pending.approval!.fingerprint, decision: "reject", eventId: "reject-1" });
+    expect(result.status).toBe("ended"); expect(rejected.write).not.toHaveBeenCalled();
+    expect(rejected.decision.mock.calls[1][0].event?.decision).toBe("reject");
+  });
+  it("invalidates old approvals when scope is adjusted and never forwards old proposed content", async () => {
+    const h = confirming(), waiting = await h.runtime.advance("alice", h.task.id);
+    await h.runtime.adjust("alice", h.task.id, { expectedVersion: 1, goal: "new goal", scope: {} });
+    await expect(h.runtime.resolveApproval("alice", h.task.id, { approvalId: waiting.approval!.id, expectedVersion: 1, fingerprint: waiting.approval!.fingerprint, decision: "approve", eventId: "late-approve" })).rejects.toMatchObject({ code: "conflict" });
+    await h.runtime.advance("alice", h.task.id);
+    expect(h.write).not.toHaveBeenCalled();
+    expect(h.decision.mock.calls[1][0].task.approval).toBeUndefined();
+    expect(h.decision.mock.calls[1][0].results).toEqual([]);
+  });
+  it("rechecks a deferred approval just before execution and fences cancellation after acceptance", async () => {
+    for (const change of ["target", "cancel"] as const) {
+      const h = confirming(), pending = await h.runtime.advance("alice", h.task.id);
+      await h.runtime.resolveApproval("alice", h.task.id, { approvalId: pending.approval!.id, expectedVersion: 1, fingerprint: pending.approval!.fingerprint, decision: "approve", eventId: "approval-1", defer: true });
+      if (change === "target") h.confirmation.mockImplementation(async () => ({ ...proposal(), content: "CHANGED_CONTENT" }));
+      else h.runtime.control("alice", h.task.id, "cancel", 1);
+      const result = await h.runtime.advance("alice", h.task.id);
+      expect(result.status).toBe(change === "target" ? "needs_attention" : "cancelled");
+      expect(h.write).not.toHaveBeenCalled();
+    }
+  });
+  it("recovers a proposal saved before its graph checkpoint without asking the model to generate another action", async () => {
+    const h = confirming(), save = h.store.saveApproval.bind(h.store);
+    let lost = true;
+    vi.spyOn(h.store, "saveApproval").mockImplementation((...args) => {
+      save(...args);
+      if (lost) { lost = false; throw new Error("synthetic stop after proposal write and before checkpoint"); }
+    });
+    const stopped = await h.runtime.advance("alice", h.task.id);
+    expect(stopped.status).toBe("needs_attention"); expect(h.write).not.toHaveBeenCalled();
+    const waiting = await h.runtime.recover("alice", h.task.id, { expectedVersion: 1, mode: "inspect", eventId: "check-prepared" });
+    expect(waiting).toMatchObject({ status: "waiting", wait: { kind: "confirmation" }, recovery: { kind: "not_started" } });
+    const result = await h.runtime.resolveApproval("alice", h.task.id, { approvalId: waiting.approval!.id, expectedVersion: 1, fingerprint: waiting.approval!.fingerprint, decision: "approve", eventId: "approve-recovered" });
+    expect(result.status).toBe("ended"); expect(h.write).toHaveBeenCalledTimes(1); expect(h.decision).toHaveBeenCalledTimes(1);
+  });
+  it("durably accepts a business feedback event before background advancement", async () => {
+    const h = setup([{ tool: "synthetic.create", args: {} }, { finish: "end" }]);
+    const waiting = await h.runtime.advance("alice", h.task.id);
+    h.business.get(waiting.wait!.refId!)!.feedback = "saved response";
+    const event = { id: "persisted-feedback", kind: "submitted", refId: waiting.wait!.refId, version: 1 };
+    await h.runtime.submitEvent("alice", h.task.id, event, { expectedVersion: 1, defer: true });
+    expect(h.store.pendingEvent("alice", h.task.id)).toEqual(event); expect(h.decision).toHaveBeenCalledTimes(1);
+    expect((await h.runtime.advance("alice", h.task.id)).status).toBe("ended"); expect(h.decision).toHaveBeenCalledTimes(2);
+  });
+  it("reconciles an existing business result after shared receipt loss without repeating the original operation", async () => {
+    const h = setup([{ tool: "synthetic.create", args: {} }]);
+    h.scene.tools["synthetic.create"].recover = async (id) => h.business.has(id)
+      ? { ref: { kind: "synthetic.record", id }, summary: "已有操作结果", wait: { kind: "record", refId: id, message: "等待反馈" } } : null;
+    const original = h.store.markAction.bind(h.store);
+    let loseOnce = true;
+    vi.spyOn(h.store, "markAction").mockImplementation((...args) => {
+      if (args[4] === "succeeded" && loseOnce) { loseOnce = false; throw new Error("synthetic receipt delivery lost"); }
+      return original(...args);
+    });
+    const interrupted = await h.runtime.advance("alice", h.task.id);
+    expect(interrupted).toMatchObject({ status: "needs_attention", recovery: { kind: "unknown" } });
+    const recovered = await h.runtime.recover("alice", h.task.id, { expectedVersion: 1, mode: "inspect", eventId: "inspect-1" });
+    expect(recovered).toMatchObject({ status: "waiting", recovery: { kind: "succeeded" } });
+    expect(h.create).toHaveBeenCalledTimes(1); expect(h.decision).toHaveBeenCalledTimes(1);
+    await h.runtime.recover("alice", h.task.id, { expectedVersion: 1, mode: "inspect", eventId: "inspect-1" });
+    expect(h.create).toHaveBeenCalledTimes(1);
+  });
+  it("never retries an unknown provider result but permits an explicit retry of a known failure within the same cumulative budget", async () => {
+    const unknown = setup([]);
+    unknown.decision.mockImplementationOnce(async (_input, ctx) => ctx.call({ kind: "decision", inputChars: 10, maxOutputTokens: 10 }, async () => { throw new AgentFailure("unknown", "synthetic connection lost"); }));
+    const uncertain = await unknown.runtime.advance("alice", unknown.task.id);
+    expect(uncertain.status).toBe("needs_attention");
+    const inspected = await unknown.runtime.recover("alice", unknown.task.id, { expectedVersion: 1, mode: "inspect" });
+    expect(inspected.recovery).toMatchObject({ kind: "unknown", allowedControls: ["inspect", "adjust", "cancel"] });
+    const noRetry = await unknown.runtime.recover("alice", unknown.task.id, { expectedVersion: 1, mode: "retry" });
+    expect(noRetry.status).toBe("needs_attention"); expect(unknown.decision).toHaveBeenCalledTimes(1);
+    const known = setup([{ finish: "hand back" }]);
+    known.decision.mockImplementationOnce(async (_input, ctx) => ctx.call({ kind: "decision", inputChars: 10, maxOutputTokens: 10 }, async () => { throw new AgentFailure("known_failure", "synthetic explicitly rejected request"); }));
+    await known.runtime.advance("alice", known.task.id);
+    const retry = await known.runtime.recover("alice", known.task.id, { expectedVersion: 1, mode: "retry", eventId: "retry-1" });
+    expect(retry.status).toBe("ended"); expect(retry.usage.calls).toBe(2); expect(known.decision).toHaveBeenCalledTimes(2);
+    await known.runtime.recover("alice", known.task.id, { expectedVersion: 1, mode: "retry", eventId: "retry-1" });
+    expect(known.decision).toHaveBeenCalledTimes(2);
+  });
+  it("does not replay an expired execution lease and safely ends a blocked task with a version CAS", async () => {
+    const h = setup([]), lease = h.store.claim("alice", h.task.id)!;
+    h.store.setState("alice", h.task.id, lease.token, "running");
+    h.store.database.prepare("UPDATE agent_tasks SET lease_until=0 WHERE id=?").run(h.task.id);
+    const stale = await h.runtime.advance("alice", h.task.id);
+    expect(stale).toMatchObject({ status: "needs_attention", recovery: { kind: "interrupted" } });
+    expect(h.decision).not.toHaveBeenCalled();
+    expect(() => h.runtime.end("alice", h.task.id, { expectedVersion: 2 })).toThrow();
+    const ended = h.runtime.end("alice", h.task.id, { expectedVersion: 1, eventId: "end-1" });
+    expect(ended.status).toBe("ended"); expect(ended.endReason).toContain("不代表");
+  });
+  it("never uses an earlier successful tool receipt to bypass a later unknown decision", async () => {
+    const h = setup([{ tool: "synthetic.read", args: { id: "allowed" } }]);
+    const first = h.decision.getMockImplementation()!;
+    h.decision.mockImplementationOnce(first).mockImplementationOnce(async (_input, ctx) => ctx.call({ kind: "decision", inputChars: 10, maxOutputTokens: 10 }, async () => { throw new AgentFailure("unknown", "next decision response lost"); }));
+    const interrupted = await h.runtime.advance("alice", h.task.id);
+    expect(interrupted.actions[0].status).toBe("succeeded");
+    const inspect = await h.runtime.recover("alice", h.task.id, { expectedVersion: 1, mode: "inspect" });
+    expect(inspect).toMatchObject({ status: "needs_attention", recovery: { kind: "unknown" } });
+    await h.runtime.recover("alice", h.task.id, { expectedVersion: 1, mode: "retry" });
+    expect(h.decision).toHaveBeenCalledTimes(2);
+  });
+  it("offers receipt inspection after explicitly pausing an active request, without stealing a live lease", async () => {
+    let release!: () => void, entered!: () => void;
+    const response = new Promise<void>(resolve => { release = resolve; }), started = new Promise<void>(resolve => { entered = resolve; });
+    const h = setup([]);
+    h.decision.mockImplementationOnce(async (_input, ctx) => ctx.call({ kind: "decision", inputChars: 10, maxOutputTokens: 10 }, async () => {
+      entered(); await response; return { value: { finish: "late" }, usage: { inputTokens: 1, outputTokens: 1 } };
+    }));
+    const running = h.runtime.advance("alice", h.task.id); await started;
+    expect((await h.runtime.recover("alice", h.task.id, { expectedVersion: 1, mode: "inspect" })).status).toBe("running");
+    const paused = h.runtime.control("alice", h.task.id, "pause", 1);
+    expect(paused).toMatchObject({ status: "paused", recovery: { kind: "unknown", allowedControls: ["inspect", "adjust", "cancel"] } });
+    expect((await h.runtime.recover("alice", h.task.id, { expectedVersion: 1, mode: "inspect" })).recovery?.kind).toBe("unknown");
+    release(); await running;
+    expect(h.decision).toHaveBeenCalledTimes(1);
+  });
+  it("does not claim the new version using a stale task snapshot from another connection", async () => {
+    const h = setup([{ finish: "new-version result" }]), other = AgentStore.open(h.dbPath);
+    const claim = h.store.claim.bind(h.store);
+    try {
+      vi.spyOn(h.store, "claim").mockImplementationOnce((accountId, taskId, expectedVersion) => {
+        other.adjust(accountId, taskId, { expectedVersion: 1, goal: "changed between read and lease", scope: {} });
+        return claim(accountId, taskId, expectedVersion);
+      });
+      const revised = await h.runtime.advance("alice", h.task.id);
+      expect(revised).toMatchObject({ version: 2, status: "ready" });
+      expect(h.decision).not.toHaveBeenCalled();
+      expect((await h.runtime.advance("alice", h.task.id)).status).toBe("ended");
+      expect(h.decision.mock.calls[0][0].task.version).toBe(2);
+    } finally { other.close(); }
+  });
+  it("conservatively settles expired running time once and retains that charge after adjustment", async () => {
+    const h = setup([]);
+    let time = 10_000;
+    const clock = vi.spyOn(Date, "now").mockImplementation(() => time);
+    try {
+      const lease = h.store.claim("alice", h.task.id, 1)!;
+      h.store.setState("alice", h.task.id, lease.token, "running");
+      time += h.task.budget.maxComputeMs + 31_000;
+      expect(h.store.claim("alice", h.task.id, 1)).toBeNull();
+      const expired = h.store.getTask("alice", h.task.id);
+      expect(expired).toMatchObject({ status: "needs_attention", usage: { computeMs: h.task.budget.maxComputeMs, computeEstimated: true } });
+      h.store.claim("alice", h.task.id, 1); h.store.release("alice", h.task.id, lease);
+      expect(h.store.getTask("alice", h.task.id).usage.computeMs).toBe(expired.usage.computeMs);
+      const revised = await h.runtime.adjust("alice", h.task.id, { expectedVersion: 1, goal: "new goal retains budget", scope: {} });
+      expect(revised.usage).toMatchObject({ computeMs: expired.usage.computeMs, computeEstimated: true });
+      expect((await h.runtime.advance("alice", h.task.id)).status).toBe("budget_exhausted");
+      expect(h.decision).not.toHaveBeenCalled();
+    } finally { clock.mockRestore(); }
+  });
+  it("explicitly retries the saved failed action after the graph moved to a later user wait", async () => {
+    const attempts: string[] = [];
+    const h = setup([{ tool: "synthetic.retryable", args: {} }, { wait: { kind: "feedback", message: "工具失败，等待用户处理" } }, { finish: "done" }], { tools: {
+      "synthetic.retryable": { description: "known retryable operation", parameters: z.object({}), execute: async (_args, ctx) => {
+        attempts.push(ctx.actionId);
+        if (attempts.length === 1) throw new AgentFailure("known_failure", "explicit no-write failure");
+        expect(ctx.task.recovery).toMatchObject({ kind: "known_failed", actionId: ctx.actionId });
+        return { ref: { kind: "synthetic.result", id: ctx.actionId }, summary: "same operation recovered", handoff: "本次操作已完成并交回。" };
+      }, recover: async () => null, validateResult: async () => {} },
+    } });
+    const waiting = await h.runtime.advance("alice", h.task.id);
+    expect(waiting.status).toBe("waiting"); expect(waiting.actions[0].status).toBe("failed");
+    const paused = h.runtime.control("alice", h.task.id, "pause", 1);
+    expect(paused.recovery).toMatchObject({ kind: "known_failed", actionId: waiting.actions[0].id, allowedControls: ["inspect", "adjust", "cancel"] });
+    const inspected = await h.runtime.recover("alice", h.task.id, { expectedVersion: 1, mode: "inspect" });
+    expect(inspected.recovery).toMatchObject({ kind: "known_failed", actionId: waiting.actions[0].id });
+    const result = await h.runtime.recover("alice", h.task.id, { expectedVersion: 1, mode: "retry", eventId: "same-operation-retry" });
+    expect(result.status).toBe("ended"); expect(attempts).toEqual([waiting.actions[0].id, waiting.actions[0].id]);
+    expect(result.recovery).toBeUndefined();
+    expect(result.actions).toHaveLength(1); expect(h.decision).toHaveBeenCalledTimes(2);
+  });
+  it("does not offer a rejected proposal or an earlier superseded failure as a generation retry", async () => {
+    const h = confirming();
+    const initial = h.decision.getMockImplementation()!;
+    h.decision.mockImplementationOnce(initial).mockImplementationOnce(async (_input, ctx) => ctx.call({ kind: "decision", inputChars: 10, maxOutputTokens: 10 }, async () => ({ value: { wait: { kind: "feedback", message: "已拒绝，等待其他要求" } }, usage: { inputTokens: 1, outputTokens: 1 } })));
+    const pending = await h.runtime.advance("alice", h.task.id);
+    await h.runtime.resolveApproval("alice", h.task.id, { approvalId: pending.approval!.id, expectedVersion: 1, fingerprint: pending.approval!.fingerprint, decision: "reject", eventId: "reject-no-retry" });
+    const paused = h.runtime.control("alice", h.task.id, "pause", 1);
+    expect(paused.recovery).toBeUndefined();
+    const inspected = await h.runtime.recover("alice", h.task.id, { expectedVersion: 1, mode: "inspect" });
+    expect(inspected.status).toBe("paused"); expect(inspected.recovery).toBeUndefined();
+    await h.runtime.recover("alice", h.task.id, { expectedVersion: 1, mode: "retry" });
+    expect(h.write).not.toHaveBeenCalled(); expect(h.decision).toHaveBeenCalledTimes(2);
+    const other = setup([{ tool: "synthetic.failed", args: {} }, { tool: "synthetic.read", args: { id: "allowed" } }, { wait: { kind: "feedback", message: "已取得其他结果" } }], { tools: {
+      "synthetic.failed": { description: "known failure", parameters: z.object({}), execute: async () => { throw new AgentFailure("known_failure", "no write"); } },
+    } });
+    await other.runtime.advance("alice", other.task.id);
+    expect(other.runtime.control("alice", other.task.id, "pause", 1).recovery).toBeUndefined();
+  });
+});

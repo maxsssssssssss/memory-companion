@@ -6,6 +6,8 @@ const fs = require('node:fs');
 const Database = require('better-sqlite3');
 const { respond } = require('./offline-fixtures.cjs');
 const { assertEvidenceDirectory } = require('./evidence-directory.cjs');
+const { decision: a2Decision } = require('./offline-a2-fixtures.cjs');
+const { initializeFaultLedger, providerFault, installReceiptFault } = require('./offline-faults.cjs');
 assert.equal(process.env.AGENT_TRIAL_MODE, 'offline', 'offline_mode_must_be_explicit');
 const root = process.env.AGENT_TRIAL_DIR;
 assert(root && path.isAbsolute(root), 'offline_absolute_trial_directory_required');
@@ -16,6 +18,8 @@ const db = new Database(path.join(root, 'offline-provider.sqlite'));
 db.pragma('busy_timeout = 10000'); db.pragma('synchronous = FULL');
 db.exec(`CREATE TABLE IF NOT EXISTS requests(id INTEGER PRIMARY KEY, started TEXT, kind TEXT, state TEXT,
   input_chars INTEGER, output_limit INTEGER, selected_action TEXT, actual_network_requests INTEGER NOT NULL DEFAULT 0)`);
+initializeFaultLedger(db);
+installReceiptFault(Database, db, root);
 const upstream = globalThis.fetch;
 globalThis.fetch = async (input, init) => {
   const request = new Request(input, init), url = new URL(request.url);
@@ -29,8 +33,13 @@ globalThis.fetch = async (input, init) => {
   const payload = JSON.parse(message.content), id = db.prepare('INSERT INTO requests(started,kind,state,input_chars,output_limit) VALUES(?,?,?,?,?)')
     .run(new Date().toISOString(), 'unclassified', 'received', raw.length, body.max_output_tokens).lastInsertRowid;
   let result;
-  try { result = respond(payload); }
-  catch (error) { db.prepare("UPDATE requests SET state='fixture_rejected' WHERE id=?").run(id); throw error; }
+  try {
+    result = payload.tools && payload.observation && payload.results ? { kind: 'decision_fixture', value: a2Decision(payload) } : respond(payload);
+    db.prepare('UPDATE requests SET kind=? WHERE id=?').run(result.kind, id);
+    const effect = await providerFault(db, root, result.kind, payload);
+    if (effect === 'known_failure') result.value = { offlineInvalidResponse: true };
+  }
+  catch (error) { db.prepare('UPDATE requests SET state=? WHERE id=?').run(error?.message === 'offline_injected_unknown_transport' ? 'injected_unknown' : 'fixture_rejected', id); throw error; }
   db.prepare("UPDATE requests SET state='completed',kind=?,selected_action=? WHERE id=?")
     .run(result.kind, result.value.tool ?? (result.value.finish ? 'finish' : result.value.wait ? 'wait' : null), id);
   // Usage is deliberately absent: fixture requests have no Provider tokens.

@@ -1,21 +1,24 @@
-// Explicitly invoked, isolated A0/A1 experience. No Provider calls on startup.
+// Explicitly invoked, isolated Agent acceptance. No Provider calls on startup.
 import fs from 'node:fs';
 import path from 'node:path';
 import net from 'node:net';
 import { spawn } from 'node:child_process';
 import { cloudEnvironment, assertCleanConfig } from '../cloud/environment.mjs';
 import { assertEvidenceDirectory } from './evidence-directory.cjs';
+import { credentialSelection, trialCredentialEnvironment } from './credential-adapter.mjs';
+import { realTrialBudget } from './request-budget.cjs';
 const real=process.argv.includes('--real');
-const repo=process.cwd(),root=path.resolve(process.env.AGENT_TRIAL_DIR||(real?'output/agent-a0-a1-windows':'output/agent-a0-a1-offline'));
+const repo=process.cwd(),root=path.resolve(process.env.AGENT_TRIAL_DIR||(real?'output/agent-a2-windows':'output/agent-a2-offline'));
 const base='http://127.0.0.1:37951',runtimeFile=path.join(root,'runtime.json'),stopFile=path.join(root,'stop');
 const mode=process.argv[2];
 if(mode==='start')assertEvidenceDirectory(root,real?'real':'offline');
+const requestBudget=mode==='start'&&real?realTrialBudget(process.env):null;
 fs.mkdirSync(root,{recursive:true});
 if(mode==='stop'){fs.writeFileSync(stopFile,'stop');console.log('Stop requested; synthetic course/task data retained.');}
 else if(mode==='status'){console.log(fs.existsSync(runtimeFile)?fs.readFileSync(runtimeFile,'utf8'):'not started');}
 else if(mode==='start'){
   assertCleanConfig(repo);
-  if(real && !process.env.DAILY_BRIEF_OPENAI_API_KEY)throw Error('Configured trial credential missing');
+  const credentials=trialCredentialEnvironment(process.env,{real,credentialEnv:credentialSelection(process.argv)});
   await new Promise((resolve,reject)=>{const s=net.createServer();s.once('error',reject);s.listen(37951,'127.0.0.1',()=>s.close(resolve));});
   const env=cloudEnvironment(repo,process.env,false);
   if(real)for(const name of ['HTTP_PROXY','HTTPS_PROXY','ALL_PROXY','NO_PROXY','NODE_EXTRA_CA_CERTS','SSL_CERT_FILE','SSL_CERT_DIR'])
@@ -25,7 +28,8 @@ else if(mode==='start'){
     NODE_OPTIONS:(real?`--require=${JSON.stringify(path.join(repo,'scripts/agent-trial/guard.cjs'))}`:
       `--require=${JSON.stringify(path.join(repo,'scripts/cloud/offline.cjs'))} --require=${JSON.stringify(path.join(repo,'scripts/agent-trial/offline-provider.cjs'))}`)+' --max-old-space-size=4096',
     AGENT_TRIAL_DIR:root,AGENT_TRIAL_PHASE:'trajectory',AGENT_TRIAL_MODE:real?'real':'offline',OPENAI_BASE_URL:'https://tokenhub.vision-intelligence.tech/v1',
-    OPENAI_API_KEY:real?process.env.DAILY_BRIEF_OPENAI_API_KEY:'offline-fixture',LEARNING_AGENT_API_KEY:real?process.env.DAILY_BRIEF_OPENAI_API_KEY:'offline-fixture',
+    ...credentials,
+    ...(requestBudget?{AGENT_TRIAL_MAX_REQUESTS:String(requestBudget.total),AGENT_TRIAL_PROTOCOL_MAX_REQUESTS:String(requestBudget.protocol)}:{}),
     LANGSMITH_TRACING:'false',LANGSMITH_TRACING_V2:'false',LANGCHAIN_TRACING:'false',LANGCHAIN_TRACING_V2:'false'});
   for(const prefix of ['LEARNING_AGENT_DECISION','LEARNING_AGENT_GENERATION'])Object.assign(env,{
     [`${prefix}_PROVIDER`]:'tokenhub',[`${prefix}_MODEL`]:'deepseek-v4-pro',[`${prefix}_MAX_INPUT_CHARS`]:'47000',
@@ -41,5 +45,5 @@ else if(mode==='start'){
   process.on('SIGTERM',stop);process.on('SIGINT',stop);
   const poll=setInterval(()=>{if(fs.existsSync(stopFile))stop();},500);
   child.on('exit',(code)=>{clearInterval(poll);fs.closeSync(log);fs.writeFileSync(runtimeFile,JSON.stringify({...state,stoppedAt:new Date().toISOString(),exitCode:code},null,2));process.exitCode=code??0;});
-  console.log(`Isolated synthetic experience starting: ${base}; ${real?'explicit Windows real mode, persistent 36-request ledger':'OFFLINE controlled Provider, external networking blocked'}.`);
-}else throw Error('Use start [--production] [--real for authorized Windows acceptance only], stop [--real], or status [--real]');
+  console.log(`Isolated synthetic experience starting: ${base}; ${real?`explicit Windows real mode, newly authorized ${requestBudget.total}-request ledger`:'OFFLINE controlled Provider, external networking blocked'}.`);
+}else throw Error('Use start [--production] [--real --credential-env OPENAI_API_KEY for authorized Windows acceptance only], stop [--real], or status [--real]');

@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import type { LearningRepository } from "./repository";
 import { LearningError } from "./repository";
 
-export type LearningAgentArtifact = { id: string; task_id: string; page_id: string; account_id: string; kind: "quiz" | "explanation";
+export type LearningAgentArtifact = { id: string; task_id: string; task_version: number; page_id: string; account_id: string; kind: "quiz" | "explanation" | "note_proposal";
   action_id: string; binding_hash: string; state: "reserved" | "completed" | "failed" | "unknown" | "invalidated"; body_json: string | null };
 
 export function learningAgentOperationId(actionId: string, kind: string) {
@@ -15,7 +15,7 @@ export function learningAgentOperationId(actionId: string, kind: string) {
 export class LearningAgentRepository {
   constructor(private learning: LearningRepository) {
     learning.database.exec(`CREATE TABLE IF NOT EXISTS learning_agent_artifacts (
-      id TEXT PRIMARY KEY, task_id TEXT NOT NULL, page_id TEXT NOT NULL, account_id TEXT NOT NULL,
+      id TEXT PRIMARY KEY, task_id TEXT NOT NULL, task_version INTEGER NOT NULL DEFAULT 1, page_id TEXT NOT NULL, account_id TEXT NOT NULL,
       kind TEXT NOT NULL, action_id TEXT NOT NULL, binding_hash TEXT NOT NULL,
       material_ids TEXT NOT NULL, state TEXT NOT NULL, body_json TEXT, created_at TEXT NOT NULL,
       UNIQUE(task_id,action_id)
@@ -30,6 +30,8 @@ export class LearningAgentRepository {
       WHEN NEW.deleted_at IS NOT NULL BEGIN
       DELETE FROM learning_agent_artifacts WHERE page_id=NEW.id;
     END;`);
+    const columns = learning.database.prepare("PRAGMA table_info(learning_agent_artifacts)").all() as Array<{ name: string }>;
+    if (!columns.some(column => column.name === "task_version")) learning.database.exec("ALTER TABLE learning_agent_artifacts ADD COLUMN task_version INTEGER NOT NULL DEFAULT 1");
   }
   get(pageId: string, taskId: string, id: string) {
     this.learning.get(pageId);
@@ -41,18 +43,29 @@ export class LearningAgentRepository {
     return this.learning.database.prepare("SELECT * FROM learning_agent_artifacts WHERE task_id=? AND page_id=? AND account_id=? ORDER BY rowid")
       .all(taskId, pageId, this.learning.accountId) as LearningAgentArtifact[];
   }
-  reserve(value: { id: string; taskId: string; pageId: string; kind: "quiz" | "explanation"; actionId: string; binding: string; materialIds: string[] }) {
+  reserve(value: { id: string; taskId: string; taskVersion?: number; pageId: string; kind: LearningAgentArtifact["kind"]; actionId: string; binding: string; materialIds: string[] }) {
     this.learning.get(value.pageId);
     return this.learning.database.transaction(() => {
       const old = this.get(value.pageId, value.taskId, value.id);
       if (old) {
-        if (old.action_id !== value.actionId || old.binding_hash !== value.binding || old.kind !== value.kind) throw new LearningError(409, "submission_conflict");
+        if (old.action_id !== value.actionId || old.binding_hash !== value.binding || old.kind !== value.kind || old.task_version !== (value.taskVersion ?? 1)) throw new LearningError(409, "submission_conflict");
         return old;
       }
-      this.learning.database.prepare("INSERT INTO learning_agent_artifacts(id,task_id,page_id,account_id,kind,action_id,binding_hash,material_ids,state,created_at) VALUES(?,?,?,?,?,?,?,?,'reserved',?)")
-        .run(value.id, value.taskId, value.pageId, this.learning.accountId, value.kind, value.actionId, value.binding, JSON.stringify(value.materialIds), new Date().toISOString());
+      this.learning.database.prepare("INSERT INTO learning_agent_artifacts(id,task_id,task_version,page_id,account_id,kind,action_id,binding_hash,material_ids,state,created_at) VALUES(?,?,?,?,?,?,?,?,?,'reserved',?)")
+        .run(value.id, value.taskId, value.taskVersion ?? 1, value.pageId, this.learning.accountId, value.kind, value.actionId, value.binding, JSON.stringify(value.materialIds), new Date().toISOString());
       return undefined;
     }).immediate();
+  }
+  savePreview(pageId: string, taskId: string, id: string, body: unknown) {
+    this.learning.get(pageId);
+    const saved = this.learning.database.prepare("UPDATE learning_agent_artifacts SET body_json=? WHERE id=? AND task_id=? AND page_id=? AND account_id=? AND kind='note_proposal' AND state='reserved' AND body_json IS NULL")
+      .run(JSON.stringify(body), id, taskId, pageId, this.learning.accountId);
+    if (!saved.changes) throw new LearningError(409, "agent_preview_conflict");
+  }
+  invalidateNotePreviews(pageId: string, taskId: string, keepVersion?: number) {
+    this.learning.get(pageId);
+    this.learning.database.prepare("UPDATE learning_agent_artifacts SET state='invalidated',body_json=NULL WHERE task_id=? AND page_id=? AND account_id=? AND kind='note_proposal' AND state='reserved' AND (? IS NULL OR task_version<>?)")
+      .run(taskId, pageId, this.learning.accountId, keepVersion ?? null, keepVersion ?? null);
   }
   complete(pageId: string, taskId: string, id: string, body: unknown) {
     this.learning.get(pageId);
@@ -63,6 +76,12 @@ export class LearningAgentRepository {
   fail(pageId: string, taskId: string, id: string, unknown: boolean) {
     this.learning.database.prepare("UPDATE learning_agent_artifacts SET state=? WHERE id=? AND task_id=? AND page_id=? AND account_id=? AND state='reserved'")
       .run(unknown ? "unknown" : "failed", id, taskId, pageId, this.learning.accountId);
+  }
+  retryKnownFailure(pageId: string, taskId: string, id: string, version: number, binding: string) {
+    this.learning.get(pageId);
+    const result = this.learning.database.prepare("UPDATE learning_agent_artifacts SET state='reserved',body_json=NULL WHERE id=? AND task_id=? AND page_id=? AND account_id=? AND task_version=? AND binding_hash=? AND state='failed'")
+      .run(id, taskId, pageId, this.learning.accountId, version, binding);
+    if (!result.changes) throw new LearningError(409, "agent_retry_conflict");
   }
   dispute(pageId: string, taskId: string, attemptId: string) {
     this.learning.get(pageId);

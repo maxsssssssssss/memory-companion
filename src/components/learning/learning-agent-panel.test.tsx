@@ -64,7 +64,7 @@ it("restores durable waiting tasks with read-only requests and resumes only afte
   fireEvent.click(screen.getByRole("button", { name: "打开题组 1" })); expect(onQuiz).toHaveBeenCalledExactlyOnceWith("quiz-one");
   fireEvent.click(screen.getByRole("button", { name: "已完成作答，继续复习" }));
   await screen.findByText("本轮检查完成；仍需结合原文判断。");
-  expect(learningAgentApi.control).toHaveBeenCalledExactlyOnceWith("page-one", { id: "task-one", action: "feedback", eventId: expect.any(String), attemptId: "attempt-one" });
+  expect(learningAgentApi.control).toHaveBeenCalledExactlyOnceWith("page-one", { id: "task-one", action: "feedback", expectedVersion: 1, eventId: expect.any(String), attemptId: "attempt-one" });
   expect(screen.queryByRole("button", { name: "取消任务" })).not.toBeInTheDocument();
 });
 
@@ -107,7 +107,7 @@ it("lets the user dispute a pending question without injecting scores or changin
   fireEvent.change(screen.getByLabelText("这道题有疑问"), { target: { value: "第一题似乎漏了前提，请先核对原文。" } });
   fireEvent.click(screen.getByRole("button", { name: "提交疑问并继续" }));
   await screen.findByText("反馈已受理，正在读取任务进度…");
-  expect(learningAgentApi.control).toHaveBeenCalledExactlyOnceWith("page-one", { id: "task-one", action: "feedback", eventId: expect.any(String), attemptId: "attempt-one", feedback: "第一题似乎漏了前提，请先核对原文。" });
+  expect(learningAgentApi.control).toHaveBeenCalledExactlyOnceWith("page-one", { id: "task-one", action: "feedback", expectedVersion: 1, eventId: expect.any(String), attemptId: "attempt-one", feedback: "第一题似乎漏了前提，请先核对原文。" });
   expect(screen.getByText(/已有答案与成绩保持原样/)).toBeVisible();
 });
 
@@ -120,7 +120,7 @@ it("shows task explanations as task content and sends subsequent feedback withou
   fireEvent.change(screen.getByLabelText("你的反馈"), { target: { value: "明白了，这轮先结束" } });
   fireEvent.click(screen.getByRole("button", { name: "提交反馈并继续" }));
   await screen.findByText("用户取消");
-  expect(learningAgentApi.control).toHaveBeenCalledExactlyOnceWith("page-one", { id: "task-one", action: "feedback", eventId: expect.any(String), feedback: "明白了，这轮先结束" });
+  expect(learningAgentApi.control).toHaveBeenCalledExactlyOnceWith("page-one", { id: "task-one", action: "feedback", expectedVersion: 1, eventId: expect.any(String), feedback: "明白了，这轮先结束" });
   expect(screen.queryByText(/已经学会/)).not.toBeInTheDocument();
 });
 
@@ -164,4 +164,142 @@ it("reports a missing decision configuration as a known blocker without locking 
   expect(screen.getByLabelText("复习目标")).toBeEnabled();
   expect(screen.queryByRole("button", { name: "核对本次任务是否已开始" })).not.toBeInTheDocument();
   expect(learningAgentApi.start).toHaveBeenCalledOnce();
+});
+
+const usage = { calls: 7, inputTokens: 120, outputTokens: 80, unknownUsageCalls: 1, computeMs: 4000, steps: 4 };
+const budget = { maxCalls: 12, maxInputChars: 48000, maxOutputTokens: 8000, maxComputeMs: 60000, maxSteps: 9, maxNoProgress: 2 };
+const approval: NonNullable<LearningAgentTaskView["approval"]> = {
+  id: "approval-one", actionId: "note-action", taskVersion: 2, tool: "learning.append_note", status: "pending", createdAt: "",
+  title: "确认追加个人笔记", summary: "仅追加这条合成解释。", target: "概率 / 条件概率", content: "[合成笔记] 条件概率缩小了考察范围。",
+  sourceFingerprint: "synthetic-source", fingerprint: "synthetic-confirmation", sources: [{ materialId: "material-one", paragraph: 1 }], includesSupplement: false,
+};
+const confirming: LearningAgentTaskView = { ...waiting, version: 2, quizLinks: [], approval, wait: { kind: "confirmation", refId: approval.id, message: "请确认这项笔记提议。" }, usage, budget };
+
+it("previews the exact scope changes before sending one versioned adjustment and retains cumulative budget", async () => {
+  const original = { ...waiting, version: 2, usage: { ...usage, computeEstimated: true }, budget, scope: { ...scope, includeHistory: true, includeNotes: true, includeSupplements: true } };
+  const revisedScope = { ...scope, materialIds: ["material-two"], chapterIds: ["chapter-one"], nodeIds: ["node-one"] };
+  vi.mocked(learningAgentApi.list).mockResolvedValue({ tasks: [original] });
+  vi.mocked(learningAgentApi.control).mockResolvedValue({ task: { ...original, version: 3, goal: "只复习新的明确范围", scope: revisedScope, status: "paused" } });
+  mount(); fireEvent.click(await screen.findByRole("button", { name: "调整本轮复习" }));
+  fireEvent.change(screen.getByLabelText("新的复习目标"), { target: { value: "只复习新的明确范围" } });
+  for (const name of ["合成概率教材", "未选择的材料", "概率", "条件概率", "允许读取本范围的相关作答历史", "纳入本范围的个人笔记", "允许本范围的材料外补充解释"]) {
+    fireEvent.click(screen.getByRole("checkbox", { name }));
+  }
+  expect(screen.queryByRole("button", { name: "确认调整本轮复习" })).not.toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "取消任务" })).toBeDisabled();
+  fireEvent.click(screen.getByRole("button", { name: "预览本轮调整" }));
+  const preview = screen.getByRole("region", { name: "调整前后预览" });
+  expect(within(preview).getByRole("region", { name: "调整前" })).toHaveTextContent("材料：合成概率教材");
+  const after = within(preview).getByRole("region", { name: "调整后" });
+  expect(after).toHaveTextContent("材料：未选择的材料");
+  expect(after).toHaveTextContent("相关历史：不读取；个人笔记：未纳入；材料外补充：不允许");
+  expect(learningAgentApi.control).not.toHaveBeenCalled();
+  fireEvent.click(screen.getByRole("button", { name: "确认调整本轮复习" }));
+  await screen.findByText("本轮版本 3");
+  expect(learningAgentApi.control).toHaveBeenCalledExactlyOnceWith("page-one", { id: waiting.id, action: "adjust", expectedVersion: 2, eventId: expect.any(String), goal: "只复习新的明确范围", scope: revisedScope });
+  expect(screen.getByText(/本任务预算：调用 7\/12 次/)).toHaveTextContent("调整目标与范围不重置已用预算");
+  expect(screen.getByText(/本任务预算：调用 7\/12 次/)).toHaveTextContent("计算 4/60 秒（含崩溃后保守估算）");
+  expect(screen.queryByLabelText("新的复习目标")).not.toBeInTheDocument();
+});
+
+it("keeps a stale adjustment draft and requires a fresh before/after comparison after a version conflict", async () => {
+  vi.mocked(learningAgentApi.list).mockResolvedValueOnce({ tasks: [waiting] }).mockResolvedValue({ tasks: [{ ...waiting, version: 2, goal: "另一窗口的新目标" }] });
+  vi.mocked(learningAgentApi.control).mockRejectedValueOnce(new LearningApiError(409, "agent_version_conflict")).mockResolvedValueOnce({ task: { ...waiting, version: 3, goal: "我尚未提交的草稿", status: "paused" } });
+  mount(); fireEvent.click(await screen.findByRole("button", { name: "调整本轮复习" }));
+  fireEvent.change(screen.getByLabelText("新的复习目标"), { target: { value: "我尚未提交的草稿" } });
+  fireEvent.click(screen.getByRole("button", { name: "预览本轮调整" }));
+  fireEvent.click(screen.getByRole("button", { name: "确认调整本轮复习" }));
+  await screen.findByText(/你的调整草稿已保留/);
+  expect(screen.getByLabelText("新的复习目标")).toHaveValue("我尚未提交的草稿");
+  fireEvent.click(screen.getByRole("button", { name: "刷新并保留草稿" }));
+  await screen.findByText(/编辑草稿仍基于版本 1/);
+  expect(screen.getByLabelText("新的复习目标")).toHaveValue("我尚未提交的草稿");
+  expect(screen.getByRole("button", { name: "确认调整本轮复习" })).toBeDisabled();
+  fireEvent.click(screen.getByRole("button", { name: "按最新版本重新比对" }));
+  expect(screen.queryByRole("button", { name: "确认调整本轮复习" })).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "预览本轮调整" }));
+  expect(screen.getByRole("region", { name: "调整前" })).toHaveTextContent("目标：另一窗口的新目标");
+  expect(screen.getByRole("region", { name: "调整后" })).toHaveTextContent("目标：我尚未提交的草稿");
+  fireEvent.click(screen.getByRole("button", { name: "确认调整本轮复习" }));
+  await screen.findByText("本轮版本 3");
+  expect(vi.mocked(learningAgentApi.control).mock.calls[1][1]).toMatchObject({ action: "adjust", expectedVersion: 2, goal: "我尚未提交的草稿" });
+});
+
+it("restores the exact pending note for review without approval calls and reconciles an unknown approval using one receipt", async () => {
+  vi.mocked(learningAgentApi.list).mockResolvedValue({ tasks: [confirming] });
+  vi.mocked(learningAgentApi.control).mockRejectedValueOnce(new Error("response lost")).mockResolvedValueOnce({ task: { ...confirming, status: "ended", wait: null, approval: undefined, endReason: "已按确认内容追加个人笔记。" } });
+  mount(); const proposal = await screen.findByRole("region", { name: "待确认笔记" });
+  expect(proposal).toHaveTextContent(approval.target); expect(proposal).toHaveTextContent(approval.content);
+  expect(proposal).toHaveTextContent("材料外补充：不包含");
+  expect(screen.queryByLabelText("你的反馈")).not.toBeInTheDocument();
+  expect(learningAgentApi.control).not.toHaveBeenCalled();
+  fireEvent.click(screen.getByRole("button", { name: "查看笔记引用原文 1" }));
+  expect(onSource).toHaveBeenCalledExactlyOnceWith("material-one", 1, undefined);
+  fireEvent.click(screen.getByRole("button", { name: "批准追加到个人笔记" }));
+  await screen.findByRole("button", { name: "核对本次任务操作" });
+  expect(screen.getByRole("button", { name: "拒绝这项笔记提议" })).toBeDisabled();
+  const input = vi.mocked(learningAgentApi.control).mock.calls[0][1];
+  expect(input).toEqual({ id: waiting.id, action: "approval", expectedVersion: 2, approvalId: approval.id, fingerprint: approval.fingerprint, decision: "approve", eventId: expect.any(String) });
+  fireEvent.click(screen.getByRole("button", { name: "核对本次任务操作" }));
+  await screen.findByText("已按确认内容追加个人笔记。");
+  expect(vi.mocked(learningAgentApi.control).mock.calls[1][1]).toEqual(input);
+  expect(screen.queryByRole("region", { name: "待确认笔记" })).not.toBeInTheDocument();
+});
+
+it("rejects a proposed supplement without sending text or a note write and hides stale approvals", async () => {
+  vi.mocked(learningAgentApi.list).mockResolvedValue({ tasks: [{ ...confirming, approval: { ...approval, includesSupplement: true } }] });
+  vi.mocked(learningAgentApi.control).mockResolvedValue({ task: { ...confirming, version: 3 } });
+  mount(); await screen.findByText("材料外补充：包含，已明确标注。");
+  fireEvent.click(screen.getByRole("button", { name: "拒绝这项笔记提议" }));
+  await screen.findByText("本轮版本 3");
+  expect(learningAgentApi.control).toHaveBeenCalledExactlyOnceWith("page-one", { id: waiting.id, action: "approval", expectedVersion: 2, approvalId: approval.id, fingerprint: approval.fingerprint, decision: "reject", eventId: expect.any(String) });
+  expect(screen.queryByRole("region", { name: "待确认笔记" })).not.toBeInTheDocument();
+  expect(screen.queryByLabelText("你的反馈")).not.toBeInTheDocument();
+});
+
+it("offers readback, not business replay, for an unknown result even if retry is accidentally advertised", async () => {
+  const unknown: LearningAgentTaskView = { ...waiting, version: 4, status: "needs_attention", wait: null, recovery: { kind: "unknown", message: "请求结果未知。", actionId: "action-one", allowedControls: ["inspect", "retry", "cancel"] } };
+  vi.mocked(learningAgentApi.list).mockResolvedValue({ tasks: [unknown] });
+  vi.mocked(learningAgentApi.control).mockResolvedValue({ task: unknown });
+  mount(); await screen.findByText("结果未知，先核对原操作");
+  expect(screen.queryByRole("button", { name: /重试|执行尚未开始|继续已核对/ })).not.toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "继续任务" })).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "核对原操作结果" }));
+  await waitFor(() => expect(learningAgentApi.control).toHaveBeenCalledExactlyOnceWith("page-one", { id: waiting.id, action: "recover", expectedVersion: 4, mode: "inspect", eventId: expect.any(String) }));
+  expect(learningAgentApi.start).not.toHaveBeenCalled();
+});
+
+it.each([
+  ["known_failed", "重试明确失败的操作"], ["not_started", "执行尚未开始的操作"],
+] as const)("uses the permitted recovery for %s with the current version", async (kind, label) => {
+  const blocked: LearningAgentTaskView = { ...waiting, version: 2, status: "needs_attention", wait: null, recovery: { kind, message: "合成可核对的中断。", allowedControls: ["inspect", "retry", "cancel"] } };
+  vi.mocked(learningAgentApi.list).mockResolvedValue({ tasks: [blocked] });
+  vi.mocked(learningAgentApi.control).mockResolvedValue({ task: { ...blocked, status: "paused" } });
+  mount(); fireEvent.click(await screen.findByRole("button", { name: label }));
+  await waitFor(() => expect(learningAgentApi.control).toHaveBeenCalledExactlyOnceWith("page-one", { id: waiting.id, action: "recover", expectedVersion: 2, mode: "retry", eventId: expect.any(String) }));
+});
+
+it("lets a changed source be explicitly removed before reconfirmation and never offers replay", async () => {
+  const invalid: LearningAgentTaskView = { ...waiting, version: 2, scope: { ...scope, materialIds: ["removed-material"] }, status: "needs_attention", wait: null, recovery: { kind: "source_invalid", message: "已删除一个来源。", allowedControls: ["adjust", "cancel"] } };
+  vi.mocked(learningAgentApi.list).mockResolvedValue({ tasks: [invalid] });
+  mount(); fireEvent.click(await screen.findByRole("button", { name: "重新确认本轮范围" }));
+  expect(screen.queryByRole("button", { name: /重试明确失败/ })).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole("checkbox", { name: "已不可用的来源（取消勾选以撤销授权）" }));
+  expect(screen.getByRole("button", { name: "预览本轮调整" })).toBeDisabled();
+  fireEvent.click(screen.getByRole("checkbox", { name: "条件概率" }));
+  fireEvent.click(screen.getByRole("button", { name: "预览本轮调整" }));
+  expect(screen.getByRole("region", { name: "调整后" })).toHaveTextContent("知识点：条件概率");
+  expect(learningAgentApi.control).not.toHaveBeenCalled();
+});
+
+it("requires an explicit continue after an inspected result returns ready", async () => {
+  const ready: LearningAgentTaskView = { ...waiting, version: 3, status: "ready", wait: null, recovery: undefined };
+  vi.mocked(learningAgentApi.list).mockResolvedValue({ tasks: [ready] });
+  vi.mocked(learningAgentApi.control).mockResolvedValue({ task: { ...waiting, version: 3 } });
+  mount(); await screen.findByRole("button", { name: "继续任务" });
+  expect(learningAgentApi.control).not.toHaveBeenCalled();
+  fireEvent.click(screen.getByRole("button", { name: "继续任务" }));
+  await screen.findByRole("button", { name: "已完成作答，继续复习" });
+  expect(learningAgentApi.control).toHaveBeenCalledExactlyOnceWith("page-one", { id: waiting.id, action: "resume", expectedVersion: 3, eventId: expect.any(String) });
+  expect(screen.queryByRole("button", { name: "继续任务" })).not.toBeInTheDocument();
 });

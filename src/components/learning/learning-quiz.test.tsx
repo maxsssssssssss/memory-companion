@@ -38,6 +38,19 @@ it("reopens a linked Agent quiz after a refresh using its saved attempt without 
   expect(learningApi.generateQuiz).not.toHaveBeenCalled();
   expect(new URLSearchParams(window.location.search).get("attempt")).toBe("a");
 });
+it("returns from a restored completed Agent attempt without sending another quiz or feedback operation", async () => {
+  a.completed = true; a.score = { correct: 1, total: 1, unassistedCorrect: 1, hinted: 0, revealed: 0, skipped: 0 };
+  window.history.replaceState(null, "", "/learning/p?view=quiz&agent=task-one&attempt=a");
+  const onReturn = vi.fn();
+  render(<LearningQuiz pageId="p" materials={materials} selected={["m"]} disabled={false} saveSelection={save} onSource={vi.fn()} onReturnToAgent={onReturn} />);
+  await screen.findByText("本次答对 1/1 题");
+  expect(screen.getByText(/作答已保存。返回本轮复习后/)).toBeVisible();
+  fireEvent.click(screen.getByRole("button", { name: "返回本轮复习" }));
+  expect(onReturn).toHaveBeenCalledOnce();
+  expect(learningApi.quizAction).not.toHaveBeenCalled();
+  expect(learningApi.startQuiz).not.toHaveBeenCalled();
+  expect(learningApi.generateQuiz).not.toHaveBeenCalled();
+});
 it("confirms the complete group deletion scope and leaves everything untouched on cancel", async () => {
   await mount(); fireEvent.click(screen.getByRole("button", { name: "题组与历史" }));
   fireEvent.click(await screen.findByRole("button", { name: "删除题组 合成题组" }));

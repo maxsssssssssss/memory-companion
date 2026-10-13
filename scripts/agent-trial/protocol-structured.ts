@@ -3,10 +3,12 @@ import { z } from 'zod';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { parseStructuredJsonResponse, type StructuredJsonDiagnostics } from '../../src/lib/server/openai/structured-json';
+import { credentialSelection, trialCredentialEnvironment } from './credential-adapter.mjs';
 const root = process.env.AGENT_TRIAL_DIR!;
 if (!process.argv.includes('--real') || !(globalThis as unknown as Record<string, unknown>).__DAILY_BRIEF_AGENT_TRIAL_GUARD__) throw Error('explicit_real_mode_and_budget_guard_required');
 process.env.AGENT_TRIAL_PHASE = 'protocol';
-const client = new OpenAI({ apiKey:process.env.DAILY_BRIEF_OPENAI_API_KEY!, baseURL:'https://tokenhub.vision-intelligence.tech/v1',
+const credential = trialCredentialEnvironment(process.env, { real: true, credentialEnv: credentialSelection(process.argv) });
+const client = new OpenAI({ apiKey:credential.OPENAI_API_KEY, baseURL:'https://tokenhub.vision-intelligence.tech/v1',
   timeout:120000,maxRetries:0,logLevel:'off',organization:null,project:null });
 const schema=z.object({tool:z.enum(['read_scope','request_material']),args:z.record(z.unknown())}).strict();
 const prompt='You are a restricted learning agent. Return JSON {"tool":"read_scope|request_material","args":{}} selecting one action. read_scope reads the authorized course inventory; request_material asks the user to provide material and args must have message. First inspect the actual course; when its real result is provided, use it to select the next action. Never invent materials.';

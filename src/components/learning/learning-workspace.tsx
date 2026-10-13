@@ -130,6 +130,7 @@ function LearningWorkspaceContent({ pageId }: { pageId: string }) {
   }, []);
   const changeArea = (next: string) => {
     scrollPositions.current[area] = window.scrollY;
+    if (next === "read" && area === "agent") setFrameworkEpoch(value => value + 1);
     setArea(next); if (next === "quiz") setVisitedQuiz(true); if (next === "agent") setVisitedAgent(true);
     const url = new URL(window.location.href); url.searchParams.set("view", next);
     window.history.replaceState(window.history.state, "", url);
@@ -236,7 +237,7 @@ function LearningWorkspaceContent({ pageId }: { pageId: string }) {
       </div>
       <div hidden={area !== "quiz"}>
       {visitedQuiz ? <LearningQuiz pageId={pageId} materials={page.materials} selected={selected} disabled={busy} onSource={viewSource}
-        saveSelection={saveSelection} openQuizId={agentQuiz?.id} openQuizRequest={agentQuiz?.request} /> : null}
+        saveSelection={saveSelection} openQuizId={agentQuiz?.id} openQuizRequest={agentQuiz?.request} onReturnToAgent={() => changeArea("agent")} /> : null}
       </div>
       <div hidden={area !== "agent"}>
       {visitedAgent ? <LearningAgentPanel pageId={pageId} materials={page.materials} selected={selected} disabled={busy || preparationActive} active={area === "agent"}

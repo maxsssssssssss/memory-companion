@@ -252,3 +252,63 @@ it("accepts an authenticated quiz dispute before submission, persists exclusion 
   expect(await reopened.finish!("已掌握", ctx)).toContain("未完成学习检查");
   expect(generate).toHaveBeenCalledTimes(1);
 });
+
+it.each(["quiz", "explanation"] as const)("explicitly retries a known failed %s through the same real business operation", async (kind) => {
+  let calls = 0;
+  const quiz = quizGenerator();
+  const generate = vi.fn(async (...args: Parameters<typeof generateStudyJson>) => {
+    calls++;
+    args[6]?.({ responseStatus: "completed", responseTextLength: 100, parseResult: calls === 1 ? "failed" : "success", validationResult: calls === 1 ? "failed" : "success", inputTokens: 31, outputTokens: 17 });
+    if (calls === 1) throw Error("[模拟] 收到完整但无效的生成结果");
+    return kind === "quiz" ? quiz(...args) : { materialAnswer: "[模拟] 重试后解释", supplements: [], items: [{ materialId, paragraph: 1 }] };
+  }) as unknown as typeof generateStudyJson;
+  const scene = createLearningAgentScenario(learning, { configure: () => config, generate }), store = AgentStore.open(join(root, "retry-agent.sqlite"));
+  const task = store.createTask({ accountId: "owner", scenario: scene.id, resourceId: pageId, goal: "[合成] 明确失败重试", scope: freezeLearningAgentScope(learning, pageId, selection()) });
+  const chosen = kind === "quiz" ? { tool: "learning.create_quiz", args: { count: 1, difficulty: "basic" } }
+    : { tool: "learning.explain", args: { question: "解释前提", sources: [{ materialId, paragraph: 1 }] } };
+  let decisions = 0;
+  const decision = vi.fn(async () => {
+    decisions++;
+    if (decisions === 1) return chosen;
+    return { wait: { kind: "feedback", message: "[模拟决策] 本次生成明确失败，请检查后决定是否重试。" } };
+  });
+  const runtime = new AgentRuntime({ store, checkpointPath: join(root, "retry-checkpoints.sqlite"), scenario: scene, decision });
+  try {
+    const failed = await runtime.advance("owner", task.id), originalAction = failed.actions[0];
+    expect(originalAction.status).toBe("failed"); expect(failed.status).toBe("waiting");
+    const originalArtifact = new LearningAgentRepository(learning).list(pageId, task.id)[0];
+    expect(originalArtifact.state).toBe("failed");
+    if (kind === "quiz") expect(new LearningQuizRepository(learning).list(pageId)[0]).toMatchObject({ id: originalArtifact.id, status: "failed", progress: { canResume: true, uncertain: false } });
+    await expect(run(scene, chosen.tool, chosen.args, { ...context(failed), actionId: originalAction.id })).rejects.toThrow("agent_explicit_retry_required");
+    expect(calls).toBe(1);
+    runtime.control("owner", task.id, "pause");
+    const inspected = await runtime.recover("owner", task.id, { expectedVersion: 1, mode: "inspect", eventId: randomUUID() });
+    expect(inspected.recovery?.kind).toBe("known_failed"); expect(calls).toBe(1);
+    const retried = await runtime.recover("owner", task.id, { expectedVersion: 1, mode: "retry", eventId: randomUUID() });
+    expect(retried.status).toBe("waiting");
+    expect(retried.actions[0]).toMatchObject({ id: originalAction.id, status: "succeeded" });
+    expect(retried.actions).toHaveLength(1); expect(calls).toBe(2); expect(retried.usage.calls).toBe(2);
+    expect(decision).toHaveBeenCalledTimes(kind === "quiz" ? 2 : 3);
+    const records = new LearningAgentRepository(learning).list(pageId, task.id);
+    expect(records).toHaveLength(1); expect(records[0]).toMatchObject({ id: originalArtifact.id, state: "completed" });
+    if (kind === "quiz") expect(new LearningQuizRepository(learning).list(pageId)).toHaveLength(1);
+    else expect(readLearningAgentExplanation(learning, retried, originalArtifact.id).materialAnswer).toBe("[模拟] 重试后解释");
+  } finally { runtime.close(); store.close(); }
+});
+
+it("never sends another Learning generation for an unknown result even when retry is requested", async () => {
+  const generate = vi.fn(async () => { throw Error("[模拟] 不知道网络请求是否已完成"); }) as unknown as typeof generateStudyJson;
+  const scene = createLearningAgentScenario(learning, { configure: () => config, generate }), store = AgentStore.open(join(root, "unknown-agent.sqlite"));
+  const task = store.createTask({ accountId: "owner", scenario: scene.id, resourceId: pageId, goal: "[合成] unknown禁止重发", scope: freezeLearningAgentScope(learning, pageId, selection()) });
+  const runtime = new AgentRuntime({ store, checkpointPath: join(root, "unknown-checkpoints.sqlite"), scenario: scene,
+    decision: async () => ({ tool: "learning.create_quiz", args: { count: 1, difficulty: "basic" } }) });
+  try {
+    const unknown = await runtime.advance("owner", task.id);
+    expect(unknown.status).toBe("needs_attention"); expect(unknown.actions[0].status).toBe("unknown");
+    await runtime.recover("owner", task.id, { expectedVersion: 1, mode: "inspect", eventId: randomUUID() });
+    const retried = await runtime.recover("owner", task.id, { expectedVersion: 1, mode: "retry", eventId: randomUUID() });
+    expect(retried.status).toBe("needs_attention"); expect(retried.recovery?.kind).toBe("unknown");
+    expect(generate).toHaveBeenCalledTimes(1); expect(retried.usage.calls).toBe(1);
+    expect(new LearningQuizRepository(learning).list(pageId)).toHaveLength(1);
+  } finally { runtime.close(); store.close(); }
+});

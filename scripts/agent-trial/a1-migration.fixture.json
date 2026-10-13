@@ -1,0 +1,627 @@
+{
+  "provenance": {
+    "commit": "c0786b48947cdc059052c6b07d421f290cc3f1d1",
+    "sourceHashes": {
+      "src/lib/server/agent/store.ts": "c1f6f74c8fca98e34af434e1fcc557071aa3ec6d35f63d0c8e8d430865d136dd",
+      "src/lib/server/agent/types.ts": "b229f3378f866902e4ded90b8329d2b2fc33328cc100028cf58e8593b96b4799",
+      "src/lib/server/agent/runtime.ts": "d0c5b435c585c2ddc71e31d4a92317b3652c4cdedce1f6d188d9a1a17d3d5f92",
+      "src/lib/server/learning/agent-repository.ts": "d5f74b5a0e458399014e8646ad0e58ee0ea4161704aa76cb9433ee8838390875"
+    },
+    "sdk": {
+      "@langchain/langgraph": "1.5.0",
+      "@langchain/langgraph-checkpoint-sqlite": "1.1.0"
+    },
+    "method": "A1 AgentStore.createTask/claim/acceptEvent/release/control and A1 AgentRuntime.advance with deterministic synthetic decision and record service; no Provider or Learning scores.",
+    "syntheticOnly": true
+  },
+  "accountId": "synthetic-migration-owner",
+  "taskId": "synthetic-a1-waiting-task",
+  "task": {
+    "id": "synthetic-a1-waiting-task",
+    "accountId": "synthetic-migration-owner",
+    "scenario": "synthetic-a1-upgrade",
+    "resourceId": "synthetic-page",
+    "goal": "Preserve synthetic A1 waiting state across upgrade",
+    "scope": {
+      "record": "synthetic-only"
+    },
+    "status": "waiting",
+    "wait": {
+      "kind": "record",
+      "refId": "synthetic-record-2",
+      "message": "Waiting for synthetic application feedback"
+    },
+    "actions": [
+      {
+        "id": "synthetic-a1-waiting-task:1",
+        "tool": "synthetic.create",
+        "status": "succeeded",
+        "resultRef": {
+          "kind": "synthetic.record",
+          "id": "synthetic-record-1"
+        },
+        "summary": "Synthetic record persisted",
+        "reason": "Deterministic migration fixture",
+        "createdAt": "2026-10-13T07:07:03.095Z"
+      },
+      {
+        "id": "synthetic-a1-waiting-task:2",
+        "tool": "synthetic.create",
+        "status": "succeeded",
+        "resultRef": {
+          "kind": "synthetic.record",
+          "id": "synthetic-record-2"
+        },
+        "summary": "Synthetic record persisted",
+        "reason": "Deterministic migration fixture",
+        "createdAt": "2026-10-13T07:07:03.126Z"
+      }
+    ],
+    "budget": {
+      "maxCalls": 16,
+      "maxInputChars": 48000,
+      "maxOutputTokens": 8000,
+      "maxComputeMs": 600000,
+      "maxSteps": 16,
+      "maxNoProgress": 3
+    },
+    "usage": {
+      "calls": 2,
+      "inputTokens": null,
+      "outputTokens": null,
+      "unknownUsageCalls": 1,
+      "computeMs": 75,
+      "steps": 2
+    },
+    "createdAt": "2026-10-13T07:07:03.058Z",
+    "updatedAt": "2026-10-13T07:07:03.135Z"
+  },
+  "consumed": {
+    "id": "synthetic-event-consumed",
+    "kind": "submitted",
+    "refId": "synthetic-record-1"
+  },
+  "pending": {
+    "id": "synthetic-event-pending",
+    "kind": "submitted",
+    "refId": "synthetic-record-2"
+  },
+  "records": [
+    {
+      "id": "synthetic-record-1",
+      "actionId": "synthetic-a1-waiting-task:1",
+      "content": "Migration fixture only; not a student result.",
+      "feedback": "synthetic feedback saved"
+    },
+    {
+      "id": "synthetic-record-2",
+      "actionId": "synthetic-a1-waiting-task:2",
+      "content": "Migration fixture only; not a student result.",
+      "feedback": "synthetic second feedback saved"
+    }
+  ],
+  "tasks": {
+    "schema": [
+      {
+        "type": "table",
+        "name": "agent_actions",
+        "sql": "CREATE TABLE agent_actions (\n        id TEXT PRIMARY KEY, task_id TEXT NOT NULL REFERENCES agent_tasks(id), step INTEGER NOT NULL,\n        tool TEXT NOT NULL, args_json TEXT NOT NULL, status TEXT NOT NULL,\n        ref_json TEXT, wait_json TEXT, summary TEXT NOT NULL DEFAULT '', reason TEXT, created_at TEXT NOT NULL,\n        UNIQUE(task_id, step)\n      )"
+      },
+      {
+        "type": "table",
+        "name": "agent_calls",
+        "sql": "CREATE TABLE agent_calls (\n        id TEXT PRIMARY KEY, task_id TEXT NOT NULL REFERENCES agent_tasks(id), action_id TEXT NOT NULL,\n        kind TEXT NOT NULL, model TEXT, input_chars INTEGER NOT NULL, output_limit INTEGER NOT NULL,\n        status TEXT NOT NULL, input_tokens INTEGER, output_tokens INTEGER, created_at TEXT NOT NULL\n      )"
+      },
+      {
+        "type": "table",
+        "name": "agent_events",
+        "sql": "CREATE TABLE agent_events (\n        task_id TEXT NOT NULL REFERENCES agent_tasks(id), id TEXT NOT NULL,\n        event_json TEXT NOT NULL, event_kind TEXT NOT NULL, ref_id TEXT, consumed INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL,\n        PRIMARY KEY(task_id,id)\n      )"
+      },
+      {
+        "type": "table",
+        "name": "agent_tasks",
+        "sql": "CREATE TABLE agent_tasks (\n        id TEXT PRIMARY KEY, account_id TEXT NOT NULL, scenario TEXT NOT NULL, resource_id TEXT NOT NULL,\n        goal TEXT NOT NULL, scope_json TEXT NOT NULL, status TEXT NOT NULL, wait_json TEXT, end_reason TEXT,\n        budget_json TEXT NOT NULL, compute_ms INTEGER NOT NULL DEFAULT 0, steps INTEGER NOT NULL DEFAULT 0,\n        lease TEXT, lease_until INTEGER NOT NULL DEFAULT 0, lease_started_at INTEGER NOT NULL DEFAULT 0,\n        created_at TEXT NOT NULL, updated_at TEXT NOT NULL\n      )"
+      },
+      {
+        "type": "index",
+        "name": "agent_event_business_identity",
+        "sql": "CREATE UNIQUE INDEX agent_event_business_identity ON agent_events(task_id,event_kind,ref_id) WHERE ref_id IS NOT NULL"
+      },
+      {
+        "type": "index",
+        "name": "agent_task_account",
+        "sql": "CREATE INDEX agent_task_account ON agent_tasks(account_id, resource_id, created_at)"
+      }
+    ],
+    "rows": {
+      "agent_actions": [
+        {
+          "id": "synthetic-a1-waiting-task:1",
+          "task_id": "synthetic-a1-waiting-task",
+          "step": 1,
+          "tool": "synthetic.create",
+          "args_json": "{}",
+          "status": "succeeded",
+          "ref_json": "{\"kind\":\"synthetic.record\",\"id\":\"synthetic-record-1\"}",
+          "wait_json": "{\"kind\":\"record\",\"refId\":\"synthetic-record-1\",\"message\":\"Waiting for synthetic application feedback\"}",
+          "summary": "Synthetic record persisted",
+          "reason": "Deterministic migration fixture",
+          "created_at": "2026-10-13T07:07:03.095Z"
+        },
+        {
+          "id": "synthetic-a1-waiting-task:2",
+          "task_id": "synthetic-a1-waiting-task",
+          "step": 2,
+          "tool": "synthetic.create",
+          "args_json": "{}",
+          "status": "succeeded",
+          "ref_json": "{\"kind\":\"synthetic.record\",\"id\":\"synthetic-record-2\"}",
+          "wait_json": "{\"kind\":\"record\",\"refId\":\"synthetic-record-2\",\"message\":\"Waiting for synthetic application feedback\"}",
+          "summary": "Synthetic record persisted",
+          "reason": "Deterministic migration fixture",
+          "created_at": "2026-10-13T07:07:03.126Z"
+        }
+      ],
+      "agent_calls": [
+        {
+          "id": "8a373c7e-6d05-4d83-919e-fc0427ebfe87",
+          "task_id": "synthetic-a1-waiting-task",
+          "action_id": "decision:1",
+          "kind": "decision",
+          "model": "mock-migration-only",
+          "input_chars": 100,
+          "output_limit": 200,
+          "status": "succeeded",
+          "input_tokens": 10,
+          "output_tokens": 5,
+          "created_at": "2026-10-13T07:07:03.091Z"
+        },
+        {
+          "id": "a0890f6c-7ce0-4239-876e-10e6c08aba73",
+          "task_id": "synthetic-a1-waiting-task",
+          "action_id": "decision:2",
+          "kind": "decision",
+          "model": "mock-migration-only",
+          "input_chars": 100,
+          "output_limit": 200,
+          "status": "succeeded",
+          "input_tokens": null,
+          "output_tokens": null,
+          "created_at": "2026-10-13T07:07:03.126Z"
+        }
+      ],
+      "agent_events": [
+        {
+          "task_id": "synthetic-a1-waiting-task",
+          "id": "synthetic-event-consumed",
+          "event_json": "{\"id\":\"synthetic-event-consumed\",\"kind\":\"submitted\",\"refId\":\"synthetic-record-1\"}",
+          "event_kind": "submitted",
+          "ref_id": "synthetic-record-1",
+          "consumed": 1,
+          "created_at": "2026-10-13T07:07:03.117Z"
+        },
+        {
+          "task_id": "synthetic-a1-waiting-task",
+          "id": "synthetic-event-pending",
+          "event_json": "{\"id\":\"synthetic-event-pending\",\"kind\":\"submitted\",\"refId\":\"synthetic-record-2\"}",
+          "event_kind": "submitted",
+          "ref_id": "synthetic-record-2",
+          "consumed": 0,
+          "created_at": "2026-10-13T07:07:03.134Z"
+        }
+      ],
+      "agent_tasks": [
+        {
+          "id": "synthetic-a1-waiting-task",
+          "account_id": "synthetic-migration-owner",
+          "scenario": "synthetic-a1-upgrade",
+          "resource_id": "synthetic-page",
+          "goal": "Preserve synthetic A1 waiting state across upgrade",
+          "scope_json": "{\"record\":\"synthetic-only\"}",
+          "status": "waiting",
+          "wait_json": "{\"kind\":\"record\",\"refId\":\"synthetic-record-2\",\"message\":\"Waiting for synthetic application feedback\"}",
+          "end_reason": null,
+          "budget_json": "{\"maxCalls\":16,\"maxInputChars\":48000,\"maxOutputTokens\":8000,\"maxComputeMs\":600000,\"maxSteps\":16,\"maxNoProgress\":3}",
+          "compute_ms": 75,
+          "steps": 2,
+          "lease": null,
+          "lease_until": 0,
+          "lease_started_at": 0,
+          "created_at": "2026-10-13T07:07:03.058Z",
+          "updated_at": "2026-10-13T07:07:03.135Z"
+        },
+        {
+          "id": "synthetic-a1-paused-task",
+          "account_id": "synthetic-migration-owner",
+          "scenario": "synthetic-a1-upgrade",
+          "resource_id": "synthetic-page",
+          "goal": "Paused task survives migration",
+          "scope_json": "{\"record\":\"synthetic-only\"}",
+          "status": "paused",
+          "wait_json": null,
+          "end_reason": null,
+          "budget_json": "{\"maxCalls\":16,\"maxInputChars\":48000,\"maxOutputTokens\":8000,\"maxComputeMs\":600000,\"maxSteps\":16,\"maxNoProgress\":3}",
+          "compute_ms": 0,
+          "steps": 0,
+          "lease": null,
+          "lease_until": 0,
+          "lease_started_at": 0,
+          "created_at": "2026-10-13T07:07:03.135Z",
+          "updated_at": "2026-10-13T07:07:03.135Z"
+        }
+      ]
+    }
+  },
+  "checkpoints": {
+    "schema": [
+      {
+        "type": "table",
+        "name": "checkpoints",
+        "sql": "CREATE TABLE checkpoints (\n  thread_id TEXT NOT NULL,\n  checkpoint_ns TEXT NOT NULL DEFAULT '',\n  checkpoint_id TEXT NOT NULL,\n  parent_checkpoint_id TEXT,\n  type TEXT,\n  checkpoint BLOB,\n  metadata BLOB,\n  PRIMARY KEY (thread_id, checkpoint_ns, checkpoint_id)\n)"
+      },
+      {
+        "type": "table",
+        "name": "writes",
+        "sql": "CREATE TABLE writes (\n  thread_id TEXT NOT NULL,\n  checkpoint_ns TEXT NOT NULL DEFAULT '',\n  checkpoint_id TEXT NOT NULL,\n  task_id TEXT NOT NULL,\n  task_path TEXT NOT NULL DEFAULT '',\n  idx INTEGER NOT NULL,\n  channel TEXT NOT NULL,\n  type TEXT,\n  value BLOB,\n  PRIMARY KEY (thread_id, checkpoint_ns, checkpoint_id, task_id, idx)\n)"
+      }
+    ],
+    "rows": {
+      "checkpoints": [
+        {
+          "thread_id": "synthetic-a1-waiting-task",
+          "checkpoint_ns": "",
+          "checkpoint_id": "1f1c6d4b-1095-6020-ffff-1b2b80a405b1",
+          "parent_checkpoint_id": null,
+          "type": "json",
+          "checkpoint": {
+            "base64": "eyJ2Ijo0LCJpZCI6IjFmMWM2ZDRiLTEwOTUtNjAyMC1mZmZmLTFiMmI4MGE0MDViMSIsInRzIjoiMjAyNi0xMC0xM1QwNzowNzowMy4wNzRaIiwiY2hhbm5lbF92YWx1ZXMiOnsiX19zdGFydF9fIjp7InRhc2tJZCI6InN5bnRoZXRpYy1hMS13YWl0aW5nLXRhc2siLCJhY3Rpb25JZCI6IiIsIm5leHQiOiJkZWNpZGUifSwiX19wcmVnZWxfdGFza3MiOltdfSwiY2hhbm5lbF92ZXJzaW9ucyI6eyJfX3N0YXJ0X18iOjF9LCJ2ZXJzaW9uc19zZWVuIjp7Il9faW5wdXRfXyI6e319fQ=="
+          },
+          "metadata": {
+            "base64": "eyJzb3VyY2UiOiJpbnB1dCIsInN0ZXAiOi0xLCJwYXJlbnRzIjp7fX0="
+          }
+        },
+        {
+          "thread_id": "synthetic-a1-waiting-task",
+          "checkpoint_ns": "",
+          "checkpoint_id": "1f1c6d4b-10b7-6300-8000-4426a0b6d882",
+          "parent_checkpoint_id": "1f1c6d4b-1095-6020-ffff-1b2b80a405b1",
+          "type": "json",
+          "checkpoint": {
+            "base64": "eyJ2Ijo0LCJpZCI6IjFmMWM2ZDRiLTEwYjctNjMwMC04MDAwLTQ0MjZhMGI2ZDg4MiIsInRzIjoiMjAyNi0xMC0xM1QwNzowNzowMy4wODhaIiwiY2hhbm5lbF92YWx1ZXMiOnsidGFza0lkIjoic3ludGhldGljLWExLXdhaXRpbmctdGFzayIsImFjdGlvbklkIjoiIiwibmV4dCI6ImRlY2lkZSIsIl9fcHJlZ2VsX3Rhc2tzIjpbXSwiYnJhbmNoOnRvOmRlY2lkZSI6bnVsbH0sImNoYW5uZWxfdmVyc2lvbnMiOnsiX19zdGFydF9fIjoyLCJ0YXNrSWQiOjIsImFjdGlvbklkIjoyLCJuZXh0IjoyLCJicmFuY2g6dG86ZGVjaWRlIjoyfSwidmVyc2lvbnNfc2VlbiI6eyJfX2lucHV0X18iOnt9LCJfX3N0YXJ0X18iOnsiX19zdGFydF9fIjoxfX19"
+          },
+          "metadata": {
+            "base64": "eyJzb3VyY2UiOiJsb29wIiwic3RlcCI6MCwicGFyZW50cyI6e319"
+          }
+        },
+        {
+          "thread_id": "synthetic-a1-waiting-task",
+          "checkpoint_ns": "",
+          "checkpoint_id": "1f1c6d4b-10cf-69a0-8001-fbae1143c219",
+          "parent_checkpoint_id": "1f1c6d4b-10b7-6300-8000-4426a0b6d882",
+          "type": "json",
+          "checkpoint": {
+            "base64": "eyJ2Ijo0LCJpZCI6IjFmMWM2ZDRiLTEwY2YtNjlhMC04MDAxLWZiYWUxMTQzYzIxOSIsInRzIjoiMjAyNi0xMC0xM1QwNzowNzowMy4wOThaIiwiY2hhbm5lbF92YWx1ZXMiOnsidGFza0lkIjoic3ludGhldGljLWExLXdhaXRpbmctdGFzayIsImFjdGlvbklkIjoic3ludGhldGljLWExLXdhaXRpbmctdGFzazoxIiwibmV4dCI6ImV4ZWN1dGUiLCJfX3ByZWdlbF90YXNrcyI6W10sImJyYW5jaDp0bzpleGVjdXRlIjoiZGVjaWRlIn0sImNoYW5uZWxfdmVyc2lvbnMiOnsiX19zdGFydF9fIjoyLCJ0YXNrSWQiOjIsImFjdGlvbklkIjozLCJuZXh0IjozLCJicmFuY2g6dG86ZGVjaWRlIjozLCJicmFuY2g6dG86ZXhlY3V0ZSI6M30sInZlcnNpb25zX3NlZW4iOnsiX19pbnB1dF9fIjp7fSwiX19zdGFydF9fIjp7Il9fc3RhcnRfXyI6MX0sImRlY2lkZSI6eyJicmFuY2g6dG86ZGVjaWRlIjoyfX19"
+          },
+          "metadata": {
+            "base64": "eyJzb3VyY2UiOiJsb29wIiwic3RlcCI6MSwicGFyZW50cyI6e319"
+          }
+        },
+        {
+          "thread_id": "synthetic-a1-waiting-task",
+          "checkpoint_ns": "",
+          "checkpoint_id": "1f1c6d4b-10e3-6220-8002-afb6abd3bcd3",
+          "parent_checkpoint_id": "1f1c6d4b-10cf-69a0-8001-fbae1143c219",
+          "type": "json",
+          "checkpoint": {
+            "base64": "eyJ2Ijo0LCJpZCI6IjFmMWM2ZDRiLTEwZTMtNjIyMC04MDAyLWFmYjZhYmQzYmNkMyIsInRzIjoiMjAyNi0xMC0xM1QwNzowNzowMy4xMDZaIiwiY2hhbm5lbF92YWx1ZXMiOnsidGFza0lkIjoic3ludGhldGljLWExLXdhaXRpbmctdGFzayIsImFjdGlvbklkIjoic3ludGhldGljLWExLXdhaXRpbmctdGFzazoxIiwibmV4dCI6IndhaXQiLCJfX3ByZWdlbF90YXNrcyI6W10sImJyYW5jaDp0bzp3YWl0IjoiZXhlY3V0ZSJ9LCJjaGFubmVsX3ZlcnNpb25zIjp7Il9fc3RhcnRfXyI6MiwidGFza0lkIjoyLCJhY3Rpb25JZCI6MywibmV4dCI6NCwiYnJhbmNoOnRvOmRlY2lkZSI6MywiYnJhbmNoOnRvOmV4ZWN1dGUiOjQsImJyYW5jaDp0bzp3YWl0Ijo0fSwidmVyc2lvbnNfc2VlbiI6eyJfX2lucHV0X18iOnt9LCJfX3N0YXJ0X18iOnsiX19zdGFydF9fIjoxfSwiZGVjaWRlIjp7ImJyYW5jaDp0bzpkZWNpZGUiOjJ9LCJleGVjdXRlIjp7ImJyYW5jaDp0bzpleGVjdXRlIjozfX19"
+          },
+          "metadata": {
+            "base64": "eyJzb3VyY2UiOiJsb29wIiwic3RlcCI6MiwicGFyZW50cyI6e319"
+          }
+        },
+        {
+          "thread_id": "synthetic-a1-waiting-task",
+          "checkpoint_ns": "",
+          "checkpoint_id": "1f1c6d4b-110c-6a30-8003-9206d3e39c08",
+          "parent_checkpoint_id": "1f1c6d4b-10e3-6220-8002-afb6abd3bcd3",
+          "type": "json",
+          "checkpoint": {
+            "base64": "eyJ2Ijo0LCJpZCI6IjFmMWM2ZDRiLTExMGMtNmEzMC04MDAzLTkyMDZkM2UzOWMwOCIsInRzIjoiMjAyNi0xMC0xM1QwNzowNzowMy4xMjNaIiwiY2hhbm5lbF92YWx1ZXMiOnsidGFza0lkIjoic3ludGhldGljLWExLXdhaXRpbmctdGFzayIsImFjdGlvbklkIjoic3ludGhldGljLWExLXdhaXRpbmctdGFzazoxIiwibmV4dCI6ImRlY2lkZSIsIl9fcHJlZ2VsX3Rhc2tzIjpbXSwiYnJhbmNoOnRvOmRlY2lkZSI6bnVsbH0sImNoYW5uZWxfdmVyc2lvbnMiOnsiX19zdGFydF9fIjoyLCJ0YXNrSWQiOjIsImFjdGlvbklkIjozLCJuZXh0Ijo1LCJicmFuY2g6dG86ZGVjaWRlIjo1LCJicmFuY2g6dG86ZXhlY3V0ZSI6NCwiYnJhbmNoOnRvOndhaXQiOjV9LCJ2ZXJzaW9uc19zZWVuIjp7Il9faW5wdXRfXyI6e30sIl9fc3RhcnRfXyI6eyJfX3N0YXJ0X18iOjF9LCJkZWNpZGUiOnsiYnJhbmNoOnRvOmRlY2lkZSI6Mn0sImV4ZWN1dGUiOnsiYnJhbmNoOnRvOmV4ZWN1dGUiOjN9LCJfX2ludGVycnVwdF9fIjp7InRhc2tJZCI6MiwiYWN0aW9uSWQiOjMsIm5leHQiOjQsIl9fc3RhcnRfXyI6MiwiYnJhbmNoOnRvOmRlY2lkZSI6MywiYnJhbmNoOnRvOmV4ZWN1dGUiOjQsImJyYW5jaDp0bzp3YWl0Ijo0fSwid2FpdCI6eyJicmFuY2g6dG86d2FpdCI6NH19fQ=="
+          },
+          "metadata": {
+            "base64": "eyJzb3VyY2UiOiJsb29wIiwic3RlcCI6MywicGFyZW50cyI6e319"
+          }
+        },
+        {
+          "thread_id": "synthetic-a1-waiting-task",
+          "checkpoint_ns": "",
+          "checkpoint_id": "1f1c6d4b-1118-6d80-8004-9a420f212594",
+          "parent_checkpoint_id": "1f1c6d4b-110c-6a30-8003-9206d3e39c08",
+          "type": "json",
+          "checkpoint": {
+            "base64": "eyJ2Ijo0LCJpZCI6IjFmMWM2ZDRiLTExMTgtNmQ4MC04MDA0LTlhNDIwZjIxMjU5NCIsInRzIjoiMjAyNi0xMC0xM1QwNzowNzowMy4xMjhaIiwiY2hhbm5lbF92YWx1ZXMiOnsidGFza0lkIjoic3ludGhldGljLWExLXdhaXRpbmctdGFzayIsImFjdGlvbklkIjoic3ludGhldGljLWExLXdhaXRpbmctdGFzazoyIiwibmV4dCI6ImV4ZWN1dGUiLCJfX3ByZWdlbF90YXNrcyI6W10sImJyYW5jaDp0bzpleGVjdXRlIjoiZGVjaWRlIn0sImNoYW5uZWxfdmVyc2lvbnMiOnsiX19zdGFydF9fIjoyLCJ0YXNrSWQiOjIsImFjdGlvbklkIjo2LCJuZXh0Ijo2LCJicmFuY2g6dG86ZGVjaWRlIjo2LCJicmFuY2g6dG86ZXhlY3V0ZSI6NiwiYnJhbmNoOnRvOndhaXQiOjV9LCJ2ZXJzaW9uc19zZWVuIjp7Il9faW5wdXRfXyI6e30sIl9fc3RhcnRfXyI6eyJfX3N0YXJ0X18iOjF9LCJkZWNpZGUiOnsiYnJhbmNoOnRvOmRlY2lkZSI6NX0sImV4ZWN1dGUiOnsiYnJhbmNoOnRvOmV4ZWN1dGUiOjN9LCJfX2ludGVycnVwdF9fIjp7InRhc2tJZCI6MiwiYWN0aW9uSWQiOjMsIm5leHQiOjQsIl9fc3RhcnRfXyI6MiwiYnJhbmNoOnRvOmRlY2lkZSI6MywiYnJhbmNoOnRvOmV4ZWN1dGUiOjQsImJyYW5jaDp0bzp3YWl0Ijo0fSwid2FpdCI6eyJicmFuY2g6dG86d2FpdCI6NH19fQ=="
+          },
+          "metadata": {
+            "base64": "eyJzb3VyY2UiOiJsb29wIiwic3RlcCI6NCwicGFyZW50cyI6e319"
+          }
+        },
+        {
+          "thread_id": "synthetic-a1-waiting-task",
+          "checkpoint_ns": "",
+          "checkpoint_id": "1f1c6d4b-1122-69c1-8005-01e1f7b684f6",
+          "parent_checkpoint_id": "1f1c6d4b-1118-6d80-8004-9a420f212594",
+          "type": "json",
+          "checkpoint": {
+            "base64": "eyJ2Ijo0LCJpZCI6IjFmMWM2ZDRiLTExMjItNjljMS04MDA1LTAxZTFmN2I2ODRmNiIsInRzIjoiMjAyNi0xMC0xM1QwNzowNzowMy4xMzJaIiwiY2hhbm5lbF92YWx1ZXMiOnsidGFza0lkIjoic3ludGhldGljLWExLXdhaXRpbmctdGFzayIsImFjdGlvbklkIjoic3ludGhldGljLWExLXdhaXRpbmctdGFzazoyIiwibmV4dCI6IndhaXQiLCJfX3ByZWdlbF90YXNrcyI6W10sImJyYW5jaDp0bzp3YWl0IjoiZXhlY3V0ZSJ9LCJjaGFubmVsX3ZlcnNpb25zIjp7Il9fc3RhcnRfXyI6MiwidGFza0lkIjoyLCJhY3Rpb25JZCI6NiwibmV4dCI6NywiYnJhbmNoOnRvOmRlY2lkZSI6NiwiYnJhbmNoOnRvOmV4ZWN1dGUiOjcsImJyYW5jaDp0bzp3YWl0Ijo3fSwidmVyc2lvbnNfc2VlbiI6eyJfX2lucHV0X18iOnt9LCJfX3N0YXJ0X18iOnsiX19zdGFydF9fIjoxfSwiZGVjaWRlIjp7ImJyYW5jaDp0bzpkZWNpZGUiOjV9LCJleGVjdXRlIjp7ImJyYW5jaDp0bzpleGVjdXRlIjo2fSwiX19pbnRlcnJ1cHRfXyI6eyJ0YXNrSWQiOjIsImFjdGlvbklkIjozLCJuZXh0Ijo0LCJfX3N0YXJ0X18iOjIsImJyYW5jaDp0bzpkZWNpZGUiOjMsImJyYW5jaDp0bzpleGVjdXRlIjo0LCJicmFuY2g6dG86d2FpdCI6NH0sIndhaXQiOnsiYnJhbmNoOnRvOndhaXQiOjR9fX0="
+          },
+          "metadata": {
+            "base64": "eyJzb3VyY2UiOiJsb29wIiwic3RlcCI6NSwicGFyZW50cyI6e319"
+          }
+        }
+      ],
+      "writes": [
+        {
+          "thread_id": "synthetic-a1-waiting-task",
+          "checkpoint_ns": "",
+          "checkpoint_id": "1f1c6d4b-1095-6020-ffff-1b2b80a405b1",
+          "task_id": "c1af3d12-0b52-5654-81d2-f753781e2ccc",
+          "task_path": "~__pregel_pull, __start__",
+          "idx": 0,
+          "channel": "taskId",
+          "type": "json",
+          "value": {
+            "base64": "InN5bnRoZXRpYy1hMS13YWl0aW5nLXRhc2si"
+          }
+        },
+        {
+          "thread_id": "synthetic-a1-waiting-task",
+          "checkpoint_ns": "",
+          "checkpoint_id": "1f1c6d4b-1095-6020-ffff-1b2b80a405b1",
+          "task_id": "c1af3d12-0b52-5654-81d2-f753781e2ccc",
+          "task_path": "~__pregel_pull, __start__",
+          "idx": 1,
+          "channel": "actionId",
+          "type": "json",
+          "value": {
+            "base64": "IiI="
+          }
+        },
+        {
+          "thread_id": "synthetic-a1-waiting-task",
+          "checkpoint_ns": "",
+          "checkpoint_id": "1f1c6d4b-1095-6020-ffff-1b2b80a405b1",
+          "task_id": "c1af3d12-0b52-5654-81d2-f753781e2ccc",
+          "task_path": "~__pregel_pull, __start__",
+          "idx": 2,
+          "channel": "next",
+          "type": "json",
+          "value": {
+            "base64": "ImRlY2lkZSI="
+          }
+        },
+        {
+          "thread_id": "synthetic-a1-waiting-task",
+          "checkpoint_ns": "",
+          "checkpoint_id": "1f1c6d4b-1095-6020-ffff-1b2b80a405b1",
+          "task_id": "c1af3d12-0b52-5654-81d2-f753781e2ccc",
+          "task_path": "~__pregel_pull, __start__",
+          "idx": 3,
+          "channel": "branch:to:decide",
+          "type": "json",
+          "value": {
+            "base64": "bnVsbA=="
+          }
+        },
+        {
+          "thread_id": "synthetic-a1-waiting-task",
+          "checkpoint_ns": "",
+          "checkpoint_id": "1f1c6d4b-10b7-6300-8000-4426a0b6d882",
+          "task_id": "bb7b52d3-aeed-59b3-bb46-489c8fbeed91",
+          "task_path": "~__pregel_pull, decide",
+          "idx": 0,
+          "channel": "actionId",
+          "type": "json",
+          "value": {
+            "base64": "InN5bnRoZXRpYy1hMS13YWl0aW5nLXRhc2s6MSI="
+          }
+        },
+        {
+          "thread_id": "synthetic-a1-waiting-task",
+          "checkpoint_ns": "",
+          "checkpoint_id": "1f1c6d4b-10b7-6300-8000-4426a0b6d882",
+          "task_id": "bb7b52d3-aeed-59b3-bb46-489c8fbeed91",
+          "task_path": "~__pregel_pull, decide",
+          "idx": 1,
+          "channel": "next",
+          "type": "json",
+          "value": {
+            "base64": "ImV4ZWN1dGUi"
+          }
+        },
+        {
+          "thread_id": "synthetic-a1-waiting-task",
+          "checkpoint_ns": "",
+          "checkpoint_id": "1f1c6d4b-10b7-6300-8000-4426a0b6d882",
+          "task_id": "bb7b52d3-aeed-59b3-bb46-489c8fbeed91",
+          "task_path": "~__pregel_pull, decide",
+          "idx": 2,
+          "channel": "branch:to:execute",
+          "type": "json",
+          "value": {
+            "base64": "ImRlY2lkZSI="
+          }
+        },
+        {
+          "thread_id": "synthetic-a1-waiting-task",
+          "checkpoint_ns": "",
+          "checkpoint_id": "1f1c6d4b-10cf-69a0-8001-fbae1143c219",
+          "task_id": "c17810de-a8cf-534c-99ed-2607f9869321",
+          "task_path": "~__pregel_pull, execute",
+          "idx": 0,
+          "channel": "next",
+          "type": "json",
+          "value": {
+            "base64": "IndhaXQi"
+          }
+        },
+        {
+          "thread_id": "synthetic-a1-waiting-task",
+          "checkpoint_ns": "",
+          "checkpoint_id": "1f1c6d4b-10cf-69a0-8001-fbae1143c219",
+          "task_id": "c17810de-a8cf-534c-99ed-2607f9869321",
+          "task_path": "~__pregel_pull, execute",
+          "idx": 1,
+          "channel": "branch:to:wait",
+          "type": "json",
+          "value": {
+            "base64": "ImV4ZWN1dGUi"
+          }
+        },
+        {
+          "thread_id": "synthetic-a1-waiting-task",
+          "checkpoint_ns": "",
+          "checkpoint_id": "1f1c6d4b-10e3-6220-8002-afb6abd3bcd3",
+          "task_id": "d9f606f1-11b0-5bc2-9cb8-aa0a410e85d5",
+          "task_path": "~__pregel_pull, wait",
+          "idx": -3,
+          "channel": "__interrupt__",
+          "type": "json",
+          "value": {
+            "base64": "eyJpZCI6ImI2MWY3Y2Y1Y2RjMWZiYWM4OTRjODJjMzVkYmExOWFkIiwidmFsdWUiOnsidGFza0lkIjoic3ludGhldGljLWExLXdhaXRpbmctdGFzayJ9fQ=="
+          }
+        },
+        {
+          "thread_id": "synthetic-a1-waiting-task",
+          "checkpoint_ns": "",
+          "checkpoint_id": "1f1c6d4b-10e3-6220-8002-afb6abd3bcd3",
+          "task_id": "00000000-0000-0000-0000-000000000000",
+          "task_path": "",
+          "idx": -4,
+          "channel": "__resume__",
+          "type": "json",
+          "value": {
+            "base64": "InN5bnRoZXRpYy1ldmVudC1jb25zdW1lZCI="
+          }
+        },
+        {
+          "thread_id": "synthetic-a1-waiting-task",
+          "checkpoint_ns": "",
+          "checkpoint_id": "1f1c6d4b-10e3-6220-8002-afb6abd3bcd3",
+          "task_id": "d9f606f1-11b0-5bc2-9cb8-aa0a410e85d5",
+          "task_path": "~__pregel_pull, wait",
+          "idx": -4,
+          "channel": "__resume__",
+          "type": "json",
+          "value": {
+            "base64": "WyJzeW50aGV0aWMtZXZlbnQtY29uc3VtZWQiXQ=="
+          }
+        },
+        {
+          "thread_id": "synthetic-a1-waiting-task",
+          "checkpoint_ns": "",
+          "checkpoint_id": "1f1c6d4b-10e3-6220-8002-afb6abd3bcd3",
+          "task_id": "d9f606f1-11b0-5bc2-9cb8-aa0a410e85d5",
+          "task_path": "~__pregel_pull, wait",
+          "idx": 1,
+          "channel": "next",
+          "type": "json",
+          "value": {
+            "base64": "ImRlY2lkZSI="
+          }
+        },
+        {
+          "thread_id": "synthetic-a1-waiting-task",
+          "checkpoint_ns": "",
+          "checkpoint_id": "1f1c6d4b-10e3-6220-8002-afb6abd3bcd3",
+          "task_id": "d9f606f1-11b0-5bc2-9cb8-aa0a410e85d5",
+          "task_path": "~__pregel_pull, wait",
+          "idx": 2,
+          "channel": "branch:to:decide",
+          "type": "json",
+          "value": {
+            "base64": "bnVsbA=="
+          }
+        },
+        {
+          "thread_id": "synthetic-a1-waiting-task",
+          "checkpoint_ns": "",
+          "checkpoint_id": "1f1c6d4b-110c-6a30-8003-9206d3e39c08",
+          "task_id": "6d72488a-df4a-59ef-b7bd-b1d3694c7c5d",
+          "task_path": "~__pregel_pull, decide",
+          "idx": 0,
+          "channel": "actionId",
+          "type": "json",
+          "value": {
+            "base64": "InN5bnRoZXRpYy1hMS13YWl0aW5nLXRhc2s6MiI="
+          }
+        },
+        {
+          "thread_id": "synthetic-a1-waiting-task",
+          "checkpoint_ns": "",
+          "checkpoint_id": "1f1c6d4b-110c-6a30-8003-9206d3e39c08",
+          "task_id": "6d72488a-df4a-59ef-b7bd-b1d3694c7c5d",
+          "task_path": "~__pregel_pull, decide",
+          "idx": 1,
+          "channel": "next",
+          "type": "json",
+          "value": {
+            "base64": "ImV4ZWN1dGUi"
+          }
+        },
+        {
+          "thread_id": "synthetic-a1-waiting-task",
+          "checkpoint_ns": "",
+          "checkpoint_id": "1f1c6d4b-110c-6a30-8003-9206d3e39c08",
+          "task_id": "6d72488a-df4a-59ef-b7bd-b1d3694c7c5d",
+          "task_path": "~__pregel_pull, decide",
+          "idx": 2,
+          "channel": "branch:to:execute",
+          "type": "json",
+          "value": {
+            "base64": "ImRlY2lkZSI="
+          }
+        },
+        {
+          "thread_id": "synthetic-a1-waiting-task",
+          "checkpoint_ns": "",
+          "checkpoint_id": "1f1c6d4b-1118-6d80-8004-9a420f212594",
+          "task_id": "eccd57fe-6199-5129-a620-fbb137e60a89",
+          "task_path": "~__pregel_pull, execute",
+          "idx": 0,
+          "channel": "next",
+          "type": "json",
+          "value": {
+            "base64": "IndhaXQi"
+          }
+        },
+        {
+          "thread_id": "synthetic-a1-waiting-task",
+          "checkpoint_ns": "",
+          "checkpoint_id": "1f1c6d4b-1118-6d80-8004-9a420f212594",
+          "task_id": "eccd57fe-6199-5129-a620-fbb137e60a89",
+          "task_path": "~__pregel_pull, execute",
+          "idx": 1,
+          "channel": "branch:to:wait",
+          "type": "json",
+          "value": {
+            "base64": "ImV4ZWN1dGUi"
+          }
+        },
+        {
+          "thread_id": "synthetic-a1-waiting-task",
+          "checkpoint_ns": "",
+          "checkpoint_id": "1f1c6d4b-1122-69c1-8005-01e1f7b684f6",
+          "task_id": "172de7ee-5e74-5338-a6f5-97263b60b108",
+          "task_path": "~__pregel_pull, wait",
+          "idx": -3,
+          "channel": "__interrupt__",
+          "type": "json",
+          "value": {
+            "base64": "eyJpZCI6ImRhNzFhMmQ4MzE5YWJkNmJhN2NjMzY4MjY4ZjlkNWQ2IiwidmFsdWUiOnsidGFza0lkIjoic3ludGhldGljLWExLXdhaXRpbmctdGFzayJ9fQ=="
+          }
+        }
+      ]
+    }
+  },
+  "learningArtifactSchema": "CREATE TABLE IF NOT EXISTS learning_agent_artifacts (\n      id TEXT PRIMARY KEY, task_id TEXT NOT NULL, page_id TEXT NOT NULL, account_id TEXT NOT NULL,\n      kind TEXT NOT NULL, action_id TEXT NOT NULL, binding_hash TEXT NOT NULL,\n      material_ids TEXT NOT NULL, state TEXT NOT NULL, body_json TEXT, created_at TEXT NOT NULL,\n      UNIQUE(task_id,action_id)\n    );\n    CREATE INDEX IF NOT EXISTS learning_agent_artifacts_task ON learning_agent_artifacts(task_id,page_id);\n    CREATE TRIGGER IF NOT EXISTS learning_agent_material_removed AFTER UPDATE OF deleted_at ON learning_materials\n      WHEN NEW.deleted_at IS NOT NULL BEGIN\n      UPDATE learning_agent_artifacts SET state='invalidated',body_json=NULL WHERE page_id=NEW.page_id\n        AND EXISTS(SELECT 1 FROM json_each(material_ids) WHERE value=NEW.id);\n    END;\n    CREATE TRIGGER IF NOT EXISTS learning_agent_page_removed AFTER UPDATE OF deleted_at ON learning_pages\n      WHEN NEW.deleted_at IS NOT NULL BEGIN\n      DELETE FROM learning_agent_artifacts WHERE page_id=NEW.id;\n    END;"
+}

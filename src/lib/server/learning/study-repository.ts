@@ -264,4 +264,18 @@ export class LearningStudyRepository {
       return result;
     }).immediate();
   }
+  /** Append through the existing node edit/CAS contract. The caller owns explicit
+   * confirmation and its operation receipt; this never replaces a current note. */
+  appendNote(pageId: string, input: { chapterId: string; nodeId: string; revision: number; text: string }) {
+    return this.db.transaction(() => {
+      this.page(pageId);
+      const current = this.node(pageId, input.chapterId, input.nodeId);
+      if (current.chapter.revision !== input.revision) throw new LearningError(409, "framework_edit_conflict");
+      if (!input.text.trim()) throw new LearningError(400, "invalid_input");
+      const note = [current.node.note, input.text].filter(Boolean).join("\n\n");
+      if (note.length > 20000) throw new LearningError(413, "note_too_large");
+      return this.framework.edit(pageId, { kind: "node", chapterId: input.chapterId, nodeId: input.nodeId, revision: input.revision,
+        title: current.node.title, explanation: current.node.explanation, note });
+    }).immediate();
+  }
 }
