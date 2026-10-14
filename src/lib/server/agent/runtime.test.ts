@@ -260,6 +260,47 @@ describe("shared LangGraph execution with a non-Learning business scene", () => 
     expect(stopped.usage.unknownUsageCalls).toBe(1);
     expect(readFileSync(uncertain.dbPath).toString("latin1")).not.toContain("timeout body should not be saved");
   });
+  it("returns a definite proposal preparation failure to the bounded decision loop without approval or a write", async () => {
+    const write = vi.fn(async () => ({ summary: "must not execute" }));
+    const h = setup([{ tool: "synthetic.propose", args: {} }, { wait: { kind: "feedback", message: "Select a valid synthetic target" } }], { tools: {
+      "synthetic.propose": { description: "prepare a fixed authorized proposal", parameters: z.object({}).strict(), execute: write,
+        confirmation: async () => { throw new AgentFailure("known_failure", "PRIVATE_DIAGNOSTIC_DO_NOT_PERSIST", undefined, "synthetic_target_invalid: read the permitted navigation or ask the user to select a target"); } },
+    } });
+    const waiting = await h.runtime.advance("alice", h.task.id);
+    expect(waiting).toMatchObject({ status: "waiting", usage: { calls: 2 } });
+    expect(waiting.approval).toBeUndefined(); expect(waiting.recovery).toBeUndefined();
+    expect(waiting.actions).toHaveLength(1);
+    expect(waiting.actions[0]).toMatchObject({ status: "failed", summary: "synthetic_target_invalid: read the permitted navigation or ask the user to select a target" });
+    expect(h.decision.mock.calls[1][0].results[0]).toMatchObject({ status: "failed", value: { summary: waiting.actions[0].summary } });
+    expect(JSON.stringify(waiting)).not.toContain("PRIVATE_DIAGNOSTIC");
+    expect(h.store.database.prepare("SELECT count(*) AS count FROM agent_approvals").get()).toEqual({ count: 0 });
+    await h.runtime.advance("alice", h.task.id);
+    expect(h.decision).toHaveBeenCalledTimes(2); expect(write).not.toHaveBeenCalled();
+  });
+  it("stops repeated invalid proposal targets through the existing no-progress and cumulative call budget", async () => {
+    const write = vi.fn(async () => ({ summary: "must not execute" }));
+    const h = setup(Array.from({ length: 4 }, () => ({ tool: "synthetic.propose", args: {} })), { tools: {
+      "synthetic.propose": { description: "known invalid target", parameters: z.object({}).strict(), execute: write,
+        confirmation: async () => { throw new AgentFailure("known_failure", "synthetic_target_invalid"); } },
+    } });
+    const stopped = await h.runtime.advance("alice", h.task.id);
+    expect(stopped.status).toBe("budget_exhausted");
+    expect(stopped.actions).toHaveLength(stopped.budget.maxNoProgress);
+    expect(stopped.actions.every(action => action.status === "failed")).toBe(true);
+    expect(stopped.usage.calls).toBe(4); expect(stopped.approval).toBeUndefined();
+    expect(write).not.toHaveBeenCalled();
+  });
+  it.each(["forbidden", "source_changed", "unknown"] as const)("does not treat %s during preparation as a correctable address error", async code => {
+    const write = vi.fn(async () => ({ summary: "must not execute" }));
+    const h = setup([{ tool: "synthetic.propose", args: {} }], { tools: {
+      "synthetic.propose": { description: "invalid scope or uncertain preparation", parameters: z.object({}).strict(), execute: write,
+        confirmation: async () => { throw new AgentFailure(code, "private diagnostic"); } },
+    } });
+    const stopped = await h.runtime.advance("alice", h.task.id);
+    expect(stopped).toMatchObject({ status: "needs_attention", recovery: { kind: code === "unknown" ? "unknown" : "source_invalid" } });
+    expect(h.decision).toHaveBeenCalledTimes(1); expect(write).not.toHaveBeenCalled();
+    expect(stopped.approval).toBeUndefined();
+  });
   it.each(["known_failure", "unknown"] as const)("retains received usage for a %s response without changing its retry classification", async (code) => {
     const h = setup([]);
     h.decision.mockImplementation(async (_input, ctx) => ctx.call({ kind: "decision", inputChars: 30, maxOutputTokens: 20 }, async () => {

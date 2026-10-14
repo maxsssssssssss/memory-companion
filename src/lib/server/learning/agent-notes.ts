@@ -14,12 +14,16 @@ type TaskIdentity = Pick<AgentTask, "id" | "accountId" | "resourceId" | "scope">
 type NoteBody = { preview: LearningAgentNotePreview; written?: { nodeId: string; chapterId: string; revision: number; contentHash: string; noteHash: string; sourceFingerprint: string } };
 const taskVersion = (task: TaskIdentity) => task.version ?? 1;
 
-function currentTarget(learning: LearningRepository, task: TaskIdentity, chapterId: string, nodeId: string) {
+function currentTarget(learning: LearningRepository, task: TaskIdentity, chapterId: string, nodeId: string, existingPreview = false) {
   if (task.accountId !== learning.accountId) throw new AgentFailure("forbidden", "agent_account_forbidden");
   const scope = readLearningAgentScope(learning, task.resourceId, task.scope);
-  if (!scope.navigation.some(chapter => chapter.id === chapterId && chapter.nodes.some(node => node.id === nodeId))) throw new AgentFailure("forbidden", "agent_note_target_forbidden");
   const framework = new LearningFrameworkRepository(learning), chapter = framework.view(task.resourceId).chapters.find(c => c.id === chapterId), node = chapter?.nodes.find(n => n.id === nodeId);
-  if (!chapter || !node) throw new AgentFailure("known_failure", "agent_note_target_missing");
+  if (!chapter || !node) {
+    if (existingPreview) throw new AgentFailure("source_changed", "agent_note_target_changed");
+    throw new AgentFailure("known_failure", "agent_note_target_invalid", undefined,
+      "agent_note_target_invalid：笔记目标地址无效，尚未创建提案或写入笔记。请调用 learning.read_navigation 获取当前授权范围内真实的 chapterId/nodeId；不能把材料 ID 当作章节或知识点 ID。无可靠目标时请等待用户选择或取消。");
+  }
+  if (!scope.navigation.some(chapter => chapter.id === chapterId && chapter.nodes.some(node => node.id === nodeId))) throw new AgentFailure("forbidden", "agent_note_target_forbidden");
   for (const index of node.sources.keys()) framework.source(task.resourceId, chapterId, nodeId, index);
   return { scope, chapter, node };
 }
@@ -35,7 +39,7 @@ function previewRow(learning: LearningRepository, task: TaskIdentity, proposalId
  * the existing private note; read permission never becomes write permission. */
 export function readLearningAgentNotePreview(learning: LearningRepository, task: TaskIdentity, proposalId: string) {
   const { body } = previewRow(learning, task, proposalId), preview = body.preview;
-  const current = currentTarget(learning, task, preview.chapterId, preview.nodeId);
+  const current = currentTarget(learning, task, preview.chapterId, preview.nodeId, true);
   if (!body.written && (current.chapter.revision !== preview.targetRevision || frameworkHash(current.node.note) !== preview.noteHash)) throw new AgentFailure("source_changed", "agent_note_preview_changed");
   if (preview.taskVersion !== taskVersion(task) || !preview.sources.length
     || preview.sources.some(ref => !current.node.sources.some(source => source.materialId === ref.materialId && source.paragraph === ref.paragraph))) throw new AgentFailure("source_changed", "agent_note_target_changed");
@@ -49,7 +53,8 @@ export function createLearningAgentNoteTool(learning: LearningRepository): Agent
     const explanation = artifacts.get(ctx.task.resourceId, ctx.task.id, args.explanationId);
     if (!explanation || explanation.kind !== "explanation" || explanation.state !== "completed" || explanation.task_version !== taskVersion(ctx.task)) throw new AgentFailure("forbidden", "agent_explanation_forbidden");
     const answer = JSON.parse(explanation.body_json!) as LearningAgentExplanation;
-    if (!answer.items.length || answer.items.some(ref => !target.node.sources.some(source => source.materialId === ref.materialId && source.paragraph === ref.paragraph))) throw new AgentFailure("known_failure", "agent_note_target_unreliable");
+    if (!answer.items.length || answer.items.some(ref => !target.node.sources.some(source => source.materialId === ref.materialId && source.paragraph === ref.paragraph))) throw new AgentFailure("known_failure", "agent_note_target_unreliable", undefined,
+      "agent_note_target_unreliable：目标知识点未覆盖解释的全部来源，尚未创建提案或写入笔记。请从 learning.read_navigation 重新选择覆盖解释来源的授权知识点；无可靠目标时请等待用户选择或取消。");
     if (answer.supplements.length && !target.scope.scope.selection.includeSupplements) throw new AgentFailure("forbidden", "agent_supplements_not_authorized");
     const sourceLabels = answer.items.map(ref => {
       const material = target.scope.materials.find(m => m.materialId === ref.materialId);

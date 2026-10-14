@@ -290,7 +290,20 @@ export class AgentRuntime {
         const tool = scenario.tools[action.tool];
         if (!tool || (action.version ?? 1) !== (ctx.task.version ?? 1)) throw new AgentFailure("forbidden", "当前行动授权已变化。");
         if (tool.confirmation) {
-          const confirmation = await tool.confirmation(action.args, context(actionId));
+          let confirmation: AgentConfirmation | null;
+          try {
+            confirmation = await tool.confirmation(action.args, context(actionId));
+          } catch (error) {
+            if (!(error instanceof AgentFailure) || error.code !== "known_failure") throw error;
+            if (store.hasUnknownCall(taskId, actionId)) throw new AgentFailure("unknown", "提案准备中的请求结果未知，已停止自动推进。");
+            await validate(context(actionId));
+            // An invalid address/content can fail before there is anything to
+            // approve. Feed that definite failure back through the same bounded
+            // decision loop; never turn it into authorization to execute a write.
+            store.markAction(accountId, taskId, lease.token, actionId, "failed", { summary: error.publicSummary ?? "提案准备明确失败，未取得可批准的操作。" });
+            store.setState(accountId, taskId, lease.token, "running");
+            return { actionId, next: "decide" as const };
+          }
           await validate(context(actionId));
           if (confirmation) {
             if (confirmation.content.length > 16_000 || confirmation.sourceFingerprint.length > 500) throw new AgentFailure("invalid_action", "确认提案超出内容上限。");
@@ -346,7 +359,7 @@ export class AgentRuntime {
               store.markAction(accountId, taskId, lease.token, state.actionId, "unknown", { summary: "工具结果未知；请检查原操作，系统不会自动重发。" });
               throw new AgentFailure("unknown", "工具结果未知，已停止自动推进。");
             }
-            store.markAction(accountId, taskId, lease.token, state.actionId, "failed", { summary: error instanceof AgentFailure && error.code === "known_failure" ? "工具明确失败，未取得业务结果。" : "工具未通过执行检查。" });
+            store.markAction(accountId, taskId, lease.token, state.actionId, "failed", { summary: error instanceof AgentFailure && error.code === "known_failure" ? error.publicSummary ?? "工具明确失败，未取得业务结果。" : "工具未通过执行检查。" });
             if (error instanceof AgentFailure && error.code === "known_failure") {
               store.setState(accountId, taskId, lease.token, "running");
               return { next: "decide" as const };
@@ -390,7 +403,7 @@ export class AgentRuntime {
       }, { retryPolicy: { maxAttempts: 1 } })
       .addEdge(START, "decide")
       .addConditionalEdges("decide", route, ["prepare", "execute", "wait", "confirm", "decide", END])
-      .addConditionalEdges("prepare", route, ["execute", "confirm", END])
+      .addConditionalEdges("prepare", route, ["execute", "confirm", "decide", END])
       .addConditionalEdges("execute", route, ["execute", "wait", "confirm", "decide", END])
       .addConditionalEdges("confirm", route, ["execute", "decide", END])
       .addEdge("wait", "decide")

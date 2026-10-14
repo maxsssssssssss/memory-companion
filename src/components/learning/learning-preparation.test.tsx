@@ -40,7 +40,7 @@ it("requires an explicit action for partial scope and keeps its consequences vis
   fireEvent.click(screen.getByRole("button", { name: "先整理可用部分" }));
   await waitFor(() => expect(learningApi.resumePreparation).toHaveBeenCalledWith("p", "r", { continueWithAvailable: true }));
   await screen.findByText("已按可用范围整理");
-  expect(onStatus).toHaveBeenLastCalledWith("部分完成");
+  await waitFor(() => expect(onStatus).toHaveBeenLastCalledWith("部分完成"));
 });
 it("offers explicit recovery only for a resumable run and labels prepare-only completion honestly", async () => {
   vi.mocked(learningApi.preparation).mockResolvedValueOnce({ runs: [run({ status: "interrupted", canResume: true })] });
@@ -76,7 +76,7 @@ it("retains partial-scope completion after the user chooses available pages inst
   vi.mocked(learningApi.preparation).mockResolvedValue({ runs: [run({ status: "completed", materials: [{ materialId: "m", title: "合成课件", kind: "pdf", status: "partial", processing: "waiting_resource", completed: 2, total: 5, issues: ["3 页未覆盖"] }] })] });
   const onStatus = vi.fn(); render(<LearningPreparation {...props} onStatus={onStatus} />);
   await screen.findByText("已按可用范围整理");
-  expect(onStatus).toHaveBeenLastCalledWith("部分完成");
+  await waitFor(() => expect(onStatus).toHaveBeenLastCalledWith("部分完成"));
   expect(screen.getByText("3 页未覆盖")).toBeVisible();
   expect(learningApi.resumePreparation).not.toHaveBeenCalled();
 });
@@ -86,7 +86,7 @@ it.each([
   vi.mocked(learningApi.preparation).mockResolvedValue({ runs: [run({ status: "needs_attention", materials: [{ materialId: "m", title: "合成课件", kind: "pdf", status: "partial", processing, completed: 2, total: 5, issues: [`pdf_parser_${processing}`] }] })] });
   const onStatus = vi.fn(); render(<LearningPreparation {...props} onStatus={onStatus} />);
   await screen.findByText(`${label} · 已完成 2/5 页`);
-  expect(onStatus).toHaveBeenLastCalledWith(label);
+  await waitFor(() => expect(onStatus).toHaveBeenLastCalledWith(label));
   expect(screen.getByText(/已完成页和原件仍保留，未完成页不会自动重试/)).toBeVisible();
   expect(screen.queryByText("等待解析资源")).not.toBeInTheDocument();
   expect(learningApi.resumePreparation).not.toHaveBeenCalled();

@@ -186,6 +186,8 @@ export function createLearningAgentScenario(learning: LearningRepository,
           }
           // Only an explicit retry of a known failed action may reuse its operation.
           // The Quiz service remains authoritative for part retries and their cap.
+          // A later model choice of create_quiz is a new action/operation, not a
+          // resume of this failed one; all of its calls still use the task budget.
           artifacts.retryKnownFailure(ctx.task.resourceId, ctx.task.id, id, version(ctx), current.fingerprint);
         }
         let generationError: unknown;
@@ -196,7 +198,12 @@ export function createLearningAgentScenario(learning: LearningRepository,
           if (generationError) throw generationError;
           await check(ctx);
           const run = quizzes.list(ctx.task.resourceId).find(r => r.id === id);
-          if (run?.status !== "completed") throw new AgentFailure("known_failure", run?.status === "insufficient" ? "agent_quiz_insufficient" : "agent_quiz_failed");
+          if (run?.status !== "completed") {
+            const insufficient = run?.status === "insufficient";
+            throw new AgentFailure("known_failure", insufficient ? "agent_quiz_insufficient" : "agent_quiz_failed", undefined,
+              insufficient ? "agent_quiz_insufficient：本次生成没有可发布题目；未创建可作答题组，不能用于诊断。"
+                : "agent_quiz_failed：本次生成明确失败，未取得可作答题组。请根据当前范围决定其他合法行动或交回用户。");
+          }
           const attemptId = learningAgentOperationId(ctx.actionId, "attempt");
           quizzes.startAttempt(ctx.task.resourceId, { id: attemptId, quizId: id, mode: "test" });
           artifacts.complete(ctx.task.resourceId, ctx.task.id, id, { attemptId });

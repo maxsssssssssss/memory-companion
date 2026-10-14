@@ -28,7 +28,7 @@ vi.mock("@/lib/server/learning/agent-api-service", async original => ({
 
 import { AgentStore } from "@/lib/server/agent/store";
 import { AgentRuntime } from "@/lib/server/agent/runtime";
-import { AgentFailure, type AgentDecisionProvider } from "@/lib/server/agent/types";
+import { AgentFailure, type AgentDecision, type AgentDecisionProvider } from "@/lib/server/agent/types";
 import { LearningRepository } from "@/lib/server/learning/repository";
 import { LearningFrameworkRepository } from "@/lib/server/learning/framework-repository";
 import { LearningQuizRepository } from "@/lib/server/learning/quiz-repository";
@@ -387,6 +387,84 @@ describe("versioned Learning Agent controls with offline decisions and real busi
     expect(stores(learning => new LearningFrameworkRepository(learning).view(pageId).chapters[0].nodes[0].note)).toBe(note);
     expect(h.decision).toHaveBeenCalledTimes(2); expect(h.generate).toHaveBeenCalledOnce();
     expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it("keeps a bad note address recoverable and approves one real append after navigation and reopen", async () => {
+    const chapter = seedFramework(), body = start();
+    expect((await POST(request("POST", body), context())).status).toBe(202);
+    const originalScope = stores((_learning, store) => store.getTask("owner", body.id).scope);
+    const generate = vi.fn(async () => ({ materialAnswer: "[离线生成fixture] 先核对前提，再应用材料中的规则。", supplements: [],
+      items: [{ materialId, paragraph: 1 }] })) as unknown as typeof generateStudyJson;
+    // Only decisions/generation are fixtures. The bad address is the same
+    // relationship as the Windows reproduction: material ID used as both IDs.
+    const initialDecision = vi.fn<AgentDecisionProvider>(async (input, ctx) => ctx.call<AgentDecision>({ kind: "offline_decision_fixture", inputChars: 100, maxOutputTokens: 100 }, async () => {
+      const explanation = input.task.actions.find(action => action.tool === "learning.explain")?.resultRef;
+      const failed = input.results.find(result => result.tool === "learning.append_note" && result.status === "failed");
+      if (failed) {
+        expect(failed.value).toMatchObject({ status: "failed", summary: expect.stringContaining("agent_note_target_invalid") });
+        expect(JSON.stringify(failed.value)).toContain("learning.read_navigation");
+        return { value: { wait: { kind: "feedback", message: "[离线决策fixture] 目标地址无效，请确认是否从授权导航重选。" } }, usage: { inputTokens: 10, outputTokens: 5 } };
+      }
+      return { value: explanation
+        ? { tool: "learning.append_note", args: { explanationId: explanation.id, chapterId: materialId, nodeId: materialId } }
+        : { tool: "learning.explain", args: { question: "[合成] 为什么要先核对前提？", sources: [{ materialId, paragraph: 1 }] } },
+        usage: { inputTokens: 10, outputTokens: 5 } };
+    }));
+    const waiting = await runOffline(body.id, initialDecision, generate);
+    expect(waiting.status).toBe("waiting"); expect(waiting.wait?.kind).toBe("feedback");
+    expect(waiting.recovery).toBeUndefined(); expect(waiting.approval).toBeUndefined();
+    expect(waiting.usage.calls).toBe(4); expect(initialDecision).toHaveBeenCalledTimes(3); expect(generate).toHaveBeenCalledOnce();
+    const failedAction = waiting.actions.find(action => action.tool === "learning.append_note")!;
+    expect(failedAction).toMatchObject({ status: "failed", resultRef: undefined });
+    stores((learning, store) => {
+      expect(store.getTask("owner", body.id).scope).toEqual(originalScope);
+      expect(new LearningAgentRepository(learning).list(pageId, body.id).map(artifact => artifact.kind)).toEqual(["explanation"]);
+      expect(new LearningFrameworkRepository(learning).view(pageId).chapters[0].nodes[0].note).toBe("");
+    });
+    const projection = (await (await GET(request(), context())).json()).tasks[0];
+    expect(projection).toMatchObject({ status: "waiting", version: 1, scope: selection(), usage: waiting.usage });
+    expect(projection.approval).toBeUndefined(); expect(projection.recovery).toBeUndefined();
+    expect(JSON.stringify(projection)).not.toMatch(/source_invalid|授权来源无效|apiKey|args_json|paragraphSha256/);
+
+    // runOffline closes all three stores. Reopening an unfulfilled wait must not
+    // ask the model again; a real authenticated feedback event authorizes resume.
+    const noDecision = vi.fn<AgentDecisionProvider>(async () => { throw Error("A persisted wait or approval must not call the model"); });
+    const reopened = await runOffline(body.id, noDecision);
+    expect(reopened.usage).toEqual(waiting.usage); expect(noDecision).not.toHaveBeenCalled();
+    const feedback = { id: body.id, action: "feedback", expectedVersion: 1, eventId: randomUUID(), feedback: "[合成用户] 请读取当前授权导航后选择正确节点，先给我预览。" };
+    expect((await PATCH(request("PATCH", feedback), context())).status).toBe(202);
+    const recoveredDecision = vi.fn<AgentDecisionProvider>(async (input, ctx) => ctx.call<AgentDecision>({ kind: "offline_decision_fixture", inputChars: 100, maxOutputTokens: 100 }, async () => {
+      const navigation = input.results.find(result => result.tool === "learning.read_navigation" && result.status === "succeeded");
+      if (!navigation) return { value: { tool: "learning.read_navigation", args: {} }, usage: { inputTokens: 10, outputTokens: 5 } };
+      const actual = navigation.value as { chapters: Array<{ id: string; nodes: Array<{ id: string }> }> };
+      expect(actual.chapters[0]).toMatchObject({ id: chapter.id, nodes: [{ id: chapter.nodes[0].id }] });
+      const explanation = input.task.actions.find(action => action.tool === "learning.explain")!.resultRef!;
+      return { value: { tool: "learning.append_note", args: { explanationId: explanation.id,
+        chapterId: actual.chapters[0].id, nodeId: actual.chapters[0].nodes[0].id } }, usage: { inputTokens: 10, outputTokens: 5 } };
+    }));
+    const proposed = await runOffline(body.id, recoveredDecision);
+    expect(proposed.status).toBe("waiting"); expect(proposed.approval?.status).toBe("pending");
+    expect(proposed.version).toBe(1); expect(proposed.scope).toEqual(originalScope); expect(proposed.usage.calls).toBe(6);
+    expect(recoveredDecision).toHaveBeenCalledTimes(2); expect(generate).toHaveBeenCalledOnce();
+    expect(proposed.actions.filter(action => action.tool === "learning.append_note").map(action => action.status)).toEqual(["failed", "prepared"]);
+    const preview = (await (await GET(request(), context())).json()).tasks[0].approval;
+    expect(preview.content).toContain("[离线生成fixture] 先核对前提，再应用材料中的规则。");
+    const approve = { id: body.id, action: "approval", expectedVersion: 1, approvalId: proposed.approval!.id,
+      fingerprint: proposed.approval!.fingerprint, decision: "approve", eventId: randomUUID() };
+    expect((await PATCH(request("PATCH", approve), context())).status).toBe(202);
+    const ended = await runOffline(body.id, noDecision);
+    expect(ended.status).toBe("ended"); expect(ended.usage.calls).toBe(6); expect(noDecision).not.toHaveBeenCalled();
+    const note = stores(learning => new LearningFrameworkRepository(learning).view(pageId).chapters[0].nodes[0].note);
+    expect(note).toBe(preview.content);
+    const schedules = deferred.length;
+    const repeated = await PATCH(request("PATCH", { ...approve, eventId: randomUUID() }), context());
+    expect(repeated.status).toBe(202); expect(await repeated.json()).toMatchObject({ scheduled: false, task: { status: "ended", usage: ended.usage } });
+    expect(deferred).toHaveLength(schedules);
+    stores(learning => {
+      expect(new LearningFrameworkRepository(learning).view(pageId).chapters[0].nodes[0].note).toBe(note);
+      expect(new LearningAgentRepository(learning).list(pageId, body.id).filter(artifact => artifact.kind === "note_proposal")).toHaveLength(1);
+    });
+    expect(advance).not.toHaveBeenCalled(); expect(fetch).not.toHaveBeenCalled();
   });
 
   it("rejects obsolete approvals after scope adjustment without writing notes", async () => {

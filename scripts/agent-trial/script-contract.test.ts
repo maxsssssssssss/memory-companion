@@ -56,16 +56,19 @@ it("browser discovery rejects a directory as an executable and reports missing l
   vi.spyOn(fs, "statSync").mockImplementation(() => { throw Error("synthetic_missing"); });
   expect(() => chromiumLaunchOptions({}, "win32")).toThrow("No installed Chromium/Chrome/Edge found");
 });
-it("the draft recheck only accepts B before/after restart and never creates trial data during argument validation", () => {
+it.each([
+  ["before-restart", "B", null], ["after-restart", "B", null],
+  ["faults", "B", "invalid_a2_subcase"], ["manual", "B", "invalid_a2_subcase"],
+  ["before-restart", "A,B", "subcase_account_filter_conflict"],
+] as const)("draft argument validation (%s, %s) preserves the error contract and writes no trial data", (phase, cases, message) => {
   const root = temporary();
-  for (const phase of ["before-restart", "after-restart"]) {
-    const accepted = child(["scripts/agent-trial/a2-browser.mjs", phase], root, { AGENT_TRIAL_SUBCASE: "draft", AGENT_TRIAL_CASES: "B" });
-    expect(accepted.status).not.toBe(0); expect(accepted.stderr).toContain("ENOENT"); expect(accepted.stderr).toContain("runtime.json");
-    expect(accepted.stderr).not.toContain("invalid_a2_subcase");
-  }
-  for (const [phase, cases, message] of [["faults", "B", "invalid_a2_subcase"], ["manual", "B", "invalid_a2_subcase"], ["before-restart", "A,B", "subcase_account_filter_conflict"]]) {
-    const rejected = child(["scripts/agent-trial/a2-browser.mjs", phase], root, { AGENT_TRIAL_SUBCASE: "draft", AGENT_TRIAL_CASES: cases });
-    expect(rejected.status).not.toBe(0); expect(rejected.stderr).toContain(message); expect(rejected.stderr).not.toContain("runtime.json");
+  const result = child(["scripts/agent-trial/a2-browser.mjs", phase], root, { AGENT_TRIAL_SUBCASE: "draft", AGENT_TRIAL_CASES: cases });
+  expect(result.status).not.toBe(0);
+  if (message === null) {
+    expect(result.stderr).toContain("ENOENT"); expect(result.stderr).toContain("runtime.json");
+    expect(result.stderr).not.toContain("invalid_a2_subcase");
+  } else {
+    expect(result.stderr).toContain(message); expect(result.stderr).not.toContain("runtime.json");
   }
   expect(fs.readdirSync(root)).toEqual([]);
 });

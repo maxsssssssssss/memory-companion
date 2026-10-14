@@ -49,7 +49,9 @@ export type AgentDecisionProvider = (input: AgentDecisionInput, context: AgentCo
 export class AgentFailure extends Error {
   constructor(public readonly code: "forbidden" | "invalid_action" | "known_failure" | "unknown" | "budget" | "inactive" | "source_changed" | "conflict", message: string,
     /** Reported usage remains a billing fact even when the result is unusable. */
-    public readonly usage?: AgentCallUsage) {
+    public readonly usage?: AgentCallUsage,
+    /** Explicit, safe business feedback for a known failure. Never a raw provider error/body. */
+    public readonly publicSummary?: string) {
     super(message); this.name = "AgentFailure";
   }
 }

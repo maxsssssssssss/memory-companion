@@ -5,7 +5,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AgentAction, AgentApproval, AgentTask } from "@/lib/domain/agent";
-import type { AgentContext } from "@/lib/server/agent/types";
+import type { AgentContext, AgentDecisionProvider } from "@/lib/server/agent/types";
 import { AgentStore } from "@/lib/server/agent/store";
 import { AgentRuntime } from "@/lib/server/agent/runtime";
 import { LearningRepository } from "./repository";
@@ -14,7 +14,7 @@ import { LearningStudyRepository } from "./study-repository";
 import { LearningAgentRepository, learningAgentOperationId } from "./agent-repository";
 import { freezeLearningAgentScope } from "./agent-scope";
 import { createLearningAgentScenario, readLearningAgentExplanation } from "./agent-scenario";
-import { readLearningAgentNotePreview } from "./agent-notes";
+import { AppendLearningAgentNote, readLearningAgentNotePreview } from "./agent-notes";
 import type { generateStudyJson } from "./framework-generator";
 
 let root: string, learning: LearningRepository, pageId: string, materialId: string, secondMaterialId: string, chapterId: string, nodeId: string, otherNodeId: string;
@@ -114,6 +114,51 @@ it("rejects unreliable targets, source deletion and tampered confirmation bindin
   learning.deleteMaterial(pageId, materialId);
   await expect(h.tool.execute(h.args, h.ctx)).rejects.toThrow("agent_note_preview_unavailable");
   expect(new LearningAgentRepository(learning).get(pageId, h.ctx.task.id, learningAgentOperationId(h.ctx.actionId, "note"))).toMatchObject({ state: "invalidated", body_json: null });
+});
+
+it("rejects material IDs used as note addresses without confusing them with changed source authorization", async () => {
+  const h = await prepare(), before = framework(), wrong = { ...h.args, chapterId: materialId, nodeId: materialId };
+  expect(AppendLearningAgentNote.safeParse(wrong).success).toBe(true);
+  await expect(h.tool.confirmation!(wrong, h.ctx)).rejects.toMatchObject({ code: "known_failure", message: "agent_note_target_invalid", publicSummary: expect.stringContaining("learning.read_navigation") });
+  await expect(h.scene.validate(h.ctx)).resolves.toBeUndefined();
+  expect(new LearningAgentRepository(learning).list(pageId, h.ctx.task.id).filter(a => a.kind === "note_proposal")).toEqual([]);
+  expect(framework()).toEqual(before);
+
+  const restricted = { ...h.ctx, task: { ...h.ctx.task, scope: freezeLearningAgentScope(learning, pageId, { ...selection(), materialIds: [], nodeIds: [nodeId] }) } };
+  await expect(h.tool.confirmation!({ ...h.args, nodeId: otherNodeId }, restricted)).rejects.toMatchObject({ code: "forbidden", message: "agent_note_target_forbidden" });
+  await expect(h.tool.confirmation!(h.args, { ...h.ctx, task: { ...h.ctx.task, accountId: "intruder" } })).rejects.toMatchObject({ code: "forbidden", message: "agent_account_forbidden" });
+  await expect(h.tool.confirmation!(h.args, { ...h.ctx, task: { ...h.ctx.task, version: 2 } })).rejects.toMatchObject({ code: "forbidden", message: "agent_explanation_forbidden" });
+  await expect(h.tool.confirmation!(h.args, { ...h.ctx, task: { ...h.ctx.task, id: randomUUID() } })).rejects.toMatchObject({ code: "forbidden", message: "agent_explanation_forbidden" });
+  expect(framework()).toEqual(before);
+});
+
+it("persists the rejected target and feedback wait across reopening, while real source deletion still blocks recovery", async () => {
+  const h = await prepare(), dbPath = join(root, "invalid-target.sqlite"), checkpointPath = join(root, "invalid-target-checkpoints.sqlite");
+  let store = AgentStore.open(dbPath);
+  const task = store.createTask({ id: h.ctx.task.id, accountId: "owner", scenario: h.scene.id, resourceId: pageId, goal: h.ctx.task.goal, scope: h.ctx.task.scope });
+  const decision = vi.fn<AgentDecisionProvider>(async (input, ctx) => ctx.call({ kind: "decision", inputChars: 100, maxOutputTokens: 100 }, async () => ({ value: input.results.length
+    ? { wait: { kind: "feedback", message: "[合成离线] 等待用户选择可靠知识点。" } }
+    : { tool: "learning.append_note", args: { ...h.args, chapterId: materialId, nodeId: materialId } } })));
+  let runtime = new AgentRuntime({ store, checkpointPath, scenario: h.scene, decision });
+  try {
+    const waiting = await runtime.advance("owner", task.id);
+    expect(waiting).toMatchObject({ status: "waiting", usage: { calls: 2 }, wait: { kind: "feedback" } });
+    expect(waiting.recovery).toBeUndefined(); expect(waiting.approval).toBeUndefined();
+    expect(waiting.actions[0]).toMatchObject({ status: "failed", summary: expect.stringContaining("agent_note_target_invalid") });
+    expect(decision.mock.calls[1][0].results[0]).toMatchObject({ status: "failed", value: { summary: expect.stringContaining("learning.read_navigation") } });
+    expect(store.database.prepare("SELECT count(*) AS count FROM agent_approvals").get()).toEqual({ count: 0 });
+    expect(new LearningAgentRepository(learning).list(pageId, task.id).filter(a => a.kind === "note_proposal")).toEqual([]);
+    runtime.close(); store.close(); learning.close();
+    learning = new LearningRepository(root, "owner"); store = AgentStore.open(dbPath);
+    runtime = new AgentRuntime({ store, checkpointPath, scenario: createLearningAgentScenario(learning), decision });
+    expect((await runtime.advance("owner", task.id)).status).toBe("waiting");
+    expect(decision).toHaveBeenCalledTimes(2);
+    expect(framework().chapters[0].nodes[0].note).toBe("用户已有笔记 PRIVATE_OLD_NOTE");
+    learning.deleteMaterial(pageId, materialId);
+    expect(await runtime.advance("owner", task.id)).toMatchObject({ status: "needs_attention", recovery: { kind: "source_invalid" }, usage: { calls: 2 } });
+    expect(decision).toHaveBeenCalledTimes(2);
+    expect(new LearningAgentRepository(learning).get(pageId, task.id, h.explanationId)).toMatchObject({ state: "invalidated", body_json: null });
+  } finally { runtime.close(); store.close(); }
 });
 
 it("new task versions cannot reuse old explanations, pending approvals or late feedback", async () => {

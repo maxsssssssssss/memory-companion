@@ -5,7 +5,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AgentAction, AgentTask } from "@/lib/domain/agent";
-import { AgentFailure, type AgentContext, type AgentScenario } from "@/lib/server/agent/types";
+import { AgentFailure, type AgentContext, type AgentDecisionProvider, type AgentScenario } from "@/lib/server/agent/types";
 import { AgentStore } from "@/lib/server/agent/store";
 import { AgentRuntime } from "@/lib/server/agent/runtime";
 import type { StructuredJsonDiagnostics } from "@/lib/server/openai/structured-json";
@@ -14,7 +14,7 @@ import { LearningFrameworkRepository } from "./framework-repository";
 import { LearningQuizRepository } from "./quiz-repository";
 import { freezeLearningAgentScope, readLearningAgentScope } from "./agent-scope";
 import { createLearningAgentScenario, readLearningAgentExplanation } from "./agent-scenario";
-import { LearningAgentRepository } from "./agent-repository";
+import { LearningAgentRepository, learningAgentOperationId } from "./agent-repository";
 import type { generateStudyJson } from "./framework-generator";
 
 let root: string, learning: LearningRepository, pageId: string, materialId: string, otherId: string;
@@ -297,12 +297,98 @@ it.each(["quiz", "explanation"] as const)("explicitly retries a known failed %s 
   } finally { runtime.close(); store.close(); }
 });
 
+it.each([4, 3])("treats a new model Quiz choice after insufficient as a new charged operation within the same %i-call budget", async (maxCalls) => {
+  const candidate = quizGenerator();
+  const generate = vi.fn(async (...args: Parameters<typeof generateStudyJson>) => {
+    args[6]?.({ responseStatus: "completed", responseTextLength: 100, parseResult: "success", validationResult: "success", inputTokens: 31, outputTokens: 17 });
+    const output = await candidate(...args) as { items: unknown[]; [key: string]: unknown };
+    // A valid, complete response can contain no publishable questions. This is
+    // synthetic generation, not a transport exception or unknown outcome.
+    return candidate.mock.calls.length === 1
+      ? { ...output, items: [], reason: "[合成] 本次没有满足唯一答案与来源条件的候选。" }
+      : { ...output, reason: "[合成] 当前只提供一题，不以重复改写凑足五题。" };
+  }) as unknown as ReturnType<typeof vi.fn<typeof generateStudyJson>>;
+  const scene = createLearningAgentScenario(learning, { configure: () => ({ ...config, maxOutputTokens: 8000 }), generate });
+  const store = AgentStore.open(join(root, "new-choice-agent.sqlite"));
+  const task = store.createTask({ accountId: "owner", scenario: scene.id, resourceId: pageId, goal: "[合成] 明确不足后重新选择行动",
+    scope: freezeLearningAgentScope(learning, pageId, selection()), budget: { maxCalls } });
+  const decision = vi.fn<AgentDecisionProvider>(async (input, ctx) => {
+    // Count the controlled decision response in the same ledger as real tool
+    // generation. The choice depends on the actual previous business result.
+    return ctx.call({ kind: "decision", inputChars: 100, maxOutputTokens: 100 }, async () => {
+      const previous = input.results.at(-1);
+      if (previous) {
+        expect(previous).toMatchObject({ tool: "learning.create_quiz", status: "failed",
+          value: { status: "failed", summary: expect.stringContaining("agent_quiz_insufficient") } });
+        expect(input.task.usage.calls).toBe(2);
+        expect(input.task.usage).toMatchObject({ inputTokens: 41, outputTokens: 21 });
+      }
+      return { value: { tool: "learning.create_quiz", args: { count: previous ? 5 : 4, difficulty: "basic" } }, usage: { inputTokens: 10, outputTokens: 4 } };
+    });
+  });
+  const runtime = new AgentRuntime({ store, checkpointPath: join(root, "new-choice-checkpoints.sqlite"), scenario: scene, decision });
+  try {
+    const result = await runtime.advance("owner", task.id);
+    expect(decision).toHaveBeenCalledTimes(2);
+    expect(result.actions).toHaveLength(2);
+    const [first, second] = result.actions;
+    expect(first).toMatchObject({ tool: "learning.create_quiz", status: "failed", summary: expect.stringContaining("agent_quiz_insufficient") });
+    expect(second.id).not.toBe(first.id);
+    const firstId = learningAgentOperationId(first.id, "quiz"), secondId = learningAgentOperationId(second.id, "quiz");
+    expect(secondId).not.toBe(firstId);
+    const quizzes = new LearningQuizRepository(learning).list(pageId);
+    expect(quizzes).toHaveLength(2);
+    expect(quizzes.find(row => row.id === firstId)).toMatchObject({ status: "insufficient", count: 0, settings: { count: 4 } });
+    const artifacts = new LearningAgentRepository(learning).list(pageId, task.id);
+    expect(artifacts.map(row => row.action_id)).toEqual([first.id, second.id]);
+    expect(artifacts[0]).toMatchObject({ id: firstId, state: "failed" });
+    const calls = store.database.prepare("SELECT action_id,kind,status FROM agent_calls WHERE task_id=? ORDER BY rowid").all(task.id);
+    expect(calls).toEqual([
+      { action_id: "decision:1", kind: "decision", status: "succeeded" },
+      { action_id: first.id, kind: "learning_quiz", status: "succeeded" },
+      { action_id: "decision:2", kind: "decision", status: "succeeded" },
+      ...(maxCalls === 4 ? [{ action_id: second.id, kind: "learning_quiz", status: "succeeded" }] : [])
+    ]);
+    expect(result.usage.calls).toBe(maxCalls);
+    expect(result.usage.steps).toBe(2);
+    if (maxCalls === 4) {
+      expect(generate).toHaveBeenCalledTimes(2);
+      expect(result).toMatchObject({ status: "waiting", wait: { kind: "quiz_submission" }, usage: { inputTokens: 82, outputTokens: 42, unknownUsageCalls: 0 } });
+      expect(second.status).toBe("succeeded");
+      expect(quizzes.find(row => row.id === secondId)).toMatchObject({ status: "completed", count: 1, settings: { count: 5 } });
+      expect(artifacts[1]).toMatchObject({ id: secondId, state: "completed" });
+      await runtime.advance("owner", task.id);
+      expect(decision).toHaveBeenCalledTimes(2); expect(generate).toHaveBeenCalledTimes(2);
+    } else {
+      expect(generate).toHaveBeenCalledTimes(1);
+      expect(result).toMatchObject({ status: "budget_exhausted", usage: { inputTokens: 51, outputTokens: 25, unknownUsageCalls: 0 } });
+      expect(second.status).toBe("failed");
+    }
+  } finally { runtime.close(); store.close(); }
+});
+
+it("does not reinterpret an insufficient Quiz as a resumable failed operation", async () => {
+  const candidate = quizGenerator();
+  const generate = vi.fn(async (...args: Parameters<typeof generateStudyJson>) => ({ ...await candidate(...args) as object,
+    items: [], reason: "[合成] 没有满足当前发布门槛的候选。" })) as unknown as ReturnType<typeof vi.fn<typeof generateStudyJson>>;
+  const scene = createLearningAgentScenario(learning, { configure: () => config, generate }), ctx = context();
+  const args = { count: 1, difficulty: "basic" };
+  await expect(run(scene, "learning.create_quiz", args, ctx)).rejects.toMatchObject({ code: "known_failure", message: "agent_quiz_insufficient" });
+  const original = new LearningQuizRepository(learning).list(pageId)[0];
+  ctx.task.recovery = { kind: "known_failed", actionId: ctx.actionId, message: "[合成] 用户明确要求重试", allowedControls: ["retry"] };
+  await expect(run(scene, "learning.create_quiz", args, ctx)).rejects.toMatchObject({ code: "known_failure", message: "agent_quiz_retry_unavailable" });
+  expect(generate).toHaveBeenCalledTimes(1);
+  expect(new LearningQuizRepository(learning).list(pageId)).toHaveLength(1);
+  expect(new LearningQuizRepository(learning).list(pageId)[0]).toMatchObject({ id: original.id, status: "insufficient" });
+});
+
 it("never sends another Learning generation for an unknown result even when retry is requested", async () => {
   const generate = vi.fn(async () => { throw Error("[模拟] 不知道网络请求是否已完成"); }) as unknown as typeof generateStudyJson;
   const scene = createLearningAgentScenario(learning, { configure: () => config, generate }), store = AgentStore.open(join(root, "unknown-agent.sqlite"));
   const task = store.createTask({ accountId: "owner", scenario: scene.id, resourceId: pageId, goal: "[合成] unknown禁止重发", scope: freezeLearningAgentScope(learning, pageId, selection()) });
+  const decision = vi.fn(async () => ({ tool: "learning.create_quiz", args: { count: 1, difficulty: "basic" } }));
   const runtime = new AgentRuntime({ store, checkpointPath: join(root, "unknown-checkpoints.sqlite"), scenario: scene,
-    decision: async () => ({ tool: "learning.create_quiz", args: { count: 1, difficulty: "basic" } }) });
+    decision });
   try {
     const unknown = await runtime.advance("owner", task.id);
     expect(unknown.status).toBe("needs_attention"); expect(unknown.actions[0].status).toBe("unknown");
@@ -310,6 +396,8 @@ it("never sends another Learning generation for an unknown result even when retr
     const retried = await runtime.recover("owner", task.id, { expectedVersion: 1, mode: "retry", eventId: randomUUID() });
     expect(retried.status).toBe("needs_attention"); expect(retried.recovery?.kind).toBe("unknown");
     expect(generate).toHaveBeenCalledTimes(1); expect(retried.usage.calls).toBe(1);
+    await runtime.advance("owner", task.id);
+    expect(decision).toHaveBeenCalledTimes(1); expect(generate).toHaveBeenCalledTimes(1);
     expect(new LearningQuizRepository(learning).list(pageId)).toHaveLength(1);
   } finally { runtime.close(); store.close(); }
 });
