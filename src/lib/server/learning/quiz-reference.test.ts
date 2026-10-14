@@ -68,7 +68,7 @@ it("rejects an entire malformed question without discarding its valid independen
 it("rejects choose-letter prose before shuffling new questions; retains unaffected items",()=>{
  for(const text of ['因此应选择D；其余不成立。','所以选 A。','Choose B.','Select C.']){
   const {id,input}=begin(),value=response(input);value.items[0].explanation=text;repo.complete(page,id,value);
-  expect(saved(id).questions).toHaveLength(1);expect(saved(id).reason).toContain('依赖排列位置');
+  expect(saved(id).questions).toHaveLength(1);expect(saved(id).reason).toContain('解析选项引用不明确：存在组合引用或序数位置依赖');
  }
 });
 it("rejects correct-item letter references observed in a real response without rewriting saved history",()=>{
@@ -76,7 +76,7 @@ it("rejects correct-item letter references observed in a real response without r
   const {id,input}=begin(),value=response(input);value.items[0].explanation=text;
   repo.complete(page,id,value);
   expect(saved(id).questions).toHaveLength(1);
-  expect(saved(id).reason).toContain('依赖排列位置');
+  expect(saved(id).reason).toContain('解析选项引用不明确：存在组合引用或序数位置依赖');
   expect(saved(id).questions[0].stem).toBe(value.items[1].stem);
  }
  for(const text of ['正确项属于方案B的说明','正确项描述的是A组','正确项Balance是材料定义的名称'])expect(hasQuizPositionDependency(text)).toBe(false);

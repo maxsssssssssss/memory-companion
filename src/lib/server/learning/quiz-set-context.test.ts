@@ -264,7 +264,7 @@ it.each(suppliedChoiceSuffixes)("rejects the reported appended choice combinatio
   q.explanationParts = [];
   const decoded = codec.decode(value, scope);
   expect(decoded.items[0]).toMatchObject({ compositionRejected: true });
-  expect(decoded.reason).toContain("解析选项引用不明确或与答案矛盾");
+  expect(decoded.reason).toContain("解析选项引用不明确：存在组合引用或序数位置依赖");
   expect(limitReferencedQuizCandidates(decoded, catalog(input), 1).items).toHaveLength(0);
   quiz.complete(page, id, decoded);
   expect(saved(id).questions).toHaveLength(0);

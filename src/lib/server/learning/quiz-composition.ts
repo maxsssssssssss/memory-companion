@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { ReferencedGeneratedQuiz } from "@/lib/domain/learning-quiz";
 import { compactQuizRequest, compactQuizPrompt, CompactQuizEnvelope } from "./quiz-compact";
-import { bindQuizOptionExplanation, hasQuizPositionDependency, quizProceduralHint } from "./quiz-grounding";
+import { inspectQuizOptionExplanation, hasQuizPositionDependency, quizProceduralHint, QUIZ_REJECTION_DETAILS, type QuizRejectionReason } from "./quiz-grounding";
 
 // A request/response view over the existing references-v2 codec. No new stored
 // reference authority, additional model request, or historical data conversion.
@@ -49,18 +49,20 @@ export function composedQuizRequest(...args: Parameters<typeof compactQuizReques
       // published coverage is computed again after individual item validation.
       if (invalidPlan || seenMaterials.size !== codec.input.materials.length) notes.push("材料考查安排不完整；本组实际涉及范围以已保存题目的来源为准。");
       const focuses: Array<string | undefined> = [];
+      const rejections = new Map<number, QuizRejectionReason>();
+      const reject = (index: number, reason: QuizRejectionReason) => {
+        rejections.set(index, reason);
+        notes.push(`第 ${index + 1} 题${QUIZ_REJECTION_DETAILS[reason]}，未发布。`);
+        return { compositionRejected: true, rejectionReason: reason };
+      };
       const items = body.items.map((raw, index) => {
         const result = itemSchema.safeParse(raw);
         if (!result.success) {
-          notes.push(`第 ${index + 1} 题的解释与依据关联不完整，未发布。`);
-          return { compositionRejected: true };
+          return reject(index, "structure_or_evidence");
         }
         const { focus, explanationParts, ...q } = result.data;
-        if (new Set(q.options.map(o => o.id)).size !== q.options.length || !q.options.some(o => o.id === q.correctOptionId)
-          || [q.scenario ?? "", q.stem, ...q.options.map(o => o.text)].some(text => hasQuizPositionDependency(text, `${q.scenario ?? ""}\n${q.stem}`))) {
-          notes.push(`第 ${index + 1} 题的选项身份或题干位置关系不明确，未发布。`);
-          return { compositionRejected: true };
-        }
+        if (new Set(q.options.map(o => o.id)).size !== q.options.length || !q.options.some(o => o.id === q.correctOptionId)) return reject(index, "option_identity");
+        if ([q.scenario ?? "", q.stem, ...q.options.map(o => o.text)].some(text => hasQuizPositionDependency(text, `${q.scenario ?? ""}\n${q.stem}`))) return reject(index, "position_dependency");
         focuses[index] = focus;
         const explanation = joinParts(explanationParts ?? q.options.find(o => o.id === q.correctOptionId)!.reasonParts);
         return { ...q, explanation: explanation.text, explanationEvidenceIds: explanation.ids,
@@ -72,24 +74,23 @@ export function composedQuizRequest(...args: Parameters<typeof compactQuizReques
       const decoded = codec.decode({ ...body, items }, scope);
       const seen = new Set<string>();
       decoded.items = decoded.items.map((raw, index) => {
+        if (rejections.has(index)) return { compositionRejected: true, rejectionReason: rejections.get(index)! };
         const checked = ReferencedGeneratedQuiz.shape.items.element.safeParse(raw);
         if (!checked.success) return raw;
         const q = checked.data;
         // Only post-answer prose is normalized, after exact short-reference
         // restoration. No model text is inserted into a stem, option or hint.
         const context = `${q.scenario ?? ""}\n${q.stem}`;
-        const explanation = bindQuizOptionExplanation(q.explanation, q.options, q.correctOptionId, context);
-        const options = q.options.map(o => ({ ...o, reason: bindQuizOptionExplanation(o.reason, q.options, q.correctOptionId, context) }));
-        if (explanation === null || options.some(o => o.reason === null)) {
-          notes.push(`第 ${index + 1} 题的解析选项引用不明确或与答案矛盾，未发布。`);
-          return { compositionRejected: true };
-        }
-        const normalized = { ...q, explanation, options: options.map(o => ({ ...o, reason: o.reason! })), hint: quizProceduralHint(q.kind) };
+        const explanation = inspectQuizOptionExplanation(q.explanation, q.options, q.correctOptionId, context);
+        const reasons = q.options.map(o => inspectQuizOptionExplanation(o.reason, q.options, q.correctOptionId, context));
+        const issue = [explanation, ...reasons].find(result => result.issue)?.issue;
+        if (issue) return reject(index, issue);
+        const normalized = { ...q, explanation: explanation.text!, options: q.options.map((o, i) => ({ ...o, reason: reasons[i].text! })), hint: quizProceduralHint(q.kind) };
         if (!focuses[index]) return normalized;
         // Exact declared objective + same scenario and stem basis, not an
         // ungrounded semantic-similarity threshold. Paraphrases still need review.
         const key = JSON.stringify([normalize(focuses[index]!), normalize(q.scenario ?? ""), [...new Set(q.stemEvidenceIds)].sort()]);
-        if (seen.has(key)) { notes.push(`第 ${index + 1} 题与已保留题的考点和情境重复，未发布。`); return { compositionRejected: true }; }
+        if (seen.has(key)) return reject(index, "repeated_focus");
         seen.add(key);
         return normalized;
       });
