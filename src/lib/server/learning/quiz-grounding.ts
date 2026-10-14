@@ -22,9 +22,9 @@ export function arrangeQuizOptions<T>(options: T[], pick = randomInt): T[] {
 
 // A conservative rejection of position-dependent options, not a semantic verifier.
 const positionDependent = /以上(?:全|都|皆|均|各|两|三)|上述(?:全|都|皆|均|各|两|三)|以下(?:全|都|皆|均)|(?:all|none|both) of (?:the )?(?:above|below)|(?:选项|答案|option|choice|选择|选|choose|select|正确项|错误项)\s*[A-Z]\b|\b[A-Z]\s*(?:和|与|及|、|或|and|or|&)\s*[A-Z]\b|第[一二三四五六1-6]个选项|\b[A-Z](?:项|正确|错误|准确|误将|将|说|是正确|是错误)/i;
-const optionPrefix = /(?:选项|答案|option|choice|正确项|错误项|选择|选|choose|select)\s*[:：]?\s*(?:(?:中(?:的)?|分别(?:是|为)|是|为)\s*[:：]?\s*)?$/i;
+const optionPrefix = /(?:选项|答案|option|choice|正确项|错误项|选择|选|choose|select)\s*[:：]?\s*(?:(?:中(?:的)?|分别(?:是|为)|是|为|只(?:能|有)?|仅(?:有|能)?|应(?:当|该)?|必须|可能|可以|同时)\s*[:：]?\s*)*$/i;
 const crossQuestion = /第\s*[一二三四五六七八九十\d]+\s*题|上(?:一)?题|前题|下(?:一)?题|previous question|next question/i;
-function quizLiteralRanges(text: string) {
+function quizLiteralRanges(text: string, context = "") {
   const entity = /(?:方案|计划|组别|类型|模型|区域|\bplan\b|\bgroup\b|\bcase\b)\s*[A-Z](?:\s*(?:和|与|及|、|或|and|or|&)\s*[A-Z])?|\b[A-Z]\s*(?:组|队|型|类|区|站)/gi;
   const ranges = [...text.matchAll(entity)].map(m => [m.index!, m.index! + m[0].length]);
   // These are explicit mathematical expressions or typed set entities, not
@@ -35,6 +35,25 @@ function quizLiteralRanges(text: string) {
     const end = m.index! + m[0].length;
     if (!optionPrefix.test(text.slice(0, m.index)) && !/^\s*(?:项|选项)/.test(text.slice(end))) ranges.push([m.index!, end]);
   }
+  // Membership, contained elements and emptiness name mathematical objects,
+  // even when their letters overlap the choice IDs. Only mask the coordinated
+  // names, not an entire sentence. Explicit choice wording still wins.
+  const declaredSets = new Set([...`${context}\n${text}`.matchAll(/\b([A-Z])\s*=\s*\{[^{}]*\}/g)].map(m => m[1]));
+  const pairs = /\b[A-Z](?:\s*(?:和|与|及|、|或|and|or|&)\s*[A-Z])+\b/g;
+  for (const m of text.matchAll(pairs)) {
+    const start = m.index!, end = start + m[0].length;
+    const before = text.slice(0, start), after = text.slice(end);
+    const membership = /(?:同时)?(?:不)?属于\s*$/.exec(before);
+    const choiceBefore = membership ? before.slice(0, membership.index) : before;
+    if (optionPrefix.test(before) || optionPrefix.test(choiceBefore)
+      || /^\s*(?:项|选项|(?:都|均|皆)?(?:是)?(?:正确|错误|准确|成立|符合|可选))/.test(after)) continue;
+    const setPredicate = /^\s*(?:(?:分别)?(?:含有?|包含)\s*元素|(?:都|均)(?:非空|为空)|(?:都|均)?(?:是|为)(?:(?:非空|空|有限|无限)?集合|非空集|空集)|的(?:元素|交集|并集|补集))/.test(after);
+    // A neutral location such as "A 和 B 中" needs definitions in this very
+    // question; definitions in another item or the source catalog do not count.
+    const declaredLocation = /^\s*(?:中|内)/.test(after)
+      && (m[0].match(/[A-Z]/g) ?? []).every(id => declaredSets.has(id));
+    if (membership || setPredicate || declaredLocation) ranges.push([start, end]);
+  }
   // Explicit alphabet enumerations containing letters outside the option-ID
   // alphabet are content (e.g. an acronym's letters), not choice combinations.
   // This does not whitelist a sample name or exempt bare A/B combinations.
@@ -44,26 +63,26 @@ function quizLiteralRanges(text: string) {
   }
   return ranges;
 }
-function maskQuizLiterals(text: string) {
+function maskQuizLiterals(text: string, context = "") {
   const chars = text.split("");
-  for (const [start, end] of quizLiteralRanges(text)) for (let i = start; i < end; i++) chars[i] = " ";
+  for (const [start, end] of quizLiteralRanges(text, context)) for (let i = start; i < end; i++) chars[i] = " ";
   return chars.join("");
 }
-export function hasQuizPositionDependency(text: string) {
+export function hasQuizPositionDependency(text: string, context = "") {
   // Mask explicit entity names for detection only; never rewrite a saved explanation.
   // A leading question label is display numbering, not reliance on another
   // question. References such as "第2题的…" or a second reference remain checked.
   const body = text.replace(/^\s*(?:\[[^\]\r\n]+\]\s*)?第\s*[一二三四五六七八九十\d]+\s*题(?:\s*[:：、.]\s*|\s+(?!\s|的|中|所|里|给出|提到|答案|选项))/, "");
-  return crossQuestion.test(body) || positionDependent.test(maskQuizLiterals(text));
+  return crossQuestion.test(body) || positionDependent.test(maskQuizLiterals(text, context));
 }
 
 /** New-response explanations only: resolve explicit option identities to quoted
  * content before shuffling. Never apply this to stems, hints or saved history. */
-export function bindQuizOptionExplanation(text: string, options: Array<{ id: string; text: string }>, correctId: string): string | null {
+export function bindQuizOptionExplanation(text: string, options: Array<{ id: string; text: string }>, correctId: string, context = ""): string | null {
   const byId = new Map(options.map(o => [o.id, o]));
   if (byId.size !== options.length || !byId.has(correctId) || crossQuestion.test(text)) return null;
-  if (/\b[A-Z]项?\s*(?:和|与|及|、|或|and|or|&)\s*(?:选项\s*)?[A-Z]项?(?![A-Za-z0-9_])/.test(maskQuizLiterals(text))) return null;
-  const protectedRanges = quizLiteralRanges(text);
+  if (/\b[A-Z]项?\s*(?:和|与|及|、|或|and|or|&)\s*(?:选项\s*)?[A-Z]项?(?![A-Za-z0-9_])/.test(maskQuizLiterals(text, context))) return null;
+  const protectedRanges = quizLiteralRanges(text, context);
   const explicit = /(?<verdict>正确项|错误项)\s*(?<verdictId>[A-Z])\b|(?<label>选项|答案|[Oo]ption|[Cc]hoice)\s*(?<labelId>[A-Z])\b|\b(?<bareId>[A-Z])(?<suffix>项|(?=正确|错误|准确|误将|将|说|是正确|是错误))/g;
   const pieces: string[] = [];
   let cursor = 0;
@@ -86,7 +105,7 @@ export function bindQuizOptionExplanation(text: string, options: Array<{ id: str
   }
   pieces.push(text.slice(cursor));
   const result = pieces.join("");
-  return hasQuizPositionDependency(result) ? null : result;
+  return hasQuizPositionDependency(result, context) ? null : result;
 }
 
 // A deliberately small equality fence for explicit integer-set literals. It
@@ -100,8 +119,17 @@ function literalSetContext(stem: string) {
   return /集合|交集|并集|补集|[∩∪⊆⊂⊇⊃∈∉]/.test(stem)
     && !/多重集|重集|multiset|序列|元组|数组|列表|字符串|JSON|代码|写法|字面|表示法/i.test(stem);
 }
+// Extend duplicate-option identity only to explicit single-letter atoms. This
+// rejects {b,a}/{a,a,a,b}/{a,b,b} without inferring cardinality or evaluating
+// symbolic expressions, set builders or general mathematical correctness.
+const atomicSet = /\{\s*(?:(?:[+-]?\d+|[A-Za-z])(?:\s*[,，、]\s*(?:[+-]?\d+|[A-Za-z]))*)?\s*\}/g;
+function atomicSetKey(literal: string) {
+  const atoms = (literal.match(/[+-]?\d+|[A-Za-z]/g) ?? [])
+    .map(atom => /^[A-Za-z]$/.test(atom) ? `letter:${atom.charCodeAt(0)}` : `integer:${BigInt(atom)}`);
+  return `{${[...new Set(atoms)].sort().join(",")}}`;
+}
 function optionContentKey(text: string, setContext: boolean) {
-  return (setContext ? text.replace(integerSet, integerSetKey) : text).replace(/\s/g, "").toLowerCase();
+  return (setContext ? text.replace(atomicSet, atomicSetKey) : text).replace(/\s/g, "").toLowerCase();
 }
 function contradictsLiteralSetEquality(stem: string, answer: string) {
   // An incorrect-statement question may intentionally choose an inequality.
@@ -135,7 +163,7 @@ function inspectReferencedQuiz(value: ReferencedQuizResponse, catalog: QuizRefer
     if (stems.has(stem)) { reject("重复，未发布"); continue; }
     if (new Set(q.options.map(o => o.id)).size !== q.options.length || !q.options.some(o => o.id === q.correctOptionId)
       || new Set(q.options.map(o => optionContentKey(o.text, literalSetContext(fullStem)))).size !== q.options.length
-      || [scenario ?? "", q.stem, q.explanation, q.hint ?? "", ...q.options.flatMap(o => [o.text, o.reason])].some(hasQuizPositionDependency)) {
+      || [scenario ?? "", q.stem, q.explanation, q.hint ?? "", ...q.options.flatMap(o => [o.text, o.reason])].some(text => hasQuizPositionDependency(text, fullStem))) {
       reject("选项重复、身份不完整或依赖排列位置，未发布"); continue;
     }
     if (literalSetContext(fullStem) && contradictsLiteralSetEquality(fullStem, q.options.find(o => o.id === q.correctOptionId)!.text)) {

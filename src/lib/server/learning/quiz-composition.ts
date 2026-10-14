@@ -57,7 +57,7 @@ export function composedQuizRequest(...args: Parameters<typeof compactQuizReques
         }
         const { focus, explanationParts, ...q } = result.data;
         if (new Set(q.options.map(o => o.id)).size !== q.options.length || !q.options.some(o => o.id === q.correctOptionId)
-          || [q.scenario ?? "", q.stem, ...q.options.map(o => o.text)].some(hasQuizPositionDependency)) {
+          || [q.scenario ?? "", q.stem, ...q.options.map(o => o.text)].some(text => hasQuizPositionDependency(text, `${q.scenario ?? ""}\n${q.stem}`))) {
           notes.push(`第 ${index + 1} 题的选项身份或题干位置关系不明确，未发布。`);
           return { compositionRejected: true };
         }
@@ -77,8 +77,9 @@ export function composedQuizRequest(...args: Parameters<typeof compactQuizReques
         const q = checked.data;
         // Only post-answer prose is normalized, after exact short-reference
         // restoration. No model text is inserted into a stem, option or hint.
-        const explanation = bindQuizOptionExplanation(q.explanation, q.options, q.correctOptionId);
-        const options = q.options.map(o => ({ ...o, reason: bindQuizOptionExplanation(o.reason, q.options, q.correctOptionId) }));
+        const context = `${q.scenario ?? ""}\n${q.stem}`;
+        const explanation = bindQuizOptionExplanation(q.explanation, q.options, q.correctOptionId, context);
+        const options = q.options.map(o => ({ ...o, reason: bindQuizOptionExplanation(o.reason, q.options, q.correctOptionId, context) }));
         if (explanation === null || options.some(o => o.reason === null)) {
           notes.push(`第 ${index + 1} 题的解析选项引用不明确或与答案矛盾，未发布。`);
           return { compositionRejected: true };
