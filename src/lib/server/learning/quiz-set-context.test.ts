@@ -198,3 +198,132 @@ it.each(["foreign evidence", "wrong correct identity"])("does not let valid set 
   quiz.complete(page, id, codec.decode(value, scope));
   expect(saved(id).questions).toHaveLength(0);
 });
+
+// Repair 3 uses only the exact fragments in the user handoff, with synthetic
+// source/reference bindings and synthetic reasons where none were supplied.
+// It is not a byte-for-byte replay of the unavailable original 12 questions.
+const suppliedCardinalityReason = "{a, a, b} 中元素 a 重复写出不会增加元素个数，因此该集合含 a、b 两个元素；{b, a} 中 a、b 均出现一次，也含 a、b 两个元素。两者元素数量相同。";
+const suppliedChoiceSuffixes = [
+  "选项只能从 A 和 B 中选一个。",
+  "正确答案只能从 A 和 B 中选择。",
+  "正确答案应当在 A 和 B 中。",
+];
+function reportedIntersection() {
+  const fixture = begin(), q = fixture.value.items[0];
+  q.stem = "已知集合 A={1,2,3}，B={3,4}。A∩B 是什么？";
+  q.correctOptionId = "C";
+  const texts = ["{1,2}", "{1,2,3,4}", "{3}", "∅"];
+  const reasons = ["所列元素不是两个集合共有的元素，并且漏掉共有元素 3。", "这是并集，包含仅属于其中一个集合的元素。", "元素 3 同时属于 A 和 B，因此 A∩B={3}。", "两者共有元素 3，交集并非空集。"];
+  q.options.forEach((option, index) => { option.text = texts[index]; option.reasonParts[0].text = reasons[index]; });
+  q.explanationParts[0].text = reasons[2];
+  return fixture;
+}
+it("does not classify the supplied lowercase element enumeration as choice identities", () => {
+  const { value } = begin();
+  expect(hasQuizPositionDependency(suppliedCardinalityReason)).toBe(false);
+  expect(bindQuizOptionExplanation(suppliedCardinalityReason, value.items[0].options, "A")).toBe(suppliedCardinalityReason);
+});
+it("keeps the supplied Q1 reason through composition, then rejects the actual equivalent options at publication", () => {
+  const { id, input, scope, codec, value } = begin(), q = value.items[0];
+  q.stem = "集合 {a, a, b} 与哪个集合含相同数量的元素？";
+  q.correctOptionId = "A";
+  const texts = ["{b,a}", "{a,a,a,b}", "{a,b,b}", "{a,c}"];
+  q.explanationParts[0].text = suppliedCardinalityReason;
+  q.options.forEach((option, index) => {
+    option.text = texts[index];
+    option.reasonParts[0].text = index === 0 ? suppliedCardinalityReason : "这个集合含两个不同的元素，与题干集合的元素数量相同。";
+  });
+  for (const text of [q.stem, suppliedCardinalityReason, ...q.options.flatMap(o => [o.text, o.reasonParts[0].text])]) {
+    expect(hasQuizPositionDependency(text, q.stem)).toBe(false);
+  }
+  const decoded = codec.decode(value, scope);
+  expect(decoded.items[0]).toMatchObject({ correctOptionId: "A", explanation: suppliedCardinalityReason,
+    options: [{ id: "A", text: "{b,a}", reason: suppliedCardinalityReason }, { id: "B", text: "{a,a,a,b}" }, { id: "C", text: "{a,b,b}" }, { id: "D", text: "{a,c}" }] });
+  expect(decoded.reason ?? "").not.toMatch(/解析选项引用不明确|与答案矛盾/);
+  const selected = limitReferencedQuizCandidates(decoded, catalog(input), 1);
+  expect(selected.items).toHaveLength(0);
+  expect(selected.reason).toContain("选项重复");
+  quiz.complete(page, id, decoded);
+  expect(saved(id).questions).toHaveLength(0);
+  expect(saved(id).reason).toContain("选项重复");
+  expect(saved(id).reason).not.toMatch(/解析选项引用不明确|与答案矛盾/);
+  expect(quiz.list(page).find(run => run.id === id)).toMatchObject({ status: "insufficient", count: 0 });
+  expect(fetch).not.toHaveBeenCalled();
+});
+it.each(suppliedChoiceSuffixes)("rejects the supplied explicit choice combination despite declared sets: %s", suffix => {
+  const { value } = reportedIntersection(), q = value.items[0];
+  const reason = q.explanationParts[0].text + suffix;
+  expect(hasQuizPositionDependency(reason, q.stem)).toBe(true);
+  expect(bindQuizOptionExplanation(reason, q.options, "C", q.stem)).toBeNull();
+});
+it.each(suppliedChoiceSuffixes)("rejects the reported appended choice combination through codec and SQLite: %s", suffix => {
+  const { id, input, scope, codec, value } = reportedIntersection(), q = value.items[0];
+  const reason = q.options[2].reasonParts[0].text + suffix;
+  q.options[2].reasonParts[0].text = reason;
+  // The actual wire contract derives the explanation from the correct reason.
+  q.explanationParts = [];
+  const decoded = codec.decode(value, scope);
+  expect(decoded.items[0]).toMatchObject({ compositionRejected: true });
+  expect(decoded.reason).toContain("解析选项引用不明确或与答案矛盾");
+  expect(limitReferencedQuizCandidates(decoded, catalog(input), 1).items).toHaveLength(0);
+  quiz.complete(page, id, decoded);
+  expect(saved(id).questions).toHaveLength(0);
+  expect(quiz.list(page).find(run => run.id === id)).toMatchObject({ status: "insufficient", count: 0 });
+  expect(fetch).not.toHaveBeenCalled();
+});
+it("publishes legitimate declared membership with stable C identity, exact evidence and saved application score", () => {
+  const { id, input, scope, codec, value } = reportedIntersection(), q = value.items[0];
+  const reason = "元素3在A和B中，因此 A∩B={3}。";
+  const incorrectReason = "该选项忽略了元素3在A和B中，交集并非空集。";
+  expect(hasQuizPositionDependency(reason, q.stem)).toBe(false);
+  expect(bindQuizOptionExplanation(reason, q.options, "C", q.stem)).toBe(reason);
+  expect(bindQuizOptionExplanation(incorrectReason, q.options, "C", q.stem)).toBe(incorrectReason);
+  q.options[2].reasonParts[0].text = reason;
+  q.options[3].reasonParts[0].text = incorrectReason;
+  q.options.reverse();
+  q.explanationParts = [];
+  quiz.complete(page, id, codec.decode(value, scope));
+  expect(quiz.list(page).find(run => run.id === id)).toMatchObject({ status: "completed", count: 1 });
+  const question = saved(id).questions[0];
+  expect(question.correctOptionId).toBe("C");
+  expect(question.explanation).toBe(reason);
+  expect(question.options.find(option => option.id === "C")).toMatchObject({ text: "{3}", reason });
+  expect(question.options.find(option => option.id === "D")?.reason).toBe(incorrectReason);
+  expect(question.evidence?.map(e => e.quote)).toEqual(input.materials[0].paragraphs.map(p => p.text));
+  expect(question.options.find(option => option.id === "C")?.evidenceIds).toEqual(input.materials[0].paragraphs.map(p => p.referenceId));
+  let attempt = quiz.startAttempt(page, { id: randomUUID(), quizId: id, mode: "test" });
+  expect(JSON.stringify(attempt)).not.toMatch(/correctOptionId|evidenceIds|feedback|reasonParts|因此/);
+  attempt = quiz.act(page, { id: randomUUID(), attemptId: attempt.id, revision: attempt.revision, action: "choose", question: 0, optionId: "C" });
+  attempt = quiz.act(page, { id: randomUUID(), attemptId: attempt.id, revision: attempt.revision, action: "finish", question: 0, optionId: null });
+  expect(attempt.score).toMatchObject({ correct: 1, total: 1 });
+  learning.close(); learning = new LearningRepository(root, "owner"); quiz = new LearningQuizRepository(learning);
+  expect(quiz.attempt(page, attempt.id)).toEqual(attempt);
+  expect(saved(id).questions[0].correctOptionId).toBe("C");
+  expect(fetch).not.toHaveBeenCalled();
+});
+it.each(["a和b都正确", "选项 a、b 两个元素", "选项只能从 a、b 两个元素中选择", "正确答案应当在 a 和 b 两个元素中"])("does not exempt lowercase choice identities as element enumerations: %s", text => {
+  expect(hasQuizPositionDependency(text, "集合 {a,b}")).toBe(true);
+  expect(bindQuizOptionExplanation(text, begin().value.items[0].options, "A", "集合 {a,b}")).toBeNull();
+});
+it("publishes a separate synthetic single-answer control with the exact supplied element reason", () => {
+  // This intentionally different synthetic question is a positive control,
+  // not a rewritten original Q1 and not counted as an original-response replay.
+  const { id, scope, codec, value } = begin(), q = value.items[0];
+  q.stem = "集合 {a, a, b} 与哪个集合含相同数量的元素？";
+  const texts = ["{b,a}", "{a}", "{a,b,c}", "{}"];
+  const reasons = [suppliedCardinalityReason, "这个集合只有一个元素。", "这个集合含三个不同的元素。", "空集没有元素。"];
+  q.explanationParts = [];
+  q.options.forEach((option, index) => { option.text = texts[index]; option.reasonParts[0].text = reasons[index]; });
+  quiz.complete(page, id, codec.decode(value, scope));
+  expect(quiz.list(page).find(run => run.id === id)).toMatchObject({ status: "completed", count: 1 });
+  expect(saved(id).questions[0]).toMatchObject({ correctOptionId: "A", explanation: suppliedCardinalityReason });
+  expect(saved(id).questions[0].options.find(option => option.id === "A")?.reason).toBe(suppliedCardinalityReason);
+});
+it.each([
+  { text: "a、b 两个元素", context: "" },
+  { text: "a、b 两个元素", context: "集合 {c,d}" },
+  { text: "a、b", context: "集合 {a,b}" },
+])("does not treat undeclared or untyped lowercase combinations as mathematical elements: $text / $context", ({ text, context }) => {
+  expect(hasQuizPositionDependency(text, context)).toBe(true);
+  expect(bindQuizOptionExplanation(text, begin().value.items[0].options, "A", context)).toBeNull();
+});

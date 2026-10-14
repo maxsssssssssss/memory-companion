@@ -22,7 +22,7 @@ export function arrangeQuizOptions<T>(options: T[], pick = randomInt): T[] {
 
 // A conservative rejection of position-dependent options, not a semantic verifier.
 const positionDependent = /以上(?:全|都|皆|均|各|两|三)|上述(?:全|都|皆|均|各|两|三)|以下(?:全|都|皆|均)|(?:all|none|both) of (?:the )?(?:above|below)|(?:选项|答案|option|choice|选择|选|choose|select|正确项|错误项)\s*[A-Z]\b|\b[A-Z]\s*(?:和|与|及|、|或|and|or|&)\s*[A-Z]\b|第[一二三四五六1-6]个选项|\b[A-Z](?:项|正确|错误|准确|误将|将|说|是正确|是错误)/i;
-const optionPrefix = /(?:选项|答案|option|choice|正确项|错误项|选择|选|choose|select)\s*[:：]?\s*(?:(?:中(?:的)?|分别(?:是|为)|是|为|只(?:能|有)?|仅(?:有|能)?|应(?:当|该)?|必须|可能|可以|同时)\s*[:：]?\s*)*$/i;
+const optionPrefix = /(?:选项|答案|option|choice|正确项|错误项|选择|选|choose|select)\s*[:：]?\s*(?:(?:中(?:的)?|分别(?:是|为)|是|为|只(?:能|有)?|仅(?:有|能)?|应(?:当|该)?|必须|可能|可以|同时|从|在)\s*[:：]?\s*)*$/i;
 const crossQuestion = /第\s*[一二三四五六七八九十\d]+\s*题|上(?:一)?题|前题|下(?:一)?题|previous question|next question/i;
 function quizLiteralRanges(text: string, context = "") {
   const entity = /(?:方案|计划|组别|类型|模型|区域|\bplan\b|\bgroup\b|\bcase\b)\s*[A-Z](?:\s*(?:和|与|及|、|或|and|or|&)\s*[A-Z])?|\b[A-Z]\s*(?:组|队|型|类|区|站)/gi;
@@ -53,6 +53,21 @@ function quizLiteralRanges(text: string, context = "") {
     const declaredLocation = /^\s*(?:中|内)/.test(after)
       && (m[0].match(/[A-Z]/g) ?? []).every(id => declaredSets.has(id));
     if (membership || setPredicate || declaredLocation) ranges.push([start, end]);
+  }
+  // Element symbols can be lowercase too. A bare letter list is still unsafe:
+  // require actual atoms in this question/prose's finite set literals AND an
+  // element/occurrence predicate. Do not rewrite the symbols or their reasons.
+  const atoms = new Set([...`${context}\n${text}`.matchAll(atomicSet)].flatMap(m => m[0].match(/[A-Za-z]/g) ?? []));
+  const elements = /\b[A-Za-z](?:\s*(?:和|与|及|、|或|and|or|&)\s*[A-Za-z])+\b/g;
+  for (const m of text.matchAll(elements)) {
+    const start = m.index!, end = start + m[0].length;
+    const before = text.slice(0, start), after = text.slice(end);
+    const elementPrefix = /(?:元素|含有?|包含)\s*$/.exec(before);
+    if (optionPrefix.test(before) || (elementPrefix && optionPrefix.test(before.slice(0, elementPrefix.index)))
+      || /^\s*(?:项|选项|(?:都|均|皆)?(?:是)?(?:正确|错误|准确|成立|符合|可选))/.test(after)) continue;
+    const elementPredicate = elementPrefix
+      || /^\s*(?:[一二两三四五六七八九十\d]+\s*个元素|(?:都|均)(?:只)?出现[一二两三四五六七八九十\d]+\s*次)/.test(after);
+    if (elementPredicate && (m[0].match(/\b[A-Za-z]\b/g) ?? []).every(atom => atoms.has(atom))) ranges.push([start, end]);
   }
   // Explicit alphabet enumerations containing letters outside the option-ID
   // alphabet are content (e.g. an acronym's letters), not choice combinations.
