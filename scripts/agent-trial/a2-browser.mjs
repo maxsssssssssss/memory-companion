@@ -59,10 +59,10 @@ async function session(key, work) {
   }, { url: `/api/learning/pages/${account.pageId}${suffix}`, method, data });
   const tasks = async () => { const response = await api(); assert.equal(response.status, 200); return response.value.tasks; };
   const current = async id => { const task = (await tasks()).find(task => task.id === id); assert(task); return task; };
-  const panel = () => page.getByRole('region', { name: '自适应复习·试用', exact: true });
+  const panel = () => page.getByRole('region', { name: '复习向导', exact: true });
   const open = async id => {
     await page.goto(`${runtime.base}/learning/${account.pageId}?view=agent${id ? '&agent=' + id : ''}`);
-    await page.getByRole('navigation', { name: '学习任务' }).getByRole('button', { name: '自适应复习·试用', exact: true }).click();
+    await page.getByRole('navigation', { name: '学习任务' }).getByRole('button', { name: '复习向导', exact: true }).click();
     await expect(panel()).toBeVisible();
   };
   const snapshot = label => page.screenshot({ path: path.join(root, 'screenshots', `${reportName}-${key}-${label}.png`), fullPage: true });

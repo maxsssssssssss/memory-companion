@@ -61,7 +61,7 @@ export function createLearningAgentNoteTool(learning: LearningRepository): Agent
       if (!material?.paragraphs.some(p => p.number === ref.paragraph)) throw new AgentFailure("source_changed", "agent_note_source_changed");
       return `《${material.title}》第 ${ref.paragraph} 段`;
     });
-    const content = [answer.materialAnswer ? `从自适应复习追加（材料内容的 AI 解释，未作语义核验）\n${answer.materialAnswer}` : null,
+    const content = [answer.materialAnswer ? `来自复习向导（根据材料生成的 AI 解释，请结合原文核对）\n${answer.materialAnswer}` : null,
       ...answer.supplements.map(s => `补充${s.kind === "example" ? "例子" : "解释"}（材料外）\n${s.text}`),
       `来源：${sourceLabels.join("；")}`].filter(Boolean).join("\n\n");
     if (target.node.note.length + content.length + 2 > 20000) throw new LearningError(413, "note_too_large");

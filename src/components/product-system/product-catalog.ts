@@ -38,8 +38,7 @@ export const PRODUCT_CATALOG: readonly ProductDefinition[] = [
     name: "学习整理",
     description: "整理课件、录音和笔记，理清知识关系，再用 Quiz 检查理解。",
     href: "/learning",
-    mark: "学",
-    trial: true
+    mark: "学"
   }
 ] as const;
 

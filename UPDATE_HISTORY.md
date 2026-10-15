@@ -15535,3 +15535,31 @@ Learning与UI：新增 `agent-scope.ts`、`agent-repository.ts`、`agent-scenari
 - 中间失败保留：来源泄漏先复现；事件消费竞争、首轮56/57的审批暂停及独立复核的暂停后核对死点均修复复验；首轮TS两份脚本声明缺失已补。相关首轮38/521中准备面板effect回调检查过早，改等待原精确断言不改产品/OCR。手动radio.check误要求异步保存同步选中，改点击/等待响应/核对状态并保留原作答续跑；B草稿警告与Next播报双匹配，限定正文后用独立B-draft正常重启复验，原B及失败证据保留，无数据库造分数/状态。
 - 证据/交接：114次离线响应（决策94、解释14、Quiz5、手动追问1）全部actual_network_requests=0，不伪造真实tokens/金额。任务库完整性ok，题组/作答/笔记/SDK checkpoint/截图/runs归档保留，服务已停。docs/agent-v1-closure.md含完成矩阵、最终命令/结果/轨迹/继续体验；docs/agent-v1-windows.md整合最终SHA检出安装seed、最小真实协议、业务、调整审批恢复、手动回归、备份与数据回退。旧Windows文档保留历史并指向统一入口，真实预算另行授权，旧A1两次PASS不套新SHA。
 - 结论：Agent V1功能开发完成（Cloud），等待Windows真实验收。功能COMPLETE；Cloud相关离线PASS；扩展全仓PARTIAL（旧外部fixture）；Windows最终SHA真实验收PENDING；生产部署NOT RUN。无已知Agent核心开发阻塞。保留批准笔记后结束需新任务、unknown无查询证据不重发、不承诺exactly-once/掌握等V1限制。按授权普通提交push同一开发分支，最终SHA由交付对话及远端核对；后续只返工具体验收缺陷，不自动A4或扩方向。
+
+
+## 2026-10-15 10:57（Asia/Shanghai）学习页复习向导：产品命名与工程展示清理（本地记录）
+
+- 用户要求把自适应复习改名为“复习向导”，去掉试用及预算、调用、决策等工程台信息。实际工作区/workspace/memory-companion，dev/cloud-code，HEAD 51237e69972fa1a14b6ac7a3f9f856c633762cef；保留原有UPDATE_HISTORY.md的70行dirty追加记录，未切分支、reset、覆盖或推送其他成果。
+- 按现有DESIGN与实际Learning调用链，仅改展示与文案：learning-workspace/learning-agent-panel入口、标题及可访问名称统一；LearningShell、product-catalog取消学习试用标记，并同步DESIGN当前规则。面板移除预算、调用/计算/决策/tokens、版本号、技术行动日志/结果ID及对应无用CSS；保留目标、范围、当前状态、Quiz、解释和用户操作。learning-agent-adjustment与learning-agent-api改为面向用户的范围确认、冲突、缺配置和结束提示。已有预算/版本/来源/权限/审批/去重仍按原逻辑执行，正式Prompt/structured_action_v1和其他产品业务未改。
+- 新笔记提案由agent-notes使用“来自复习向导”署名并保留AI解释需结合原文核对的提示；不改已有笔记或审批内容快照。复核发现正式API不投影rejected审批，故前端以既有拒绝结束原因准确映射用户说明，未新建API/持久状态。同步learning-agent-panel.test、product-system.test、agent-a2.test以及两份既有browser脚本locator；无新增依赖、迁移或接口。
+- 实测：npm run cloud:test --（7个文件完整参数见output/review-guide-ui-20261015/tests.log）首轮7文件122例121过1失败，失败仅agent-a2旧笔记署名匹配；更新后该文件10/10退出0。独立复核后补充真实拒绝投影场景，最终受影响panel/agent-a2两文件31/31退出0；其余5文件91项此前通过且未再改动，共7文件122个独立用例已通过，不累加重跑数量。npm run cloud:check的9环境/进程合同和完整TypeScript退出0。首个build为补齐拒绝文案主动停止（143），最终npm run cloud:build退出0（含完整类型、44页面、180 trace manifests、forbidden=0）。脚本node --check和git diff --check通过。
+- 实际production浏览器以合成课程、真实应用API/SQLite和受限离线Provider展示开始、持久等待Quiz、调整前后预览、原Quiz作答组件、笔记待确认；断言相关界面不含工程统计和试用标记。首个临时截图脚本使用getByLabel精确定位已填文本框超时，改用现有正式验收相同的getByRole textbox后复验退出0，复用已保存任务，不重复创建题组。没有产品页面错误或浏览器外联。截图/日志/verification.json保存在output/review-guide-ui-20261015。
+- 边界与结束：离线响应10次、真实Provider网络请求0；正常停止本轮launcher/app退出0，合成课程、任务、Quiz及待确认笔记保留。未运行全仓/真实Provider/Windows新版本验收，未commit/push/部署。本轮仅完成本地产品界面改动，不改既有有限数学与S32语义支持限制；历史记录仅追加，原成果保留。
+
+
+## 2026-10-15 14:18（Asia/Shanghai）复习向导：统一学习整理视觉与操作层级
+
+- 背景与范围：用户要求参照学习整理其他UI整理、美化复习向导。当前 /workspace/memory-companion、dev/cloud-code、HEAD 51237e69972fa1a14b6ac7a3f9f856c633762cef 保持不变，保留上一轮改名/去工程信息及技能安装历史的15个dirty文件，没有切分支、重置或覆盖。使用已安装并适配的 Impeccable 4.1.1 layout 指导，依据 PRODUCT.md、DESIGN.md 和现有阅读/Quiz组件；不进行整站重设计。
+- 调查与实现：旧布局存在标题全宽而正文800px居中、任务信息平铺、主次按钮拥挤、疑问表单常驻等问题。本轮仅修改 learning-agent-panel.tsx、learning.module.css 和 learning-agent-panel.test.tsx（加本历史记录）。统一标题和内容的800px阅读轴；保留书卷金token、字体与现有按钮/来源样式。目标、状态、范围和读取权限分组；浅金“接下来”区域集中等待说明、打开题组和已作答继续；调整/暂停/取消集中为低强调底部操作。题目疑问使用原生details按需展开，支持键盘且保留原反馈内容与成绩保护。新建、调整、笔记审批、解释和恢复区使用一致间距与边界，小屏单列且主操作适应宽度；长目标平衡换行，保留原文。没有新依赖/图标库/迁移/API或业务逻辑改写，没有恢复预算/调用/决策/版本/日志等工程信息。
+- 功能保全：账号/来源/授权、稳定事件身份、pending收据、未知结果不得重发、旧版本审批禁用、准确笔记正文与来源绑定、调整前后预览、认证失效清内容、已保存Quiz及作答都沿用现有接口。布局调整不新增自动调用、审批或外联。独立只读审查与本轮组件回归未发现相关功能回归。
+- 最终验证：npm run cloud:test -- src/components/learning/learning-agent-panel.test.tsx src/components/learning/learning-quiz.test.tsx src/components/learning/learning-study.test.tsx src/components/learning/learning-framework.test.tsx src/components/learning/learning.test.tsx src/components/learning/learning-preparation.test.tsx src/components/product-system/product-system.test.tsx，7文件113项通过、0失败/跳过，退出0。npm run cloud:check：9环境/进程合同和完整Next typegen/TypeScript通过，退出0。npm run cloud:build：44/44页面、180 trace manifests、forbidden=0，退出0。此前panel单文件21/21与最终113项重叠，不累加覆盖数量。
+- 浏览器：使用现有明确合成的集合课程、任务、Quiz与笔记提案，通过正式登录/API/SQLite读取，在离线启动器的dev及最终production两种模式验证；最终脚本 node output/review-guide-layout-20261015/preview.mjs 退出0。实际1440×1100与390×844页面、键盘Enter展开疑问、表单填写及默认未勾选权限、打开原Quiz组件、调整预览/取消、固定笔记提案及来源/批准拒绝入口可见；无横向溢出，任务面板按钮/summary均至少44px，刷新不增加离线生成调用；浏览器errors/denied均为空。停止dev后从保留SQLite数据启动production，等待任务与审批保持；本轮未提交新的学生答案或批准笔记，不把界面验证扩大为新业务闭环验收。最终实际页面截图、每轮日志、增量diff与verification.json保存在 output/review-guide-layout-20261015，合成内容未为美观改写。
+- 实际中间失败/限制：首轮panel 21项中20过1失败，原因是新增测试把折叠details后代误认为不在DOM，修正为不可见断言并保留实际展开、提交和API检查；最终全部通过。Impeccable机械检测退出2，仅命中本轮未修改的frameworkSupplement既有2px左边界，符合当前学习主题而保留，没有新增命中；此检测不代替功能/可访问性验证。技能还报告旧PRODUCT.md无其schema stamp，仅记录而未扩展为文档迁移。全仓回归、真实Provider、Windows设备与生产部署 NOT RUN；本轮真实LLM/ASR/OCR请求0。
+- 收尾：本轮所属dev及production服务均正常停止、退出0，保留合成数据与截图；git diff --check通过。仅本地完成UI改动，未commit/push/merge/deploy，未修改main，不将本地UI验证混同为Windows或生产结果。
+
+
+## 2026-10-15 14:29（Asia/Shanghai）复习向导 UI：获准提交至 dev/cloud-code
+
+- 用户明确指令执行提交/推送，目标 maxsssssssssss/memory-companion 的 dev/cloud-code。本次 GitHub fetch 核对远端和本地起点均为51237e69972fa1a14b6ac7a3f9f856c633762cef（ahead/behind=0/0），无分叉，不合并main、不force push、不部署。
+- 提交范围为两轮复习向导改名、移除工程展示、布局优化、关联设计说明和测试脚本，共14个相关源码/测试/设计文件及对应本历史。源码哈希与上一条最终验证一致，沿用7文件113项、完整TypeScript、production build及实际桌面/窄屏浏览器通过证据；没有验证后代码修改，不重复运行已通过门禁。补充两个浏览器脚本node --check、git diff --check均退出0，独立只读diff审查未发现无关代码或阻塞。
+- 原始工作区历史完整保留，仅暂存本次两轮UI记录和此交付核对记录；早前明确仅限本地的返修/集成记录及技能安装记录未混入本次UI提交。忽略的Skills目录、合成数据和截图不入Git。正常push及远端完整SHA核对结果以本次交付消息和本地push-result.json为准；真实Provider请求0，未启动服务。

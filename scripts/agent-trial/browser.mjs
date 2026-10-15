@@ -76,8 +76,8 @@ try {
       const task = (await tasks()).find(item => item.id === state.accounts[account.key]?.taskId);
       assert(task, 'persisted_task_missing'); return task;
     };
-    const panel = () => page.getByRole('region', { name: '自适应复习·试用', exact: true });
-    const openAgent = async () => { await page.getByRole('navigation', { name: '学习任务' }).getByRole('button', { name: '自适应复习·试用', exact: true }).click(); await expect(panel()).toBeVisible(); };
+    const panel = () => page.getByRole('region', { name: '复习向导', exact: true });
+    const openAgent = async () => { await page.getByRole('navigation', { name: '学习任务' }).getByRole('button', { name: '复习向导', exact: true }).click(); await expect(panel()).toBeVisible(); };
     const refresh = async () => { await panel().getByRole('button', { name: '刷新任务', exact: true }).click(); };
     async function settle(label, afterActions = -1, skipStatuses = []) {
       const deadline = Date.now() + 12 * 60_000; let previous;

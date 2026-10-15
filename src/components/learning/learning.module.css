@@ -219,19 +219,70 @@ pre.original { padding: 24px; border-radius: var(--db-radius-card); background: 
 .quizAttempt, .quizResults, .quizReady, .quizSettings { max-width: 800px; margin-inline: auto; }
 .quizReady { padding: 24px 0; }
 .quizReady fieldset { border: 0; padding: 0; }
-.agentPanel { max-width: 800px; margin-inline: auto; overflow-wrap: anywhere; }
-.agentPanel > label, .agentFeedback > label { display: grid; gap: 8px; }
-.agentPanel select { min-height: var(--db-touch-target); padding: 8px; font: inherit; color: var(--db-text); background: var(--db-surface); border: 1px solid var(--db-border-strong); border-radius: var(--db-radius-control); }
-.agentFeedback, .agentExplanation, .agentLog { margin-top: 24px; padding-top: 20px; border-top: 1px solid var(--db-border); }
-.agentFeedback > button { margin-top: 12px; }
-.agentExplanation summary, .agentLog summary { min-height: var(--db-touch-target); align-content: center; cursor: pointer; }
-.agentLog li { margin-block: 16px; }
-.agentLog li p { margin-block: 6px; }
-.agentAdjustment, .agentApproval, .agentRecovery { margin-block: 24px; padding-block: 20px; border-block: 1px solid var(--db-border); }
-.agentBudget { padding: 12px 16px; background: var(--db-surface-inset); border-left: 3px solid var(--db-accent); }
-.agentChangePreview { margin-block: 20px; }
+.agentSection { max-width: 800px; margin-inline: auto; }
+.agentHeader { align-items: flex-start; gap: 20px; padding-bottom: 28px; }
+.agentHeader > div:first-child { flex: 1 1 280px; }
+.agentHeader h2 { margin-bottom: 8px; }
+.agentHeader p { margin: 0; }
+.agentHeader > .row { gap: 8px; }
+.agentHeader button { font-size: 14px; }
+.app .agentQuietButton { border-color: transparent; background: transparent; }
+.agentPanel { min-width: 0; overflow-wrap: anywhere; }
+.agentPanel select { width: 100%; min-width: 0; }
+.agentPanel > label, .agentFeedback > label, .agentDisputeBody > label { display: grid; gap: 8px; }
+.agentTaskPicker { margin-bottom: 24px; }
+.agentOverview { padding-bottom: 24px; }
+.agentStatus { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; margin: 0 0 16px; font-size: 13px; color: var(--db-text-secondary); }
+.app .agentGoal { margin: 0 0 16px; font-size: 22px; font-weight: 600; line-height: 1.65; text-wrap: balance; }
+.agentScope { margin: 0; font-size: 14px; }
+.agentPermissions { display: flex; flex-wrap: wrap; gap: 4px 20px; margin-top: 8px; color: var(--db-text-secondary); font-size: 13px; line-height: 1.7; }
+.agentNextStep { padding: 24px; background: var(--db-surface-muted); border-radius: var(--db-radius-card); }
+.agentNextStep h4, .agentQuizArchive h4, .agentApproval h4, .agentRecovery h4 { margin: 0 0 8px; font-size: 16px; line-height: 1.6; }
+.agentNextStep > p { margin: 0 0 20px; }
+.agentQuizFeedback { margin-top: 20px; padding-top: 16px; border-top: 1px solid var(--db-border); }
+.agentQuizFeedback > p { margin: 0 0 12px; }
+.agentFeedback { display: grid; gap: 16px; margin-top: 20px; }
+.agentFeedback > button, .agentDisputeBody > button { justify-self: start; }
+.agentDispute { margin-top: 16px; }
+.app .agentDispute > summary { width: fit-content; max-width: 100%; color: var(--db-text-secondary); font-size: 14px; font-weight: 400; }
+.agentDisputeBody { display: grid; gap: 12px; padding-top: 8px; }
+.agentDisputeBody p { margin: 0; }
+.agentTaskControls { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px 24px; margin-top: 24px; padding-top: 16px; border-top: 1px solid var(--db-border); }
+.agentTaskControls .row { gap: 8px; }
+.agentTaskControls button { border-color: transparent; background: transparent; font-size: 14px; }
+.agentNotice { padding: 16px 20px; margin: 0 0 24px; background: var(--db-surface-muted); border-radius: var(--db-radius-control); }
+.agentExplanation { margin: 0 0 24px; padding: 0 0 20px; border-bottom: 1px solid var(--db-border); }
+.agentExplanation summary { min-height: var(--db-touch-target); align-content: center; cursor: pointer; }
+.agentExplanation .original { margin: 8px 0 16px; }
+.agentAdjustment, .agentApproval, .agentRecovery { display: grid; gap: 16px; margin: 0 0 24px; padding: 24px; background: var(--db-surface); border: 1px solid var(--db-border); border-radius: var(--db-radius-card); }
+.agentAdjustment > :is(h3, p), .agentApproval > p, .agentRecovery > p { margin: 0; }
+.agentApproval .frameworkNote { padding: 16px 20px; margin: 0; border: 0; background: var(--db-surface-muted); border-radius: var(--db-radius-control); }
+.agentApproval .original { margin: 0; }
+.agentApproval .sources { margin: 0; }
+.agentChangePreview { margin-block: 8px; }
 .agentChangePreview > div { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 270px), 1fr)); gap: 20px; }
 .agentChangePreview > div > section { border-top: 1px solid var(--db-border); }
+.agentStart { margin: 0; background: var(--db-surface); padding: 24px; }
+.agentStart legend { padding-inline: 8px; font-weight: 600; }
+.agentStart > p { margin: 0; }
+.agentStart > button { justify-self: start; }
+.agentStart ~ button { margin-top: 16px; }
+.agentPermissionsForm { display: grid; gap: 4px; padding-top: 12px; border-top: 1px solid var(--db-border); }
+.agentAdjustment .quizSettings { width: 100%; margin: 0; padding: 0; border: 0; }
+.agentAdjustment .quizSettings > legend { padding: 0 0 16px; font-weight: 600; }
+.agentAdjustment fieldset fieldset { min-width: 0; margin: 0; padding: 12px 16px; border: 1px solid var(--db-border); border-radius: var(--db-radius-control); }
+.agentQuizArchive { margin-block: 24px; }
+.agentFootnote { margin: 20px 0 0; color: var(--db-text-secondary); font-size: 12px; }
+@media (max-width: 700px) {
+  .agentHeader { gap: 16px; padding-bottom: 24px; }
+  .agentHeader > div:first-child { flex-basis: 100%; }
+  .app .agentGoal { font-size: 20px; }
+  .agentNextStep, .agentAdjustment, .agentApproval, .agentRecovery { padding: 20px 16px; }
+  .agentPermissions { gap: 4px 16px; }
+  .agentTaskControls { gap: 8px; }
+  .agentTaskControls > button, .agentTaskControls .row button { padding-inline: 8px; }
+  .agentNextStep > .row > button { flex: 1 1 auto; }
+}
 .quizOption span { display: grid; gap: 6px; }
 .quizOption small { line-height: 1.6; color: var(--db-text-secondary); }
 .quizAttempt { margin-top: 16px; }

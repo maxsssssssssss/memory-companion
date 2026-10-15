@@ -41,7 +41,6 @@ export function LearningShell({ children, dailyReflectionEnabled }: { children: 
         <header className={styles.shellHeader}>
           <div className={styles.row}>
             <ProductSwitcher accountId={user.id} currentProduct="learning_organizer" dailyReflectionEnabled={dailyReflectionEnabled} />
-            <span className={styles.badge}>试用中</span>
           </div>
           <ProductAccountMenu userLabel={user.name || user.email} onLogout={async () => {
             await api.logout(); setUser(null); router.replace("/date-companion");

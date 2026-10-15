@@ -218,7 +218,7 @@ function LearningWorkspaceContent({ pageId }: { pageId: string }) {
         </div>
       </header>
       <nav className={styles.taskNav} aria-label="学习任务">
-        {[['read', '阅读框架'], ['quiz', 'Quiz 练习'], ['agent', '自适应复习·试用']].map(([id, label]) => <button key={id} type="button" aria-pressed={area === id} onClick={() => changeArea(id)}>{label}</button>)}
+        {[['read', '阅读框架'], ['quiz', 'Quiz 练习'], ['agent', '复习向导']].map(([id, label]) => <button key={id} type="button" aria-pressed={area === id} onClick={() => changeArea(id)}>{label}</button>)}
         <button className={styles.materialsEntry} type="button" aria-pressed={area === "materials"} onClick={() => changeArea("materials")}>材料</button>
       </nav>
       <LearningPreparation pageId={pageId} refreshKey={preparationEpoch} onUpdated={preparationUpdated} onActive={setPreparationActive} onStatus={setPreparationStatus}

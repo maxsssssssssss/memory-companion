@@ -34,9 +34,9 @@ export function LearningAgentAdjustmentForm({ task, materials, chapters, disable
   const missing = (field: "materialIds" | "chapterIds" | "nodeIds", available: Array<{ id: string }>) => draft.scope[field].filter(id => !available.some(item => item.id === id)).map(id => <label className={styles.materialCheck} key={id}><input type="checkbox" checked onChange={() => toggle(field, id)} />已不可用的来源（取消勾选以撤销授权）</label>);
   return <section className={styles.agentAdjustment} aria-label="调整本轮复习">
     <h3>调整本轮复习</h3>
-    <p className={styles.muted}>只调整这个学习页。新选择需再次确认；已用预算累计，历史题组和作答不改写。旧等待与未执行的笔记确认将失效。</p>
-    {stale ? <div role="alert" className={styles.error}><p>本轮已更新到版本 {task.version}，编辑草稿仍基于版本 {before.expectedVersion}。先比对最新目标和范围。</p><details><summary>查看服务器当前版本</summary>{summary(snapshot(task))}</details>
-      <button type="button" disabled={disabled} onClick={() => { const latest = snapshot(task); setBefore(latest); setDraft(value => ({ ...value, expectedVersion: latest.expectedVersion })); setPreview(false); }}>按最新版本重新比对</button></div> : null}
+    <p className={styles.muted}>只调整当前学习页内的内容。确认后会按新目标和范围继续；历史练习与作答保留，待保存的笔记需要重新确认。</p>
+    {stale ? <div role="alert" className={styles.error}><p>本轮复习已在其他地方更新。请先核对最新目标和范围，再提交你的调整。</p><details><summary>查看当前目标和范围</summary>{summary(snapshot(task))}</details>
+      <button type="button" disabled={disabled} onClick={() => { const latest = snapshot(task); setBefore(latest); setDraft(value => ({ ...value, expectedVersion: latest.expectedVersion })); setPreview(false); }}>按最新内容重新比对</button></div> : null}
     <fieldset disabled={disabled} className={styles.quizSettings}><legend>修改目标与授权</legend>
       <label>新的复习目标<textarea rows={3} maxLength={2000} value={draft.goal} onChange={event => { setDraft(value => ({ ...value, goal: event.target.value })); setPreview(false); }} /></label>
       <fieldset><legend>本页材料</legend>{materials.map(material => <label className={styles.materialCheck} key={material.id}><input type="checkbox" checked={draft.scope.materialIds.includes(material.id)} onChange={() => toggle("materialIds", material.id)} />{material.title}</label>)}{missing("materialIds", materials)}</fieldset>
@@ -46,11 +46,11 @@ export function LearningAgentAdjustmentForm({ task, materials, chapters, disable
       <label className={styles.materialCheck}><input type="checkbox" checked={draft.scope.includeHistory} onChange={event => changeScope({ includeHistory: event.target.checked })} />允许读取本范围的相关作答历史</label>
       <label className={styles.materialCheck}><input type="checkbox" checked={draft.scope.includeNotes} onChange={event => changeScope({ includeNotes: event.target.checked })} />纳入本范围的个人笔记</label>
       <label className={styles.materialCheck}><input type="checkbox" checked={draft.scope.includeSupplements} onChange={event => changeScope({ includeSupplements: event.target.checked })} />允许本范围的材料外补充解释</label>
-      <p className={styles.muted}>撤销后下一步不再读取对应内容；已保存业务记录保留。读取个人笔记的授权不等于写入授权，每项新增笔记仍需单独确认。</p>
+      <p className={styles.muted}>取消勾选后，后续复习不再使用对应内容；已保存的练习和笔记会保留。允许读取笔记不会自动保存新笔记，保存前仍会请你确认。</p>
       <button type="button" disabled={!draft.goal.trim() || !draft.scope.materialIds.length && !draft.scope.chapterIds.length && !draft.scope.nodeIds.length || stale} onClick={() => setPreview(true)}>预览本轮调整</button>
     </fieldset>
-    {preview ? <section aria-label="调整前后预览" className={styles.agentChangePreview}><h4>调整前后预览</h4><div><section aria-label="调整前"><h4>调整前 · 版本 {before.expectedVersion}</h4>{summary(before)}</section><section aria-label="调整后"><h4>调整后</h4>{summary(draft)}</section></div>
-      <p>确认后开始新的任务版本，重新检查来源并选择下一步；不会重置本任务已用调用、计算时间和步数。</p>
+    {preview ? <section aria-label="调整前后预览" className={styles.agentChangePreview}><h4>调整前后预览</h4><div><section aria-label="调整前"><h4>调整前</h4>{summary(before)}</section><section aria-label="调整后"><h4>调整后</h4>{summary(draft)}</section></div>
+      <p>确认后，将根据新的目标和范围继续复习。</p>
       <button type="button" className={styles.primary} disabled={disabled || stale} onClick={() => onSubmit({ ...draft, goal: draft.goal.trim() })}>确认调整本轮复习</button></section> : null}
     <div className={styles.row}><button type="button" disabled={disabled} onClick={onRefresh}>刷新并保留草稿</button><button type="button" disabled={disabled} onClick={onClose}>取消本次调整</button></div>
   </section>;

@@ -200,7 +200,7 @@ it("runs the actual shared confirmation loop, appends once with readable notes a
     expect(completed.status).toBe("ended"); expect(completed.endReason).toContain("不代表学习检查通过");
     expect(completed.actions.at(-1)?.status).toBe("succeeded");
     const saved = framework().chapters[0].nodes[0].note;
-    expect(saved).toContain("[模拟生成]"); expect(saved.match(/从自适应复习追加/g)).toHaveLength(1);
+    expect(saved).toContain("[模拟生成]"); expect(saved.match(/来自复习向导/g)).toHaveLength(1);
     await runtime.resolveApproval("owner", task.id, input);
     expect(framework().chapters[0].nodes[0].note).toBe(saved); expect(decision).toHaveBeenCalledTimes(1);
   } finally { runtime.close(); store.close(); }

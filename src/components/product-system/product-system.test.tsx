@@ -26,13 +26,13 @@ beforeEach(() => {
 afterEach(cleanup);
 
 describe("product system", () => {
-  it("adds the trial learning entrance while retaining the existing three destinations", () => {
+  it("shows the learning entrance without a trial label while retaining the existing three destinations", () => {
     render(<GlobalProductEntry accountId="account_a" dailyReflectionEnabled workReviewEnabled onLogout={vi.fn()} userLabel="synthetic@example.com" />);
     for (const [name, href] of [["约会陪伴", "/date-companion/a"], ["日常复盘", "/reflection"], ["工作复盘", "/work-review"], ["学习整理", "/learning"]]) {
       expect(screen.getByRole("link", { name: new RegExp(name) })).toHaveAttribute("href", href);
     }
     const learning = screen.getByRole("link", { name: /学习整理/ });
-    expect(learning).toHaveTextContent("试用中");
+    expect(learning).not.toHaveTextContent("试用");
     learning.addEventListener("click", (event) => event.preventDefault());
     fireEvent.click(learning);
     expect(window.localStorage.getItem(productPreferenceKey("account_a"))).toBe("learning_organizer");
