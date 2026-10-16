@@ -3,10 +3,20 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { LearningAgentPanel } from "./learning-agent-panel";
 import { learningAgentApi, type LearningAgentTaskView } from "@/lib/client/learning-agent-api";
 import { learningApi, LearningApiError } from "@/lib/client/learning-api";
+import type { LearningAgentReviewSummary } from "@/lib/domain/learning-agent";
 import type { FrameworkChapter } from "@/lib/domain/learning-framework";
+import type { QuizAttemptView } from "@/lib/domain/learning-quiz";
 
 vi.mock("@/lib/client/learning-agent-api", async original => ({ ...await original<typeof import("@/lib/client/learning-agent-api")>(), learningAgentApi: { list: vi.fn(), start: vi.fn(), control: vi.fn() } }));
 vi.mock("@/lib/client/learning-api", async original => ({ ...await original<typeof import("@/lib/client/learning-api")>(), learningApi: { framework: vi.fn(), quizzes: vi.fn() } }));
+const quizCallbacks = vi.hoisted(() => ({ saved: undefined as ((attempt: QuizAttemptView) => void) | undefined }));
+vi.mock("./learning-quiz", () => ({ LearningQuiz: ({ openQuizId, embedded, onAttemptSaved, openReview }: { openQuizId?: string; embedded?: boolean; onAttemptSaved?: (attempt: QuizAttemptView) => void; openReview?: { index: number; requestId: string } }) => {
+  quizCallbacks.saved = onAttemptSaved;
+  return <div data-testid="inline-quiz" data-embedded={String(embedded)} data-review-index={openReview?.index}>题组与解析 {openQuizId}</div>;
+} }));
+const attempt = (completed = true): QuizAttemptView => ({ id: "attempt-one", quizId: "quiz-one", title: "合成诊断", mode: "practice", revision: completed ? 2 : 1,
+  completed, createdAt: "", completedAt: completed ? "2026-10-15T00:00:00Z" : null, questions: [], score: completed ? { correct: 1, total: 1, unassistedCorrect: 1, hinted: 0, revealed: 0, skipped: 0 } : null });
+const savedTask = (task: LearningAgentTaskView): LearningAgentTaskView => ({ ...task, quizLinks: task.quizLinks?.map(link => ({ ...link, completed: true })) });
 const materials = [
   { id: "material-one", title: "合成概率教材", kind: "text" as const, byteLength: 40, createdAt: "", filename: null, selected: true },
   { id: "material-two", title: "未选择的材料", kind: "text" as const, byteLength: 20, createdAt: "", filename: null, selected: false },
@@ -16,10 +26,10 @@ const chapter: FrameworkChapter = { id: "chapter-one", runId: "framework-one", r
 ] };
 const scope = { materialIds: ["material-one"], chapterIds: [], nodeIds: [], includeHistory: false, includeNotes: false, includeSupplements: false };
 const waiting: LearningAgentTaskView = { id: "task-one", goal: "检查条件概率的理解", scope, status: "waiting", wait: { kind: "quiz_submission", refId: "attempt-one", message: "请完成诊断题组后继续。" }, actions: [{ id: "action-one", tool: "learning.create_quiz", status: "succeeded", summary: "已保存诊断题组", resultRef: { kind: "learning.quiz", id: "quiz-one" } }], quizLinks: [{ quizId: "quiz-one", attemptId: "attempt-one" }] };
-const saveSelection = vi.fn(), onQuiz = vi.fn(), onSource = vi.fn();
-function mount() { return render(<LearningAgentPanel pageId="page-one" materials={materials} selected={["material-one"]} disabled={false} saveSelection={saveSelection} onQuiz={onQuiz} onSource={onSource} />); }
+const saveSelection = vi.fn(), onSource = vi.fn();
+function mount() { return render(<LearningAgentPanel pageId="page-one" materials={materials} selected={["material-one"]} disabled={false} saveSelection={saveSelection} onSource={onSource} />); }
 beforeEach(() => {
-  vi.clearAllMocks(); window.history.replaceState(null, "", "/learning/page-one?view=agent");
+  vi.clearAllMocks(); quizCallbacks.saved = undefined; vi.mocked(learningAgentApi.control).mockReset(); window.history.replaceState(null, "", "/learning/page-one?view=agent");
   vi.mocked(learningAgentApi.list).mockResolvedValue({ tasks: [] });
   vi.mocked(learningApi.framework).mockResolvedValue({ framework: { chapters: [chapter], runs: [], overview: [] } });
   vi.mocked(learningApi.quizzes).mockResolvedValue({ quizzes: [] });
@@ -56,15 +66,16 @@ it("requires explicit node selection and sends only that narrow scope plus check
 
 it.each([
   { status: "ended" as const, reason: "本轮检查完成；仍需结合原文判断。", displayedReason: "本轮检查完成；仍需结合原文判断。" },
-  { status: "budget_exhausted" as const, reason: "本任务预算已用完，调用和决策步数达到上限。", displayedReason: "本轮复习已达到单次上限，已有内容已保留。你可以开始新的复习。" },
-])("restores waiting tasks without extra requests and shows a product-facing $status result after saved-attempt feedback", async ({ status, reason, displayedReason }) => {
+  { status: "budget_exhausted" as const, reason: "本轮复习的输入内容过长，已有内容已保留。你可以缩小范围后开始新的复习。", displayedReason: "本轮复习的输入内容过长，已有内容已保留。你可以缩小范围后开始新的复习。" },
+])("restores waiting tasks without extra requests and shows a product-facing $status result after automatic saved-attempt synchronization", async ({ status, reason, displayedReason }) => {
   vi.mocked(learningAgentApi.list).mockResolvedValue({ tasks: [waiting] });
   vi.mocked(learningAgentApi.control).mockResolvedValue({ task: { ...waiting, status, wait: null, endReason: reason, usage, budget } });
-  mount(); await screen.findByRole("button", { name: "已完成作答，继续复习" });
+  mount(); await screen.findByTestId("inline-quiz");
   const nextStep = within(screen.getByRole("region", { name: "接下来" }));
   expect(nextStep.getByText(waiting.wait!.message)).toBeVisible();
-  expect(nextStep.getByRole("button", { name: "打开题组 1" })).toBeVisible();
-  expect(nextStep.getByRole("button", { name: "已完成作答，继续复习" })).toBeEnabled();
+  expect(screen.getByTestId("inline-quiz")).toHaveAttribute("data-embedded", "true");
+  expect(screen.queryByRole("button", { name: "已完成作答，继续复习" })).not.toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: /打开题组/ })).not.toBeInTheDocument();
   for (const name of ["调整本轮复习", "取消任务"]) {
     expect(nextStep.queryByRole("button", { name })).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name })).toBeEnabled();
@@ -72,13 +83,22 @@ it.each([
   vi.useFakeTimers(); await act(async () => { await vi.advanceTimersByTimeAsync(10000); }); vi.useRealTimers();
   expect(learningAgentApi.list).toHaveBeenCalledOnce();
   expect(learningAgentApi.start).not.toHaveBeenCalled(); expect(learningAgentApi.control).not.toHaveBeenCalled();
-  fireEvent.click(screen.getByRole("button", { name: "打开题组 1" })); expect(onQuiz).toHaveBeenCalledExactlyOnceWith("quiz-one");
-  fireEvent.click(screen.getByRole("button", { name: "已完成作答，继续复习" }));
+  await act(async () => { quizCallbacks.saved!(attempt()); });
   await screen.findByText(displayedReason);
-  expect(learningAgentApi.control).toHaveBeenCalledExactlyOnceWith("page-one", { id: "task-one", action: "feedback", expectedVersion: 1, eventId: expect.any(String), attemptId: "attempt-one" });
+  expect(learningAgentApi.control).toHaveBeenCalledExactlyOnceWith("page-one", { id: "task-one", action: "sync_quiz", expectedVersion: 1, eventId: expect.any(String), attemptId: "attempt-one" });
   expect(screen.queryByRole("button", { name: "取消任务" })).not.toBeInTheDocument();
   expect(screen.getByRole("button", { name: "开始另一项复习" })).toBeEnabled();
   expect(screen.getByRole("region", { name: "复习向导" })).not.toHaveTextContent(/预算|调用|决策|tokens|已掌握/);
+});
+
+it.each([undefined, null, "", "本任务预算耗尽，已停止；等待用户的时间不计入计算预算。"])("keeps a legacy execution limit honest when the saved reason is %s", async endReason => {
+  vi.mocked(learningAgentApi.list).mockResolvedValue({ tasks: [{ ...waiting, status: "budget_exhausted", wait: null, endReason, usage, budget }] });
+  mount();
+  expect(await screen.findByText("本轮复习因执行限制停止，旧记录未保存具体原因。已有内容已保留，你可以开始新的复习。")).toBeVisible();
+  expect(screen.getByRole("button", { name: "开始另一项复习" })).toBeEnabled();
+  expect(screen.getByRole("region", { name: "复习向导" })).not.toHaveTextContent(/单次上限|次数已用完|500|计算预算/);
+  expect(learningAgentApi.start).not.toHaveBeenCalled();
+  expect(learningAgentApi.control).not.toHaveBeenCalled();
 });
 
 it("reuses an uncertain control receipt and prevents an unrelated action until it is reconciled", async () => {
@@ -98,14 +118,14 @@ it("polls read-only after a scheduled waiting response, observes execution, then
   const running = { ...waiting, status: "running" as const, wait: null };
   const next = { ...waiting, wait: { kind: "feedback", message: "现在还有哪里不清楚？" }, actions: [...waiting.actions, { id: "action-two", tool: "learning.read_answers", status: "succeeded", summary: "已读回实际保存的作答与评分。" }] };
   vi.mocked(learningAgentApi.list).mockResolvedValueOnce({ tasks: [waiting] }).mockResolvedValueOnce({ tasks: [running] }).mockResolvedValue({ tasks: [next] });
-  vi.mocked(learningAgentApi.control).mockResolvedValue({ task: waiting, scheduled: true });
-  mount(); await screen.findByRole("button", { name: "已完成作答，继续复习" });
+  vi.mocked(learningAgentApi.control).mockResolvedValue({ task: savedTask(waiting), scheduled: true });
+  mount(); await screen.findByTestId("inline-quiz");
   vi.useFakeTimers();
-  await act(async () => { fireEvent.click(screen.getByRole("button", { name: "已完成作答，继续复习" })); });
+  await act(async () => { quizCallbacks.saved!(attempt()); });
   expect(screen.getByText("反馈已受理，正在读取任务进度…")).toBeVisible();
-  expect(screen.getByRole("button", { name: "已完成作答，继续复习" })).toBeDisabled();
+  expect(screen.queryByRole("button", { name: "已完成作答，继续复习" })).not.toBeInTheDocument();
   await act(async () => { await vi.advanceTimersByTimeAsync(1500); });
-  expect(screen.getByRole("status")).toHaveTextContent("正在复习");
+  expect(screen.getByText("正在复习", { exact: true })).toBeVisible();
   await act(async () => { await vi.advanceTimersByTimeAsync(1500); });
   expect(screen.getByText("现在还有哪里不清楚？")).toBeVisible();
   await act(async () => { await vi.advanceTimersByTimeAsync(10000); });
@@ -115,20 +135,18 @@ it("polls read-only after a scheduled waiting response, observes execution, then
 
 it("lets the user dispute a pending question without injecting scores or changing saved quiz answers", async () => {
   vi.mocked(learningAgentApi.list).mockResolvedValue({ tasks: [waiting] });
-  vi.mocked(learningAgentApi.control).mockResolvedValue({ task: waiting, scheduled: true });
-  mount(); await screen.findByLabelText("这道题有疑问");
-  const question = screen.getByLabelText("这道题有疑问");
+  vi.mocked(learningAgentApi.control).mockResolvedValue({ task: { ...waiting, status: "paused", wait: null, quizLinks: [{ quizId: "quiz-one", attemptId: "attempt-one", disputed: true }] } });
+  mount(); await screen.findByLabelText("说明题目疑问");
+  const question = screen.getByLabelText("说明题目疑问");
   expect(question).not.toBeVisible();
-  expect(screen.getByRole("button", { name: "提交疑问并继续" })).not.toBeVisible();
-  fireEvent.click(screen.getByText("这道题有疑问", { selector: "summary" }));
-  expect(question).toBeVisible();
-  expect(question).toBeEnabled();
-  expect(screen.getByRole("button", { name: "提交疑问并继续" })).toBeDisabled();
+  fireEvent.click(screen.getByText("这组题有疑问", { selector: "summary" }));
+  expect(question).toBeVisible(); expect(question).toBeEnabled();
+  expect(screen.getByRole("button", { name: "提交疑问并暂停" })).toBeDisabled();
   fireEvent.change(question, { target: { value: "第一题似乎漏了前提，请先核对原文。" } });
-  fireEvent.click(screen.getByRole("button", { name: "提交疑问并继续" }));
-  await screen.findByText("反馈已受理，正在读取任务进度…");
-  expect(learningAgentApi.control).toHaveBeenCalledExactlyOnceWith("page-one", { id: "task-one", action: "feedback", expectedVersion: 1, eventId: expect.any(String), attemptId: "attempt-one", feedback: "第一题似乎漏了前提，请先核对原文。" });
-  expect(screen.getByText(/已有答案与成绩保持原样/)).toBeVisible();
+  fireEvent.click(screen.getByRole("button", { name: "提交疑问并暂停" }));
+  await screen.findByText("这组题已标记为有疑问，不再用它的成绩判断薄弱点。已有作答保持原样。");
+  expect(learningAgentApi.control).toHaveBeenCalledExactlyOnceWith("page-one", { id: "task-one", action: "dispute_quiz", expectedVersion: 1, eventId: expect.any(String), attemptId: "attempt-one", feedback: "第一题似乎漏了前提，请先核对原文。" });
+  expect(screen.getByRole("status")).toHaveTextContent("已暂停");
 });
 
 it("shows task explanations as task content and sends subsequent feedback without saving a personal note", async () => {
@@ -136,6 +154,11 @@ it("shows task explanations as task content and sends subsequent feedback withou
   vi.mocked(learningAgentApi.list).mockResolvedValue({ tasks: [explain] });
   vi.mocked(learningAgentApi.control).mockResolvedValue({ task: { ...explain, status: "cancelled", endReason: "用户取消", wait: null } });
   mount(); await screen.findByText(explain.explanations![0].text);
+  expect(screen.getByText("本轮讲解 1", { selector: "summary" })).toBeVisible();
+  expect(screen.getByText("本轮讲解根据本轮授权材料生成，随本轮保存，不会自动写入个人笔记；材料外补充会明确标注。")).toBeVisible();
+  expect(screen.queryByText(/任务内解释/)).not.toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "批准追加到个人笔记" })).not.toBeInTheDocument();
+  expect(learningAgentApi.control).not.toHaveBeenCalled();
   fireEvent.click(screen.getByRole("button", { name: "查看引用原文 1" })); expect(onSource).toHaveBeenCalledExactlyOnceWith("material-one", 1, undefined);
   fireEvent.change(screen.getByLabelText("你的反馈"), { target: { value: "明白了，这轮先结束" } });
   fireEvent.click(screen.getByRole("button", { name: "提交反馈并继续" }));
@@ -324,7 +347,217 @@ it("requires an explicit continue after an inspected result returns ready", asyn
   mount(); await screen.findByRole("button", { name: "继续任务" });
   expect(learningAgentApi.control).not.toHaveBeenCalled();
   fireEvent.click(screen.getByRole("button", { name: "继续任务" }));
-  await screen.findByRole("button", { name: "已完成作答，继续复习" });
+  await screen.findByText(waiting.wait!.message);
+  expect(screen.getByTestId("inline-quiz")).toHaveTextContent("quiz-one");
   expect(learningAgentApi.control).toHaveBeenCalledExactlyOnceWith("page-one", { id: waiting.id, action: "resume", expectedVersion: 3, eventId: expect.any(String) });
   expect(screen.queryByRole("button", { name: "继续任务" })).not.toBeInTheDocument();
+});
+
+it("does not advance incomplete or unrelated saves and synchronizes a completed attempt only once across rereads and refreshes", async () => {
+  vi.mocked(learningAgentApi.list).mockResolvedValueOnce({ tasks: [waiting] }).mockResolvedValue({ tasks: [savedTask(waiting)] });
+  vi.mocked(learningAgentApi.control).mockResolvedValue({ task: savedTask(waiting) });
+  mount(); await screen.findByTestId("inline-quiz");
+  await act(async () => { quizCallbacks.saved!(attempt(false)); quizCallbacks.saved!({ ...attempt(), id: "unrelated-attempt" }); });
+  expect(learningAgentApi.control).not.toHaveBeenCalled();
+  await act(async () => { quizCallbacks.saved!(attempt()); });
+  await waitFor(() => expect(learningAgentApi.control).toHaveBeenCalledOnce());
+  await act(async () => { quizCallbacks.saved!(attempt()); quizCallbacks.saved!(attempt()); });
+  fireEvent.click(screen.getByRole("button", { name: "刷新任务" }));
+  await waitFor(() => expect(learningAgentApi.list).toHaveBeenCalledTimes(2));
+  expect(learningAgentApi.control).toHaveBeenCalledOnce();
+  expect(vi.mocked(learningAgentApi.control).mock.calls[0][1]).toMatchObject({ action: "sync_quiz", attemptId: "attempt-one", expectedVersion: 1 });
+  expect(screen.getByTestId("inline-quiz")).toHaveTextContent("quiz-one");
+  expect(screen.queryByRole("button", { name: /已完成作答|返回复习向导/ })).not.toBeInTheDocument();
+});
+
+it("reconciles a restored server-completed attempt automatically without waiting for another quiz save", async () => {
+  const completed = savedTask(waiting);
+  vi.mocked(learningAgentApi.list).mockResolvedValue({ tasks: [completed] });
+  vi.mocked(learningAgentApi.control).mockResolvedValue({ task: completed });
+  mount(); await waitFor(() => expect(learningAgentApi.control).toHaveBeenCalledOnce());
+  expect(learningAgentApi.control).toHaveBeenCalledExactlyOnceWith("page-one", { id: waiting.id, action: "sync_quiz", expectedVersion: 1, attemptId: "attempt-one", eventId: expect.any(String) });
+  fireEvent.click(screen.getByRole("button", { name: "刷新任务" }));
+  await waitFor(() => expect(learningAgentApi.list).toHaveBeenCalledTimes(2));
+  expect(learningAgentApi.control).toHaveBeenCalledOnce();
+});
+
+it.each(["paused", "cancelled", "version_changed"] as const)("does not let an old quiz callback advance a task after %s", async status => {
+  const updated: LearningAgentTaskView = status === "version_changed"
+    ? { ...waiting, version: 2, goal: "已调整的目标" }
+    : { ...waiting, status, wait: null };
+  vi.mocked(learningAgentApi.list).mockResolvedValueOnce({ tasks: [waiting] }).mockResolvedValue({ tasks: [updated] });
+  vi.mocked(learningAgentApi.control).mockResolvedValue({ task: updated });
+  mount(); await screen.findByTestId("inline-quiz"); const oldCallback = quizCallbacks.saved!;
+  fireEvent.click(screen.getByRole("button", { name: status === "paused" ? "暂停任务" : status === "cancelled" ? "取消任务" : "刷新任务" }));
+  if (status === "version_changed") await screen.findByRole("heading", { name: updated.goal });
+  else await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent(status === "paused" ? "已暂停" : "用户已取消"));
+  await act(async () => { oldCallback(attempt()); });
+  expect(vi.mocked(learningAgentApi.control).mock.calls.filter(([, input]) => input.action === "sync_quiz")).toHaveLength(0);
+  expect(learningAgentApi.control).toHaveBeenCalledTimes(status === "version_changed" ? 0 : 1);
+});
+
+it("keeps completed explanations visible when a next quiz arrives until the user switches it", async () => {
+  const next: LearningAgentTaskView = { ...savedTask(waiting), wait: { kind: "quiz_submission", refId: "attempt-two", message: "下一组练习已生成。" },
+    quizLinks: [...savedTask(waiting).quizLinks!, { quizId: "quiz-two", attemptId: "attempt-two", completed: false }] };
+  vi.mocked(learningAgentApi.list).mockResolvedValue({ tasks: [waiting] });
+  vi.mocked(learningAgentApi.control).mockResolvedValue({ task: next });
+  mount(); await screen.findByTestId("inline-quiz");
+  await act(async () => { quizCallbacks.saved!(attempt()); });
+  await screen.findByText("下一组练习已准备好，可在本轮练习中切换查看。");
+  expect(screen.getByTestId("inline-quiz")).toHaveTextContent("quiz-one");
+  expect(screen.getByRole("button", { name: "查看题组 1" })).toHaveAttribute("aria-pressed", "true");
+  fireEvent.click(screen.getByRole("button", { name: "查看题组 2" }));
+  expect(screen.getByTestId("inline-quiz")).toHaveTextContent("quiz-two");
+  expect(learningAgentApi.control).toHaveBeenCalledOnce();
+});
+
+it("retains the saved quiz and retries the original synchronization receipt after a lost response", async () => {
+  vi.mocked(learningAgentApi.list).mockResolvedValue({ tasks: [waiting] });
+  vi.mocked(learningAgentApi.control).mockRejectedValueOnce(new Error("response lost")).mockResolvedValueOnce({ task: { ...savedTask(waiting), status: "running", wait: null } });
+  mount(); await screen.findByTestId("inline-quiz");
+  await act(async () => { quizCallbacks.saved!(attempt()); });
+  await screen.findByText("作答已保存，自动衔接尚未确认。可以核对衔接状态，无需重新作答。");
+  expect(screen.getByTestId("inline-quiz")).toHaveTextContent("quiz-one");
+  expect(screen.getByRole("button", { name: "暂停任务" })).toBeDisabled();
+  const receipt = vi.mocked(learningAgentApi.control).mock.calls[0][1];
+  await act(async () => { quizCallbacks.saved!(attempt()); });
+  expect(learningAgentApi.control).toHaveBeenCalledOnce();
+  fireEvent.click(screen.getByRole("button", { name: "核对本次任务操作" }));
+  await screen.findByText("作答已保存，复习向导正在根据这次结果准备下一步。解析会继续保留。");
+  expect(vi.mocked(learningAgentApi.control).mock.calls[1][1]).toEqual(receipt);
+  expect(screen.queryByText("作答已保存，自动衔接尚未确认。可以核对衔接状态，无需重新作答。")).not.toBeInTheDocument();
+});
+
+it("offers an explicit synchronization retry with the same event after a known conflict instead of an automatic loop", async () => {
+  vi.mocked(learningAgentApi.list).mockResolvedValue({ tasks: [waiting] });
+  vi.mocked(learningAgentApi.control).mockRejectedValueOnce(new LearningApiError(409, "agent_busy")).mockResolvedValueOnce({ task: { ...savedTask(waiting), status: "running", wait: null } });
+  mount(); await screen.findByTestId("inline-quiz");
+  await act(async () => { quizCallbacks.saved!(attempt()); });
+  const retry = await screen.findByRole("button", { name: "核对作答衔接" });
+  const receipt = vi.mocked(learningAgentApi.control).mock.calls[0][1];
+  expect(learningAgentApi.control).toHaveBeenCalledOnce();
+  fireEvent.click(retry);
+  await waitFor(() => expect(learningAgentApi.control).toHaveBeenCalledTimes(2));
+  expect(vi.mocked(learningAgentApi.control).mock.calls[1][1]).toEqual(receipt);
+});
+
+it.each(["running", "ended"] as const)("keeps the completed quiz dispute available after automatic advancement reaches %s", async status => {
+  const current: LearningAgentTaskView = { ...savedTask(waiting), status, wait: null };
+  vi.mocked(learningAgentApi.list).mockResolvedValue({ tasks: [current] });
+  vi.mocked(learningAgentApi.control).mockResolvedValue({ task: { ...current, status: "paused", quizLinks: current.quizLinks!.map(link => ({ ...link, disputed: true })) } });
+  mount(); fireEvent.click(await screen.findByText("这组题有疑问", { selector: "summary" }));
+  fireEvent.change(screen.getByLabelText("说明题目疑问"), { target: { value: "第二个选项也成立，请核对。" } });
+  fireEvent.click(screen.getByRole("button", { name: "提交疑问并暂停" }));
+  await screen.findByText("这组题已标记为有疑问，不再用它的成绩判断薄弱点。已有作答保持原样。");
+  expect(learningAgentApi.control).toHaveBeenCalledExactlyOnceWith("page-one", { id: waiting.id, action: "dispute_quiz", expectedVersion: 1, attemptId: "attempt-one", eventId: expect.any(String), feedback: "第二个选项也成立，请核对。" });
+});
+
+it("does not let a late incomplete task read overwrite a saved completion even when synchronization needs recovery", async () => {
+  let finishRead!: (value: { tasks: LearningAgentTaskView[] }) => void;
+  vi.mocked(learningAgentApi.list).mockResolvedValueOnce({ tasks: [waiting] }).mockImplementationOnce(() => new Promise(resolve => { finishRead = resolve; }));
+  vi.mocked(learningAgentApi.control).mockRejectedValueOnce(new LearningApiError(409, "agent_busy"));
+  mount(); await screen.findByTestId("inline-quiz");
+  fireEvent.click(screen.getByRole("button", { name: "刷新任务" }));
+  await waitFor(() => expect(learningAgentApi.list).toHaveBeenCalledTimes(2));
+  await act(async () => { quizCallbacks.saved!(attempt()); finishRead({ tasks: [waiting] }); await Promise.resolve(); });
+  await screen.findByRole("button", { name: "核对作答衔接" });
+  expect(learningAgentApi.control).toHaveBeenCalledExactlyOnceWith("page-one", { id: waiting.id, action: "sync_quiz", expectedVersion: 1, attemptId: "attempt-one", eventId: expect.any(String) });
+  expect(screen.getByText("作答已保存，自动衔接尚未确认。可以核对衔接状态，无需重新作答。")).toBeVisible();
+  expect(screen.getByTestId("inline-quiz")).toHaveTextContent("quiz-one");
+});
+
+const reviewSummary: LearningAgentReviewSummary = {
+  kind: "completed", headline: "本轮完成 2 组练习，交集与并集还值得再区分一下。",
+  stats: { groups: 2, total: 10, answered: 10, correct: 8, wrong: 2, unassistedCorrect: 8, hinted: 0, revealed: 0, skipped: 0, unanswered: 0, excludedGroups: 0 },
+  topics: [{ id: "intersection", title: "交集与并集", explanation: "交集要求同时属于两个集合，并集只需属于其中一个。",
+    questionRefs: [{ quizId: "quiz-one", attemptId: "attempt-one", index: 1 }], sources: [{ materialId: "material-one", paragraph: 3 }] }],
+  reminders: ["先分清同时满足还是至少满足一个。", "列出集合元素后去重。"], notices: [],
+};
+const reviewedTask = (): LearningAgentTaskView => ({ ...savedTask(waiting), status: "ended", wait: null, reviewSummary,
+  quizLinks: [{ quizId: "quiz-one", attemptId: "attempt-one", completed: true }, { quizId: "quiz-two", attemptId: "attempt-two", completed: true }] });
+
+it("shows authoritative whole-task review and opens a specific earlier wrong question inside the guide without generating or changing answers", async () => {
+  vi.mocked(learningAgentApi.list).mockResolvedValue({ tasks: [reviewedTask()] });
+  mount(); const summary = await screen.findByRole("region", { name: "本轮复习总结" });
+  expect(summary).toHaveTextContent("已记录 2 组练习 · 已作答 10/10 题");
+  expect(summary).toHaveTextContent("答对 8 题（独立答对 8 题） · 答错 2 题");
+  expect(within(summary).getByRole("region", { name: "专项讲解" })).toHaveTextContent(reviewSummary.topics[0].explanation);
+  expect(within(summary).getAllByRole("listitem")).toHaveLength(2);
+  await waitFor(() => expect(screen.getByTestId("inline-quiz")).toHaveTextContent("quiz-two"));
+  fireEvent.click(within(summary).getByRole("button", { name: "查看错题 · 题组 1 第 2 题" }));
+  expect(screen.getByTestId("inline-quiz")).toHaveTextContent("quiz-one");
+  expect(screen.getByTestId("inline-quiz")).toHaveAttribute("data-review-index", "1");
+  expect(screen.getByRole("region", { name: "本轮练习" })).toHaveFocus();
+  expect(new URLSearchParams(window.location.search).get("view")).toBe("agent");
+  fireEvent.click(within(summary).getByRole("button", { name: "查看原文 · 交集与并集" }));
+  expect(onSource).toHaveBeenCalledExactlyOnceWith("material-one", 3, undefined);
+  expect(learningAgentApi.start).not.toHaveBeenCalled(); expect(learningAgentApi.control).not.toHaveBeenCalled();
+});
+
+it("keeps an all-independent-correct review brief and refreshes it with read-only requests", async () => {
+  const praise: LearningAgentReviewSummary = { ...reviewSummary, headline: "本轮 10 题全部独立答对，做得不错！", stats: { ...reviewSummary.stats, correct: 10, wrong: 0, unassistedCorrect: 10 }, topics: [], reminders: [] };
+  vi.mocked(learningAgentApi.list).mockResolvedValue({ tasks: [{ ...reviewedTask(), reviewSummary: praise }] });
+  mount(); const summary = await screen.findByRole("region", { name: "本轮复习总结" });
+  expect(summary).toHaveTextContent(praise.headline);
+  expect(summary.querySelectorAll("p")).toHaveLength(1);
+  expect(within(summary).queryByRole("region", { name: "专项讲解" })).not.toBeInTheDocument();
+  expect(within(summary).queryByRole("button")).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "刷新任务" }));
+  await waitFor(() => expect(learningAgentApi.list).toHaveBeenCalledTimes(2));
+  expect(learningAgentApi.start).not.toHaveBeenCalled(); expect(learningAgentApi.control).not.toHaveBeenCalled();
+});
+
+it.each(["cancelled", "budget_exhausted", "ended"] as const)("shows a progress review for %s without inventing successful completion or praise", async status => {
+  const progress: LearningAgentReviewSummary = { ...reviewSummary, kind: "partial", headline: "本轮尚无可用于回顾的作答，已有内容已保留。", stats: { groups: 0, total: 0, answered: 0, correct: 0, wrong: 0, unassistedCorrect: 0, hinted: 0, revealed: 0, skipped: 0, unanswered: 0, excludedGroups: 0 }, topics: [], reminders: [], notices: ["本轮尚未完成复习目标。"] };
+  vi.mocked(learningAgentApi.list).mockResolvedValue({ tasks: [{ ...reviewedTask(), status, reviewSummary: progress }] });
+  mount(); const summary = await screen.findByRole("region", { name: "本轮进度回顾" });
+  expect(summary).toHaveTextContent(progress.headline); expect(summary).toHaveTextContent(progress.notices[0]);
+  expect(summary).not.toHaveTextContent(/做得不错|全部独立答对|已经掌握/);
+  expect(screen.queryByRole("region", { name: "本轮复习总结" })).not.toBeInTheDocument();
+  expect(learningAgentApi.control).not.toHaveBeenCalled();
+});
+
+it("shows supported assistance and exclusion statistics without treating them as wrong answers", async () => {
+  const summary: LearningAgentReviewSummary = { ...reviewSummary, kind: "partial", headline: "已保存这次练习的作答情况。", stats: { groups: 1, total: 5, answered: 2, correct: 2, wrong: 0, unassistedCorrect: 1, hinted: 1, revealed: 1, skipped: 1, unanswered: 1, excludedGroups: 1 }, topics: [], reminders: [], notices: ["1 组存在疑问的题目未用于诊断。"] };
+  vi.mocked(learningAgentApi.list).mockResolvedValue({ tasks: [{ ...reviewedTask(), reviewSummary: summary }] });
+  mount(); const region = await screen.findByRole("region", { name: "本轮进度回顾" });
+  expect(region).toHaveTextContent("答对 2 题（独立答对 1 题） · 答错 0 题");
+  expect(region).toHaveTextContent("使用提示 1 题 · 看答案 1 题 · 跳过 1 题 · 未完成 1 题");
+  expect(region).toHaveTextContent(summary.notices[0]);
+  expect(within(region).queryByRole("region", { name: "专项讲解" })).not.toBeInTheDocument();
+});
+
+it("replaces the old diagnosis with the authoritative post-dispute summary after the round ended", async () => {
+  const before = reviewedTask();
+  const after: LearningAgentTaskView = { ...before, quizLinks: before.quizLinks!.map(link => ({ ...link, disputed: true })), reviewSummary: { ...reviewSummary, kind: "partial", headline: "题目疑问已记录，本轮暂不据此判断薄弱点。", topics: [], reminders: [], notices: ["有疑问题组的成绩已从总结中排除。"] } };
+  vi.mocked(learningAgentApi.list).mockResolvedValue({ tasks: [before] }); vi.mocked(learningAgentApi.control).mockResolvedValue({ task: after });
+  mount(); await screen.findByRole("region", { name: "本轮复习总结" });
+  fireEvent.click(await screen.findByText("这组题有疑问", { selector: "summary" }));
+  fireEvent.change(screen.getByLabelText("说明题目疑问"), { target: { value: "选项可能不唯一。" } });
+  fireEvent.click(screen.getByRole("button", { name: "提交疑问并暂停" }));
+  const summary = await screen.findByRole("region", { name: "本轮进度回顾" });
+  expect(summary).toHaveTextContent(after.reviewSummary!.headline);
+  expect(screen.queryByText(reviewSummary.topics[0].explanation)).not.toBeInTheDocument();
+  expect(within(summary).queryByRole("button", { name: /查看错题/ })).not.toBeInTheDocument();
+  expect(learningAgentApi.control).toHaveBeenCalledOnce();
+});
+
+it("preserves parsed source identity and disables unmatched historical question links", async () => {
+  const parsed = { documentId: "doc-one", version: 2, blockId: "block-one", physicalPage: 4, sourceHash: "binding-one" };
+  const summary: LearningAgentReviewSummary = { ...reviewSummary, topics: [{ ...reviewSummary.topics[0], questionRefs: [{ quizId: "old-group", attemptId: "old-attempt", index: 0 }], sources: [{ materialId: "material-one", paragraph: 12, parsed }] }] };
+  vi.mocked(learningAgentApi.list).mockResolvedValue({ tasks: [{ ...reviewedTask(), reviewSummary: summary }] });
+  mount(); const region = await screen.findByRole("region", { name: "本轮复习总结" });
+  expect(within(region).getByRole("button", { name: "原题组不可用" })).toBeDisabled();
+  fireEvent.click(within(region).getByRole("button", { name: "查看原文 · 交集与并集" }));
+  expect(onSource).toHaveBeenCalledExactlyOnceWith("material-one", 4, parsed);
+});
+
+it("does not carry a previous version summary into the adjusted round", async () => {
+  vi.mocked(learningAgentApi.list).mockResolvedValueOnce({ tasks: [reviewedTask()] }).mockResolvedValue({ tasks: [{ ...waiting, version: 2, goal: "新的复习范围", quizLinks: [] }] });
+  mount(); await screen.findByRole("region", { name: "本轮复习总结" });
+  fireEvent.click(screen.getByRole("button", { name: "刷新任务" }));
+  await screen.findByRole("heading", { name: "新的复习范围" });
+  expect(screen.queryByRole("region", { name: "本轮复习总结" })).not.toBeInTheDocument();
+  expect(screen.queryByText(reviewSummary.topics[0].explanation)).not.toBeInTheDocument();
+  expect(learningAgentApi.control).not.toHaveBeenCalled();
 });

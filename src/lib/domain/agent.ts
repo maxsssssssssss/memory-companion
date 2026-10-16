@@ -24,7 +24,7 @@ export interface AgentApproval extends AgentConfirmation {
   id: string; actionId: string; taskVersion: number; tool: string; fingerprint: string;
   status: "pending" | "approved" | "rejected" | "invalidated"; createdAt: string;
 }
-export type AgentRecoveryKind = "not_started" | "known_failed" | "unknown" | "succeeded" | "source_invalid" | "version_changed" | "interrupted";
+export type AgentRecoveryKind = "not_started" | "known_failed" | "unknown" | "succeeded" | "source_invalid" | "version_changed" | "interrupted" | "feedback_received";
 export interface AgentRecovery {
   kind: AgentRecoveryKind; message: string; actionId?: string;
   allowedControls: Array<"inspect" | "retry" | "adjust" | "cancel">;

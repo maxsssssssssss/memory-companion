@@ -8,7 +8,7 @@ import { LearningError } from "@/lib/server/learning/repository";
 import { freezeLearningAgentScope } from "@/lib/server/learning/agent-scope";
 import { learningAgentGenerationConfig } from "@/lib/server/learning/agent-scenario";
 import { LearningAgentRepository } from "@/lib/server/learning/agent-repository";
-import { openLearningAgentStore, projectLearningAgentTask, advanceLearningAgent, learningAgentFailure, openLearningAgentRuntime } from "@/lib/server/learning/agent-api-service";
+import { openLearningAgentStore, projectLearningAgentTask, advanceLearningAgent, learningAgentFailure, openLearningAgentRuntime, syncLearningAgentQuiz, disputeLearningAgentQuiz } from "@/lib/server/learning/agent-api-service";
 import { learningJson, learningJsonBody, withLearning } from "../../../route-utils";
 export const runtime = "nodejs";
 type Context = { params: Promise<{ pageId: string }> };
@@ -23,13 +23,15 @@ const Control = z.union([
   z.object({ ...identity, action: z.literal("approval"), expectedVersion: version, approvalId: z.string().min(1).max(180),
     fingerprint: z.string().min(1).max(128), decision: z.enum(["approve", "reject"]) }).strict(),
   z.object({ ...identity, action: z.literal("recover"), expectedVersion: version, mode: z.enum(["inspect", "retry"]) }).strict(),
-  z.object({ ...identity, action: z.literal("end"), expectedVersion: version }).strict()
+  z.object({ ...identity, action: z.literal("end"), expectedVersion: version }).strict(),
+  z.object({ ...identity, action: z.literal("sync_quiz"), expectedVersion: version, attemptId: LearningId }).strict(),
+  z.object({ ...identity, action: z.literal("dispute_quiz"), expectedVersion: version, attemptId: LearningId, feedback: z.string().trim().min(1).max(2000) }).strict()
 ]);
 export async function GET(request: Request, context: Context) {
   return withLearning(request, async learning => {
     const pageId = LearningId.parse((await context.params).pageId); learning.get(pageId);
     const store = openLearningAgentStore(learning);
-    try { return learningJson({ tasks: store.listTasks(learning.accountId, pageId).map(t => projectLearningAgentTask(learning, t)) }); }
+    try { return learningJson({ tasks: store.listTasks(learning.accountId, pageId).map(t => projectLearningAgentTask(learning, t, store)) }); }
     catch (error) { return learningAgentFailure(error); } finally { store.close(); }
   });
 }
@@ -43,7 +45,7 @@ export async function POST(request: Request, context: Context) {
       const task = store.createTask({ id: value.id, accountId: learning.accountId, resourceId: pageId, scenario: "learning.adaptive-review.v1", goal: value.goal, scope });
       const root = learning.accountDataRoot, accountId = learning.accountId;
       if (task.status === "ready") after(() => advanceLearningAgent(root, accountId, task.id).then(() => undefined));
-      return learningJson({ task: projectLearningAgentTask(learning, task) }, 202);
+      return learningJson({ task: projectLearningAgentTask(learning, task, store) }, 202);
     } catch (error) { return learningAgentFailure(error); } finally { store.close(); }
   });
 }
@@ -60,7 +62,12 @@ export async function PATCH(request: Request, context: Context) {
       const expectedVersion = value.expectedVersion ?? 1;
       if (value.action !== "adjust" && expectedVersion !== (task.version ?? 1)) throw new AgentFailure("conflict", "agent_version_conflict");
       let scheduled = false;
-      if (value.action === "feedback") {
+      if (value.action === "sync_quiz") {
+        ({ task, scheduled } = await syncLearningAgentQuiz(learning, store, task.id, value));
+        if (scheduled) after(() => advanceLearningAgent(root, accountId, task.id).then(() => undefined));
+      } else if (value.action === "dispute_quiz") {
+        task = await disputeLearningAgentQuiz(learning, store, task.id, value);
+      } else if (value.action === "feedback") {
         const event = { id: value.eventId, kind: value.attemptId ? (value.feedback ? "quiz_dispute" : "quiz_submission") : "feedback", refId: value.attemptId, message: value.feedback,
           ...(value.expectedVersion === undefined ? {} : { version: expectedVersion }) };
         // Repeated accepted events are read-only receipts, including after the
@@ -107,9 +114,13 @@ export async function PATCH(request: Request, context: Context) {
         // The version check is repeated inside the transaction by the store.
         task = store.control(accountId, task.id, value.action as "pause" | "resume" | "cancel", expectedVersion);
         if (value.action === "cancel") new LearningAgentRepository(learning).invalidateNotePreviews(pageId, task.id);
+        if (value.action === "resume" && task.status === "waiting" && task.wait?.kind === "quiz_submission" && task.wait.refId) {
+          ({ task, scheduled } = await syncLearningAgentQuiz(learning, store, task.id, { expectedVersion, attemptId: task.wait.refId }));
+          if (scheduled) after(() => advanceLearningAgent(root, accountId, task.id).then(() => undefined));
+        }
         if (value.action === "resume" && task.status === "ready") { after(() => advanceLearningAgent(root, accountId, task.id).then(() => undefined)); scheduled = true; }
       }
-      return learningJson({ task: projectLearningAgentTask(learning, task), scheduled }, 202);
+      return learningJson({ task: projectLearningAgentTask(learning, task, store), scheduled }, 202);
     } catch (error) { return learningAgentFailure(error); } finally { store.close(); }
   });
 }

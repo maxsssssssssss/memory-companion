@@ -9,12 +9,20 @@ import styles from "./learning.module.css";
 import resultStyles from "./quiz-results.module.css";
 import { useLearningUnsaved } from "./use-learning-unsaved";
 
-export function LearningQuiz({ pageId, materials, selected, disabled, saveSelection, onSource, openQuizId, openQuizRequest, onReturnToAgent }: {
+type LearningQuizProps = {
   pageId: string; materials: LearningMaterial[]; selected: string[]; disabled: boolean;
-  openQuizId?: string; openQuizRequest?: number;
+  openQuizId?: string; openQuizRequest?: number; openReview?: { index: number; requestId: string };
   onReturnToAgent?: () => void;
+  embedded?: boolean; onAttemptSaved?: (attempt: QuizAttemptView) => void;
   saveSelection: () => Promise<void>; onSource: (id: string, paragraph: number, parsed?: import("@/lib/domain/learning-pdf-study").ParsedTextBinding) => void;
-}) {
+};
+
+export function LearningQuiz(props: LearningQuizProps) {
+  // A different embedded group gets its own async lifecycle and recovery receipt.
+  return <LearningQuizSession key={`${props.pageId}:${props.embedded ? `embedded:${props.openQuizId ?? ""}` : "standalone"}`} {...props} />;
+}
+
+function LearningQuizSession({ pageId, materials, selected, disabled, saveSelection, onSource, openQuizId, openQuizRequest, onReturnToAgent, embedded = false, onAttemptSaved, openReview }: LearningQuizProps) {
   const open = true;
   const [stage, setStage] = useState<"prepare" | "history" | "ready" | "answer" | "results">("prepare");
   const [chosen, setChosen] = useState<QuizRunSummary | null>(null);
@@ -32,22 +40,45 @@ export function LearningQuiz({ pageId, materials, selected, disabled, saveSelect
   const pendingGeneration = useRef<{ id: string; settings: QuizConfig } | null>(null), pendingAction = useRef<QuizActionInput | null>(null);
   const pendingStart = useRef<{ id: string; quizId: string; mode: "practice" | "test" } | null>(null);
   const requestedQuiz = useRef<string | null>(null);
-  const key = `learning-quiz-pending:${pageId}`;
+  const key = `learning-quiz-pending:${pageId}${embedded ? `:embedded:${openQuizId ?? ""}` : ""}`;
+  const savedCallback = useRef(onAttemptSaved); savedCallback.current = onAttemptSaved;
+  const reviewItems = useRef(new Map<number, HTMLDetailsElement>());
+  const reviewOpened = useRef<string | null>(null);
+  const lastNotified = useRef<string | null>(null);
+  useEffect(() => {
+    if (!embedded || !openReview || !attempt || attempt.quizId !== openQuizId || busy || pendingAction.current || reviewOpened.current === openReview.requestId) return;
+    const question = attempt.questions[openReview.index];
+    if (!question?.feedback) return;
+    if (!attempt.completed) {
+      setIndex(openReview.index); setStage("answer"); setSourceText(""); reviewOpened.current = openReview.requestId; return;
+    }
+    if (stage !== "results") { setStage("results"); return; }
+    const details = reviewItems.current.get(openReview.index);
+    if (!details) return;
+    details.open = true; details.querySelector("summary")?.focus({ preventScroll: true }); details.scrollIntoView?.({ block: "start" });
+    reviewOpened.current = openReview.requestId;
+  }, [embedded, openReview, attempt, openQuizId, busy, stage]);
+  const reportSaved = useCallback((saved: QuizAttemptView) => {
+    if (!mounted.current || pendingAction.current || (embedded && saved.quizId !== openQuizId)) return;
+    const version = `${saved.id}:${saved.revision}:${saved.completed}`;
+    if (lastNotified.current === version) return;
+    lastNotified.current = version; savedCallback.current?.(saved);
+  }, [embedded, openQuizId]);
   useLearningUnsaved(Boolean(pendingAction.current));
-  const rememberPosition = (id: string, question: number) => { const url = new URL(window.location.href); url.searchParams.set("view", "quiz"); url.searchParams.set("attempt", id); url.searchParams.set("question", String(question)); window.history.replaceState(window.history.state, "", url); };
+  const rememberPosition = (id: string, question: number) => { if (embedded) return; const url = new URL(window.location.href); url.searchParams.set("view", "quiz"); url.searchParams.set("attempt", id); url.searchParams.set("question", String(question)); window.history.replaceState(window.history.state, "", url); };
   const load = useCallback(async () => {
     const n = ++seq.current;
     const attemptId = currentId.current;
     try {
-      const [r, f, a] = await Promise.all([learningApi.quizzes(pageId), learningApi.framework(pageId), attemptId ? learningApi.quizAttempt(pageId, attemptId).catch(e => {
+      const [r, f, a] = await Promise.all([learningApi.quizzes(pageId), embedded ? Promise.resolve({ framework: { chapters: [] } }) : learningApi.framework(pageId), attemptId ? learningApi.quizAttempt(pageId, attemptId).catch(e => {
         if (e instanceof LearningApiError && ((e.status === 404 && e.code === "quiz_not_found") || (e.status === 410 && e.code === "quiz_deleted"))) return { attempt: null };
         throw e;
       }) : null]);
       if (!mounted.current || n !== seq.current) return;
-      setRuns(r.quizzes); setChapters(f.framework.chapters); if (a?.attempt) {
-        setAttempt(a.attempt);
+      setRuns(embedded ? r.quizzes.filter(item => item.id === openQuizId) : r.quizzes); setChapters(f.framework.chapters); if (a?.attempt && (!embedded || a.attempt.quizId === openQuizId)) {
+        setAttempt(a.attempt); reportSaved(a.attempt);
         if (!restored.current) {
-          const position = Number(new URLSearchParams(window.location.search).get("question"));
+          const position = embedded ? Math.max(0, a.attempt.questions.findIndex(item => !item.progress.submitted && !item.progress.skipped && !item.progress.revealed)) : Number(new URLSearchParams(window.location.search).get("question"));
           setIndex(Number.isInteger(position) && position >= 0 && position < a.attempt.questions.length ? position : 0);
           setStage(a.attempt.completed ? "results" : "answer"); restored.current = true;
         }
@@ -55,8 +86,8 @@ export function LearningQuiz({ pageId, materials, selected, disabled, saveSelect
         currentId.current = null; restored.current = true; setAttempt(null); setSourceText(""); setStage("history");
         if (pendingAction.current?.attemptId === attemptId) { pendingAction.current = null; sessionStorage.removeItem(key + ":action"); }
         const url = new URL(window.location.href);
-        if (url.searchParams.get("attempt") === attemptId) { url.searchParams.delete("attempt"); url.searchParams.delete("question"); window.history.replaceState(window.history.state, "", url); }
-        setNotice("这份题组或作答记录已不可用，可以继续使用其他题组。");
+        if (!embedded && url.searchParams.get("attempt") === attemptId) { url.searchParams.delete("attempt"); url.searchParams.delete("question"); window.history.replaceState(window.history.state, "", url); }
+        setNotice(embedded ? "这份题组或作答记录已不可用，请在本轮复习中调整目标。" : "这份题组或作答记录已不可用，可以继续使用其他题组。");
       }
       const completed=pendingGeneration.current && r.quizzes.find(q=>q.id===pendingGeneration.current!.id&&q.status!=="generating");
       if(completed){if(completed.status==="completed"){setChosen(completed);setStage(s=>s==="prepare"?"ready":s);}pendingGeneration.current=null;sessionStorage.removeItem(key);}
@@ -67,27 +98,28 @@ export function LearningQuiz({ pageId, materials, selected, disabled, saveSelect
           if (quiz.attemptId) {
             const saved = (await learningApi.quizAttempt(pageId, quiz.attemptId)).attempt;
             if (!mounted.current || n !== seq.current || requestedQuiz.current !== requested) return;
-            currentId.current = saved.id; restored.current = true; setAttempt(saved);
+            if (embedded && saved.quizId !== openQuizId) { requestedQuiz.current = null; setNotice("这份题组的作答记录不匹配，请刷新本轮复习。"); return; }
+            currentId.current = saved.id; restored.current = true; setAttempt(saved); reportSaved(saved);
             const next = Math.max(0, saved.questions.findIndex(item => !item.progress.submitted && !item.progress.skipped && !item.progress.revealed));
             setIndex(next); setStage(saved.completed ? "results" : "answer"); rememberPosition(saved.id, next);
           } else { currentId.current = null; setAttempt(null); setChosen(quiz); setStage("ready"); }
           requestedQuiz.current = null; setSourceText("");
-        } else if (!quiz) { requestedQuiz.current = null; setStage("history"); setNotice("这份题组已不可用，可以继续使用其他题组。"); }
+        } else if (!quiz) { requestedQuiz.current = null; setStage("history"); setNotice(embedded ? "这份题组已不可用，请在本轮复习中调整目标。" : "这份题组已不可用，可以继续使用其他题组。"); }
       }
     } catch (e) { if (mounted.current && n === seq.current) { setError(learningErrorMessage(e)); if (e instanceof LearningApiError && [401,404,410].includes(e.status)) { setRuns([]); setAttempt(null); setSourceText(""); } } }
-  }, [pageId, key]);
+  }, [pageId, key, embedded, openQuizId, reportSaved]);
   useEffect(() => {
     mounted.current = true;
-    const query = new URLSearchParams(window.location.search); currentId.current = query.get("attempt"); requestedQuiz.current = currentId.current ? null : query.get("quiz");
+    const query = new URLSearchParams(window.location.search); currentId.current = embedded ? null : query.get("attempt"); requestedQuiz.current = embedded ? openQuizId ?? null : currentId.current ? null : query.get("quiz");
     setAgentContext(query.has("agent"));
-    try { const saved = sessionStorage.getItem(key + ":action"); if (saved) pendingAction.current = JSON.parse(saved); } catch { /* Optional receipt only. */ }
-    try { const saved = sessionStorage.getItem(key); if (saved) {
+    try { const saved = sessionStorage.getItem(key + ":action"); if (saved) { pendingAction.current = JSON.parse(saved); if (embedded) currentId.current = pendingAction.current!.attemptId; } } catch { /* Optional receipt only. */ }
+    try { const saved = embedded ? null : sessionStorage.getItem(key); if (saved) {
       const p = JSON.parse(saved) as { id: string; settings: QuizConfig }; pendingGeneration.current = p;
       setScope(p.settings.chapterIds.length ? "chapters" : p.settings.nodeIds.length ? "nodes" : "materials");
       setChapterIds(p.settings.chapterIds); setNodeIds(p.settings.nodeIds); setCount(p.settings.count); setDifficulty(p.settings.difficulty); setNotes(p.settings.includeNotes); setSupplements(p.settings.includeSupplements);
     } } catch { /* No original content in this optional recovery receipt. */ }
     return () => { mounted.current = false; seq.current++; };
-  }, [key]);
+  }, [key, embedded, openQuizId]);
   useEffect(() => {
     if (!openQuizId) return;
     requestedQuiz.current = openQuizId;
@@ -132,12 +164,13 @@ export function LearningQuiz({ pageId, materials, selected, disabled, saveSelect
     }
     if (!mounted.current) return;
     const next = Math.max(0, a.questions.findIndex(q => !q.progress.submitted && !q.progress.skipped && !q.progress.revealed && (a.mode === "practice" || !q.progress.optionId)));
-    currentId.current = a.id; restored.current = true; setAttempt(a); setIndex(next); rememberPosition(a.id, next); setStage(a.completed ? "results" : "answer"); setSourceText(""); await load();
+    if (embedded && a.quizId !== openQuizId) throw new LearningApiError(409, "submission_conflict");
+    currentId.current = a.id; restored.current = true; setAttempt(a); reportSaved(a); setIndex(next); rememberPosition(a.id, next); setStage(a.completed ? "results" : "answer"); setSourceText(""); await load();
   });
   const act = (action: QuizActionInput["action"], optionId: string | null = null) => work(async () => {
     if (!attempt) return;
     const p = pendingAction.current ?? { id: crypto.randomUUID(), attemptId: attempt.id, revision: attempt.revision, action, question: index, optionId }; pendingAction.current = p; sessionStorage.setItem(key + ":action", JSON.stringify(p));
-    try { const r = await learningApi.quizAction(pageId, p); pendingAction.current = null; sessionStorage.removeItem(key + ":action"); if (mounted.current) { setAttempt(r.attempt); setNotice("已保存"); setSourceText(""); if (r.attempt.completed && (r.attempt.mode === "test" || p.action === "finish")) setStage("results"); if (r.attempt.completed) await load(); } }
+    try { const r = await learningApi.quizAction(pageId, p); pendingAction.current = null; sessionStorage.removeItem(key + ":action"); if (mounted.current && (!embedded || r.attempt.quizId === openQuizId)) { setAttempt(r.attempt); reportSaved(r.attempt); setNotice("已保存"); setSourceText(""); if (r.attempt.completed && (r.attempt.mode === "test" || p.action === "finish")) setStage("results"); if (r.attempt.completed) await load(); } }
     catch (e) { if (e instanceof LearningApiError && e.status < 500) { pendingAction.current = null; sessionStorage.removeItem(key + ":action"); await load(); } throw e; }
   });
   const toggle = (ids: string[], id: string) => ids.includes(id) ? ids.filter(x => x !== id) : [...ids, id];
@@ -207,12 +240,12 @@ export function LearningQuiz({ pageId, materials, selected, disabled, saveSelect
   </div> : null;
   return <section className={styles.section} aria-label="单选 Quiz">
     <div className={styles.sectionHeader}><h2>{stage === "results" ? "本次结果" : stage === "answer" ? attempt?.mode === "practice" ? "练习" : "测验" : stage === "history" ? "题组与历史" : "Quiz"}</h2>
-      <div className={styles.row}>{onReturnToAgent && (agentContext || openQuizId) ? <button type="button" disabled={busy || Boolean(pendingAction.current)} onClick={onReturnToAgent}>返回本轮复习</button> : null}
-        {stage !== "history" ? <button type="button" disabled={busy || Boolean(pendingAction.current)} onClick={history}>题组与历史</button> : <button type="button" onClick={() => setStage("prepare")}>生成另一组</button>}</div></div>
+      <div className={styles.row}>{!embedded && onReturnToAgent && (agentContext || openQuizId) ? <button type="button" disabled={busy || Boolean(pendingAction.current)} onClick={onReturnToAgent}>返回本轮复习</button> : null}
+        {!embedded ? stage !== "history" ? <button type="button" disabled={busy || Boolean(pendingAction.current)} onClick={history}>题组与历史</button> : <button type="button" onClick={() => setStage("prepare")}>生成另一组</button> : null}</div></div>
     {error ? <p role="alert" className={styles.error}>{error}</p> : null}
     {stage !== "answer" && (busy || notice) ? <p role="status">{busy ? "正在保存或处理，请稍候…" : notice}</p> : null}
     {!busy && pendingAction.current ? <><p role="alert">这次作答的保存结果尚未确认，请重试后再切题或返回。</p><button onClick={() => void act(pendingAction.current!.action)}>核对并重试同一作答操作</button></> : null}
-    {stage === "prepare" ? <>
+    {!embedded && stage === "prepare" ? <>
       <p className={styles.muted}>根据所选材料检查理解，也可以独立出题，无需先生成框架。</p>
       <fieldset disabled={busy || disabled || active || Boolean(pendingGeneration.current)} className={styles.quizSettings}><legend>设置练习</legend>
         <label>出题范围<select value={scope} onChange={e => setScope(e.target.value)}><option value="materials">当前勾选材料（{selected.length} 份）</option><option value="chapters">选择章节</option><option value="nodes">选择知识点</option></select></label>
@@ -250,7 +283,7 @@ export function LearningQuiz({ pageId, materials, selected, disabled, saveSelect
       {!active && runs.slice(0,1).filter(r => r.status === "failed" || r.status === "insufficient").map(r => <p role="alert" key={r.id}>{r.status === "failed" ? learningErrorMessage(new LearningApiError(422, r.failure ?? "quiz_invalid_result")) : r.reason ?? "材料不足，请调整范围再生成。"}</p>)}
       {!active && runs.slice(0,1).filter(r=>r.status==="failed"&&r.progress?.canResume).map(r=><button key={r.id} disabled={busy} onClick={()=>void resumeGeneration(r)}>继续未完成部分</button>)}
     </> : null}
-    {stage === "history" ? <>
+    {!embedded && stage === "history" ? <>
       {!runs.length ? <p>还没有题组，选择材料后可以开始生成。</p> : <ul className={styles.quizHistory}>{runs.map(r => <li key={r.id}>
         <div><h3>{r.title ?? "本次题组"}</h3><p className={styles.muted}>{r.createdAt.slice(0,16).replace("T", " ")} · {r.status === "generating" ? "生成中" : questionCount(r)}</p>
         {r.reason ? <p>{r.reason}</p> : null}{r.status === "failed" ? <p className={styles.error}>{learningErrorMessage(new LearningApiError(422, r.failure ?? "quiz_invalid_result"))}</p> : null}
@@ -260,6 +293,7 @@ export function LearningQuiz({ pageId, materials, selected, disabled, saveSelect
         <button type="button" className={styles.danger} disabled={busy || disabled} aria-label={`删除题组 ${r.title ?? "本次题组"}`} onClick={() => { setDeleting(r); setDeleteError(""); }}>删除</button></div>
       </li>)}</ul>}
     </> : null}
+    {embedded && (stage === "prepare" || stage === "history") && !notice && !error ? <p role="status">正在读取本轮题组…</p> : null}
     {stage === "ready" && chosen ? <div className={styles.quizReady}>
       <h3>{chosen.title}</h3><p>{questionCount(chosen)}</p>{chosen.reason ? <p>{chosen.reason}</p> : null}
       <fieldset disabled={busy || Boolean(pendingStart.current)}><legend>选择作答方式</legend>
@@ -291,14 +325,14 @@ export function LearningQuiz({ pageId, materials, selected, disabled, saveSelect
     {stage === "results" && attempt ? <div className={`${styles.quizResults} ${resultStyles.results}`} aria-label="本次结果">
       <header className={resultStyles.header}><h3>{attempt.title}</h3>{attempt.score ? <><p className={`${styles.resultScore} ${resultStyles.score}`}>本次答对 {attempt.score.correct}/{attempt.score.total} 题</p><p className={resultStyles.stats}>无提示答对 {attempt.score.unassistedCorrect} 题 · 使用提示 {attempt.score.hinted} 题 · 看答案 {attempt.score.revealed} 题 · 跳过 {attempt.score.skipped} 题</p></> : null}</header>
       <p className={styles.muted}>成绩只表示这次练习的作答情况，不代表课程掌握率。AI 题目与解析可能有误，请结合来源判断。</p>
-      {onReturnToAgent && (agentContext || openQuizId) ? <p>作答已保存。返回本轮复习后，可明确继续，让复习任务读取这次结果。</p> : null}
-      <button type="button" onClick={() => { history(); setStage("prepare"); }}>生成另一组</button>
+      {!embedded && onReturnToAgent && (agentContext || openQuizId) ? <p>作答已保存。返回本轮复习后，可明确继续，让复习任务读取这次结果。</p> : null}
+      {!embedded ? <button type="button" onClick={() => { history(); setStage("prepare"); }}>生成另一组</button> : null}
       <p className={resultStyles.reviewHint}>逐题回顾 · 展开查看答案、解析与来源</p>
       <div className={resultStyles.questions}>{attempt.questions.map((question,i) => {
         const own = question.options.find(o => o.id === question.progress.optionId);
         const correct = question.options.find(o => o.id === question.feedback?.correctOptionId);
         const result = question.progress.skipped ? "已跳过" : question.feedback?.correct ? "答对" : question.progress.revealed ? "已看答案" : "未答对";
-        return <details className={resultStyles.question} key={attempt.id + ":" + question.index} aria-label={`第 ${i+1} 题回顾`}>
+        return <details ref={node => { if (node) reviewItems.current.set(i, node); else reviewItems.current.delete(i); }} className={resultStyles.question} key={attempt.id + ":" + question.index} aria-label={`第 ${i+1} 题回顾`}>
           <summary className={resultStyles.summary}>
             <span className={resultStyles.number}>第 {i+1} 题</span>
             <span className={resultStyles.summaryContent}><span className={resultStyles.statusLine}><span className={resultStyles.status} data-correct={Boolean(question.feedback?.correct)}>{result}</span>{question.progress.hinted ? <span className={resultStyles.hintLabel}>使用过提示</span> : null}</span><span className={resultStyles.preview}>{question.stem}</span></span>

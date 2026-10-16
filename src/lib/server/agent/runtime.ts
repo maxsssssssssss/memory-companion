@@ -3,6 +3,7 @@ import { SqliteSaver } from "@langchain/langgraph-checkpoint-sqlite";
 import { createHash } from "node:crypto";
 import type { AgentApproval, AgentConfirmation, AgentEvent, AgentRecovery, AgentTask } from "@/lib/domain/agent";
 import { AgentStore, type AgentLease } from "./store";
+import { agentBudgetEndReason } from "./budget-reason";
 import { AgentFailure, type AgentContext, type AgentDecisionProvider, type AgentScenario, type AgentToolResult } from "./types";
 
 // LangGraph owns routing, durable execution position and interrupt/resume. These
@@ -80,6 +81,18 @@ export class AgentRuntime {
       if (!accepted) store.acceptEvent(accountId, taskId, lease.token, event);
     } finally { store.release(accountId, taskId, lease); }
     return input.defer ? store.getTask(accountId, taskId) : this.advance(accountId, taskId);
+  }
+  async pauseForFeedback(accountId: string, taskId: string, event: AgentEvent, expectedVersion: number) {
+    const { store, scenario } = this.options;
+    const task = store.assertVersion(accountId, taskId, expectedVersion);
+    if (task.scenario !== scenario.id) throw new AgentFailure("forbidden", "任务场景不匹配。");
+    if (store.acceptedEvent(accountId, taskId, event)) return task;
+    const ctx = this.localContext(accountId, taskId);
+    await scenario.validate(ctx);
+    await scenario.validateEvent?.(event, ctx);
+    const result = store.pauseForFeedback(accountId, taskId, event, expectedVersion);
+    this.running.get(taskId)?.abort();
+    return result;
   }
   async resolveApproval(accountId: string, taskId: string, input: { approvalId: string; expectedVersion: number; fingerprint: string; decision: "approve" | "reject"; eventId: string; defer?: boolean }) {
     const { store, scenario } = this.options;
@@ -215,7 +228,7 @@ export class AgentRuntime {
       task: store.getTask(accountId, taskId), actionId, event: currentEvent, signal: controller.signal,
       assertActive: async () => {
         store.assertLease(accountId, taskId, lease.token);
-        if (controller.signal.aborted || original.usage.computeMs + Date.now() - lease.startedAt >= original.budget.maxComputeMs) throw new AgentFailure("budget", "本次计算时间预算耗尽。");
+        if (controller.signal.aborted || original.usage.computeMs + Date.now() - lease.startedAt >= original.budget.maxComputeMs) throw new AgentFailure("budget", "agent_compute_limit");
       },
       call: async (request, invoke) => {
         await context(actionId).assertActive();
@@ -251,8 +264,21 @@ export class AgentRuntime {
         ctx = context(decisionId);
         const observation = await scenario.observe(ctx);
         const results = [];
-        for (const receipt of ctx.task.actions.filter(action => (action.version ?? 1) === (ctx.task.version ?? 1)).slice(-12)) {
+        const receipts = ctx.task.actions.filter(action => (action.version ?? 1) === (ctx.task.version ?? 1)).slice(-12);
+        // Re-read each current business result once. Historical actions remain
+        // visible, but identical successful references point to their latest read.
+        const identity = (receipt: typeof receipts[number]) => receipt.status === "succeeded" && receipt.resultRef
+          ? JSON.stringify([receipt.tool, receipt.resultRef.kind, receipt.resultRef.id]) : null;
+        const latest = new Map<string, string>();
+        for (const receipt of receipts) { const key = identity(receipt); if (key) latest.set(key, receipt.id); }
+        for (const receipt of receipts) {
           await validate(ctx);
+          const key = identity(receipt), newer = key ? latest.get(key) : undefined;
+          if (newer && newer !== receipt.id) {
+            results.push({ actionId: receipt.id, tool: receipt.tool, status: receipt.status,
+              value: { ref: receipt.resultRef, supersededBy: newer, notice: "相同业务结果在后续行动中重新读取；详情仅提供一次。" } });
+            continue;
+          }
           const tool = scenario.tools[receipt.tool];
           const value = receipt.status === "succeeded" && tool?.readResult
             ? await tool.readResult(receipt, ctx)
@@ -267,6 +293,7 @@ export class AgentRuntime {
         await validate(context(decisionId));
         if ("finish" in decision) {
           const explanation = scenario.finish ? await scenario.finish(decision.finish, context(decisionId)) : "任务已交回。该状态不代表业务目标已验证完成。";
+          if (store.hasUnknownCall(taskId, decisionId)) throw new AgentFailure("unknown", "结束整理请求结果未知，已停止自动推进。");
           await validate(context(decisionId));
           store.setState(accountId, taskId, lease.token, "ended", { endReason: explanation.slice(0, 1_000) });
           return { next: "end" as const };
@@ -434,6 +461,11 @@ export class AgentRuntime {
           await graph.updateState(config, { taskId, actionId: retry.id, next: "execute" }, "prepare");
         }
       }
+      if (original.status === "ready" && original.recovery?.kind === "feedback_received") {
+        // New authenticated feedback supersedes the old wait/prepared action.
+        // Unknown operations cannot reach ready through the resume control.
+        await graph.updateState(config, { taskId, actionId: "", next: "decide" }, "wait");
+      }
       const snapshot = await graph.getState(config);
       if (original.status === "waiting") {
         event ??= store.pendingEvent(accountId, taskId);
@@ -489,7 +521,7 @@ export class AgentRuntime {
         endReason: failure.code === "source_changed" ? "授权来源已变化或不可用，请重新选择范围后开始任务。"
           : failure.code === "forbidden" ? "当前任务或来源已无访问权限。"
           : failure.code === "invalid_action" ? "行动或反馈未通过受限协议检查，已交回用户。"
-          : failure.code === "budget" ? "本任务预算耗尽，已停止；等待用户的时间不计入计算预算。"
+          : failure.code === "budget" ? agentBudgetEndReason(failure.message)
           : "执行结果未确认，已停止自动推进；系统不会自动重发外部请求。",
       });
     } catch { /* pause/cancel fenced this invocation; never publish a late result */ }

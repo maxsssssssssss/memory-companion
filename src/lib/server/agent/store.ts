@@ -203,7 +203,8 @@ export class AgentStore {
     if (operation === "resume" && row.status === "paused") {
       const active = this.database.prepare("SELECT id FROM agent_calls WHERE task_id=? AND version=? AND status IN ('running','unknown') LIMIT 1").get(taskId, row.version);
       const action = this.database.prepare("SELECT id FROM agent_actions WHERE task_id=? AND version=? AND status IN ('running','unknown') LIMIT 1").get(taskId, row.version);
-      if (active || action) { status = "needs_attention"; reason = "暂停前的动作结果未确认；请检查已有业务结果，系统不会自动重发。"; }
+      const feedbackUnknown = row.recovery_json && (JSON.parse(row.recovery_json) as AgentRecovery).kind === "unknown";
+      if (active || action || feedbackUnknown) { status = "needs_attention"; reason = "暂停前的动作结果未确认；请检查已有业务结果，系统不会自动重发。"; }
       else status = row.wait_json ? "waiting" : "ready";
     }
     const elapsed = row.lease && row.lease_started_at ? Math.max(0, Date.now() - row.lease_started_at) : 0;
@@ -213,10 +214,37 @@ export class AgentStore {
     return this.getTask(accountId, taskId);
     }).immediate();
   }
+  /** Authenticated scenario feedback can invalidate an in-flight decision. Its
+   * receipt and lease fence are atomic; external calls remain billable facts. */
+  pauseForFeedback(accountId: string, taskId: string, event: AgentEvent, expectedVersion: number) {
+    return this.database.transaction(() => {
+      const task = this.assertVersion(accountId, taskId, expectedVersion), row = this.row(accountId, taskId);
+      if (this.acceptedEvent(accountId, taskId, event)) return task;
+      if (row.status === "cancelled") throw new AgentFailure("inactive", "已取消任务不能接收新反馈。");
+      if (!event.id || event.id.length > 180 || !event.message?.trim() || event.message.length > 2000) throw new AgentFailure("invalid_action", "反馈事件格式无效。");
+      const unresolvedFeedback = row.recovery_json && (JSON.parse(row.recovery_json) as AgentRecovery).kind === "unknown";
+      const unknown = unresolvedFeedback || this.database.prepare("SELECT id FROM agent_calls WHERE task_id=? AND version=? AND status IN ('running','unknown') LIMIT 1").get(taskId, row.version)
+        || this.database.prepare("SELECT id FROM agent_actions WHERE task_id=? AND version=? AND status IN ('running','unknown') LIMIT 1").get(taskId, row.version);
+      this.database.prepare("UPDATE agent_events SET consumed=1 WHERE task_id=? AND version=?").run(taskId, row.version);
+      this.database.prepare("INSERT INTO agent_events(task_id,id,event_json,event_kind,ref_id,created_at,version,consumed) VALUES(?,?,?,?,?,?,?,1)")
+        .run(taskId, event.id, JSON.stringify(event), event.kind, event.refId ?? null, now(), row.version);
+      this.invalidateApprovals(taskId);
+      this.database.prepare("UPDATE agent_actions SET status='failed',summary=? WHERE task_id=? AND version=? AND status='prepared'")
+        .run("用户补充反馈，原未执行行动已失效。", taskId, row.version);
+      const terminal = ["ended", "budget_exhausted"].includes(row.status);
+      const message = terminal ? "已记录题组疑问；原作答保留，本轮结束说明不能作为该题组的学习诊断。"
+        : unknown ? "已记录疑问并暂停；暂停前的结果尚未确认，请先检查原结果，不会自动重发。" : "已记录疑问并暂停。继续后将依据新反馈重新判断，不再使用该题组成绩诊断。";
+      const recovery: AgentRecovery = { kind: unknown ? "unknown" : "feedback_received", message, allowedControls: unknown ? ["inspect", "adjust", "cancel"] : [] };
+      const elapsed = row.lease && row.lease_started_at ? Math.max(0, Date.now() - row.lease_started_at) : 0;
+      this.database.prepare("UPDATE agent_tasks SET status=?,wait_json=NULL,end_reason=?,recovery_json=?,compute_ms=compute_ms+?,lease=NULL,lease_until=0,lease_started_at=0,updated_at=? WHERE id=?")
+        .run(terminal ? row.status : "paused", message, terminal ? null : JSON.stringify(recovery), elapsed, now(), taskId);
+      return this.getTask(accountId, taskId);
+    }).immediate();
+  }
   step(accountId: string, taskId: string, token: string) {
     return this.database.transaction(() => {
     const task = this.assertLease(accountId, taskId, token);
-    if (task.usage.steps >= task.budget.maxSteps) throw new AgentFailure("budget", "已达到本任务决策步数上限。");
+    if (task.usage.steps >= task.budget.maxSteps) throw new AgentFailure("budget", "agent_step_limit");
     this.database.prepare("UPDATE agent_tasks SET steps=steps+1 WHERE id=?").run(taskId);
     return task.usage.steps + 1;
     }).immediate();
@@ -227,7 +255,7 @@ export class AgentStore {
     const args = JSON.stringify(input.args);
     if (args.length > 8_000) throw new AgentFailure("invalid_action", "工具参数超出上限。");
     const previous = this.database.prepare("SELECT tool,args_json,ref_json FROM agent_actions WHERE task_id=? AND version=? ORDER BY step DESC LIMIT ?").all(taskId, task.version ?? 1, task.budget.maxNoProgress) as { tool: string; args_json: string; ref_json: string | null }[];
-    if (previous.length >= task.budget.maxNoProgress && previous.every((p) => p.tool === input.tool && p.args_json === args && p.ref_json === previous[0].ref_json)) throw new AgentFailure("budget", "连续重复相同行动且未取得进展，已停止。");
+    if (previous.length >= task.budget.maxNoProgress && previous.every((p) => p.tool === input.tool && p.args_json === args && p.ref_json === previous[0].ref_json)) throw new AgentFailure("budget", "agent_no_progress_limit");
     const id = `${taskId}:${input.step}`;
     this.database.prepare("INSERT INTO agent_actions(id,task_id,step,tool,args_json,status,reason,created_at,version) VALUES(?,?,?,?,?,'prepared',?,?,?)")
       .run(id, taskId, input.step, input.tool, args, input.reason?.slice(0, 240) ?? null, now(), task.version ?? 1);
@@ -252,9 +280,12 @@ export class AgentStore {
   reserveCall(accountId: string, taskId: string, token: string, actionId: string, request: AgentCallRequest, elapsedMs: number) {
     return this.database.transaction(() => {
       const task = this.assertLease(accountId, taskId, token);
-      if (!Number.isSafeInteger(request.inputChars) || request.inputChars < 0 || request.inputChars > task.budget.maxInputChars
-        || !Number.isSafeInteger(request.maxOutputTokens) || request.maxOutputTokens <= 0 || request.maxOutputTokens > task.budget.maxOutputTokens
-        || task.usage.calls >= task.budget.maxCalls || task.usage.computeMs + elapsedMs >= task.budget.maxComputeMs) throw new AgentFailure("budget", "已达到任务调用、输入、输出或运行时间预算。");
+      if (!Number.isSafeInteger(request.inputChars) || request.inputChars < 0 || request.inputChars > task.budget.maxInputChars)
+        throw new AgentFailure("budget", "agent_request_input_limit");
+      if (!Number.isSafeInteger(request.maxOutputTokens) || request.maxOutputTokens <= 0 || request.maxOutputTokens > task.budget.maxOutputTokens)
+        throw new AgentFailure("budget", "agent_request_output_limit");
+      if (task.usage.calls >= task.budget.maxCalls) throw new AgentFailure("budget", "agent_call_limit");
+      if (task.usage.computeMs + elapsedMs >= task.budget.maxComputeMs) throw new AgentFailure("budget", "agent_compute_limit");
       const id = randomUUID();
       this.database.prepare("INSERT INTO agent_calls(id,task_id,action_id,kind,model,input_chars,output_limit,status,created_at,version) VALUES(?,?,?,?,?,?,?,'running',?,?)")
         .run(id, taskId, actionId, request.kind.slice(0, 80), request.model?.slice(0, 120) ?? null, request.inputChars, request.maxOutputTokens, now(), task.version ?? 1);

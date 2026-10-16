@@ -260,6 +260,23 @@ describe("shared LangGraph execution with a non-Learning business scene", () => 
     expect(stopped.usage.unknownUsageCalls).toBe(1);
     expect(readFileSync(uncertain.dbPath).toString("latin1")).not.toContain("timeout body should not be saved");
   });
+  it("preserves an unknown finish call even when the scene returns a local fallback", async () => {
+    const h = setup([{ finish: "end this synthetic task" }]);
+    const generate = vi.fn(async () => { throw new Error("private-summary-transport-detail"); });
+    h.scene.finish = async (_reason, ctx) => {
+      try { await ctx.call({ kind: "finish_summary", inputChars: 20, maxOutputTokens: 20 }, generate); }
+      catch { /* A business fallback must not conceal an unknown network outcome. */ }
+      return "Local summary fallback";
+    };
+    const stopped = await h.runtime.advance("alice", h.task.id);
+    expect(stopped).toMatchObject({ status: "needs_attention", recovery: { kind: "unknown" }, usage: { calls: 2, unknownUsageCalls: 1 } });
+    expect(stopped.endReason).not.toBe("Local summary fallback");
+    expect(h.store.database.prepare("SELECT status FROM agent_calls WHERE task_id=? AND kind='finish_summary'").get(h.task.id)).toEqual({ status: "unknown" });
+    await h.runtime.advance("alice", h.task.id);
+    expect(generate).toHaveBeenCalledTimes(1);
+    expect(h.decision).toHaveBeenCalledTimes(1);
+    expect(JSON.stringify(stopped)).not.toContain("private-summary-transport-detail");
+  });
   it("returns a definite proposal preparation failure to the bounded decision loop without approval or a write", async () => {
     const write = vi.fn(async () => ({ summary: "must not execute" }));
     const h = setup([{ tool: "synthetic.propose", args: {} }, { wait: { kind: "feedback", message: "Select a valid synthetic target" } }], { tools: {
@@ -346,12 +363,14 @@ describe("shared LangGraph execution with a non-Learning business scene", () => 
         await ctx.call({ kind: "generation", inputChars: 48_001, maxOutputTokens: 10 }, fetcher); return { summary: "unreachable" };
       } },
     } });
-    expect((await oversized.runtime.advance("alice", oversized.task.id)).status).toBe("budget_exhausted");
+    const tooLarge = await oversized.runtime.advance("alice", oversized.task.id);
+    expect(tooLarge.status).toBe("budget_exhausted"); expect(tooLarge.endReason).toContain("内容超过单次处理上限");
     expect(fetcher).not.toHaveBeenCalled();
     const looping = setup(Array.from({ length: 5 }, () => ({ tool: "synthetic.read", args: { id: "allowed" } })));
     const stopped = await looping.runtime.advance("alice", looping.task.id);
     expect(stopped.status).toBe("budget_exhausted");
     expect(stopped.actions).toHaveLength(3);
+    expect(stopped.endReason).toContain("连续重复相同行动");
   });
   it("does not externalize traces even with inherited tracing enabled", async () => {
     vi.stubEnv("LANGSMITH_TRACING", "true");
@@ -685,4 +704,46 @@ describe("A2 versioned changes, confirmation and recovery with no product depend
     await other.runtime.advance("alice", other.task.id);
     expect(other.runtime.control("alice", other.task.id, "pause", 1).recovery).toBeUndefined();
   });
+});
+
+
+it("reads identical successful business references once per decision while retaining both action receipts", async () => {
+  const h = setup([{ tool: "synthetic.read", args: { id: "allowed" } }, { tool: "synthetic.read", args: { id: "allowed" } }, { finish: "done" }]);
+  const read = vi.fn(async () => ({ current: 42 })); h.scene.tools["synthetic.read"].readResult = read;
+  const result = await h.runtime.advance("alice", h.task.id);
+  expect(result.status).toBe("ended"); expect(result.actions).toHaveLength(2);
+  expect(read).toHaveBeenCalledTimes(2);
+  const values = h.decision.mock.calls[2][0].results;
+  expect(values[0].value).toMatchObject({ supersededBy: values[1].actionId });
+  expect(values[1].value).toEqual({ current: 42 });
+});
+it("keeps different references from the same tool separate", async () => {
+  const h = setup([{ tool: "synthetic.multi", args: { id: "first" } }, { tool: "synthetic.multi", args: { id: "second" } }, { finish: "done" }], { tools: {
+    "synthetic.multi": { description: "read distinct sources", parameters: z.object({ id: z.string() }), execute: async (args) => ({ ref: { kind: "source", id: (args as { id: string }).id }, summary: "source" }), readResult: async receipt => ({ source: receipt.resultRef!.id }) }
+  } });
+  await h.runtime.advance("alice", h.task.id);
+  expect(h.decision.mock.calls[2][0].results.map(r => r.value)).toEqual([{ source: "first" }, { source: "second" }]);
+});
+it("persists a call-limit reason without claiming the trial's total allowance is exhausted", async () => {
+  const h = setup([{ tool: "synthetic.read", args: { id: "allowed" } }, { finish: "done" }], { calls: 1 });
+  const stopped = await h.runtime.advance("alice", h.task.id);
+  expect(stopped.status).toBe("budget_exhausted"); expect(stopped.usage.calls).toBe(1);
+  expect(stopped.endReason).toContain("本轮模型调用已达到任务上限");
+  expect(h.store.getTask("alice", h.task.id).endReason).toBe(stopped.endReason);
+});
+
+
+it("resumes authenticated superseding feedback at a new decision instead of the old wait checkpoint", async () => {
+  const h = setup([{ tool: "synthetic.create", args: {} }, { finish: "stop" }]);
+  const waiting = await h.runtime.advance("alice", h.task.id);
+  h.business.get(waiting.wait!.refId!)!.feedback = "new saved feedback";
+  const event = { id: "feedback-interruption", kind: "submitted", refId: waiting.wait!.refId, message: "do not use this result", version: 1 };
+  expect(await h.runtime.pauseForFeedback("alice", h.task.id, event, 1)).toMatchObject({ status: "paused", recovery: { kind: "feedback_received" } });
+  expect(h.decision).toHaveBeenCalledTimes(1);
+  expect(h.runtime.control("alice", h.task.id, "resume", 1).status).toBe("ready");
+  const done = await h.runtime.advance("alice", h.task.id);
+  expect(done.status).toBe("ended"); expect(h.create).toHaveBeenCalledTimes(1); expect(h.decision).toHaveBeenCalledTimes(2);
+  expect(h.decision.mock.calls[1][0].event).toEqual(event);
+  expect(await h.runtime.pauseForFeedback("alice", h.task.id, event, 1)).toMatchObject({ status: "ended" });
+  expect(h.decision).toHaveBeenCalledTimes(2);
 });

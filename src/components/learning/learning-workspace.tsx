@@ -51,7 +51,6 @@ function LearningWorkspaceContent({ pageId }: { pageId: string }) {
   const [area, setArea] = useState("read");
   const [visitedQuiz, setVisitedQuiz] = useState(false);
   const [visitedAgent, setVisitedAgent] = useState(false);
-  const [agentQuiz, setAgentQuiz] = useState<{ id: string; request: number } | null>(null);
   const [expandedSource, setExpandedSource] = useState(false);
   const initialized = useRef(false);
   const scrollPositions = useRef<Record<string, number>>({});
@@ -237,14 +236,11 @@ function LearningWorkspaceContent({ pageId }: { pageId: string }) {
       </div>
       <div hidden={area !== "quiz"}>
       {visitedQuiz ? <LearningQuiz pageId={pageId} materials={page.materials} selected={selected} disabled={busy} onSource={viewSource}
-        saveSelection={saveSelection} openQuizId={agentQuiz?.id} openQuizRequest={agentQuiz?.request} onReturnToAgent={() => changeArea("agent")} /> : null}
+        saveSelection={saveSelection} onReturnToAgent={() => changeArea("agent")} /> : null}
       </div>
       <div hidden={area !== "agent"}>
       {visitedAgent ? <LearningAgentPanel pageId={pageId} materials={page.materials} selected={selected} disabled={busy || preparationActive} active={area === "agent"}
-        saveSelection={saveSelection} onSource={viewSource} onQuiz={id => {
-          setAgentQuiz(previous => ({ id, request: (previous?.request ?? 0) + 1 })); changeArea("quiz");
-          const url = new URL(window.location.href); url.searchParams.set("quiz", id); url.searchParams.delete("attempt"); url.searchParams.delete("question"); window.history.replaceState(window.history.state, "", url);
-        }} /> : null}
+        saveSelection={saveSelection} onSource={viewSource} /> : null}
       </div>
       <div hidden={area !== "materials"}>
       <section className={styles.section} aria-labelledby="saved-materials-title">

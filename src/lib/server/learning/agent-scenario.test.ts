@@ -12,6 +12,7 @@ import type { StructuredJsonDiagnostics } from "@/lib/server/openai/structured-j
 import { LearningRepository } from "./repository";
 import { LearningFrameworkRepository } from "./framework-repository";
 import { LearningQuizRepository } from "./quiz-repository";
+import { generateLearningQuiz } from "./quiz-service";
 import { freezeLearningAgentScope, readLearningAgentScope } from "./agent-scope";
 import { createLearningAgentScenario, readLearningAgentExplanation } from "./agent-scenario";
 import { LearningAgentRepository, learningAgentOperationId } from "./agent-repository";
@@ -115,6 +116,100 @@ it("uses real Quiz business services, counts each generation part, hides answers
   const otherTask = context();
   await expect(run(scene, "learning.read_answers", { attemptId }, otherTask)).rejects.toThrow("agent_history_forbidden");
   expect(globalThis.fetch).not.toHaveBeenCalled();
+});
+
+it("keeps navigation and quiz receipts compact while reading complete saved answers only on demand", async () => {
+  const generate = quizGenerator(), scene = createLearningAgentScenario(learning, { configure: () => config, generate });
+  const ctx = context({ scope: freezeLearningAgentScope(learning, pageId, { ...selection(), includeHistory: true }) });
+  const created = await run(scene, "learning.create_quiz", { count: 2, difficulty: "basic" }, ctx);
+  const attemptId = created.result.wait!.refId!, quiz = new LearningQuizRepository(learning);
+  let attempt = quiz.attempt(pageId, attemptId);
+  attempt = quiz.act(pageId, { id: randomUUID(), attemptId, revision: attempt.revision, action: "hint", question: 0, optionId: null });
+  attempt = quiz.act(pageId, { id: randomUUID(), attemptId, revision: attempt.revision, action: "choose", question: 0, optionId: "A" });
+  attempt = quiz.act(pageId, { id: randomUUID(), attemptId, revision: attempt.revision, action: "finish", question: 0, optionId: null });
+  const summary = await scene.tools["learning.create_quiz"].readResult!(created.receipt, ctx);
+  expect(summary).toMatchObject({ attemptId, quizId: attempt.quizId, count: 2, submitted: true, disputed: false,
+    score: { correct: 1, total: 2, unassistedCorrect: 0, hinted: 1, skipped: 1, revealed: 0 }, progress: { hinted: 1, skipped: 1, revealed: 0 } });
+  expect(JSON.stringify(summary)).not.toMatch(/SECRET_|stem|questions|feedback|correctOptionId/);
+  expect(summary).not.toHaveProperty("result");
+  const navigation = await run(scene, "learning.read_navigation", {}, ctx);
+  expect(navigation.value).toMatchObject({ history: [summary], historyAllowed: true, historyOmitted: 0, historyLimit: 30 });
+  const details = await run(scene, "learning.read_answers", { attemptId }, ctx);
+  expect(JSON.stringify(details.value)).toMatch(/SECRET_EXPLANATION/);
+  expect(details.value).toMatchObject({ attemptId, questions: [{ index: 0, selectedOptionId: "A", progress: { hinted: true } }, { index: 1, progress: { skipped: true } }] });
+  expect(JSON.stringify(navigation.value).length).toBeLessThan(JSON.stringify(details.value).length);
+  expect(scene.tools["learning.read_navigation"].description).toContain("learning.read_answers");
+  expect(scene.tools["learning.create_quiz"].description).toContain("learning.read_answers");
+  expect(generate).toHaveBeenCalledTimes(2);
+  expect(globalThis.fetch).not.toHaveBeenCalled();
+});
+
+it("preserves hint, skip and reveal facts for authorized practice history and removes it after history consent is withdrawn", async () => {
+  const generate = quizGenerator(), scene = createLearningAgentScenario(learning, { configure: () => config, generate });
+  const quizId = randomUUID();
+  await generateLearningQuiz(learning, pageId, { id: quizId, settings: { materialIds: [materialId], chapterIds: [], nodeIds: [], includeNotes: false, includeSupplements: false, count: 3, difficulty: "basic" } }, { configure: () => config, generate });
+  const quiz = new LearningQuizRepository(learning), attemptId = randomUUID();
+  let attempt = quiz.startAttempt(pageId, { id: attemptId, quizId, mode: "practice" });
+  attempt = quiz.act(pageId, { id: randomUUID(), attemptId, revision: attempt.revision, action: "hint", question: 0, optionId: null });
+  attempt = quiz.act(pageId, { id: randomUUID(), attemptId, revision: attempt.revision, action: "choose", question: 0, optionId: "A" });
+  attempt = quiz.act(pageId, { id: randomUUID(), attemptId, revision: attempt.revision, action: "submit", question: 0, optionId: null });
+  attempt = quiz.act(pageId, { id: randomUUID(), attemptId, revision: attempt.revision, action: "skip", question: 1, optionId: null });
+  quiz.act(pageId, { id: randomUUID(), attemptId, revision: attempt.revision, action: "reveal", question: 2, optionId: null });
+  const ctx = context({ scope: freezeLearningAgentScope(learning, pageId, { ...selection(), includeHistory: true }) });
+  const navigation = await run(scene, "learning.read_navigation", {}, ctx);
+  expect(navigation.value).toMatchObject({ history: [{ attemptId, count: 3, score: { correct: 1, total: 3 }, progress: { hinted: 1, skipped: 1, revealed: 1 } }] });
+  const detail = await run(scene, "learning.read_answers", { attemptId }, ctx);
+  expect(detail.value).toMatchObject({ questions: [{ progress: { hinted: true } }, { progress: { skipped: true } }, { progress: { revealed: true } }] });
+  ctx.task.scope = freezeLearningAgentScope(learning, pageId, selection()); ctx.task.version = 2;
+  expect((await run(scene, "learning.read_navigation", {}, ctx)).value).toMatchObject({ history: [], historyAllowed: false, historyOmitted: 0 });
+  await expect(scene.tools["learning.read_answers"].readResult!(detail.receipt, ctx)).rejects.toThrow("agent_history_forbidden");
+});
+
+it("limits validated history summaries with an exact omission count and excludes unfinished or out-of-scope quizzes", async () => {
+  const generate = quizGenerator(), scene = createLearningAgentScenario(learning, { configure: () => config, generate });
+  const ctx = context({ scope: freezeLearningAgentScope(learning, pageId, { ...selection(), includeHistory: true }) });
+  const quiz = new LearningQuizRepository(learning);
+  for (let i = 0; i < 31; i++) {
+    const created = await run(scene, "learning.create_quiz", { count: 1, difficulty: "basic" }, { ...ctx, actionId: randomUUID() });
+    const attemptId = created.result.wait!.refId!, attempt = quiz.attempt(pageId, attemptId);
+    quiz.act(pageId, { id: randomUUID(), attemptId, revision: attempt.revision, action: "finish", question: 0, optionId: null });
+  }
+  await run(scene, "learning.create_quiz", { count: 1, difficulty: "basic" }, { ...ctx, actionId: randomUUID() });
+  const outside = context({ scope: freezeLearningAgentScope(learning, pageId, { ...selection(), materialIds: [otherId] }) });
+  const createdOutside = await run(scene, "learning.create_quiz", { count: 1, difficulty: "basic" }, outside);
+  const outsideAttemptId = createdOutside.result.wait!.refId!, outsideAttempt = quiz.attempt(pageId, outsideAttemptId);
+  quiz.act(pageId, { id: randomUUID(), attemptId: outsideAttemptId, revision: outsideAttempt.revision, action: "finish", question: 0, optionId: null });
+  const navigation = await run(scene, "learning.read_navigation", {}, ctx);
+  expect(navigation.value).toMatchObject({ historyAllowed: true, historyLimit: 30, historyOmitted: 1 });
+  expect((navigation.value as { history: unknown[] }).history).toHaveLength(30);
+  expect(JSON.stringify(navigation.value)).not.toContain(outsideAttemptId);
+  expect(JSON.stringify(navigation.value)).not.toMatch(/SECRET_|correctOptionId|questions/);
+  await expect(run(scene, "learning.read_answers", { attemptId: outsideAttemptId }, ctx)).rejects.toThrow("agent_history_forbidden");
+}, 15000);
+
+it("keeps disputed scores out of both summary paths and still fences stale versions, accounts and source deletion", async () => {
+  const generate = quizGenerator(), scene = createLearningAgentScenario(learning, { configure: () => config, generate });
+  const ctx = context({ scope: freezeLearningAgentScope(learning, pageId, { ...selection(), includeHistory: true }) });
+  const created = await run(scene, "learning.create_quiz", { count: 1, difficulty: "basic" }, ctx);
+  const attemptId = created.result.wait!.refId!, quiz = new LearningQuizRepository(learning);
+  let attempt = quiz.attempt(pageId, attemptId);
+  attempt = quiz.act(pageId, { id: randomUUID(), attemptId, revision: attempt.revision, action: "choose", question: 0, optionId: "A" });
+  quiz.act(pageId, { id: randomUUID(), attemptId, revision: attempt.revision, action: "finish", question: 0, optionId: null });
+  ctx.task.wait = created.result.wait;
+  ctx.event = { id: randomUUID(), kind: "quiz_dispute", refId: attemptId, message: "[合成] 题意有疑问" };
+  await scene.validateEvent!(ctx.event, ctx); await scene.observe(ctx);
+  const summary = await scene.tools["learning.create_quiz"].readResult!(created.receipt, ctx);
+  expect(summary).toMatchObject({ disputed: true, submitted: true, count: 1 });
+  expect(JSON.stringify(summary)).not.toMatch(/score|correct|SECRET_/);
+  const navigation = await run(scene, "learning.read_navigation", {}, ctx);
+  expect(navigation.value).toMatchObject({ history: [summary] });
+  expect(JSON.stringify(navigation.value)).not.toMatch(/score|correct|SECRET_/);
+  expect(quiz.attempt(pageId, attemptId).score?.correct).toBe(1);
+  await expect(scene.tools["learning.create_quiz"].readResult!(created.receipt, { ...ctx, task: { ...ctx.task, version: 2 } })).rejects.toThrow("agent_result_forbidden");
+  await expect(scene.tools["learning.create_quiz"].readResult!(created.receipt, { ...ctx, task: { ...ctx.task, accountId: "other" } })).rejects.toThrow("agent_account_forbidden");
+  learning.deleteMaterial(pageId, materialId);
+  await expect(scene.tools["learning.create_quiz"].readResult!(created.receipt, ctx)).rejects.toMatchObject({ code: "source_changed" });
+  await expect(scene.tools["learning.read_navigation"].readResult!(navigation.receipt, ctx)).rejects.toMatchObject({ code: "source_changed" });
 });
 
 it("persists operation receipts across connection loss and never retries unknown generations", async () => {
@@ -236,7 +331,8 @@ it("accepts an authenticated quiz dispute before submission, persists exclusion 
   expect(JSON.parse(new LearningAgentRepository(learning).list(pageId, ctx.task.id)[0].body_json!).disputed).toBeUndefined();
   ctx.event = event; await scene.observe(ctx); await scene.observe(ctx);
   const disputed = await scene.tools["learning.create_quiz"].readResult!(created.receipt, ctx);
-  expect(disputed).toMatchObject({ submitted: false, disputed: true, result: { disputed: true } });
+  expect(disputed).toMatchObject({ submitted: false, disputed: true, attemptId });
+  expect(disputed).not.toHaveProperty("result");
   expect(JSON.stringify(disputed)).not.toMatch(/SECRET_|correctOptionId|score/);
   await expect(scene.validateEvent!({ ...event, id: randomUUID(), kind: "quiz_submission" }, ctx)).rejects.toThrow("agent_answers_not_submitted");
   const quiz = new LearningQuizRepository(learning); let attempt = quiz.attempt(pageId, attemptId);

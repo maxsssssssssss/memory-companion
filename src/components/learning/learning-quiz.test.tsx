@@ -426,3 +426,180 @@ it("restores an unknown operation receipt and prevents history navigation until 
   await waitFor(()=>expect(learningApi.quizAction).toHaveBeenCalledWith("p",receipt));
   await waitFor(()=>expect(sessionStorage.getItem("learning-quiz-pending:p:action")).toBeNull());
 });
+
+
+it("embeds only the requested group and keeps practice completion on its final explanation", async () => {
+  a.mode = "practice";
+  const onAttemptSaved = vi.fn();
+  window.history.replaceState(null, "", "/learning/p?view=agent");
+  vi.mocked(learningApi.quizAction).mockImplementation(async (_page, value) => {
+    a.revision++;
+    a.questions[0].progress.optionId = "A";
+    if (value.action === "submit") {
+      a.completed = true; a.questions[0].progress.submitted = true;
+      a.questions[0].feedback = {correct:true, correctOptionId:"A", explanation:"最后一题的解析", reasons:[], sources:[]};
+    }
+    return {attempt:structuredClone(a)};
+  });
+  render(<LearningQuiz pageId="p" materials={materials} selected={["m"]} disabled={false} saveSelection={save} onSource={vi.fn()} embedded openQuizId="q" onAttemptSaved={onAttemptSaved} onReturnToAgent={vi.fn()} />);
+  fireEvent.click(await screen.findByRole("button", {name:"开始作答"}));
+  await screen.findByText("合成问题");
+  expect(screen.queryByRole("button", {name:"题组与历史"})).not.toBeInTheDocument();
+  expect(screen.queryByRole("button", {name:"返回本轮复习"})).not.toBeInTheDocument();
+  expect(screen.queryByRole("button", {name:"生成 Quiz"})).not.toBeInTheDocument();
+  expect(learningApi.framework).not.toHaveBeenCalled();
+  fireEvent.click(screen.getByRole("radio", {name:"A. 选项甲"}));
+  await waitFor(() => expect(screen.getByRole("button", {name:"确认答案"})).toBeEnabled());
+  expect(onAttemptSaved.mock.calls.every(([attempt]) => !attempt.completed)).toBe(true);
+  fireEvent.click(screen.getByRole("button", {name:"确认答案"}));
+  await screen.findByText("最后一题的解析");
+  expect(screen.getByRole("article", {name:"当前作答"})).toBeVisible();
+  await waitFor(() => expect(onAttemptSaved.mock.calls.filter(([attempt]) => attempt.completed)).toHaveLength(1));
+  fireEvent.focus(window);
+  await waitFor(() => expect(learningApi.quizAttempt).toHaveBeenCalled());
+  expect(onAttemptSaved.mock.calls.filter(([attempt]) => attempt.completed)).toHaveLength(1);
+  expect(window.location.search).toBe("?view=agent");
+  fireEvent.click(screen.getByRole("button", {name:"查看本次结果"}));
+  expect(screen.queryByRole("button", {name:"生成另一组"})).not.toBeInTheDocument();
+  expect(screen.getByLabelText("第 1 题回顾").querySelector("summary")).toBeVisible();
+  expect(learningApi.generateQuiz).not.toHaveBeenCalled();
+});
+
+it("notifies an embedded test only of server-confirmed completion after hand-in", async () => {
+  const onAttemptSaved = vi.fn();
+  vi.mocked(learningApi.quizzes).mockResolvedValue({quizzes:[{...run, attemptId:"a"}]});
+  vi.mocked(learningApi.quizAction).mockImplementation(async (_page, value) => {
+    a.revision++; a.questions[0].progress.optionId="A";
+    if(value.action === "finish") {a.completed=true;a.questions[0].progress.submitted=true;}
+    return {attempt:structuredClone(a)};
+  });
+  render(<LearningQuiz pageId="p" materials={materials} selected={["m"]} disabled={false} saveSelection={save} onSource={vi.fn()} embedded openQuizId="q" onAttemptSaved={onAttemptSaved} />);
+  fireEvent.click(await screen.findByRole("radio", {name:"A. 选项甲"}));
+  await waitFor(() => expect(screen.getByRole("button", {name:"交卷并查看结果"})).toBeEnabled());
+  expect(onAttemptSaved.mock.calls.every(([attempt]) => !attempt.completed)).toBe(true);
+  fireEvent.click(screen.getByRole("button", {name:"交卷并查看结果"}));
+  await waitFor(() => expect(onAttemptSaved.mock.calls.filter(([attempt]) => attempt.completed)).toHaveLength(1));
+  expect(screen.getByLabelText("本次结果")).toBeVisible();
+});
+
+it("restores an embedded completed attempt without importing an unrelated Quiz URL or generating", async () => {
+  a.completed=true;
+  window.history.replaceState(null,"","/learning/p?view=agent&attempt=unrelated&question=9");
+  vi.mocked(learningApi.quizzes).mockResolvedValue({quizzes:[{...run, attemptId:"a"}]});
+  const onAttemptSaved=vi.fn();
+  render(<LearningQuiz pageId="p" materials={materials} selected={["m"]} disabled={false} saveSelection={save} onSource={vi.fn()} embedded openQuizId="q" onAttemptSaved={onAttemptSaved} />);
+  await waitFor(()=>expect(onAttemptSaved).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({id:"a",quizId:"q",completed:true})));
+  expect(learningApi.quizAttempt).not.toHaveBeenCalledWith("p","unrelated");
+  expect(learningApi.startQuiz).not.toHaveBeenCalled();
+  expect(learningApi.generateQuiz).not.toHaveBeenCalled();
+  expect(window.location.search).toBe("?view=agent&attempt=unrelated&question=9");
+});
+
+it("retains an unknown embedded save across refresh and reports completion only after the same receipt succeeds", async () => {
+  const onAttemptSaved=vi.fn();
+  vi.mocked(learningApi.quizzes).mockResolvedValue({quizzes:[{...run,attemptId:"a"}]});
+  vi.mocked(learningApi.quizAction).mockRejectedValueOnce(new LearningApiError(503,"learning_storage_unavailable"));
+  const props={pageId:"p",materials,selected:["m"],disabled:false,saveSelection:save,onSource:vi.fn(),embedded:true,openQuizId:"q",onAttemptSaved};
+  const first=render(<LearningQuiz {...props}/>);
+  fireEvent.click(await screen.findByRole("radio",{name:"A. 选项甲"}));
+  await screen.findByText(/这次作答的保存结果尚未确认/);
+  const receipt=vi.mocked(learningApi.quizAction).mock.calls[0][1];
+  expect(sessionStorage.getItem("learning-quiz-pending:p:embedded:q:action")).not.toBeNull();
+  first.unmount();
+  a.completed=true;
+  render(<LearningQuiz {...props}/>);
+  await screen.findByText(/这次作答的保存结果尚未确认/);
+  expect(onAttemptSaved.mock.calls.every(([attempt])=>!attempt.completed)).toBe(true);
+  vi.mocked(learningApi.quizAction).mockResolvedValueOnce({attempt:structuredClone(a)});
+  fireEvent.click(screen.getByRole("button",{name:"核对并重试同一作答操作"}));
+  await waitFor(()=>expect(onAttemptSaved.mock.calls.filter(([attempt])=>attempt.completed)).toHaveLength(1));
+  expect(vi.mocked(learningApi.quizAction).mock.calls[1][1]).toEqual(receipt);
+  expect(sessionStorage.getItem("learning-quiz-pending:p:embedded:q:action")).toBeNull();
+});
+
+it("ignores a late completed read when the embedded group changes", async () => {
+  const firstAttempt=structuredClone(a);firstAttempt.completed=true;
+  const nextAttempt={...structuredClone(a),id:"a-next",quizId:"q-next",title:"新的题组"};
+  vi.mocked(learningApi.quizzes).mockResolvedValue({quizzes:[{...run,attemptId:"a"},{...run,id:"q-next",attemptId:"a-next"}]});
+  let resolveOld!: (value:{attempt:QuizAttemptView})=>void;
+  vi.mocked(learningApi.quizAttempt).mockImplementation(async(_page,id)=>id==="a"?new Promise(resolve=>{resolveOld=resolve;}):{attempt:nextAttempt});
+  const onAttemptSaved=vi.fn();
+  const props={pageId:"p",materials,selected:["m"],disabled:false,saveSelection:save,onSource:vi.fn(),embedded:true,onAttemptSaved};
+  const view=render(<LearningQuiz {...props} openQuizId="q"/>);
+  await waitFor(()=>expect(resolveOld).toBeTypeOf("function"));
+  view.rerender(<LearningQuiz {...props} openQuizId="q-next"/>);
+  await screen.findByText("新的题组");
+  await act(async()=>resolveOld({attempt:firstAttempt}));
+  expect(onAttemptSaved.mock.calls.every(([attempt])=>attempt.quizId==="q-next")).toBe(true);
+  expect(screen.queryByText("合成题组")).not.toBeInTheDocument();
+});
+
+it("ignores an old embedded save after switching groups without clearing the new group's unknown receipt", async () => {
+  const old=structuredClone(a);old.completed=true;
+  const next={...structuredClone(a),id:"a-next",quizId:"q-next",title:"新的题组"};
+  vi.mocked(learningApi.quizzes).mockResolvedValue({quizzes:[{...run,attemptId:"a"},{...run,id:"q-next",attemptId:"a-next"}]});
+  vi.mocked(learningApi.quizAttempt).mockImplementation(async(_page,id)=>({attempt:structuredClone(id==="a"?a:next)}));
+  let resolveOld!: (value:{attempt:QuizAttemptView})=>void;
+  vi.mocked(learningApi.quizAction).mockImplementationOnce(()=>new Promise(resolve=>{resolveOld=resolve;})).mockRejectedValueOnce(new LearningApiError(503,"learning_storage_unavailable"));
+  const onAttemptSaved=vi.fn();
+  const props={pageId:"p",materials,selected:["m"],disabled:false,saveSelection:save,onSource:vi.fn(),embedded:true,onAttemptSaved};
+  const view=render(<LearningQuiz {...props} openQuizId="q"/>);
+  fireEvent.click(await screen.findByRole("radio",{name:"A. 选项甲"}));
+  await waitFor(()=>expect(resolveOld).toBeTypeOf("function"));
+  view.rerender(<LearningQuiz {...props} openQuizId="q-next"/>);
+  fireEvent.click(await screen.findByRole("radio",{name:"A. 选项甲"}));
+  await screen.findByText(/这次作答的保存结果尚未确认/);
+  await act(async()=>resolveOld({attempt:old}));
+  expect(onAttemptSaved.mock.calls.every(([attempt])=>!attempt.completed)).toBe(true);
+  expect(sessionStorage.getItem("learning-quiz-pending:p:embedded:q-next:action")).not.toBeNull();
+  expect(screen.getByText("新的题组")).toBeVisible();
+  expect(screen.getByRole("button",{name:"核对并重试同一作答操作"})).toBeEnabled();
+});
+
+function completedReviewAttempt(): QuizAttemptView {
+  const question = structuredClone(a.questions[0]);
+  const progress = { optionId: "B", submitted: true, skipped: false, hinted: false, revealed: false };
+  const feedback = { correct: false, correctOptionId: "A", explanation: "原题解析", reasons: [{ id: "A", reason: "正确依据" }, { id: "B", reason: "错误依据" }], sources: [] };
+  return { ...a, completed: true, revision: 3, completedAt: "2026-10-15T01:00:00Z", score: { correct: 0, total: 2, unassistedCorrect: 0, hinted: 0, revealed: 0, skipped: 0 },
+    questions: [{ ...question, index: 0, stem: "第一道错题", progress, feedback }, { ...question, index: 1, stem: "第二道错题", progress, feedback }] };
+}
+
+it("opens the requested saved wrong question after the embedded group loads and reopens it without writes", async () => {
+  a = completedReviewAttempt();
+  vi.mocked(learningApi.quizzes).mockResolvedValue({ quizzes: [{ ...run, attemptId: "a", count: 2 }] });
+  const props = { pageId: "p", materials, selected: ["m"], disabled: false, saveSelection: save, onSource: vi.fn(), embedded: true, openQuizId: "q" };
+  const view = render(<LearningQuiz {...props} openReview={{ index: 1, requestId: "review-one" }} />);
+  const review = await screen.findByLabelText("第 2 题回顾");
+  await waitFor(() => expect(review).toHaveAttribute("open"));
+  expect(screen.getByLabelText("第 1 题回顾")).not.toHaveAttribute("open");
+  expect(review.querySelector("summary")).toHaveFocus();
+  fireEvent.click(review.querySelector("summary")!); expect(review).not.toHaveAttribute("open");
+  view.rerender(<LearningQuiz {...props} openReview={{ index: 1, requestId: "review-two" }} />);
+  await waitFor(() => expect(review).toHaveAttribute("open"));
+  expect(learningApi.quizAction).not.toHaveBeenCalled(); expect(learningApi.generateQuiz).not.toHaveBeenCalled(); expect(learningApi.startQuiz).not.toHaveBeenCalled();
+});
+
+it("applies a wrong-question target only after the newly selected embedded group is restored", async () => {
+  const first = completedReviewAttempt(); const next = { ...completedReviewAttempt(), id: "attempt-next", quizId: "quiz-next", title: "另一个题组" };
+  vi.mocked(learningApi.quizzes).mockResolvedValue({ quizzes: [{ ...run, attemptId: "a" }, { ...run, id: "quiz-next", attemptId: "attempt-next", title: "另一个题组" }] });
+  vi.mocked(learningApi.quizAttempt).mockImplementation(async (_page, id) => ({ attempt: structuredClone(id === "a" ? first : next) }));
+  const props = { pageId: "p", materials, selected: ["m"], disabled: false, saveSelection: save, onSource: vi.fn(), embedded: true };
+  const view = render(<LearningQuiz {...props} openQuizId="q" openReview={{ index: 0, requestId: "old" }} />);
+  await waitFor(() => expect(screen.getByLabelText("第 1 题回顾")).toHaveAttribute("open"));
+  view.rerender(<LearningQuiz {...props} openQuizId="quiz-next" openReview={{ index: 1, requestId: "next" }} />);
+  await screen.findByRole("heading", { name: "另一个题组" });
+  await waitFor(() => expect(screen.getByLabelText("第 2 题回顾")).toHaveAttribute("open"));
+  expect(screen.getByLabelText("第 1 题回顾")).not.toHaveAttribute("open");
+  expect(learningApi.quizAction).not.toHaveBeenCalled(); expect(learningApi.generateQuiz).not.toHaveBeenCalled();
+});
+
+it("can review an already submitted wrong answer in an unfinished attempt without submitting remaining questions", async () => {
+  const saved = completedReviewAttempt();
+  a = { ...saved, completed: false, score: null, completedAt: null, questions: [saved.questions[0], { ...saved.questions[1], feedback: undefined, progress: { optionId: null, submitted: false, skipped: false, hinted: false, revealed: false } }] };
+  vi.mocked(learningApi.quizzes).mockResolvedValue({ quizzes: [{ ...run, attemptId: "a", count: 2 }] });
+  render(<LearningQuiz pageId="p" materials={materials} selected={["m"]} disabled={false} saveSelection={save} onSource={vi.fn()} embedded openQuizId="q" openReview={{ index: 0, requestId: "review-partial" }} />);
+  await screen.findByText("第一道错题");
+  expect(screen.getByText("原题解析")).toBeVisible(); expect(screen.getByText("第 1/2 题 · 已选择 1 题")).toBeVisible();
+  expect(screen.getByRole("radio", { name: "A. 选项甲" })).toBeDisabled();
+  expect(learningApi.quizAction).not.toHaveBeenCalled(); expect(learningApi.generateQuiz).not.toHaveBeenCalled(); expect(learningApi.startQuiz).not.toHaveBeenCalled();
+});

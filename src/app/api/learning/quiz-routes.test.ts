@@ -1,4 +1,5 @@
 // @vitest-environment node
+import { existsSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -91,6 +92,7 @@ it("uses actual API save/reopen, reveals server-side only and consumes zero call
   expect((await (await GET(req("GET", undefined, "owner", `?attempt=${a.id}`), ctx())).json()).attempt).toEqual(a);
   await act("finish"); expect(a.score.correct).toBe(1); expect(a.questions[0].feedback.explanation).toBe("SECRET_EXPLANATION");
   expect((await GET(req("GET", undefined, "owner", `?attempt=${a.id}&question=0&source=0`), ctx())).status).toBe(200); expect(generate).toHaveBeenCalledTimes(1);
+  expect(existsSync(join(root, "owner", "agent-tasks.sqlite"))).toBe(false);
 });
 it("delete during a real API pending mock fences the late result and retains no question rows", async () => {
   let done!: (v: unknown) => void; generate.mockImplementationOnce(() => new Promise(r => { done = r; }));

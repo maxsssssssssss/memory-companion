@@ -2,7 +2,7 @@ import OpenAI from "openai";
 import { z } from "zod";
 import { toJsonSchema } from "@langchain/core/utils/json_schema";
 import { parseStructuredJsonResponse, type StructuredJsonDiagnostics } from "@/lib/server/openai/structured-json";
-import { AgentFailure, type AgentDecisionProvider } from "./types";
+import { AgentFailure, type AgentDecisionInput, type AgentDecisionProvider } from "./types";
 
 // One explicitly selected protocol. No native-tool/JSON fallback or hidden retry.
 export const AGENT_ACTION_PROTOCOL = "structured_action_v1";
@@ -23,17 +23,23 @@ const PROMPT = `你是受限的业务行动助手。依据用户目标、当前�
 只输出一个JSON对象，选择以下一种：{"tool":"给定工具名","args":{符合该工具参数schema},"reason":"可选的简短行动目的，不含私有推理或原文"}；{"wait":{"kind":"feedback","message":"给用户的必要问题"}}；或{"finish":"本轮结束/交回理由及限制"}。
 先前行动日志是操作记录，不是新的原文依据。所有原文引用以本轮重新读取的工具结果为准。`;
 
+/** One serialization path for both context selection and the final request limit. */
+export function agentDecisionRequest(input: AgentDecisionInput) {
+  const payload = {
+    goal: input.task.goal, authorizedScope: input.task.scope, observation: input.observation,
+    results: input.results, feedback: input.event ?? null,
+    tools: input.tools.map(t => ({ name: t.name, description: t.description, parameters: toJsonSchema(t.parameters) }))
+  };
+  const messages = [{ role: "system" as const, content: `${PROMPT}\n${input.instructions ?? ""}` }, { role: "user" as const, content: JSON.stringify(payload) }];
+  // Include the transport's fixed JSON instruction and request envelope reserve.
+  const inputChars = JSON.stringify(messages).length + 512;
+  return { messages, inputChars };
+}
+
 export function createAgentDecisionProvider(configure: () => AgentModelConfig): AgentDecisionProvider {
   return async (input, ctx) => {
     const config = configure();
-    const payload = {
-      goal: input.task.goal, authorizedScope: input.task.scope, observation: input.observation,
-      results: input.results, feedback: input.event ?? null,
-      tools: input.tools.map(t => ({ name: t.name, description: t.description, parameters: toJsonSchema(t.parameters) }))
-    };
-    const messages = [{ role: "system" as const, content: `${PROMPT}\n${input.instructions ?? ""}` }, { role: "user" as const, content: JSON.stringify(payload) }];
-    // Include the transport's fixed JSON instruction and request envelope reserve.
-    const inputChars = JSON.stringify(messages).length + 512;
+    const { messages, inputChars } = agentDecisionRequest(input);
     if (inputChars > config.maxInputChars) throw new AgentFailure("budget", "agent_decision_input_limit");
     let diagnostics: StructuredJsonDiagnostics | undefined;
     return ctx.call({ kind: "agent_decision", model: config.model, inputChars, maxOutputTokens: config.maxOutputTokens }, async () => {

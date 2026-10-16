@@ -23,3 +23,11 @@ export type LearningAgentNotePreview = {
   targetLabel: string; content: string; sources: Array<{ materialId: string; paragraph: number }>; includesSupplement: boolean;
   targetRevision: number; noteHash: string; sourceFingerprint: string;
 };
+
+/** Saved Learning review facts; model text cannot change these statistics. */
+export type LearningAgentReviewSummary = {
+  kind: "completed" | "partial"; headline: string;
+  stats: { groups: number; total: number; answered: number; correct: number; wrong: number; unassistedCorrect: number; hinted: number; revealed: number; skipped: number; unanswered: number; excludedGroups: number };
+  topics: Array<{ id: string; title: string; explanation: string; questionRefs: Array<{ quizId: string; attemptId: string; index: number }>; sources: Array<{ materialId: string; paragraph: number; parsed?: import("./learning-pdf-study").ParsedTextBinding }> }>;
+  reminders: string[]; notices: string[];
+};
