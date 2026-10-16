@@ -13,6 +13,7 @@ import { LearningAgentRepository, learningAgentOperationId } from "./agent-repos
 import { readLearningAgentNotePreview } from "./agent-notes";
 import { LearningQuizRepository } from "./quiz-repository";
 import { projectLearningAgentReviewSummary, unavailableLearningAgentReviewSummary } from "./agent-review-summary";
+import { projectLearningPlanSourceAdjustment } from "./agent-plan-sources";
 import { assessLearningCompletion } from "./agent-completion";
 import { LearningExplanationFeedback } from "@/lib/domain/learning-agent-completion";
 
@@ -65,6 +66,7 @@ export function projectLearningAgentTask(learning: LearningRepository, task: Age
         : "授权来源已变化或不可用；旧解释不再作为证据，请调整本轮复习范围。",
       actions: base.actions.map(a => ({ ...a, summary: "历史动作；来源已变化。", reason: undefined })) };
   }
+  base.sourceAdjustment = projectLearningPlanSourceAdjustment(learning, task);
   // Finished tasks have no actionable proposal. Later edits to a former target
   // must not turn their persisted end state back into an attention request.
   if (!terminal && task.approval && task.approval.taskVersion === (task.version ?? 1)

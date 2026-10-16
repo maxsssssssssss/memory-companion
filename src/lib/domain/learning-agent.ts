@@ -13,6 +13,8 @@ export type LearningAgentScope = {
   version: 1; pageId: string; selection: LearningAgentSelection; fingerprint: string;
   /** Absent on V1 tasks: their history is never retroactively graded as a goal check. */
   completionVersion?: 1;
+  /** Explicit user source correction; applied only to the next version. No raw text. */
+  planSourceAdjustment?: { previousPlanId: string; previousVersion: number; previousPlanHash: string; reason: "user_confirmed_sources"; corrections: Array<{ objectiveId: string; sources: Array<{ materialId: string; paragraph: number }> }> };
   sources: Array<{ materialId: string; paragraphs: number[] }>;
 };
 export type LearningAgentExplanation = {

@@ -7,6 +7,7 @@ import { AgentFailure } from "@/lib/server/agent/types";
 import { LearningError } from "@/lib/server/learning/repository";
 import { freezeLearningAgentScope } from "@/lib/server/learning/agent-scope";
 import { learningAgentGenerationConfig } from "@/lib/server/learning/agent-scenario";
+import { LearningPlanSourceCorrections, prepareLearningPlanSourceAdjustment, materializeLearningPlanSourceAdjustment } from "@/lib/server/learning/agent-plan-sources";
 import { LearningAgentRepository } from "@/lib/server/learning/agent-repository";
 import { openLearningAgentStore, projectLearningAgentTask, advanceLearningAgent, learningAgentFailure, openLearningAgentRuntime, syncLearningAgentQuiz, disputeLearningAgentQuiz, submitLearningExplanationFeedback } from "@/lib/server/learning/agent-api-service";
 import { learningJson, learningJsonBody, withLearning } from "../../../route-utils";
@@ -19,7 +20,7 @@ const Control = z.union([
   z.object({ ...identity, action: z.enum(["pause", "resume", "cancel", "feedback"]), expectedVersion: version.optional(),
     feedback: z.string().trim().min(1).max(2000).optional(), attemptId: LearningId.optional() }).strict(),
   z.object({ ...identity, action: z.literal("adjust"), expectedVersion: version,
-    goal: z.string().trim().min(1).max(2000), scope: LearningAgentSelection }).strict(),
+    goal: z.string().trim().min(1).max(2000), scope: LearningAgentSelection, sourceCorrections: LearningPlanSourceCorrections.optional() }).strict(),
   z.object({ ...identity, action: z.literal("approval"), expectedVersion: version, approvalId: z.string().min(1).max(180),
     fingerprint: z.string().min(1).max(128), decision: z.enum(["approve", "reject"]) }).strict(),
   z.object({ ...identity, action: z.literal("recover"), expectedVersion: version, mode: z.enum(["inspect", "retry"]) }).strict(),
@@ -96,10 +97,29 @@ export async function PATCH(request: Request, context: Context) {
         const runtime = openLearningAgentRuntime(learning, store);
         try {
           if (value.action === "adjust") {
-            const scope = { ...freezeLearningAgentScope(learning, pageId, value.scope),
+            const scope: LearningAgentScope = { ...freezeLearningAgentScope(learning, pageId, value.scope),
               ...((task.scope as LearningAgentScope).completionVersion === 1 ? { completionVersion: 1 as const } : {}) };
+            if (value.sourceCorrections) {
+              const prior = (task.scope as LearningAgentScope).planSourceAdjustment;
+              if ((task.version ?? 1) !== expectedVersion) {
+                // Preserve the original control identity for an exact repeated
+                // confirmation; AgentStore still rejects a different event/body.
+                if ((task.version ?? 1) !== expectedVersion + 1 || prior?.previousVersion !== expectedVersion
+                  || JSON.stringify(prior.corrections) !== JSON.stringify(value.sourceCorrections))
+                  throw new AgentFailure("conflict", "agent_version_conflict");
+                scope.planSourceAdjustment = prior;
+              } else scope.planSourceAdjustment = prepareLearningPlanSourceAdjustment(learning, task, { goal: value.goal, scope }, value.sourceCorrections);
+            }
             task = await runtime.adjust(accountId, task.id, { expectedVersion, goal: value.goal, scope, eventId: value.eventId });
             new LearningAgentRepository(learning).invalidateNotePreviews(pageId, task.id, task.version ?? 1);
+            // Local deterministic write only. If interrupted, the persisted
+            // consent recipe is resumed by observe/tools; no paid plan retry.
+            await materializeLearningPlanSourceAdjustment(learning, { task, actionId: "user-source-adjustment",
+              signal: new AbortController().signal, assertActive: async () => {
+                const current = store.assertVersion(accountId, task.id, task.version ?? 1);
+                if (["cancelled", "ended", "paused"].includes(current.status)) throw new AgentFailure("inactive", "agent_adjustment_inactive");
+              },
+              call: async () => { throw new AgentFailure("forbidden", "agent_adjustment_model_forbidden"); } });
           } else if (value.action === "approval") {
             task = await runtime.resolveApproval(accountId, task.id, { expectedVersion, approvalId: value.approvalId,
               fingerprint: value.fingerprint, decision: value.decision, eventId: value.eventId, defer: true });

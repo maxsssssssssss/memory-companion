@@ -344,6 +344,85 @@ describe("shared LangGraph execution with a non-Learning business scene", () => 
     expect(actual).toHaveBeenCalledTimes(1);
     expect(exhausted.usage.calls).toBe(2);
     expect(exhausted.usage.inputTokens).toBeNull();
+    expect(exhausted.recovery).toBeUndefined();
+    expect(exhausted.actions[0].status).toBe("failed");
+    expect(h.store.callsForVersion("alice", h.task.id).every(call => call.status === "succeeded")).toBe(true);
+  });
+  it("stops a locally rejected next decision without inventing an unknown result for the previous successful action", async () => {
+    const h = setup([{ tool: "synthetic.read", args: { id: "allowed" } }], { calls: 1 });
+    const stopped = await h.runtime.advance("alice", h.task.id);
+    expect(stopped).toMatchObject({ status: "budget_exhausted", usage: { calls: 1, steps: 2 } });
+    expect(stopped.recovery).toBeUndefined();
+    expect(stopped.endReason).toContain("模型调用已达到任务上限");
+    expect(stopped.actions).toHaveLength(1); expect(stopped.actions[0].status).toBe("succeeded");
+    expect(h.store.callsForVersion("alice", h.task.id)).toEqual([{ action_id: "decision:1", status: "succeeded" }]);
+    const decisions = h.decision.mock.calls.length;
+    await h.runtime.advance("alice", h.task.id);
+    await h.runtime.recover("alice", h.task.id, { expectedVersion: 1, mode: "retry" });
+    expect(h.decision).toHaveBeenCalledTimes(decisions);
+    expect(h.store.getTask("alice", h.task.id).usage.calls).toBe(1);
+  });
+  it("retains 15 historical calls across adjustment, completes call 16 and stops before request 17 with no unknown metadata", async () => {
+    const invoke = vi.fn(async () => ({ value: "synthetic saved observation", usage: { inputTokens: 1, outputTokens: 1 } }));
+    const h = setup([{ tool: "synthetic.observe", args: {} }, { tool: "synthetic.read", args: { id: "allowed" } }], { calls: 16, tools: {
+      "synthetic.observe": { description: "Synthetic nested observations", parameters: z.object({}).strict(), execute: async (_args, ctx) => {
+        for (let i = 0; i < 14; i++) await ctx.call({ kind: "synthetic_generation", inputChars: 1, maxOutputTokens: 1 }, invoke);
+        return { summary: "已保存合成观察", wait: { kind: "feedback", message: "等待反馈" } };
+      } },
+    } });
+    const old = await h.runtime.advance("alice", h.task.id);
+    expect(old.status).toBe("waiting"); expect(old.usage.calls).toBe(15);
+    const revised = await h.runtime.adjust("alice", h.task.id, { expectedVersion: 1, goal: "明确调整后的合成目标", scope: { record: "allowed", history: true } });
+    expect(revised.version).toBe(2); expect(revised.usage.calls).toBe(15); expect(revised.budget).toEqual(old.budget);
+    const stopped = await h.runtime.advance("alice", h.task.id);
+    expect(stopped).toMatchObject({ status: "budget_exhausted", version: 2, usage: { calls: 16, steps: 3 } });
+    expect(stopped.recovery).toBeUndefined(); expect(stopped.actions).toHaveLength(2);
+    expect(stopped.actions.every(action => action.status === "succeeded")).toBe(true);
+    expect(h.store.callsForVersion("alice", h.task.id)).toEqual([{ action_id: "decision:2", status: "succeeded" }]);
+    expect(invoke).toHaveBeenCalledTimes(14);
+    h.runtime.close(); h.store.close();
+    const reopened = AgentStore.open(h.dbPath);
+    try { expect(reopened.getTask("alice", h.task.id)).toMatchObject({ status: "budget_exhausted", version: 2, recovery: undefined, usage: { calls: 16 } }); }
+    finally { reopened.close(); }
+  });
+  it("projects only proven legacy call-limit misclassification without rewriting its persisted evidence", async () => {
+    const h = setup([{ tool: "synthetic.read", args: { id: "allowed" } }], { calls: 1 });
+    const originalSetState = h.store.setState.bind(h.store);
+    const legacyWrite = vi.spyOn(h.store, "setState").mockImplementation((account, id, token, status, extra) => {
+      // Fault injection reproduces the old catch classification. Calls and
+      // successful business actions still originate from the real runtime.
+      if (status === "budget_exhausted") return originalSetState(account, id, token, status, { ...extra,
+        recovery: { kind: "unknown", actionId: h.store.getTask(account, id).actions.at(-1)!.id, message: "legacy unknown", allowedControls: ["inspect", "adjust", "cancel"] } });
+      return originalSetState(account, id, token, status, extra);
+    });
+    const stopped = await h.runtime.advance("alice", h.task.id);
+    expect(stopped.recovery).toBeUndefined();
+    const raw = h.store.database.prepare("SELECT recovery_json FROM agent_tasks WHERE id=?").get(h.task.id) as { recovery_json: string };
+    expect(JSON.parse(raw.recovery_json).kind).toBe("unknown");
+    expect(h.store.getTask("alice", h.task.id).recovery).toBeUndefined();
+    expect(h.store.database.prepare("SELECT recovery_json FROM agent_tasks WHERE id=?").get(h.task.id)).toEqual(raw);
+    legacyWrite.mockRestore();
+    h.runtime.close(); h.store.close();
+    const reopened = AgentStore.open(h.dbPath);
+    try { expect(reopened.getTask("alice", h.task.id).recovery).toBeUndefined(); }
+    finally { reopened.close(); }
+  });
+  it("retains a real unresolved call when a later local budget error is raised and never resends it", async () => {
+    const h = setup([], { calls: 1 });
+    const sent = vi.fn(async () => { throw new AgentFailure("unknown", "synthetic response lost"); });
+    h.decision.mockImplementationOnce(async (_input, ctx) => {
+      try { await ctx.call({ kind: "decision", inputChars: 20, maxOutputTokens: 10 }, sent); }
+      catch { throw new AgentFailure("budget", "agent_call_limit"); }
+      return { finish: "unreachable" };
+    });
+    const stopped = await h.runtime.advance("alice", h.task.id);
+    expect(stopped).toMatchObject({ status: "budget_exhausted", recovery: { kind: "unknown" }, usage: { calls: 1 } });
+    expect(stopped.recovery?.actionId).toBeUndefined();
+    expect(h.store.callsForVersion("alice", h.task.id)).toEqual([{ action_id: "decision:1", status: "unknown" }]);
+    expect(stopped.actions).toEqual([]);
+    await h.runtime.advance("alice", h.task.id);
+    await h.runtime.recover("alice", h.task.id, { expectedVersion: 1, mode: "retry" });
+    expect(sent).toHaveBeenCalledTimes(1); expect(h.decision).toHaveBeenCalledTimes(1);
   });
   it("looks up a stable operation receipt after a lost notification instead of repeating side effects", async () => {
     const execute = vi.fn(async () => { throw new AgentFailure("unknown", "business commit succeeded but notification was lost"); });

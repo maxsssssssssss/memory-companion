@@ -1,5 +1,7 @@
 # Learning Agent V1.1：Windows 整包返修交接
 
+> 当前整包 R1–R3 返修优先按 [集中交接](agent-completion-v1-1-repair2.md) 验收；以下内容保留原阶段证据身份，旧请求数量不代表当前余额。
+
 日期：2026-10-16。基线 `495c2e1fa81a892080f55cc5bcf56cbfe3ab48e6`，开发线 `feat/learning-agent-completion-v1-1`。本文件针对 Windows 首次 V1.1 集中验收的 F1/F2/F3，不扩大到其他 Agent。Windows 冻结版结论仍是 **BLOCKED**；修后 SHA 的真实验收是 **PENDING**，Cloud 离线通过不替代它。
 
 ## 收到的原始证据

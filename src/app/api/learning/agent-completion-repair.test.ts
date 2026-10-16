@@ -29,6 +29,7 @@ import { createLearningAgentScenario } from "@/lib/server/learning/agent-scenari
 import { withLearningCompletionDecision } from "@/lib/server/learning/agent-context";
 import { LearningAgentRepository } from "@/lib/server/learning/agent-repository";
 import { assessLearningCompletion } from "@/lib/server/learning/agent-completion";
+import { readLearningAgentScope } from "@/lib/server/learning/agent-scope";
 import type { generateStudyJson } from "@/lib/server/learning/framework-generator";
 import { GET, POST, PATCH } from "./pages/[pageId]/agent/route";
 import { GET as quizGet, PATCH as quizPatch } from "./pages/[pageId]/quiz/route";
@@ -137,6 +138,131 @@ function mismatchedPlan() {
   return value;
 }
 const artifacts = (id: string) => stores(learning => new LearningAgentRepository(learning).list(pageId, id));
+function expectNoNewCalls(actual: AgentTask["usage"], before: AgentTask["usage"]) {
+  const { computeMs, ...counters } = before;
+  expect(actual).toMatchObject(counters);
+  // Local permission/feedback processing is compute; it must not reset the
+  // accumulated duration, but it does not create a Provider or generation call.
+  expect(actual.computeMs).toBeGreaterThanOrEqual(computeMs);
+}
+
+async function savedMismatchedExplanation() {
+  const value = plan("explanation"); value.objectives[0].sources = [{ materialId, paragraph: 2 }];
+  candidates.push(planAction(value), waitAction);
+  const id = await create("[合成] 请解释应用规则前为何先核对前提");
+  const waiting = await run(id), explanationId = randomUUID();
+  // Reconstruct an already saved pre-fix explanation through the artifact
+  // repository. New generation must not create this invalid association.
+  stores(learning => {
+    const scope = readLearningAgentScope(learning, pageId, waiting.scope);
+    const repository = new LearningAgentRepository(learning), fixedPlan = assessment(id).plan!;
+    repository.reserve({ id: explanationId, taskId: id, taskVersion: 1, pageId, kind: "explanation", actionId: `pre-repair:${explanationId}`,
+      binding: scope.fingerprint, materialIds: [materialId] });
+    repository.complete(pageId, id, explanationId, { id: explanationId,
+      materialAnswer: "[合成历史讲解] 先核对规则的前提，只有前提满足时才能使用规则。", supplements: [], items: [{ materialId, paragraph: 1 }],
+      reviewContext: { planId: fixedPlan.id, taskVersion: 1, purpose: purpose("concept", { method: "explain" }) } });
+  });
+  return { id, explanationId };
+}
+
+describe("R1/R2 explicit source recovery through formal API and SQLite", () => {
+  it("rejects the existing mismatched explanation, then accepts explicit resolution only after versioned source correction and a new related explanation", async () => {
+    const { id, explanationId } = await savedMismatchedExplanation(), before = task(id), oldArtifacts = artifacts(id);
+    expect(assessment(id).technicalBlocker?.kind).toBe("plan_source_mismatch");
+    const refused = await PATCH(request("PATCH", { id, expectedVersion: 1, eventId: randomUUID(), action: "explanation_feedback", explanationId, outcome: "resolved" }), routeContext());
+    expect(refused.status).toBe(409);
+    expect(artifacts(id).filter(row => row.kind === "explanation_feedback")).toHaveLength(0);
+    expectNoNewCalls(task(id).usage, before.usage);
+    const projected = await GET(request(), routeContext());
+    const view = (await projected.json()).tasks.find((item: { id: string }) => item.id === id);
+    expect(view.sourceAdjustment.objectives).toContainEqual({ id: "concept", label: "理解规则前提", currentSources: [{ materialId, paragraph: 2 }] });
+    expect(view.sourceAdjustment.sources).toContainEqual(expect.objectContaining({ materialId, paragraph: 1, text: "[合成] 只有前提成立时才可应用规则。" }));
+
+    const correction = { action: "adjust", eventId: randomUUID(), goal: before.goal, scope: selection(),
+      sourceCorrections: [{ objectiveId: "concept", sources: [{ materialId, paragraph: 1 }] }] };
+    await control(id, correction);
+    expect(task(id)).toMatchObject({ version: 2, goal: before.goal }); expectNoNewCalls(task(id).usage, before.usage);
+    const duplicateCorrection = await PATCH(request("PATCH", { id, expectedVersion: 1, ...correction }), routeContext());
+    expect(duplicateCorrection.status).toBe(202); expect(task(id).version).toBe(2); expectNoNewCalls(task(id).usage, before.usage);
+    expect(assessment(id).plan?.objectives).toEqual(plan("explanation").objectives);
+    expect(artifacts(id).filter(row => oldArtifacts.some(old => old.id === row.id))).toEqual(oldArtifacts);
+    const stale = await PATCH(request("PATCH", { id, expectedVersion: 1, eventId: randomUUID(), action: "explanation_feedback", explanationId, outcome: "resolved" }), routeContext());
+    expect(stale.status).toBe(409);
+    const wrongVersionExplanation = await PATCH(request("PATCH", { id, expectedVersion: 2, eventId: randomUUID(), action: "explanation_feedback", explanationId, outcome: "resolved" }), routeContext());
+    expect(wrongVersionExplanation.status).toBe(409);
+    candidates.push({ tool: "learning.read_source", args: { materialId, paragraph: 1 } }, { tool: "learning.explain", args: {
+      question: "为什么使用规则前先核对前提？", sources: [{ materialId, paragraph: 1 }], purpose: purpose("concept", { method: "explain" }) } }, waitAction);
+    const waiting = await run(id);
+    expect(waiting.status).toBe("waiting");
+    const freshExplanation = artifacts(id).find(row => row.kind === "explanation" && row.task_version === 2)!;
+    expect(freshExplanation.id).not.toBe(explanationId); expect(assessment(id).technicalBlocker).toBeUndefined();
+    await control(id, { action: "feedback", feedback: "谢谢" }); candidates.push(waitAction); await run(id);
+    expect(assessment(id).outcome).toBe("insufficient");
+    const calls = decision.mock.calls.length, usage = task(id).usage;
+    const feedback = { action: "explanation_feedback", explanationId: freshExplanation.id, outcome: "resolved" };
+    await control(id, feedback); await Promise.all([run(id), run(id)]);
+    expect(task(id).status).toBe("ended"); expect(assessment(id).outcome).toBe("explanation_resolved");
+    const finishedUsage = { ...usage, steps: usage.steps + 1 }; // deterministic local finish is still an accounted step
+    expectNoNewCalls(task(id).usage, finishedUsage); expect(decision).toHaveBeenCalledTimes(calls); expect(generation).toHaveBeenCalledTimes(1);
+    await control(id, feedback); await run(id);
+    expect(artifacts(id).filter(row => row.kind === "explanation_feedback")).toHaveLength(1);
+    expect(decision).toHaveBeenCalledTimes(calls); expectNoNewCalls(task(id).usage, finishedUsage);
+    expect(stores(learning => new LearningQuizRepository(learning).list(pageId))).toHaveLength(0);
+  });
+
+  it("rejects source repair that changes the goal or references an unowned source without changing version, history or usage", async () => {
+    const { id } = await savedMismatchedExplanation(), before = task(id), prior = artifacts(id);
+    for (const invalid of [
+      { goal: "[合成] 换成简单目标", sourceCorrections: [{ objectiveId: "concept", sources: [{ materialId, paragraph: 1 }] }] },
+      { goal: before.goal, sourceCorrections: [{ objectiveId: "concept", sources: [{ materialId: randomUUID(), paragraph: 1 }] }] },
+    ]) {
+      const response = await PATCH(request("PATCH", { id, action: "adjust", eventId: randomUUID(), expectedVersion: 1, scope: selection(), ...invalid }), routeContext());
+      expect(response.status).toBeGreaterThanOrEqual(400); expect(response.status).toBeLessThan(500);
+      expect(task(id).version).toBe(1); expect(task(id).usage).toEqual(before.usage); expect(artifacts(id)).toEqual(prior);
+    }
+  });
+
+  it.each(["wrong", "hinted"] as const)("reassociates %s responses only with explicit history and resumes relevant explanation without erasing the learning gap", async problem => {
+    const waiting = await firstQuiz(mismatchedPlan()), a = await answer(waiting, problem !== "wrong", problem === "hinted");
+    await run(waiting.id);
+    const before = task(waiting.id), oldPlan = artifacts(waiting.id).find(row => row.kind === "review_plan")!;
+    await control(waiting.id, { action: "adjust", goal: before.goal, scope: { ...selection(), includeHistory: true },
+      sourceCorrections: [{ objectiveId: "concept", sources: [{ materialId, paragraph: 1 }] }] });
+    expect(task(waiting.id).usage).toEqual(before.usage); expect(task(waiting.id).version).toBe(2);
+    candidates.push({ tool: "learning.read_answers", args: { attemptId: a.id } }, association(reference(a)), input => {
+      const actual = input.results.find(result => result.tool === "learning.read_answers")?.value;
+      expect(actual).toMatchObject({ attemptId: a.id, score: problem === "wrong" ? { correct: 0, total: 1 } : { correct: 1, hinted: 1, unassistedCorrect: 0 } });
+      return { tool: "learning.explain", args: { question: "[合成] 重新说明保存作答中尚需区分的规则前提", sources: [{ materialId, paragraph: 1 }],
+        purpose: purpose("concept", { method: "explain", priorEvidenceRefs: [reference(a)] }) } };
+    }, waitAction);
+    const continued = await run(waiting.id);
+    expect(continued.status).toBe("waiting"); expect(continued.wait?.kind).toBe("feedback");
+    const result = assessment(waiting.id), objective = result.objectives[0];
+    expect(result.technicalBlocker).toBeUndefined(); expect(result.canAutoFinish).toBe(false); expect(result.outcome).not.toBe("check_passed");
+    expect(objective.requirements[0].supported).toBe(false);
+    if (problem === "wrong") expect(objective.unresolvedErrors).toContainEqual(reference(a));
+    else expect(objective.evidence[0]).toMatchObject({ correct: true, hintedBeforeSubmission: true, independentInApp: false });
+    expect(artifacts(waiting.id).filter(row => row.kind === "explanation" && row.task_version === 2)).toHaveLength(1);
+    expect(generation).toHaveBeenCalledTimes(2); // one original Quiz + one gap-directed explanation
+    expect(stores(learning => new LearningQuizRepository(learning).list(pageId))).toHaveLength(1);
+    expect(artifacts(waiting.id).find(row => row.id === oldPlan.id)).toEqual(oldPlan);
+    expect(attempt(a.id).score).toEqual(a.score);
+    const calls = decision.mock.calls.length, usage = task(waiting.id).usage;
+    await Promise.all([run(waiting.id), run(waiting.id)]);
+    expect(decision).toHaveBeenCalledTimes(calls); expectNoNewCalls(task(waiting.id).usage, usage);
+  });
+
+  it("removes source repair previews and rejects source correction after material deletion", async () => {
+    const { id } = await savedMismatchedExplanation(), before = task(id);
+    stores(learning => learning.deleteMaterial(pageId, materialId));
+    const response = await GET(request(), routeContext()), view = (await response.json()).tasks.find((item: { id: string }) => item.id === id);
+    expect(view.sourceAdjustment).toBeUndefined(); expect(view.explanations).toEqual([]);
+    expect(JSON.stringify(view)).not.toContain("只有前提成立时才可应用规则");
+    const denied = await PATCH(request("PATCH", { id, action: "adjust", expectedVersion: 1, eventId: randomUUID(), goal: before.goal, scope: selection(),
+      sourceCorrections: [{ objectiveId: "concept", sources: [{ materialId, paragraph: 1 }] }] }), routeContext());
+    expect(denied.status).toBeGreaterThanOrEqual(400); expect(task(id).version).toBe(1); expect(task(id).usage).toEqual(before.usage);
+  });
+});
 
 describe("F3 synthetic repair: actual API, business SQLite and checkpoint", () => {
   it("hands an authorized plan/source mismatch back without treating it as a learning gap or calling the model again", async () => {

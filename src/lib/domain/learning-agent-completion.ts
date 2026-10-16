@@ -83,7 +83,7 @@ export type LearningCompletionAssessment = {
   outcome: "check_passed" | "explanation_resolved" | "diagnosis_complete" | "partial" | "insufficient" | "legacy" | "stale";
   support: "sufficient" | "partial" | "insufficient" | "not_assessed";
   objectives: LearningObjectiveAssessment[]; canAutoFinish: boolean; pending: string[];
-  technicalBlocker?: { kind: "plan_source_mismatch"; objectiveIds: string[]; message: string };
+  technicalBlocker?: { kind: "plan_source_mismatch"; objectiveIds: string[]; explanationIds?: string[]; message: string };
   headline: string; stopReason: string | null; limitations: string[]; longTermMastery: "unverified";
 };
 

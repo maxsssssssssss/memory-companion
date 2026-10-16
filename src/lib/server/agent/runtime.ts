@@ -522,6 +522,18 @@ export class AgentRuntime {
       const failure = error instanceof AgentFailure ? error : new AgentFailure("unknown", "执行结果未确认，已停止自动推进。");
       const current = store.getTask(accountId, taskId);
       const action = [...current.actions].reverse().find(item => (item.version ?? 1) === (current.version ?? 1));
+      if (failure.code === "budget") {
+        // A local call/step/input limit is a known stop, not a missing provider
+        // response. Keep uncertainty only when an actual unfinished call or
+        // business action supports it; an earlier succeeded receipt does not.
+        const unresolved = [...current.actions].reverse().find(item => (item.version ?? 1) === (current.version ?? 1) && ["running", "unknown"].includes(item.status));
+        const unknownCall = store.callsForVersion(accountId, taskId).some(call => ["running", "unknown"].includes(call.status));
+        store.setState(accountId, taskId, lease.token, "budget_exhausted", {
+          endReason: agentBudgetEndReason(failure.message),
+          ...(unresolved || unknownCall ? { recovery: { kind: "unknown" as const, message: "本轮已达到执行上限，另有原操作结果尚未确认；不会自动重发。", actionId: unresolved?.id, allowedControls: ["inspect", "adjust", "cancel"] as AgentRecovery["allowedControls"] } } : {}),
+        });
+        return;
+      }
       const invalidSource = ["source_changed", "forbidden"].includes(failure.code);
       if (invalidSource) store.invalidateApprovals(taskId);
       const recovery: AgentRecovery = invalidSource
@@ -529,12 +541,11 @@ export class AgentRuntime {
         : failure.code === "conflict" ? { kind: "version_changed", message: "版本或确认内容已变化，请刷新后重新确认。", actionId: action?.id, allowedControls: ["adjust", "cancel"] }
         : failure.code === "known_failure" || failure.code === "invalid_action" ? { kind: action?.status === "prepared" ? "not_started" : "known_failed", message: "本次行动未完成，可以检查原结果后明确重试。", actionId: action?.id, allowedControls: ["inspect", "retry", "adjust", "cancel"] }
         : { kind: "unknown", message: "结果尚未确认，请先检查原操作结果；不会自动重发。", actionId: action?.id, allowedControls: ["inspect", "adjust", "cancel"] };
-      store.setState(accountId, taskId, lease.token, failure.code === "budget" ? "budget_exhausted" : "needs_attention", {
+      store.setState(accountId, taskId, lease.token, "needs_attention", {
         recovery,
         endReason: failure.code === "source_changed" ? "授权来源已变化或不可用，请重新选择范围后开始任务。"
           : failure.code === "forbidden" ? "当前任务或来源已无访问权限。"
           : failure.code === "invalid_action" ? "行动或反馈未通过受限协议检查，已交回用户。"
-          : failure.code === "budget" ? agentBudgetEndReason(failure.message)
           : "执行结果未确认，已停止自动推进；系统不会自动重发外部请求。",
       });
     } catch { /* pause/cancel fenced this invocation; never publish a late result */ }

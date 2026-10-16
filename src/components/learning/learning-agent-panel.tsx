@@ -342,7 +342,7 @@ export function LearningAgentPanel({ pageId, materials, selected, disabled, acti
 
       {showNextStep ? <section className={styles.agentNextStep} aria-label="接下来">
         <h4>{sourceAssociationBlocked ? "先核对本轮复习" : waitingQuiz ? "完成练习，再继续复习" : "一起继续理清知识"}</h4>
-        <p>{sourceAssociationBlocked ? "请使用“调整本轮复习”核对目标与材料，或先结束本轮。无需为解决来源关联问题继续答题；已有题组与作答保持原样。" : task.wait!.message}</p>
+        <p>{sourceAssociationBlocked ? "请使用“调整本轮复习”核对目标与材料，或先结束本轮。无需为解决来源关联问题继续答题；已有题组与作答保持原样，讲解也会保留。调整后将重新读取原文并核对关联。" : task.wait!.message}</p>
         {sourceAssociationBlocked ? <button type="button" disabled={interactionLocked} onClick={end}>结束本轮复习</button> : null}
         {!sourceAssociationBlocked && waitingQuiz && shownQuiz?.attemptId !== attemptId ? <p className={styles.muted}>下一组练习已准备好，可在本轮练习中切换查看。</p> : null}
       {task.status === "waiting" && !sourceAssociationBlocked && !waitingQuiz && !approvalWaiting && task.wait?.kind !== "confirmation" && !editing ? <div className={styles.agentFeedback}><label>你的反馈<textarea rows={3} maxLength={1000} value={feedback} disabled={busy || Boolean(pendingControl.current) || pendingAdvance?.id === task.id} onChange={event => setFeedback(event.target.value)} placeholder="例如：这段讲解有帮助，我想练习一下；或说明仍不明白的地方。" /></label>

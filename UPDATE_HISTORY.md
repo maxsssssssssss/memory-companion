@@ -15574,3 +15574,17 @@ Learning与UI：新增 `agent-scope.ts`、`agent-repository.ts`、`agent-scenari
 - 验证：原附件schema脚本在基线上原样复现5约束/6反例/6正例/2保护对照exit0；原W2正式assessor缺陷复现5项exit0。新增completion-repair-replay在原业务副本正式评估及按原action9/action12时间界限的只读artifact投影共16项PASS、exit0，原129哈希仍一致，保留partial/第三组pending，模型/生成/fetch均0。相邻cloud:test最终57文件1060用例PASS、exit0，含C01–C10、prepared/checkpoint、unknown、版本/来源/撤权、重复/并发、答案及稳定选项/历史保护；后续仅测试mock类型修正后的受影响7项复验PASS、exit0，不重复累计。完整cloud:check 9环境合同+Next typegen+TypeScript最终exit0；cloud:build最终exit0，编译84秒，180trace manifests forbidden=0；git diff --check通过。
 - 实际失败及修复：新增合同测试首次误用scene.name，改为scene.id后通过；新回放脚本首次同名TEMP VIEW影响repository建索引，改具名视图/只读SELECT代理，未改生产构造器；新增API测试vi.fn泛型在首次cloud:check失败，改为明确拒绝调用的Promise<never>后7项及完整类型通过。原失败输出保留。本轮未重跑完整浏览器/扩展全仓回归，不借旧Windows浏览器PASS覆盖新SHA。
 - 交付与限制：实现/返修说明和集中Windows步骤在docs/agent-completion-v1-1-repair.md，更新原实现/Windows文档入口；证据在output/learning-completion-repair。Cloud真实LLM/ASR/OCR请求0；Windows本轮账本17请求、98533输入+6734输出tokens，guard36剩19与授权200剩183、报告文档48差异单独列为工具限制，不提高上限、不拆账/清账/重新seed，不继承旧V1 34/36。保留S32、有限数学/来源支持与语义关联限制；没有自动语义纠错器。Windows新SHA真实复验PENDING，原冻结版仍BLOCKED；不集成dev/cloud-code/main、不部署。原有本地历史追加原样保留，仅本条按当前跟踪规则纳入此次提交。
+
+
+## 2026-10-16 Learning Agent V1.1：Windows R1–R3 整包离线返修
+
+- 背景与证据：在 feat/learning-agent-completion-v1-1 的 b7d8fcc1ada69ffe5c76402cd9f5fe5d823aceee 上处理解释明确解决 409、目标来源错配恢复和已知预算拒绝误报 unknown。新附件 137/137 清单项大小/哈希一致（含清单共138文件），独立 REPORT 一致；旧 W2 完整包129/129仍在，未将公开投影冒充原库。修改前原样 W1 脚本8项 exit0准确复现阻塞，非修复PASS。
+- R1：agent-completion 的解释反馈/评估共用版本、purpose、来源关联检查；错误关联仍409，同时产生可解释的technicalBlocker。原解释不改写；明确新版本纠正来源后，新的合法解释经用户明确确认即可零额外模型结束，“谢谢”仍等待。
+- R2：新增 Learning 专属 agent-plan-sources，在建计划前提供有界完整授权原文并检查呈现/回读依据；explain在预留和生成前拒绝与目的目标不相交的来源。既有调整API/UI可明确仅更正来源，预览前后与原文，保留目标ID/含义/requirements及累计预算；版本化scope保存受schema约束的同意快照，原artifact仍是计划权威。本地写入幂等恢复，并在写前阻止取消/再次调整晚到写入。历史重用仍需明确授权、实际读回和重新关联；不把来源相交或用户选择当语义核验。
+- R3：runtime把本地已知预算拒绝归为budget_exhausted，只在真实未决call/action存在时保留unknown；store只读投影纠正精确可证明的旧误标，原行保留。agent-review-summary只按真实reserved/unknown总结artifact显示未确认，不能由任务unknown虚构总结请求。真正unknown不自动重发。
+- 修改边界：Learning来源服务/场景/评估、原Agent控制API、客户端/调整及完成面板、共享预算分类/投影、测试、原证据回放脚本和集中Windows交接文档。没有新增依赖、表或SQL迁移，锁文件、正式Prompt、structured_action_v1、guard及严格校验不变；现有scope JSON/API仅增加可选来源更正字段，没有新平台或第二评分权威。
+- 最终验证：npm run cloud:test -- 精确59文件，1096用例PASS、exit0（完整命令见docs/agent-completion-v1-1-repair2.md）；npm run cloud:check exit0，含9环境合同及项目lint/Next typegen/完整TypeScript；npm run cloud:build exit0，180 trace manifests、forbidden0。新公开业务投影回放23项、原129文件W2正式assessor回放16项，均exit0；原W3正式交卷仍1/2、hinted1、unassisted0，来源更正后真实错答仍阻止通过；原W2第三组pending/旧成绩保留。分组和重复复验不叠加覆盖数。
+- 浏览器：正式production服务/API/SQLite/checkpoint及原UI，合成旧错配→明确更正v2→新合法解释→正常停机重启→明确解决零额外调用结束，11项PASS、各exit0；刷新/重登零调用、无新Quiz、仅1确认、3SQLite完整性检查通过。5次离线响应（4决策/1解释）和3次标记fixture决策单列，真实Provider0。两次自有launcher正常停止exit0，合成数据保留；不改写Windows原taskkill退出1事实。
+- 实际失败与修复：新测试曾缺createdAt造成首次类型exit1、用错repository方法名、错误预期JSON undefined/未交卷score/本地计算与finish步骤；回放初稿错误预期score undefined；浏览器首轮精确标签locator失败exit1。均按实际原合同修正测试/脚本并复验，不降低既有断言、不重seed制造PASS。曾有定向命令含不存在client路径，按实际发现文件计数，最终精确59路径全部存在。失败证据保留。无关全仓扩展回归NOT RUN。
+- 限制与交接：新包缺W3原raw codec envelope、原逐题关联rationale和完整WindowsDB，故该回放明确为保存内容投影；旧129原库单独回放。首次解释#21的准确底层解析路径未保存，旧首次拒绝decision不能恢复，不猜测。S32、有限数学、语义支持、迁移判断与长期掌握限制保留；模拟学生不代表教学效果。来源上下文10,000字符/60完整段落，更正预览20,000/60，省略项须回读或明确缩小范围；收据仅证明曾读，不证明模型理解。
+- Cloud相关离线修复PASS；Windows本基线仍BLOCKED，新SHA真实验收PENDING。原账本35/36余1，总授权200不绕过guard；不重置、不加额度，1次不足以承诺完整W1/W3真实链。W2原任务16/16不重置，第三组不伪装完成。交接/备份/回退见docs/agent-completion-v1-1-repair2.md；代码回退不自动回退数据。保护进入任务前已有95行历史追加，提交只包含本条；不集成dev/cloud-code、不合并main、不部署，不联系Windows会话。

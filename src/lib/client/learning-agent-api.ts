@@ -21,12 +21,18 @@ export type LearningAgentTaskView = {
   explanations?: Array<{ id: string; text: string; sources?: Array<{ materialId: string; paragraph: number; parsed?: import("@/lib/domain/learning-pdf-study").ParsedTextBinding }> }>;
   reviewSummary?: LearningAgentReviewSummary;
   completion?: LearningCompletionAssessment;
+  sourceAdjustment?: {
+    objectives: Array<{ id: string; label: string; currentSources: Array<{ materialId: string; paragraph: number }> }>;
+    sources: Array<{ materialId: string; paragraph: number; title: string; text: string }>;
+    omitted?: number;
+  };
   quizLinks?: Array<{ quizId: string; attemptId?: string | null; completed?: boolean; disputed?: boolean; historical?: boolean }>;
 };
 export type LearningAgentSource = { materialId: string; paragraph: number; parsed?: import("@/lib/domain/learning-pdf-study").ParsedTextBinding };
 export type StartLearningAgent = { id: string; goal: string; scope: LearningAgentScope };
 export type LearningAgentControl = { id: string; action: "pause" | "resume" | "cancel" | "feedback"; eventId: string; expectedVersion?: number; feedback?: string; attemptId?: string };
-export type LearningAgentAdjustment = { goal: string; scope: LearningAgentScope; expectedVersion: number };
+export type LearningAgentAdjustment = { goal: string; scope: LearningAgentScope; expectedVersion: number;
+  sourceCorrections?: Array<{ objectiveId: string; sources: Array<{ materialId: string; paragraph: number }> }> };
 export type LearningAgentMutation = LearningAgentControl
   | { id: string; action: "explanation_feedback"; eventId: string; expectedVersion: number; explanationId: string; outcome: "resolved" | "needs_clarification"; message?: string }
   | { id: string; action: "sync_quiz"; eventId: string; expectedVersion: number; attemptId: string }
@@ -79,6 +85,9 @@ export function learningAgentErrorMessage(error: unknown) {
     agent_explanation_feedback_invalid: "这条讲解已变化或不属于当前复习，请刷新后再确认。",
     agent_completion_plan_required: "本轮需要先明确要检查的目标，请刷新查看复习安排。",
     agent_completion_plan_locked: "本轮检查要求已确定。需要更改时，请使用“调整本轮复习”。",
+    agent_completion_feedback_invalid: "这次讲解与本轮目标或来源尚未对应，请刷新后核对；来源关联有误时可调整本轮复习。",
+    agent_source_adjustment_goal_changed: "核对来源时需保留原目标和检查要求；如需改目标，请取消“仅核对来源关联”后重新预览。",
+    agent_source_adjustment_objectives_changed: "本轮目标已变化，请刷新并重新核对各项目标的来源。",
   };
   return error instanceof LearningApiError && messages[error.code] ? messages[error.code] : learningErrorMessage(error);
 }

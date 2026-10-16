@@ -139,6 +139,27 @@ it("retains unknown outcome and never automatically regenerates", async () => {
   const view = projectLearningAgentReviewSummary(learning, { ...ctx.task, status: "needs_attention", recovery: { kind: "unknown", message: "unknown", allowedControls: ["inspect"] } })!;
   expect(view.kind).toBe("partial"); expect(view.stats.wrong).toBe(1); expect(view.notices.join()).toContain("不会自动重新生成");
 });
+it.each(["budget_exhausted", "needs_attention"] as const)("does not invent a summary request from %s task-level unknown recovery", status => {
+  group("correct");
+  const artifacts = new LearningAgentRepository(learning), before = artifacts.list(pageId, ctx.task.id);
+  expect(before.filter(row => row.kind === "review_summary")).toEqual([]);
+  const view = projectLearningAgentReviewSummary(learning, { ...ctx.task, status,
+    recovery: { kind: "unknown", actionId: "old-successful-action", message: "old task recovery", allowedControls: ["inspect"] } })!;
+  expect(view.kind).toBe("partial"); expect(view.stats).toMatchObject({ correct: 1, wrong: 0 });
+  expect(view.notices.join()).not.toContain("专项归纳");
+  if (status === "budget_exhausted") expect(view.notices.join()).toContain("单次上限");
+  expect(artifacts.list(pageId, ctx.task.id)).toEqual(before);
+  expect(globalThis.fetch).not.toHaveBeenCalled();
+});
+it("does not relabel a completed summary as unknown because a different task request is unresolved", async () => {
+  group("wrong"); const generate = enrich();
+  const saved = await saveLearningAgentReviewSummary(learning, ctx, generate);
+  const view = projectLearningAgentReviewSummary(learning, { ...ctx.task, status: "needs_attention",
+    recovery: { kind: "unknown", message: "unresolved later decision", allowedControls: ["inspect"] } })!;
+  expect(view.stats).toEqual(saved.stats); expect(view.topics).toEqual(saved.topics);
+  expect(view.notices.join()).not.toContain("结果尚未确认"); expect(generate).toHaveBeenCalledTimes(1);
+  expect(globalThis.fetch).not.toHaveBeenCalled();
+});
 it("fences a late summary after cancellation", async () => {
   group("wrong"); let active = true; ctx.assertActive = async () => { if (!active) throw new AgentFailure("inactive", "cancelled"); };
   const generate = enrich();

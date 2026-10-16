@@ -133,18 +133,22 @@ export function projectLearningAgentReviewSummary(learning: LearningRepository, 
   try { evidence = readEvidence(learning, task, disputedAttempts); }
   catch (error) { if (error instanceof LearningError && task.accountId === learning.accountId) return unavailableLearningAgentReviewSummary(); throw error; }
   const saved = new LearningAgentRepository(learning).get(task.resourceId, task.id, summaryId(task));
+  // Task-level uncertainty may concern a decision or a different generation.
+  // Only this version's actual summary operation can establish summary doubt.
+  const summaryUnconfirmed = saved && saved.task_version === (task.version ?? 1) && ["unknown", "reserved"].includes(saved.state)
+    ? ["专项归纳的结果尚未确认；这里仅回顾已保存的作答与解析，不会自动重新生成。"] : [];
   if (saved?.state === "completed" && saved.body_json) {
     const value = JSON.parse(saved.body_json) as SavedReview;
     if (value.evidenceKey === evidence.key) return { ...value.summary, kind: evidence.summary.kind, headline: evidence.summary.headline, stats: evidence.summary.stats,
       notices: [...new Set([...evidence.summary.notices, ...value.summary.notices.filter(n => n.startsWith("专项归纳暂未完成")),
-        ...(task.recovery?.kind === "unknown" ? ["专项归纳的请求结果尚未确认；这里仅回顾已保存的作答与解析，不会自动重新生成。"] : [])])] };
+        ...summaryUnconfirmed])] };
   }
   const summary = evidence.summary;
   // A plain ended state can also mean explicit user handoff. Only the saved
   // finish artifact establishes a normal completed review summary.
   return { ...summary, kind: "partial" as const,
     headline: summary.headline,
-    notices: [...summary.notices, ...(task.recovery?.kind === "unknown" ? ["专项归纳的请求结果尚未确认；这里仅回顾已保存的作答与解析，不会自动重新生成。"] : [])] };
+    notices: [...summary.notices, ...summaryUnconfirmed] };
 }
 
 export const GeneratedLearningReview = z.object({ items: z.array(z.object({ id: z.string().min(1).max(32), explanation: z.string().trim().min(1).max(2400), reminder: z.string().trim().min(1).max(180) }).strict()).min(1).max(30) }).strict();

@@ -14,7 +14,7 @@ import { LearningFrameworkRepository } from "./framework-repository";
 import { LearningAgentRepository } from "./agent-repository";
 import { freezeLearningAgentScope, readLearningAgentScope } from "./agent-scope";
 import { assessLearningCompletion, establishLearningReviewPlan, recordLearningEvidenceProposal, persistLearningCompletion, recordLearningPurpose,
-  recordExplanationFeedback, guardLearningCompletionAction, hasPendingLearningFeedback, acknowledgeLearningFeedback } from "./agent-completion";
+  recordExplanationFeedback, validateLearningExplanationFeedback, guardLearningCompletionAction, hasPendingLearningFeedback, acknowledgeLearningFeedback } from "./agent-completion";
 import { quizReviewQuestionKey } from "./quiz-review-purpose";
 import { firstSubmissionFacts, learningQuestionIdentity, loadLearningCompletionEvidence } from "./agent-completion-evidence";
 import { withLearningCompletionDecision } from "./agent-context";
@@ -394,4 +394,65 @@ it("preserves disputes and known issues on the mismatched question and still fen
   expect(loadLearningCompletionEvidence(learning, ctx.task, savedPlan, [knownIssue], readLearningAgentScope(learning, pageId, ctx.task.scope))[0].quality).toBe("disputed");
   learning.deleteMaterial(pageId, materialId); result = assessLearningCompletion(learning, ctx.task);
   expect(result).toMatchObject({ outcome: "stale", objectives: [], plan: null }); expect(result.technicalBlocker).toBeUndefined();
+});
+
+
+/** Formal artifact replay of the explanation mismatch class; original Windows
+ * bodies are replayed separately and are never replaced with this fixture. */
+function saveExplanationForPlan(savedPlan: ReturnType<typeof plan>, paragraph: number, context = { planId: savedPlan.id, taskVersion: ctx.task.version ?? 1, purpose: purpose() }) {
+  const id = randomUUID(), repository = new LearningAgentRepository(learning);
+  repository.reserve({ id, taskId: ctx.task.id, taskVersion: ctx.task.version, pageId, kind: "explanation", actionId: randomUUID(),
+    binding: (ctx.task.scope as { fingerprint: string }).fingerprint, materialIds: [materialId] });
+  repository.complete(pageId, ctx.task.id, id, { id, materialAnswer: "[合成] 区分前提未成立与结论不成立。", supplements: [],
+    items: [{ materialId, paragraph }], reviewContext: context });
+  return id;
+}
+it("identifies an authorized explanation-source mismatch without accepting its resolved feedback or generating again", async () => {
+  const savedPlan = plan("explanation"), id = saveExplanationForPlan(savedPlan, 2), repository = new LearningAgentRepository(learning);
+  const before = repository.list(pageId, ctx.task.id);
+  expect(() => validateLearningExplanationFeedback(learning, ctx.task, { explanationId: id, outcome: "resolved" })).toThrow("agent_completion_feedback_invalid");
+  const result = assessLearningCompletion(learning, ctx.task);
+  expect(result).toMatchObject({ outcome: "insufficient", canAutoFinish: false, technicalBlocker: { kind: "plan_source_mismatch", objectiveIds: ["rule"], explanationIds: [id] } });
+  expect(result.objectives[0]).toMatchObject({ status: "uncertain", explanationResolved: false, unresolvedErrors: [] });
+  expect(result.objectives[0].gaps.join()).toContain("解释与计划来源");
+  const decide = vi.fn();
+  expect(await withLearningCompletionDecision(learning, decide)({ task: ctx.task, observation: {}, results: [], tools: [] }, ctx)).toMatchObject({ tool: "learning.request_feedback" });
+  expect(guardLearningCompletionAction(learning, ctx, "explanation", purpose()).wait).toContain("调整本轮复习");
+  expect(decide).not.toHaveBeenCalled(); expect(globalThis.fetch).not.toHaveBeenCalled();
+  expect(repository.list(pageId, ctx.task.id)).toEqual(before);
+  learning.close(); learning = new LearningRepository(directory, "owner");
+  expect(assessLearningCompletion(learning, ctx.task)).toEqual(result);
+});
+it("keeps the old explanation immutable after an explicit new-version source choice and only resolves a new valid explanation", async () => {
+  const oldPlan = plan("explanation"), oldId = saveExplanationForPlan(oldPlan, 2), repository = new LearningAgentRepository(learning);
+  const before = repository.list(pageId, ctx.task.id), originalUsage = structuredClone(ctx.task.usage);
+  // Unit setup models the already-authorized version change; the API suite
+  // exercises the actual adjustment request and its old-event fence.
+  ctx.task = { ...ctx.task, version: 2, goal: "[合成] 明确前提与结论区别" };
+  const newPlan = establishLearningReviewPlan(learning, ctx, { kind: "explanation", objectives: [{ id: "rule", label: "前提与结论区别", sources: [{ materialId, paragraph: 2 }], requirements: [] }] });
+  expect(() => validateLearningExplanationFeedback(learning, ctx.task, { explanationId: oldId, outcome: "resolved" })).toThrow("agent_completion_feedback_invalid");
+  const id = saveExplanationForPlan(newPlan, 2);
+  expect(assessLearningCompletion(learning, ctx.task)).toMatchObject({ outcome: "insufficient", canAutoFinish: false });
+  recordExplanationFeedback(learning, ctx.task, { eventId: randomUUID(), explanationId: id, outcome: "resolved" });
+  const result = assessLearningCompletion(learning, ctx.task), decide = vi.fn();
+  expect(result).toMatchObject({ outcome: "explanation_resolved", canAutoFinish: true }); expect(result.technicalBlocker).toBeUndefined();
+  expect(await withLearningCompletionDecision(learning, decide)({ task: ctx.task, observation: {}, results: [], tools: [] }, ctx)).toMatchObject({ finish: expect.any(String) });
+  expect(decide).not.toHaveBeenCalled(); expect(globalThis.fetch).not.toHaveBeenCalled(); expect(ctx.task.usage).toEqual(originalUsage);
+  expect(quizzes.list(pageId)).toHaveLength(0); expect(repository.list(pageId, ctx.task.id).filter(row => row.task_version === 1)).toEqual(before);
+});
+it("does not recover a stale explanation review context through a second otherwise-valid purpose record", () => {
+  const savedPlan = plan("explanation"), id = saveExplanationForPlan(savedPlan, 1, { planId: savedPlan.id, taskVersion: 0, purpose: purpose() });
+  recordLearningPurpose(learning, ctx, "explanation", purpose(), id);
+  expect(() => validateLearningExplanationFeedback(learning, ctx.task, { explanationId: id, outcome: "resolved" })).toThrow("agent_completion_feedback_invalid");
+  expect(assessLearningCompletion(learning, ctx.task)).toMatchObject({ canAutoFinish: false, outcome: "insufficient" });
+  expect(new LearningAgentRepository(learning).list(pageId, ctx.task.id).filter(row => row.kind === "explanation_feedback")).toHaveLength(0);
+});
+it("does not classify unauthorized or absent explanation references as a repairable plan-source mismatch", () => {
+  const savedPlan = plan("explanation"), id = saveExplanationForPlan(savedPlan, 999);
+  expect(() => validateLearningExplanationFeedback(learning, ctx.task, { explanationId: id, outcome: "resolved" })).toThrow("agent_completion_feedback_invalid");
+  const result = assessLearningCompletion(learning, ctx.task);
+  expect(result.technicalBlocker).toBeUndefined(); expect(result.canAutoFinish).toBe(false);
+  learning.deleteMaterial(pageId, materialId);
+  expect(assessLearningCompletion(learning, ctx.task)).toMatchObject({ outcome: "stale", objectives: [] });
+  expect(() => validateLearningExplanationFeedback(learning, ctx.task, { explanationId: id, outcome: "resolved" })).toThrow();
 });

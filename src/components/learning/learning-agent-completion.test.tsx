@@ -128,3 +128,15 @@ it("distinguishes a plan-source association problem from a learner mistake witho
   fireEvent.click(screen.getByRole("button", { name: "查看作答 · 题组 1 第 3 题" }));
   expect(onReview).toHaveBeenLastCalledWith(evidence.ref);
 });
+
+it("explains an existing explanation-source mismatch without requiring a quiz or claiming the question was resolved", () => {
+  mount({ ...assessment, plan: { ...assessment.plan!, kind: "explanation",
+    objectives: [{ ...assessment.plan!.objectives[0], requirements: [] }] },
+    technicalBlocker: { kind: "plan_source_mismatch", objectiveIds: ["boundary"], message: "讲解与本轮目标引用的原文未对应，请先核对。" },
+    objectives: [{ ...assessment.objectives[0], requirements: [], evidence: [], explanationResolved: false,
+      gaps: ["讲解与目标的来源关联需要核对。"] }] });
+  fireEvent.click(screen.getByText("查看依据与来源", { selector: "summary" }));
+  expect(screen.getByText("讲解已保留，但它与本轮目标的来源关联需要先核对，暂不能记录为疑问已解决。")).toBeVisible();
+  expect(screen.queryByText("暂未关联可用于判断的已保存作答。")).not.toBeInTheDocument();
+  expect(screen.queryByText("你已明确确认这项疑问得到解决。")).not.toBeInTheDocument();
+});

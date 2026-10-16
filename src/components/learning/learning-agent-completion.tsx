@@ -57,7 +57,9 @@ export function LearningAgentCompletion({ completion, taskVersion, ended, quizLi
               <button type="button" disabled={disabled || !canOpen} onClick={() => onReview(evidence.ref)}>{group < 0 ? "原题组当前不可打开" : quizLinks[group].historical ? `查看历史作答 · 第 ${evidence.ref.questionIndex + 1} 题` : `查看作答 · 题组 ${group + 1} 第 ${evidence.ref.questionIndex + 1} 题`}</button>
               {completed && evidence.submitted && evidence.rationale ? <p className={styles.muted}>关联说明：{evidence.rationale}（模型提出，未作独立教学核验）</p> : null}
             </li>;
-          })}</ul> : <p className={styles.muted}>{assessed?.explanationResolved ? "依据是你对本轮讲解的明确反馈。" : "暂未关联可用于判断的已保存作答。"}</p>}
+          })}</ul> : <p className={styles.muted}>{assessed?.explanationResolved ? "依据是你对本轮讲解的明确反馈。"
+            : plan.kind === "explanation" ? completion.technicalBlocker ? "讲解已保留，但它与本轮目标的来源关联需要先核对，暂不能记录为疑问已解决。" : "等待对本轮相关讲解的明确反馈，不要求先完成练习。"
+              : "暂未关联可用于判断的已保存作答。"}</p>}
           {objective.sources.length ? <div className={styles.sources}>{objective.sources.map((source, index) => {
             const material = materials.find(item => item.id === source.materialId);
             const parsed = assessed?.evidence.flatMap(item => item.sources).find(item => item.materialId === source.materialId && item.paragraph === source.paragraph && item.parsed)?.parsed;

@@ -615,6 +615,41 @@ it.each([
   if (outcome === "resolved") expect(screen.getByRole("button", { name: "开始另一项复习" })).toBeEnabled();
 });
 
+it("keeps a mismatched explanation readable but replaces invalid resolution controls with explicit adjustment", async () => {
+  const current = explanationTask();
+  current.completion = { ...explanationCompletion, technicalBlocker: { kind: "plan_source_mismatch", objectiveIds: ["conditional"],
+    message: "讲解与本轮目标引用的原文未对应，请调整本轮复习核对。" } };
+  vi.mocked(learningAgentApi.list).mockResolvedValue({ tasks: [current] });
+  mount(); await screen.findByRole("heading", { name: "先核对本轮复习" });
+  expect(screen.queryByRole("button", { name: "疑问已解决" })).not.toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "仍需说明" })).not.toBeInTheDocument();
+  expect(screen.queryByLabelText("你的反馈")).not.toBeInTheDocument();
+  expect(screen.getByText(/调整后将重新读取原文并核对关联/)).toBeVisible();
+  expect(screen.getByText("合成讲解：条件概率先缩小样本空间。")).toBeInTheDocument();
+  expect(learningAgentApi.control).not.toHaveBeenCalled();
+  fireEvent.click(screen.getByRole("button", { name: "调整本轮复习" }));
+  expect(screen.getByRole("region", { name: "调整本轮复习" })).toBeVisible();
+  expect(screen.getByLabelText("新的复习目标")).toHaveValue(current.goal);
+  expect(learningAgentApi.control).not.toHaveBeenCalled();
+});
+
+it("sends explanation resolution only for the explicitly adjusted version and its new related explanation", async () => {
+  const current = explanationTask();
+  current.version = 2;
+  current.completion = { ...explanationCompletion, taskVersion: 2,
+    plan: { ...explanationCompletion.plan!, taskVersion: 2, id: "adjusted-plan" } };
+  current.explanations = [{ ...current.explanations![0], id: "new-related-explanation" }];
+  vi.mocked(learningAgentApi.list).mockResolvedValue({ tasks: [current] });
+  vi.mocked(learningAgentApi.control).mockResolvedValue({ task: { ...current, status: "ended", wait: null } });
+  mount(); fireEvent.click(await screen.findByRole("button", { name: "疑问已解决" }));
+  await waitFor(() => expect(learningAgentApi.control).toHaveBeenCalledExactlyOnceWith("page-one", {
+    id: current.id, action: "explanation_feedback", eventId: expect.any(String), expectedVersion: 2,
+    explanationId: "new-related-explanation", outcome: "resolved",
+  }));
+  expect(learningAgentApi.start).not.toHaveBeenCalled();
+  expect(screen.queryByTestId("inline-quiz")).not.toBeInTheDocument();
+});
+
 it("does not infer resolution from thanks, refresh or ordinary feedback", async () => {
   const current = explanationTask();
   vi.mocked(learningAgentApi.list).mockResolvedValue({ tasks: [current] });

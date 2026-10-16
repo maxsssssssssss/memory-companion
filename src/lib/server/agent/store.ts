@@ -4,6 +4,7 @@ import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import type { AgentAction, AgentApproval, AgentBudget, AgentEvent, AgentRecovery, AgentTask, AgentTaskStatus, AgentWait } from "@/lib/domain/agent";
 import { AgentFailure, type AgentCallRequest, type AgentCallUsage, type AgentDecisionDiagnostic, type AgentToolResult } from "./types";
+import { agentBudgetEndReason } from "./budget-reason";
 
 export const DEFAULT_AGENT_BUDGET: AgentBudget = {
   maxCalls: 16, maxInputChars: 48_000, maxOutputTokens: 8_000,
@@ -125,6 +126,20 @@ export class AgentStore {
       SUM(input_tokens) AS input_tokens, SUM(output_tokens) AS output_tokens FROM agent_calls WHERE task_id = ?`).get(taskId) as { calls: number; unknown_calls: number | null; input_tokens: number | null; output_tokens: number | null };
     const approval = this.database.prepare("SELECT body_json,status FROM agent_approvals WHERE task_id=? AND version=? ORDER BY rowid DESC LIMIT 1").get(taskId, row.version) as { body_json: string; status: AgentApproval["status"] } | undefined;
     let recovery: AgentRecovery | undefined = row.recovery_json ? JSON.parse(row.recovery_json) : undefined;
+    const budget: AgentBudget = JSON.parse(row.budget_json);
+    // Earlier runtimes attached the preceding successful action to a local
+    // next-decision call-limit rejection. Correct only that provable legacy
+    // projection; retain the original row and any genuine unresolved operation.
+    if (row.status === "budget_exhausted" && recovery?.kind === "unknown" &&
+      row.end_reason === agentBudgetEndReason("agent_call_limit") && usage.calls >= budget.maxCalls) {
+      const latest = [...actions].reverse().find(action => action.version === row.version);
+      const calls = this.callsForVersion(accountId, taskId), lastCall = calls.at(-1);
+      const lastDecision = lastCall?.action_id.match(/^decision:(\d+)$/);
+      if (latest?.status === "succeeded" && recovery.actionId === latest.id && lastCall?.status === "succeeded" &&
+        lastDecision && Number(lastDecision[1]) < row.steps &&
+        !calls.some(call => ["running", "unknown"].includes(call.status)) &&
+        !actions.some(action => action.version === row.version && ["prepared", "running", "unknown"].includes(action.status))) recovery = undefined;
+    }
     if (!recovery && row.status === "paused") {
       const latest = [...actions].reverse().find(action => action.version === row.version);
       const confirmation = latest ? this.database.prepare("SELECT status FROM agent_approvals WHERE id=?").get(latest.id) as { status: AgentApproval["status"] } | undefined : undefined;
@@ -138,7 +153,7 @@ export class AgentStore {
     return { id: row.id, version: row.version, accountId: row.account_id, scenario: row.scenario, resourceId: row.resource_id, goal: row.goal,
       scope: JSON.parse(row.scope_json), status: row.status, wait: row.wait_json ? JSON.parse(row.wait_json) : undefined,
       endReason: row.end_reason ?? undefined, currentAction: [...actions].reverse().find((a) => a.version === row.version && a.status === "running")?.tool,
-      actions, budget: JSON.parse(row.budget_json), usage: { calls: usage.calls, inputTokens: usage.unknown_calls ? null : usage.input_tokens,
+      actions, budget, usage: { calls: usage.calls, inputTokens: usage.unknown_calls ? null : usage.input_tokens,
         outputTokens: usage.unknown_calls ? null : usage.output_tokens, unknownUsageCalls: usage.unknown_calls ?? 0, computeMs: row.compute_ms,
         ...(row.compute_estimated ? { computeEstimated: true } : {}), steps: row.steps },
       approval: approval ? { ...JSON.parse(approval.body_json), status: approval.status } : undefined,
