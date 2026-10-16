@@ -4,6 +4,7 @@ import { createHash } from "node:crypto";
 import type { AgentApproval, AgentConfirmation, AgentEvent, AgentRecovery, AgentTask } from "@/lib/domain/agent";
 import { AgentStore, type AgentLease } from "./store";
 import { agentBudgetEndReason } from "./budget-reason";
+import { decisionSchemaIssues, decisionToolName } from "./decision-diagnostics";
 import { AgentFailure, type AgentContext, type AgentDecisionProvider, type AgentScenario, type AgentToolResult } from "./types";
 
 // LangGraph owns routing, durable execution position and interrupt/resume. These
@@ -235,11 +236,12 @@ export class AgentRuntime {
         const callId = store.reserveCall(accountId, taskId, lease.token, actionId, request, Date.now() - lease.startedAt);
         let result: Awaited<ReturnType<typeof invoke>>;
         try {
-          result = await invoke();
+          result = await invoke({ requestId: callId });
         } catch (error) {
           // A thrown network/parse error is not evidence the provider did nothing.
           const known = error instanceof AgentFailure && ["known_failure", "forbidden", "invalid_action", "budget"].includes(error.code);
-          store.finishCall(callId, known ? "failed" : "unknown", error instanceof AgentFailure ? error.usage : undefined);
+          store.finishCall(callId, known ? "failed" : "unknown", error instanceof AgentFailure ? error.usage : undefined,
+            error instanceof AgentFailure ? error.decisionDiagnostic : undefined);
           throw error;
         }
         // A complete response remains a known billing fact even when pause,
@@ -304,9 +306,20 @@ export class AgentRuntime {
           return { next: "wait" as const };
         }
         const tool = scenario.tools[decision.tool];
-        if (!tool || !Object.hasOwn(scenario.tools, decision.tool)) throw new AgentFailure("invalid_action", "模型选择了未授权工具。");
+        if (!tool || !Object.hasOwn(scenario.tools, decision.tool)) {
+          store.recordDecisionRejection(accountId, taskId, lease.token, decisionId, {
+            layer: "tool_selection", reasonCode: "tool_not_registered", tool: decisionToolName(decision.tool, Object.keys(scenario.tools)), issues: [], issuesTruncated: false,
+          });
+          throw new AgentFailure("invalid_action", "模型选择了未授权工具。");
+        }
         const parsed = tool.parameters.safeParse(decision.args);
-        if (!parsed.success) throw new AgentFailure("invalid_action", "模型工具参数未通过校验。");
+        if (!parsed.success) {
+          store.recordDecisionRejection(accountId, taskId, lease.token, decisionId, {
+            layer: "tool_parameters", reasonCode: "tool_arguments_invalid", tool: decisionToolName(decision.tool, Object.keys(scenario.tools)),
+            ...decisionSchemaIssues(tool.parameters, parsed.error),
+          });
+          throw new AgentFailure("invalid_action", "模型工具参数未通过校验。");
+        }
         const actionId = store.prepareAction(accountId, taskId, lease.token, { step, tool: decision.tool, args: parsed.data, reason: decision.reason });
         return { actionId, next: "prepare" as const };
       }, { retryPolicy: { maxAttempts: 1 } })

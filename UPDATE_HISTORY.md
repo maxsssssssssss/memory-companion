@@ -15563,3 +15563,14 @@ Learning与UI：新增 `agent-scope.ts`、`agent-repository.ts`、`agent-scenari
 - 用户明确指令执行提交/推送，目标 maxsssssssssss/memory-companion 的 dev/cloud-code。本次 GitHub fetch 核对远端和本地起点均为51237e69972fa1a14b6ac7a3f9f856c633762cef（ahead/behind=0/0），无分叉，不合并main、不force push、不部署。
 - 提交范围为两轮复习向导改名、移除工程展示、布局优化、关联设计说明和测试脚本，共14个相关源码/测试/设计文件及对应本历史。源码哈希与上一条最终验证一致，沿用7文件113项、完整TypeScript、production build及实际桌面/窄屏浏览器通过证据；没有验证后代码修改，不重复运行已通过门禁。补充两个浏览器脚本node --check、git diff --check均退出0，独立只读diff审查未发现无关代码或阻塞。
 - 原始工作区历史完整保留，仅暂存本次两轮UI记录和此交付核对记录；早前明确仅限本地的返修/集成记录及技能安装记录未混入本次UI提交。忽略的Skills目录、合成数据和截图不入Git。正常push及远端完整SHA核对结果以本次交付消息和本地push-result.json为准；真实Provider请求0，未启动服务。
+
+
+## 2026-10-16：Learning Agent V1.1 Windows 整包 F1–F3 定向返修
+
+- 背景与基线：在 feat/learning-agent-completion-v1-1 的 495c2e1fa81a892080f55cc5bcf56cbfe3ab48e6 上接收 Windows BLOCKED 整包。报告与 ZIP 独立报告一致，FILES_SHA256 的129项大小/哈希全部核对通过；原附件、原合成课程/题组/作答/来源/计划/评估保持不变。W1/W3未保存被拒绝的原始decision，不能确定原tool/args或具体拒绝字段，也不能断言F2就是F1原根因。
+- F1：共享 agent model/runtime/store/types 与新增 decision-diagnostics helper 在根解析/工具选择/参数校验拒绝时保存最小脱敏诊断。agent_calls 新增 nullable diagnostics_json，记录安全失败层/原因、已注册工具名、受限Zod code/path；未知工具任意字符串不保存，不存原文、参数值、Zod message、密钥或推理。正式决策使用随机UUID请求关联；试用 guard 的既有requests增加nullable client_request_id，旧17行合成迁移回归及原累计预算/usage保留。两个字段为本次可诊断性所需增量，不引入新authority、外部服务或依赖。
+- F2：learning-agent-completion 领域schema参数描述完整呈现目标ID唯一、非解释要求非空、role唯一、targeted followup、targeted/chapter independent五条既有约束及purpose目标ID唯一。严格Zod条件保留，增加准确issue path；通过实际Learning工具到正式agentDecisionRequest测试模型可见合同。正式Prompt、structured_action_v1和依赖锁不变；不靠重试或放宽校验掩盖失败。
+- F3：Learning completion/evidence/context/scenario将授权有效但与冻结目标来源不相交区分为plan_source_mismatch/technicalBlocker，旧invalid仍不能贡献支持。决策前零模型进入既有持久反馈等待；prepared Quiz/解释执行前同样停止生成及预留。准确交回现有“调整本轮复习”，保留任务可调整、旧计划、成绩与累计预算；不在同版本无痕纠正来源。UI区分资料关联问题与学生困难，不要求靠补题解决；实际第三组pending仍保留。新版本明确授权历史、回读来源与作答后可重新关联；错答/提示/争议等仍不得变成通过。
+- 验证：原附件schema脚本在基线上原样复现5约束/6反例/6正例/2保护对照exit0；原W2正式assessor缺陷复现5项exit0。新增completion-repair-replay在原业务副本正式评估及按原action9/action12时间界限的只读artifact投影共16项PASS、exit0，原129哈希仍一致，保留partial/第三组pending，模型/生成/fetch均0。相邻cloud:test最终57文件1060用例PASS、exit0，含C01–C10、prepared/checkpoint、unknown、版本/来源/撤权、重复/并发、答案及稳定选项/历史保护；后续仅测试mock类型修正后的受影响7项复验PASS、exit0，不重复累计。完整cloud:check 9环境合同+Next typegen+TypeScript最终exit0；cloud:build最终exit0，编译84秒，180trace manifests forbidden=0；git diff --check通过。
+- 实际失败及修复：新增合同测试首次误用scene.name，改为scene.id后通过；新回放脚本首次同名TEMP VIEW影响repository建索引，改具名视图/只读SELECT代理，未改生产构造器；新增API测试vi.fn泛型在首次cloud:check失败，改为明确拒绝调用的Promise<never>后7项及完整类型通过。原失败输出保留。本轮未重跑完整浏览器/扩展全仓回归，不借旧Windows浏览器PASS覆盖新SHA。
+- 交付与限制：实现/返修说明和集中Windows步骤在docs/agent-completion-v1-1-repair.md，更新原实现/Windows文档入口；证据在output/learning-completion-repair。Cloud真实LLM/ASR/OCR请求0；Windows本轮账本17请求、98533输入+6734输出tokens，guard36剩19与授权200剩183、报告文档48差异单独列为工具限制，不提高上限、不拆账/清账/重新seed，不继承旧V1 34/36。保留S32、有限数学/来源支持与语义关联限制；没有自动语义纠错器。Windows新SHA真实复验PENDING，原冻结版仍BLOCKED；不集成dev/cloud-code/main、不部署。原有本地历史追加原样保留，仅本条按当前跟踪规则纳入此次提交。

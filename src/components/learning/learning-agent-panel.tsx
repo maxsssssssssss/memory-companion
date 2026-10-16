@@ -183,6 +183,8 @@ export function LearningAgentPanel({ pageId, materials, selected, disabled, acti
   const waitingQuiz = task?.wait?.kind === "quiz_submission";
   const attemptId = waitingQuiz ? task.wait?.refId : undefined;
   const approvalWaiting = task?.approval?.status === "pending" && task.approval.taskVersion === (task.version ?? 1);
+  const sourceAssociationBlocked = Boolean(task?.completion?.technicalBlocker
+    && task.completion.taskVersion === (task.version ?? 1) && task.completion.outcome !== "stale");
   const explanationToConfirm = task?.completion?.plan?.kind === "explanation"
     && task.completion.taskVersion === (task.version ?? 1) && task.completion.outcome !== "stale"
     && task.status === "waiting" && task.wait?.kind === "feedback"
@@ -318,6 +320,7 @@ export function LearningAgentPanel({ pageId, materials, selected, disabled, acti
         <h4>{shownQuiz.historical ? "相关历史作答" : "本轮练习"}</h4>{quizControls}
         <p className={styles.muted}>{shownQuiz.historical ? "这组历史作答用于本轮核对，原题、作答与成绩保持不变。查看记录不会重新启动复习。"
           : terminal.has(task.status) ? "本轮已结束。题组、作答与解析保留在这里，查看记录不会重新启动复习。"
+          : sourceAssociationBlocked ? "已保存的练习保留供回看。请先核对目标与来源，不要求继续作答来解决关联问题。"
           : task.status === "paused" ? "本轮已暂停。作答仍会保存，继续复习后再读取结果。"
           : "整组作答保存后，复习向导会自动读取结果并继续。你可以留在这里查看解析。"}</p>
         <LearningQuiz key={task.id + ":" + (task.version ?? 1) + ":" + shownQuiz.quizId} pageId={pageId} materials={materials} selected={selected}
@@ -338,10 +341,11 @@ export function LearningAgentPanel({ pageId, materials, selected, disabled, acti
         {explanation.sources?.length ? <div className={styles.sources}>{explanation.sources.map((source, i) => <button key={i} type="button" onClick={() => onSource(source.materialId, source.parsed?.physicalPage ?? source.paragraph, source.parsed)}>查看引用原文 {i + 1}</button>)}</div> : null}</details>)}
 
       {showNextStep ? <section className={styles.agentNextStep} aria-label="接下来">
-        <h4>{waitingQuiz ? "完成练习，再继续复习" : "一起继续理清知识"}</h4>
-        <p>{task.wait!.message}</p>
-        {waitingQuiz && shownQuiz?.attemptId !== attemptId ? <p className={styles.muted}>下一组练习已准备好，可在本轮练习中切换查看。</p> : null}
-      {task.status === "waiting" && !waitingQuiz && !approvalWaiting && task.wait?.kind !== "confirmation" && !editing ? <div className={styles.agentFeedback}><label>你的反馈<textarea rows={3} maxLength={1000} value={feedback} disabled={busy || Boolean(pendingControl.current) || pendingAdvance?.id === task.id} onChange={event => setFeedback(event.target.value)} placeholder="例如：这段讲解有帮助，我想练习一下；或说明仍不明白的地方。" /></label>
+        <h4>{sourceAssociationBlocked ? "先核对本轮复习" : waitingQuiz ? "完成练习，再继续复习" : "一起继续理清知识"}</h4>
+        <p>{sourceAssociationBlocked ? "请使用“调整本轮复习”核对目标与材料，或先结束本轮。无需为解决来源关联问题继续答题；已有题组与作答保持原样。" : task.wait!.message}</p>
+        {sourceAssociationBlocked ? <button type="button" disabled={interactionLocked} onClick={end}>结束本轮复习</button> : null}
+        {!sourceAssociationBlocked && waitingQuiz && shownQuiz?.attemptId !== attemptId ? <p className={styles.muted}>下一组练习已准备好，可在本轮练习中切换查看。</p> : null}
+      {task.status === "waiting" && !sourceAssociationBlocked && !waitingQuiz && !approvalWaiting && task.wait?.kind !== "confirmation" && !editing ? <div className={styles.agentFeedback}><label>你的反馈<textarea rows={3} maxLength={1000} value={feedback} disabled={busy || Boolean(pendingControl.current) || pendingAdvance?.id === task.id} onChange={event => setFeedback(event.target.value)} placeholder="例如：这段讲解有帮助，我想练习一下；或说明仍不明白的地方。" /></label>
         {explanationToConfirm ? <><p className={styles.muted}>针对最近一次讲解，请明确告诉我们疑问是否已解决。只记录这次反馈，不把它当作学习检查通过。</p>
           <div className={styles.row}><button type="button" className={styles.primary} disabled={interactionLocked} onClick={() => explanationFeedback(explanationToConfirm.id, "resolved")}>疑问已解决</button>
           <button type="button" disabled={interactionLocked} onClick={() => explanationFeedback(explanationToConfirm.id, "needs_clarification")}>仍需说明</button>

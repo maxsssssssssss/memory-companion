@@ -3,7 +3,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import type { AgentAction, AgentApproval, AgentBudget, AgentEvent, AgentRecovery, AgentTask, AgentTaskStatus, AgentWait } from "@/lib/domain/agent";
-import { AgentFailure, type AgentCallRequest, type AgentCallUsage, type AgentToolResult } from "./types";
+import { AgentFailure, type AgentCallRequest, type AgentCallUsage, type AgentDecisionDiagnostic, type AgentToolResult } from "./types";
 
 export const DEFAULT_AGENT_BUDGET: AgentBudget = {
   maxCalls: 16, maxInputChars: 48_000, maxOutputTokens: 8_000,
@@ -80,6 +80,8 @@ export class AgentStore {
     if (!taskColumns.some(column => column.name === "compute_estimated")) database.exec("ALTER TABLE agent_tasks ADD COLUMN compute_estimated INTEGER NOT NULL DEFAULT 0");
     const actionColumns = database.prepare("PRAGMA table_info(agent_actions)").all() as { name: string }[];
     if (!actionColumns.some(column => column.name === "handoff")) database.exec("ALTER TABLE agent_actions ADD COLUMN handoff TEXT");
+    const callColumns = database.prepare("PRAGMA table_info(agent_calls)").all() as { name: string }[];
+    if (!callColumns.some(column => column.name === "diagnostics_json")) database.exec("ALTER TABLE agent_calls ADD COLUMN diagnostics_json TEXT");
     database.exec("DROP INDEX IF EXISTS agent_event_business_identity; CREATE UNIQUE INDEX IF NOT EXISTS agent_event_version_identity ON agent_events(task_id,version,event_kind,ref_id) WHERE ref_id IS NOT NULL");
     }).immediate();
   }
@@ -292,10 +294,27 @@ export class AgentStore {
       return id;
     }).immediate();
   }
-  finishCall(id: string, status: "succeeded" | "failed" | "unknown", usage?: AgentCallUsage) {
+  finishCall(id: string, status: "succeeded" | "failed" | "unknown", usage?: AgentCallUsage, diagnostic?: AgentDecisionDiagnostic) {
     const valid = (v: number | null | undefined) => Number.isFinite(v) && (v ?? -1) >= 0 ? v! : null;
-    this.database.prepare("UPDATE agent_calls SET status=?,input_tokens=?,output_tokens=? WHERE id=? AND status='running'")
-      .run(status, valid(usage?.inputTokens), valid(usage?.outputTokens), id);
+    this.database.prepare("UPDATE agent_calls SET status=?,input_tokens=?,output_tokens=?,diagnostics_json=? WHERE id=? AND status='running'")
+      .run(status, valid(usage?.inputTokens), valid(usage?.outputTokens), diagnostic ? JSON.stringify(diagnostic) : null, id);
+  }
+  recordDecisionRejection(accountId: string, taskId: string, token: string, decisionId: string, diagnostic: AgentDecisionDiagnostic) {
+    const task = this.assertLease(accountId, taskId, token);
+    // A successful response is still a billing fact when its tool arguments fail.
+    // Associate the rejection with its last actual call, not a new action/usage row.
+    this.database.prepare(`UPDATE agent_calls SET diagnostics_json=? WHERE id=(
+      SELECT id FROM agent_calls WHERE task_id=? AND version=? AND action_id=? ORDER BY rowid DESC LIMIT 1
+    ) AND diagnostics_json IS NULL`).run(JSON.stringify(diagnostic), taskId, task.version ?? 1, decisionId);
+  }
+  decisionDiagnostics(accountId: string, taskId: string) {
+    this.row(accountId, taskId);
+    const rows = this.database.prepare(`SELECT id,task_id,version,action_id,status,diagnostics_json FROM agent_calls
+      WHERE task_id=? AND diagnostics_json IS NOT NULL ORDER BY rowid`).all(taskId) as Array<{
+        id: string; task_id: string; version: number; action_id: string; status: string; diagnostics_json: string;
+      }>;
+    return rows.map(row => ({ requestId: row.id, callId: row.id, taskId: row.task_id, taskVersion: row.version,
+      decisionId: row.action_id, callStatus: row.status, diagnostic: JSON.parse(row.diagnostics_json) as AgentDecisionDiagnostic }));
   }
   hasUnknownCall(taskId: string, actionId: string) {
     return !!this.database.prepare("SELECT id FROM agent_calls WHERE task_id=? AND action_id=? AND status IN ('running','unknown') LIMIT 1").get(taskId, actionId);

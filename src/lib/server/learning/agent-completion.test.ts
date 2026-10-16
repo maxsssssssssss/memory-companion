@@ -17,6 +17,8 @@ import { assessLearningCompletion, establishLearningReviewPlan, recordLearningEv
   recordExplanationFeedback, guardLearningCompletionAction, hasPendingLearningFeedback, acknowledgeLearningFeedback } from "./agent-completion";
 import { quizReviewQuestionKey } from "./quiz-review-purpose";
 import { firstSubmissionFacts, learningQuestionIdentity, loadLearningCompletionEvidence } from "./agent-completion-evidence";
+import { withLearningCompletionDecision } from "./agent-context";
+import { createLearningAgentScenario } from "./agent-scenario";
 
 let directory: string, learning: LearningRepository, quizzes: LearningQuizRepository, pageId: string, materialId: string, ctx: AgentContext;
 const settings = () => ({ materialIds: [materialId], chapterIds: [], nodeIds: [], includeNotes: false, includeSupplements: false, count: 1, difficulty: "standard" });
@@ -29,11 +31,11 @@ function act(attempt: QuizAttemptView, action: QuizActionInput["action"], option
   vi.setSystemTime(Date.now() + 10);
   return quizzes.act(pageId, { id: randomUUID(), attemptId: attempt.id, revision: attempt.revision, action, question, optionId });
 }
-function group(answer: "correct" | "wrong" | "hint" | "reveal" | "skip" | "incomplete" = "correct", stem = "[合成] 前提未满足时能应用规则吗？", own = true) {
+function group(answer: "correct" | "wrong" | "hint" | "reveal" | "skip" | "incomplete" = "correct", stem = "[合成] 前提未满足时能应用规则吗？", own = true, paragraph = 1) {
   vi.setSystemTime(Date.now() + 10);
   const id = randomUUID(); quizzes.begin(pageId, { id, settings: settings() }, 24000);
   quizzes.complete(pageId, id, { title: "[合成] 条件检查", reason: null, items: [{ stem, kind: "concept",
-    options: [{ id: "A", text: "不能应用", reason: "前提未满足时不能应用规则。" }, { id: "B", text: "能够应用", reason: "只有前提满足才可应用规则。" }], correctOptionId: "A", hint: "先看适用条件。", explanation: "只有前提满足才可应用规则。", sources: [{ kind: "material", materialId, paragraph: 1 }] }] });
+    options: [{ id: "A", text: "不能应用", reason: "前提未满足时不能应用规则。" }, { id: "B", text: "能够应用", reason: "只有前提满足才可应用规则。" }], correctOptionId: "A", hint: "先看适用条件。", explanation: "只有前提满足才可应用规则。", sources: [{ kind: "material", materialId, paragraph }] }] });
   let attempt = quizzes.startAttempt(pageId, { id: randomUUID(), quizId: id, mode: "practice" });
   if (answer === "reveal" || answer === "skip") attempt = act(attempt, answer);
   else if (answer !== "incomplete") {
@@ -61,7 +63,7 @@ beforeEach(async () => {
   vi.useFakeTimers({ toFake: ["Date"] }); vi.setSystemTime(new Date("2026-10-16T00:00:00Z"));
   directory = await mkdtemp(join(tmpdir(), "agent-completion-")); learning = new LearningRepository(directory, "owner"); quizzes = new LearningQuizRepository(learning);
   pageId = randomUUID(); materialId = randomUUID(); learning.create({ id: pageId, title: "[合成] 完成依据" });
-  learning.saveMaterials(pageId, [{ id: materialId, title: "[合成] 条件", kind: "text", filename: null, bytes: Buffer.from("[合成] 只有前提满足才可应用规则。前提不成立时不可直接推导结论。") }]);
+  learning.saveMaterials(pageId, [{ id: materialId, title: "[合成] 条件", kind: "text", filename: null, bytes: Buffer.from("[合成] 只有前提满足才可应用规则。前提不成立时不可直接推导结论。\n\n[合成] 检查条件时，应区分前提未成立与结论不成立；条件未满足不能直接应用规则。") }]);
   const task: AgentTask = { id: randomUUID(), accountId: "owner", scenario: "learning.adaptive-review.v1", resourceId: pageId, version: 1, goal: "[合成] 检查条件", scope: { ...freezeLearningAgentScope(learning, pageId, { materialIds: [materialId], chapterIds: [], nodeIds: [], includeNotes: false, includeSupplements: false, includeHistory: false }), completionVersion: 1 }, status: "running", actions: [], budget: { maxCalls: 16, maxInputChars: 48000, maxOutputTokens: 8000, maxComputeMs: 100000, maxSteps: 16, maxNoProgress: 3 }, usage: { calls: 0, inputTokens: null, outputTokens: null, unknownUsageCalls: 0, computeMs: 0, steps: 0 }, createdAt: "synthetic", updatedAt: "synthetic" };
   ctx = { task, actionId: randomUUID(), signal: new AbortController().signal, assertActive: async () => {}, call: async (_r, invoke) => (await invoke()).value };
   vi.stubGlobal("fetch", vi.fn(() => { throw Error("Network forbidden"); }));
@@ -296,4 +298,100 @@ it("describes unresolved explanation goals without presenting them as an unsucce
   explanation(); const result = assessLearningCompletion(learning, ctx.task);
   expect(result.outcome).toBe("insufficient"); expect(result.headline).toContain("等待你确认"); expect(result.headline).not.toContain("检查通过");
   expect(result.limitations.join()).not.toContain("verified"); expect(result.limitations.join()).toContain("尚未经独立核验");
+});
+
+/** Explicit synthetic regression for the W2 failure class. This is not the
+ * original Windows evidence; that package has its own unchanged formal replay. */
+function misassociatedReviewedGroup() {
+  const savedPlan = establishLearningReviewPlan(learning, ctx, { kind: "chapter_check", objectives: [{ id: "rule", label: "规则适用条件",
+    sources: [{ materialId, paragraph: 2 }], requirements: [{ role: "concept", description: "检查规则前提", independent: true }] }] });
+  const id = randomUUID(), input = quizzes.begin(pageId, { id, settings: settings() }, 24000);
+  if (!input) throw Error("synthetic_quiz_input_required");
+  const reference = input.materials[0].paragraphs[0].referenceId;
+  const question = { stem: "[合成关联冲突] 前提未满足时可以直接应用规则吗？", kind: "concept" as const,
+    options: [{ id: "A" as const, text: "不能应用", reason: "只有前提满足才可应用规则。", evidenceIds: [reference] },
+      { id: "B" as const, text: "能够应用", reason: "前提未满足时不能应用规则。", evidenceIds: [reference] }],
+    correctOptionId: "A" as const, hint: null, explanation: "只有前提满足才可应用规则。", stemEvidenceIds: [reference], explanationEvidenceIds: [reference] };
+  quizzes.complete(pageId, id, { contractVersion: "references-v2", title: "[合成] 来源关联冲突", reason: null, items: [question] }, {
+    context: { planId: savedPlan.id, taskVersion: 1, objectives: savedPlan.objectives, purpose: purpose({ method: "retrieval" }) },
+    candidates: [{ questionKey: quizReviewQuestionKey(question), check: { objectiveIds: ["rule"], role: "concept", rationale: "[合成错误关联] 题目提供规则检查" } }] });
+  let attempt = quizzes.startAttempt(pageId, { id: randomUUID(), quizId: id, mode: "test" });
+  attempt = act(attempt, "choose", "A"); attempt = act(attempt, "finish");
+  const artifacts = new LearningAgentRepository(learning);
+  artifacts.reserve({ id, taskId: ctx.task.id, taskVersion: 1, pageId, kind: "quiz", actionId: randomUUID(), binding: (ctx.task.scope as { fingerprint: string }).fingerprint, materialIds: [materialId] });
+  artifacts.complete(pageId, ctx.task.id, id, { attemptId: attempt.id });
+  return { attempt, savedPlan };
+}
+it("separates a frozen plan-source mismatch from missing answers and learning counterevidence", () => {
+  const { attempt, savedPlan } = misassociatedReviewedGroup();
+  const result = assessLearningCompletion(learning, ctx.task);
+  expect(result.technicalBlocker).toMatchObject({ kind: "plan_source_mismatch", objectiveIds: ["rule"] });
+  expect(result.objectives[0]).toMatchObject({ status: "uncertain", unresolvedErrors: [], evidence: [{ submitted: true, correct: true,
+    quality: "invalid", diagnosticCode: "plan_source_mismatch", eligible: false }] });
+  expect(result.headline).toContain("资料关联需要核对"); expect(result.canAutoFinish).toBe(false);
+  try { associate(attempt); throw Error("expected rejection"); }
+  catch (error) { expect(error).toMatchObject({ message: "agent_completion_plan_source_mismatch", publicSummary: expect.stringContaining("该作答已经保存") }); }
+  expect(quizzes.attempt(pageId, attempt.id).score?.correct).toBe(1);
+  expect(assessLearningCompletion(learning, ctx.task).plan).toEqual(savedPlan);
+});
+it("does not attempt more decisions or generation to repair a source association, including a prepared tool", async () => {
+  misassociatedReviewedGroup();
+  const decide = vi.fn(), generate = vi.fn(), configure = vi.fn();
+  const next = await withLearningCompletionDecision(learning, decide)({ task: ctx.task, observation: {}, results: [], tools: [] }, ctx);
+  expect(next).toMatchObject({ tool: "learning.request_feedback", args: { question: expect.stringContaining("调整本轮复习") } });
+  expect(decide).not.toHaveBeenCalled();
+  expect(guardLearningCompletionAction(learning, ctx, "quiz", purpose()).wait).toContain("不自动改写");
+  const scene = createLearningAgentScenario(learning, { configure, generate });
+  for (const tool of ["learning.create_quiz", "learning.explain"]) {
+    const args = tool.endsWith("create_quiz") ? { count: 1, difficulty: "standard", purpose: purpose() }
+      : { question: "继续解释", sources: source(), purpose: purpose() };
+    const result = await scene.tools[tool].execute(args, ctx);
+    expect(result.wait).toMatchObject({ kind: "feedback", refId: `feedback:${ctx.actionId}`, message: expect.stringContaining("来源关联") });
+    expect(result.handoff).toBeUndefined();
+  }
+  expect(configure).not.toHaveBeenCalled(); expect(generate).not.toHaveBeenCalled(); expect(quizzes.list(pageId)).toHaveLength(1);
+  expect(globalThis.fetch).not.toHaveBeenCalled();
+});
+it("retains the mismatch when newer correct evidence supports the requirement, and preserves pending groups", () => {
+  const { attempt } = misassociatedReviewedGroup();
+  associate(group("correct", "[合成] 新检查前提不成立可直接用规则吗？", true, 2));
+  group("incomplete", "[合成] 已存在但尚未作答的第三组", true, 2);
+  const assessment = assessLearningCompletion(learning, ctx.task);
+  expect(assessment.objectives[0].requirements[0].supported).toBe(true);
+  expect(assessment.objectives[0].status).toBe("uncertain"); expect(assessment.objectives[0].unresolvedErrors).toEqual([]);
+  expect(assessment.technicalBlocker?.kind).toBe("plan_source_mismatch"); expect(assessment.pending).toContain("等待实际作答");
+  expect(assessment.canAutoFinish).toBe(false); expect(assessment.outcome).not.toBe("check_passed");
+  expect(quizzes.attempt(pageId, attempt.id).score?.correct).toBe(1); expect(quizzes.list(pageId)).toHaveLength(3);
+});
+it("persists the technical handback projection across reopen without rewriting the immutable plan or answers", () => {
+  const { attempt, savedPlan } = misassociatedReviewedGroup(), before = quizzes.attempt(pageId, attempt.id);
+  const assessment = persistLearningCompletion(learning, ctx.task);
+  learning.close(); learning = new LearningRepository(directory, "owner"); quizzes = new LearningQuizRepository(learning);
+  expect(assessLearningCompletion(learning, ctx.task)).toEqual(assessment);
+  expect(assessLearningCompletion(learning, ctx.task).plan).toEqual(savedPlan);
+  expect(quizzes.attempt(pageId, attempt.id)).toEqual(before);
+  const record = new LearningAgentRepository(learning).list(pageId, ctx.task.id).find(r => r.kind === "completion_assessment");
+  expect(record?.body_json).toContain("资料关联问题"); expect(record?.body_json).not.toContain('"correct"');
+});
+it.each(["wrong", "hint", "reveal"] as const)("does not clear actual %s facts alongside a technical mismatch", answer => {
+  misassociatedReviewedGroup(); const actual = group(answer, `[合成] 真实${answer}检查`, true, 2); associate(actual);
+  const result = assessLearningCompletion(learning, ctx.task), proof = result.objectives[0].evidence.find(e => e.ref.attemptId === actual.id)!;
+  expect(result.canAutoFinish).toBe(false); expect(result.outcome).not.toBe("check_passed");
+  if (answer === "wrong") { expect(proof.correct).toBe(false); expect(result.objectives[0].unresolvedErrors).toContainEqual(proof.ref); }
+  if (answer === "hint") expect(proof).toMatchObject({ hintedBeforeSubmission: true, independentInApp: false });
+  if (answer === "reveal") expect(proof).toMatchObject({ revealedBeforeSubmission: true, eligible: false, independentInApp: false });
+  expect(quizzes.attempt(pageId, actual.id).questions[0].progress).toEqual(actual.questions[0].progress);
+});
+it("preserves disputes and known issues on the mismatched question and still fences source deletion", () => {
+  const { attempt, savedPlan } = misassociatedReviewedGroup();
+  new LearningAgentRepository(learning).dispute(pageId, ctx.task.id, attempt.id);
+  let result = assessLearningCompletion(learning, ctx.task);
+  expect(result.objectives[0].evidence[0]).toMatchObject({ quality: "disputed", diagnosticCode: "plan_source_mismatch", eligible: false });
+  expect(result.pending).toContain("题组疑问尚未处理");
+  const knownIssue: LearningEvidenceProposal = { ref: { quizId: attempt.quizId, attemptId: attempt.id, questionIndex: 0 }, objectiveId: "rule", role: "concept",
+    rationale: "已知题目问题", relevance: "supported", relation: "initial", priorEvidenceRefs: [], contentStatus: "known_issue" };
+  // Explicit proposal readback cannot override the real dispute.
+  expect(loadLearningCompletionEvidence(learning, ctx.task, savedPlan, [knownIssue], readLearningAgentScope(learning, pageId, ctx.task.scope))[0].quality).toBe("disputed");
+  learning.deleteMaterial(pageId, materialId); result = assessLearningCompletion(learning, ctx.task);
+  expect(result).toMatchObject({ outcome: "stale", objectives: [], plan: null }); expect(result.technicalBlocker).toBeUndefined();
 });

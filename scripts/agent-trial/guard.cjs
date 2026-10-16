@@ -17,12 +17,18 @@ db.pragma('busy_timeout = 10000');
 db.pragma('synchronous = FULL');
 db.exec(`CREATE TABLE IF NOT EXISTS requests(id INTEGER PRIMARY KEY, phase TEXT, started TEXT, state TEXT,
  model TEXT, input_chars INTEGER, output_limit INTEGER, status INTEGER, input_tokens INTEGER, output_tokens INTEGER)`);
-const reserve = db.transaction((phase, body, chars) => {
+// Correlate a rejected business decision with its existing network-ledger row.
+// Old rows/counters are preserved; missing or non-UUID headers never get copied.
+db.transaction(() => {
+  if (!db.prepare('PRAGMA table_info(requests)').all().some(column => column.name === 'client_request_id'))
+    db.exec('ALTER TABLE requests ADD COLUMN client_request_id TEXT');
+}).immediate();
+const reserve = db.transaction((phase, body, chars, clientRequestId) => {
   if (db.prepare('SELECT count(*) n FROM requests').get().n >= requestBudget.total) throw Error('trial_total_budget_exhausted');
   if (phase === 'protocol' && db.prepare("SELECT count(*) n FROM requests WHERE phase='protocol'").get().n >= requestBudget.protocol)
     throw Error('trial_protocol_budget_exhausted');
-  return db.prepare('INSERT INTO requests(phase,started,state,model,input_chars,output_limit) VALUES(?,?,?,?,?,?)')
-    .run(phase, new Date().toISOString(), 'dispatched', body.model, chars, body.max_output_tokens).lastInsertRowid;
+  return db.prepare('INSERT INTO requests(phase,started,state,model,input_chars,output_limit,client_request_id) VALUES(?,?,?,?,?,?,?)')
+    .run(phase, new Date().toISOString(), 'dispatched', body.model, chars, body.max_output_tokens, clientRequestId).lastInsertRowid;
 });
 const realFetch = globalThis.fetch;
 globalThis.fetch = async (input, init) => {
@@ -34,7 +40,9 @@ globalThis.fetch = async (input, init) => {
   if (body.model !== 'deepseek-v4-pro' || text.length > 48000 || !Number.isInteger(body.max_output_tokens)
       || body.max_output_tokens < 1 || body.max_output_tokens > 8000 || body.store !== false || body.stream !== true)
     throw Error('agent_trial_request_contract_rejected');
-  const id = reserve.immediate(process.env.AGENT_TRIAL_PHASE || 'trajectory', body, text.length);
+  const requestId = req.headers.get('x-client-request-id');
+  const clientRequestId = typeof requestId === 'string' && /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i.test(requestId) ? requestId : null;
+  const id = reserve.immediate(process.env.AGENT_TRIAL_PHASE || 'trajectory', body, text.length, clientRequestId);
   let response;
   try { response = await realFetch(req, { redirect: 'error' }); }
   catch { db.prepare("UPDATE requests SET state='unknown' WHERE id=?").run(id); throw Error('agent_trial_transport_unknown'); }

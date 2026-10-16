@@ -114,3 +114,17 @@ it("opens authorized history as history, without claiming a missing link means t
   expect(screen.queryByText("尚未完成作答，不据此判断。")).not.toBeInTheDocument();
   expect(screen.getByRole("button", { name: "原题组当前不可打开" })).toBeDisabled();
 });
+
+it("distinguishes a plan-source association problem from a learner mistake without claiming a pass", () => {
+  const message = "本轮目标与题目引用的原文未对应，请调整本轮复习核对来源。";
+  mount({ ...assessment, technicalBlocker: { kind: "plan_source_mismatch", objectiveIds: ["boundary"], message },
+    objectives: [{ ...assessment.objectives[0], status: "uncertain", evidence: [{ ...evidence, correct: true, quality: "invalid", eligible: false,
+      diagnosticCode: "plan_source_mismatch", independentInApp: false }], unresolvedErrors: [] }] });
+  expect(screen.getByRole("status")).toHaveTextContent(message);
+  fireEvent.click(screen.getByText("查看依据与来源", { selector: "summary" }));
+  expect(screen.getByText("题目与本轮目标引用的原文未对应，暂不用于判断；这不表示你答错或尚未学会。")).toBeVisible();
+  expect(screen.queryByText("本题答错，可能存在需要进一步区分的问题。")).not.toBeInTheDocument();
+  expect(screen.queryByText(/本轮.*检查通过/)).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "查看作答 · 题组 1 第 3 题" }));
+  expect(onReview).toHaveBeenLastCalledWith(evidence.ref);
+});

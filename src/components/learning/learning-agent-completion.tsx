@@ -10,6 +10,7 @@ const supportLabels = { supported: "已有表现支持", partial: "仍需巩固"
 
 function evidenceDescription(evidence: LearningCompletionEvidence, completed: boolean) {
   if (!completed || !evidence.submitted) return "尚未完成作答，不据此判断。";
+  if (evidence.quality === "invalid" && evidence.diagnosticCode === "plan_source_mismatch") return "题目与本轮目标引用的原文未对应，暂不用于判断；这不表示你答错或尚未学会。";
   if (evidence.quality === "disputed") return "题目有疑问，已排除。";
   if (evidence.quality === "known_issue" || evidence.quality === "invalid") return "题目或来源存在问题，已排除。";
   if (evidence.quality === "uncertain" || evidence.quality === "historical_unknown") return "题目或历史信息尚不充分，暂不据此通过。";
@@ -37,6 +38,7 @@ export function LearningAgentCompletion({ completion, taskVersion, ended, quizLi
   const { plan } = completion;
   return <section className={completionStyles.completion} aria-label="本轮目标与依据">
     <div className={completionStyles.heading}><h4>本轮要检查什么</h4><span className={styles.muted}>{goalLabels[plan.kind]}</span></div>
+    {completion.technicalBlocker ? <div className={styles.agentNotice} role="status"><strong>先核对目标与来源</strong><p>{completion.technicalBlocker.message}</p></div> : null}
     <p className={styles.muted}>以下是本轮约定的目标。{plan.kind === "chapter_check" ? "这些核心目标不代表整章全部知识。" : "需要更改时，可调整本轮复习。"}</p>
     <ol className={completionStyles.objectives}>{plan.objectives.map(objective => {
       const assessed = completion.objectives.find(item => item.id === objective.id);

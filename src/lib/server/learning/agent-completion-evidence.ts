@@ -69,10 +69,10 @@ export function loadLearningCompletionEvidence(learning: LearningRepository, tas
       firstSubmittedAt: facts?.firstSubmittedAt ?? null, hintedBeforeSubmission: facts?.hinted ?? false, revealedBeforeSubmission: facts?.revealed ?? false,
       skipped: question?.progress.skipped ?? false, answerAvailability: "unknown", repetition: "unknown", historical, quality: "invalid", eligible: false, independentInApp: false,
       reasons, rationale: "", relation: proposal.relation, semanticProvenance: "model_proposal", priorEvidenceRefs: proposal.priorEvidenceRefs, sources: [] };
-    if (!snapshot || !question || snapshot.attempt.id !== ref.attemptId) { reasons.push("缺少当前授权内的完整作答记录"); return base; }
-    if (!own && !scope.scope.selection.includeHistory) { reasons.push("未授权读取相关历史"); return base; }
+    if (!snapshot || !question || snapshot.attempt.id !== ref.attemptId) { base.diagnosticCode = "record_unavailable"; reasons.push("缺少当前授权内的完整作答记录"); return base; }
+    if (!own && !scope.scope.selection.includeHistory) { base.diagnosticCode = "history_forbidden"; reasons.push("未授权读取相关历史"); return base; }
     const ownRow = rows.find(r => r.id === ref.quizId && r.kind === "quiz");
-    if (own && (ownRow?.state !== "completed" || ownRow.binding_hash !== scope.fingerprint)) { reasons.push("题组来源或版本已变化"); return base; }
+    if (own && (ownRow?.state !== "completed" || ownRow.binding_hash !== scope.fingerprint)) { base.diagnosticCode = "source_changed"; reasons.push("题组来源或版本已变化"); return base; }
     // All task-local disputes are authoritative. Authorized historical artifacts
     // can reveal a dispute; absence of a historical record is not a clean bill.
     const knownRows = learning.database.prepare("SELECT body_json FROM learning_agent_artifacts WHERE page_id=? AND account_id=? AND kind='quiz' AND id=? AND state='completed'")
@@ -97,7 +97,22 @@ export function loadLearningCompletionEvidence(learning: LearningRepository, tas
       : s.kind === "note" ? scope.scope.selection.includeNotes : scope.scope.selection.includeSupplements));
     base.sources = sources.flatMap(s => s.kind === "material" ? [{ materialId: s.materialId, paragraph: s.paragraph, ...(s.parsed ? { parsed: s.parsed } : {}) }] : []);
     const objective = plan.objectives.find(o => o.id === proposal.objectiveId);
-    if (!allowed || !objective || !base.sources.some(s => objective.sources.some(r => r.materialId === s.materialId && r.paragraph === s.paragraph))) { reasons.push("来源不支持当前授权中的目标关联"); return base; }
+    if (!allowed) { base.diagnosticCode = "source_forbidden"; reasons.push("题目来源不在当前有效授权范围内"); return base; }
+    if (!objective) { base.diagnosticCode = "objective_missing"; reasons.push("题目关联的目标不在当前计划中"); return base; }
+    // Current source validity and overlap with the frozen plan are different
+    // facts. A bad model association is not evidence of a learner's difficulty,
+    // nor permission to silently replace the plan's sources. Preserve the proof
+    // as ineligible and hand the task back for an explicit versioned adjustment.
+    if (!base.sources.some(s => objective.sources.some(r => r.materialId === s.materialId && r.paragraph === s.paragraph))) {
+      base.diagnosticCode = "plan_source_mismatch";
+      reasons.push("来源不支持当前授权中的目标关联", "题目来源当前有效，但与已固定目标的来源段落不相交；需要核对计划关联，不能据此判断学习困难或继续补题");
+      // Do not let this technical classification mask a separate substantive
+      // issue on the same question. It remains visible and unusable either way.
+      if (disputed) { base.quality = "disputed"; reasons.push("题组存在尚未解决的疑问"); }
+      else if (knownIssue || proposal.contentStatus === "known_issue") { base.quality = "known_issue"; reasons.push("已记录影响判断的题目问题"); }
+      else if (proposal.contentStatus === "uncertain" || proposal.relevance === "uncertain") { base.quality = "uncertain"; reasons.push("内容或语义关联尚不能可靠判断"); }
+      return base;
+    }
     base.rationale = proposal.rationale;
     base.quality = disputed ? "disputed" : (proposal.contentStatus === "known_issue" || knownIssue) ? "known_issue" : proposal.contentStatus === "uncertain" || proposal.relevance === "uncertain" ? "uncertain"
       : historical && !ownIds.has(ref.quizId) && !knownRows.length ? "historical_unknown" : "tentative";

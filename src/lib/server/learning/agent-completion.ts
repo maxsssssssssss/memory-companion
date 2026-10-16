@@ -96,6 +96,8 @@ export function recordLearningEvidenceProposal(learning: LearningRepository, ctx
   const proposal = LearningEvidenceProposal.parse(input), plan = readLearningReviewPlan(learning, ctx.task);
   if (!plan || !plan.objectives.some(o => o.id === proposal.objectiveId)) throw new AgentFailure("known_failure", "agent_completion_objective_invalid", undefined, "目的或证据引用了当前计划之外的目标，请读取当前计划并选择实际目标ID。");
   const scope = scoped(learning, ctx.task), proof = loadLearningCompletionEvidence(learning, ctx.task, plan, [proposal], scope)[0];
+  if (proof.diagnosticCode === "plan_source_mismatch") throw new AgentFailure("known_failure", "agent_completion_plan_source_mismatch", undefined,
+    "该作答已经保存，题目来源也在当前授权内，但与此目标已固定的来源段落不相交。这是目标与来源关联问题，不是未读取作答或学习困难；不能通过继续出题修复。请使用“调整本轮复习”核对目标和范围，在新版本读取原文后重新建立计划，保留原题、成绩及旧记录。");
   if (proof.quality === "invalid" || proof.quality === "pending") throw new AgentFailure("known_failure", "agent_completion_evidence_invalid", undefined, "没有可用的已提交作答或当前授权来源，请先读取实际已完成题组；不可凭猜测关联。");
   // Prior references must exist in this goal's recorded evidence, not guessed IDs.
   const existing = collectProposals(learning, ctx.task, plan, rows(learning, ctx.task));
@@ -167,11 +169,13 @@ export function assessLearningCompletion(learning: LearningRepository, task: Age
         && (!requirement.independent || e.independentInApp)
         && (requirement.role !== "followup" || ["followup", "new_context"].includes(e.relation))) }));
     const badEvidence = relevant.some(e => ["disputed", "known_issue", "uncertain", "invalid", "historical_unknown"].includes(e.quality));
-    const supported = plan.kind === "explanation" ? explanationResolved : requirements.every(r => r.supported) && (plan.kind === "diagnosis" || unresolvedErrors.length === 0) && !badEvidence;
+    const associationMismatch = relevant.some(e => e.diagnosticCode === "plan_source_mismatch");
+    const supported = !associationMismatch && (plan.kind === "explanation" ? explanationResolved : requirements.every(r => r.supported) && (plan.kind === "diagnosis" || unresolvedErrors.length === 0) && !badEvidence);
     const gaps = requirements.filter(r => !r.supported).map(r => `尚缺：${r.description}`);
     if (plan.kind === "explanation" && !explanationResolved) gaps.push("还没有收到对相关解释的明确解决确认");
     if (unresolvedErrors.length && plan.kind !== "diagnosis") gaps.push("仍有反向表现尚未得到相关的新检查支持；不推定具体心理原因");
-    if (badEvidence) gaps.push("有来源、争议或语义问题尚不能用于当前判断");
+    if (associationMismatch) gaps.push("题目与计划来源的关联需要核对；这是资料关联问题，不能当作学习困难继续补题");
+    if (relevant.some(e => ["disputed", "known_issue", "uncertain", "historical_unknown"].includes(e.quality) || (e.quality === "invalid" && e.diagnosticCode !== "plan_source_mismatch"))) gaps.push("有来源、争议或语义问题尚不能用于当前判断");
     return { id: objective.id, label: objective.label, status: supported ? "supported" : badEvidence ? "uncertain" : valid.length ? "partial" : "unobserved",
       requirements, evidence: relevant, gaps, unresolvedErrors, explanationResolved };
   });
@@ -189,7 +193,12 @@ export function assessLearningCompletion(learning: LearningRepository, task: Age
   if (task.wait?.kind === "feedback" && !(task.wait.refId ? feedback.some(f => (f.roundId ?? f.explanationId) === task.wait?.refId) : feedback.length > 0)) pending.push("等待新的用户反馈");
   const sufficient = objectives.every(o => o.status === "supported") && !pending.some(p => p === "题组记录不可用" || p === "题组疑问尚未处理"), partial = objectives.some(o => o.status === "supported" || o.status === "partial");
   const outcome = sufficient ? plan.kind === "explanation" ? "explanation_resolved" : plan.kind === "diagnosis" ? "diagnosis_complete" : "check_passed" : partial ? "partial" : "insufficient";
-  const headline = plan.kind === "explanation" && outcome !== "explanation_resolved" ? partial ? "部分疑问已明确解决，仍有疑问需要你的确认或进一步说明。" : "等待你确认本轮疑问是否已解决，或指出仍需说明的部分。" : outcome === "check_passed" ? "本轮约定目标检查通过（基于当前暂定证据）。" : outcome === "explanation_resolved" ? "你已明确确认本轮疑问得到解决。" : outcome === "diagnosis_complete" ? "本轮约定诊断已完成；诊断完成不代表所有目标都会。" : outcome === "partial" ? "部分目标已有表现支持，仍有未覆盖或需要巩固的部分。" : "当前证据不足或存在问题，无法可靠给出本轮检查通过。";
+  const mismatchIds = objectives.filter(o => o.evidence.some(e => e.diagnosticCode === "plan_source_mismatch")).map(o => o.id);
+  const technicalBlocker: LearningCompletionAssessment["technicalBlocker"] = mismatchIds.length ? {
+    kind: "plan_source_mismatch", objectiveIds: mismatchIds,
+    message: "题目来源与本轮计划的来源关联需要核对，已停止继续出题。这不代表你未学会；已有作答、其他待检查项与题目疑问均保留。请使用“调整本轮复习”核对目标和范围，在新版本重新读取原文并建立计划；本版本目标与检查要求不自动改写。"
+  } : undefined;
+  const headline = technicalBlocker ? "本轮资料关联需要核对，暂不判断通过，也不据此要求补题。" : plan.kind === "explanation" && outcome !== "explanation_resolved" ? partial ? "部分疑问已明确解决，仍有疑问需要你的确认或进一步说明。" : "等待你确认本轮疑问是否已解决，或指出仍需说明的部分。" : outcome === "check_passed" ? "本轮约定目标检查通过（基于当前暂定证据）。" : outcome === "explanation_resolved" ? "你已明确确认本轮疑问得到解决。" : outcome === "diagnosis_complete" ? "本轮约定诊断已完成；诊断完成不代表所有目标都会。" : outcome === "partial" ? "部分目标已有表现支持，仍有未覆盖或需要巩固的部分。" : "当前证据不足或存在问题，无法可靠给出本轮检查通过。";
   const progressFingerprint = hash(objectives.map(o => ({ id: o.id, requirements: o.requirements.map(r => [r.role, r.supported]), resolved: o.explanationResolved,
     // New question IDs/wrong scores do not count as progress. Only follow-up
     // support changes this signal; unresolved mistakes themselves are retained.
@@ -197,7 +206,7 @@ export function assessLearningCompletion(learning: LearningRepository, task: Age
   return { schemaVersion: 1, taskVersion: version(task), planId: plan.id, sourceFingerprint: scope.fingerprint, plan,
     evidenceFingerprint: hash({ plan, evidence, feedback, pending }), progressFingerprint, outcome, support: sufficient ? "sufficient" : partial ? "partial" : "insufficient",
     objectives, canAutoFinish: sufficient && pending.length === 0 && !["cancelled", "paused", "budget_exhausted", "needs_attention"].includes(task.status), pending,
-    headline, stopReason: task.endReason ?? null, limitations, longTermMastery: "unverified" };
+    headline, ...(technicalBlocker ? { technicalBlocker } : {}), stopReason: task.endReason ?? null, limitations, longTermMastery: "unverified" };
 }
 function errorsCorrected(objective: LearningObjectiveAssessment) {
   return objective.evidence.filter(e => e.eligible && e.correct === false && !objective.unresolvedErrors.some(ref => evidenceRefKey(ref) === evidenceRefKey(e.ref))).length;
@@ -219,6 +228,7 @@ export function guardLearningCompletionAction(learning: LearningRepository, ctx:
   if (!enabled(ctx.task)) return { assessment, purpose: undefined };
   if (assessment.outcome === "stale") throw new AgentFailure("source_changed", "agent_completion_source_changed");
   if (!assessment.plan) throw new AgentFailure("known_failure", "agent_review_plan_required", undefined, "请先使用learning.establish_review_plan明确本轮目标；此前可以读取范围、导航、原文或请求澄清。");
+  if (assessment.technicalBlocker) return { assessment, purpose: input, wait: assessment.technicalBlocker.message };
   if (assessment.canAutoFinish && !hasPendingLearningFeedback(learning, ctx.task, ctx.event)) return { assessment, purpose: input, stop: assessment.headline };
   const parsed = LearningCheckPurpose.safeParse(input);
   if (!parsed.success) throw new AgentFailure("known_failure", "agent_check_purpose_required", undefined, "请补充purpose，明确本次目标ID、检查角度、方法及目的；不能无目的出题或解释。");

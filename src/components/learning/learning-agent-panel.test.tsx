@@ -574,6 +574,28 @@ const explanationCompletion: LearningCompletionAssessment = {
 const explanationTask = (): LearningAgentTaskView => ({ ...waiting, quizLinks: [], completion: explanationCompletion,
   wait: { kind: "feedback", message: "现在能区分条件概率了吗？" }, explanations: [{ id: "explanation-one", text: "合成讲解：条件概率先缩小样本空间。", sources: [{ materialId: "material-one", paragraph: 1 }] }] });
 
+it.each(["quiz_submission", "feedback"] as const)("offers adjustment instead of more practice for a source association problem during %s", async kind => {
+  const completion: LearningCompletionAssessment = { ...explanationCompletion,
+    plan: { ...explanationCompletion.plan!, kind: "chapter_check" },
+    headline: "本轮目标与题目的来源关联需要核对，不据此判断是否学会。",
+    technicalBlocker: { kind: "plan_source_mismatch", objectiveIds: ["conditional"], message: "题目引用的原文与目标未对应，请调整本轮复习核对。" } };
+  const current: LearningAgentTaskView = { ...waiting, completion,
+    wait: { kind, refId: kind === "quiz_submission" ? "attempt-one" : "feedback:association", message: "旧等待说明" } };
+  vi.mocked(learningAgentApi.list).mockResolvedValue({ tasks: [current] });
+  mount(); await screen.findByTestId("inline-quiz");
+  const next = within(screen.getByRole("region", { name: "接下来" }));
+  expect(next.getByRole("heading", { name: "先核对本轮复习" })).toBeVisible();
+  expect(next.queryByRole("heading", { name: "完成练习，再继续复习" })).not.toBeInTheDocument();
+  expect(next.queryByLabelText("你的反馈")).not.toBeInTheDocument();
+  expect(next.getByRole("button", { name: "结束本轮复习" })).toBeEnabled();
+  expect(screen.getByText(/已有题组与作答保持原样/)).toBeVisible();
+  expect(learningAgentApi.control).not.toHaveBeenCalled();
+  fireEvent.click(screen.getByRole("button", { name: "调整本轮复习" }));
+  expect(screen.getByRole("region", { name: "调整本轮复习" })).toBeVisible();
+  expect(screen.getByLabelText("新的复习目标")).toHaveValue(current.goal);
+  expect(learningAgentApi.control).not.toHaveBeenCalled();
+});
+
 it.each([
   { button: "疑问已解决", outcome: "resolved", message: "" },
   { button: "仍需说明", outcome: "needs_clarification", message: "分母为何变化仍不明白。" },

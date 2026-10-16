@@ -3,13 +3,22 @@ import type { AgentAction, AgentConfirmation, AgentEvent, AgentResultRef, AgentT
 
 export interface AgentCallRequest { kind: string; inputChars: number; maxOutputTokens: number; model?: string }
 export interface AgentCallUsage { inputTokens?: number | null; outputTokens?: number | null }
+export interface AgentCallIdentity { requestId: string }
+/** Diagnostic codes/paths only. Never a response, parameter value, or Zod message. */
+export interface AgentDecisionDiagnostic {
+  layer: "response" | "action_json" | "action_schema" | "tool_selection" | "tool_parameters";
+  reasonCode: "response_not_completed" | "action_json_invalid" | "action_schema_invalid" | "tool_not_registered" | "tool_arguments_invalid";
+  tool: string | null;
+  issues: Array<{ code: string; path: Array<string | number> }>;
+  issuesTruncated: boolean;
+}
 export interface AgentContext {
   task: AgentTask;
   actionId: string;
   event?: AgentEvent;
   signal: AbortSignal;
   assertActive(): Promise<void>;
-  call<T>(request: AgentCallRequest, invoke: () => Promise<{ value: T; usage?: AgentCallUsage }>): Promise<T>;
+  call<T>(request: AgentCallRequest, invoke: (identity?: AgentCallIdentity) => Promise<{ value: T; usage?: AgentCallUsage }>): Promise<T>;
 }
 export interface AgentToolResult { ref?: AgentResultRef; summary: string; wait?: AgentWait; handoff?: string }
 export interface AgentTool {
@@ -51,7 +60,8 @@ export class AgentFailure extends Error {
     /** Reported usage remains a billing fact even when the result is unusable. */
     public readonly usage?: AgentCallUsage,
     /** Explicit, safe business feedback for a known failure. Never a raw provider error/body. */
-    public readonly publicSummary?: string) {
+    public readonly publicSummary?: string,
+    public readonly decisionDiagnostic?: AgentDecisionDiagnostic) {
     super(message); this.name = "AgentFailure";
   }
 }

@@ -83,6 +83,10 @@ export function withLearningCompletionDecision(learning: LearningRepository, dec
   return async (input, ctx) => {
     await ctx.assertActive();
     const completion = assessLearningCompletion(learning, ctx.task, ctx.event);
+    // Do not spend another decision/generation call on a plan-source mismatch.
+    // The existing feedback tool gives this handback a persistent round while
+    // retaining the user's existing versioned adjustment and cancel controls.
+    if (completion.technicalBlocker) return { tool: "learning.request_feedback", args: { question: completion.technicalBlocker.message }, reason: "等待核对本轮目标与资料关联。" };
     if (completion.canAutoFinish && !hasPendingLearningFeedback(learning, ctx.task, ctx.event)) return { finish: completion.headline };
     const observation = record(input.observation) ?? {};
     const decision = await decide({ ...input, observation: { ...observation, completion } }, ctx);

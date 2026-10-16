@@ -170,6 +170,13 @@ export function createLearningAgentScenario(learning: LearningRepository,
     const handoff = await completionHandoff(ctx, reason), completion = assessLearningCompletion(learning, ctx.task);
     return { ref: { kind: "learning.completion_assessment", id: completion.evidenceFingerprint }, summary: reason, handoff };
   };
+  const completionAdjustmentWait = async (ctx: AgentContext, message: string): Promise<AgentToolResult> => {
+    await check(ctx);
+    const completion = persistLearningCompletion(learning, ctx.task);
+    if (!completion.technicalBlocker || completion.technicalBlocker.message !== message) throw new AgentFailure("conflict", "agent_completion_result_changed");
+    return { ref: { kind: "learning.completion_assessment", id: completion.evidenceFingerprint }, summary: message,
+      wait: { kind: "feedback", refId: `feedback:${ctx.actionId}`, message } };
+  };
   const validateCompletionResult = async (result: AgentToolResult, ctx: AgentContext) => {
     await check(ctx);
     const completion = assessLearningCompletion(learning, ctx.task);
@@ -225,6 +232,7 @@ export function createLearningAgentScenario(learning: LearningRepository,
       execute: async (args, ctx) => {
         const value = QuizArguments.parse(args), current = await check(ctx), id = learningAgentOperationId(ctx.actionId, "quiz");
         const guarded = guardLearningCompletionAction(learning, ctx, "quiz", value.purpose);
+        if (guarded.wait) return completionAdjustmentWait(ctx, guarded.wait);
         if (guarded.stop) return completionResult(ctx, guarded.stop);
         const plan = readLearningReviewPlan(learning, ctx.task);
         const settings: QuizConfig = { materialIds: value.nodeId ? [] : current.scope.selection.materialIds,
@@ -320,6 +328,7 @@ export function createLearningAgentScenario(learning: LearningRepository,
       execute: async (args, ctx) => {
         const value = ExplainArguments.parse(args), current = await check(ctx), id = learningAgentOperationId(ctx.actionId, "explanation");
         const guarded = guardLearningCompletionAction(learning, ctx, "explanation", value.purpose);
+        if (guarded.wait) return completionAdjustmentWait(ctx, guarded.wait);
         if (guarded.stop) return completionResult(ctx, guarded.stop);
         const plan = readLearningReviewPlan(learning, ctx.task);
         const originals = value.sources.map(ref => source(ctx, ref));

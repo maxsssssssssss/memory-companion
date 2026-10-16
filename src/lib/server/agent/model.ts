@@ -3,6 +3,7 @@ import { z } from "zod";
 import { toJsonSchema } from "@langchain/core/utils/json_schema";
 import { parseStructuredJsonResponse, type StructuredJsonDiagnostics } from "@/lib/server/openai/structured-json";
 import { AgentFailure, type AgentDecisionInput, type AgentDecisionProvider } from "./types";
+import { decisionSchemaIssues } from "./decision-diagnostics";
 
 // One explicitly selected protocol. No native-tool/JSON fallback or hidden retry.
 export const AGENT_ACTION_PROTOCOL = "structured_action_v1";
@@ -42,14 +43,16 @@ export function createAgentDecisionProvider(configure: () => AgentModelConfig): 
     const { messages, inputChars } = agentDecisionRequest(input);
     if (inputChars > config.maxInputChars) throw new AgentFailure("budget", "agent_decision_input_limit");
     let diagnostics: StructuredJsonDiagnostics | undefined;
-    return ctx.call({ kind: "agent_decision", model: config.model, inputChars, maxOutputTokens: config.maxOutputTokens }, async () => {
+    return ctx.call({ kind: "agent_decision", model: config.model, inputChars, maxOutputTokens: config.maxOutputTokens }, async (identity) => {
       try {
         const client = new OpenAI({ apiKey: config.apiKey, baseURL: config.baseURL, organization: null, project: null,
           timeout: config.requestTimeoutMs, maxRetries: 0, logLevel: "off", fetchOptions: { redirect: "error" } });
         const value = await parseStructuredJsonResponse({ client, model: config.model, name: "agent_action", schema: Action,
           mode: "json", stream: true, store: false, jsonRootField: null, jsonInstruction: "按受限行动协议只输出JSON。", maxOutputTokens: config.maxOutputTokens, maxResponseBytes: 200000,
           reasoning: { effort: "none" } as never, requestInput: messages,
-          requestOptions: { maxRetries: 0, timeout: config.requestTimeoutMs, signal: AbortSignal.any([ctx.signal, AbortSignal.timeout(config.requestTimeoutMs)]) },
+          requestOptions: { maxRetries: 0, timeout: config.requestTimeoutMs,
+            headers: identity ? { "X-Client-Request-Id": identity.requestId } : undefined,
+            signal: AbortSignal.any([ctx.signal, AbortSignal.timeout(config.requestTimeoutMs)]) },
           onDiagnostics: d => { diagnostics = d; } });
         return { value, usage: { inputTokens: diagnostics?.inputTokens, outputTokens: diagnostics?.outputTokens } };
       } catch (error) {
@@ -59,7 +62,12 @@ export function createAgentDecisionProvider(configure: () => AgentModelConfig): 
         const completed = diagnostics?.responseStatus === "completed" && diagnostics.parseResult !== "not_started";
         throw new AgentFailure(completed ? "known_failure" : "unknown",
           completed ? "agent_action_invalid_result" : "agent_decision_result_unknown",
-          diagnostics ? { inputTokens: diagnostics.inputTokens, outputTokens: diagnostics.outputTokens } : undefined);
+          diagnostics ? { inputTokens: diagnostics.inputTokens, outputTokens: diagnostics.outputTokens } : undefined,
+          undefined, {
+            layer: !completed ? "response" : error instanceof z.ZodError ? "action_schema" : "action_json",
+            reasonCode: !completed ? "response_not_completed" : error instanceof z.ZodError ? "action_schema_invalid" : "action_json_invalid",
+            tool: null, ...(error instanceof z.ZodError ? decisionSchemaIssues(Action, error) : { issues: [], issuesTruncated: false }),
+          });
       }
     });
   };
