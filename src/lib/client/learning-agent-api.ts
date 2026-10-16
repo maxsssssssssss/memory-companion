@@ -1,4 +1,5 @@
 import type { LearningAgentReviewSummary } from "@/lib/domain/learning-agent";
+import type { LearningCompletionAssessment } from "@/lib/domain/learning-agent-completion";
 import { LearningApiError, learningErrorMessage } from "./learning-api";
 import type { AgentApproval, AgentBudget, AgentRecovery, AgentResultRef, AgentUsage } from "@/lib/domain/agent";
 
@@ -19,13 +20,15 @@ export type LearningAgentTaskView = {
   recovery?: AgentRecovery;
   explanations?: Array<{ id: string; text: string; sources?: Array<{ materialId: string; paragraph: number; parsed?: import("@/lib/domain/learning-pdf-study").ParsedTextBinding }> }>;
   reviewSummary?: LearningAgentReviewSummary;
-  quizLinks?: Array<{ quizId: string; attemptId?: string | null; completed?: boolean; disputed?: boolean }>;
+  completion?: LearningCompletionAssessment;
+  quizLinks?: Array<{ quizId: string; attemptId?: string | null; completed?: boolean; disputed?: boolean; historical?: boolean }>;
 };
 export type LearningAgentSource = { materialId: string; paragraph: number; parsed?: import("@/lib/domain/learning-pdf-study").ParsedTextBinding };
 export type StartLearningAgent = { id: string; goal: string; scope: LearningAgentScope };
 export type LearningAgentControl = { id: string; action: "pause" | "resume" | "cancel" | "feedback"; eventId: string; expectedVersion?: number; feedback?: string; attemptId?: string };
 export type LearningAgentAdjustment = { goal: string; scope: LearningAgentScope; expectedVersion: number };
 export type LearningAgentMutation = LearningAgentControl
+  | { id: string; action: "explanation_feedback"; eventId: string; expectedVersion: number; explanationId: string; outcome: "resolved" | "needs_clarification"; message?: string }
   | { id: string; action: "sync_quiz"; eventId: string; expectedVersion: number; attemptId: string }
   | { id: string; action: "dispute_quiz"; eventId: string; expectedVersion: number; attemptId: string; feedback: string }
   | ({ id: string; action: "adjust"; eventId: string } & LearningAgentAdjustment)
@@ -73,6 +76,9 @@ export function learningAgentErrorMessage(error: unknown) {
     agent_retry_unavailable: "当前结果不能重发，请先核对原操作；未知结果不等于明确失败。",
     agent_budget_exhausted: "本轮因执行限制停止，已有内容已保留。请刷新任务查看具体原因。",
     agent_known_failure: "上次操作未完成，请按页面提示检查结果或重试。",
+    agent_explanation_feedback_invalid: "这条讲解已变化或不属于当前复习，请刷新后再确认。",
+    agent_completion_plan_required: "本轮需要先明确要检查的目标，请刷新查看复习安排。",
+    agent_completion_plan_locked: "本轮检查要求已确定。需要更改时，请使用“调整本轮复习”。",
   };
   return error instanceof LearningApiError && messages[error.code] ? messages[error.code] : learningErrorMessage(error);
 }

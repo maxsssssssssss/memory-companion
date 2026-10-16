@@ -5,7 +5,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AgentAction, AgentTask } from "@/lib/domain/agent";
-import { AgentFailure, type AgentContext, type AgentDecisionProvider, type AgentScenario } from "@/lib/server/agent/types";
+import { AgentFailure, type AgentContext, type AgentDecision, type AgentDecisionProvider, type AgentScenario } from "@/lib/server/agent/types";
 import { AgentStore } from "@/lib/server/agent/store";
 import { AgentRuntime } from "@/lib/server/agent/runtime";
 import type { StructuredJsonDiagnostics } from "@/lib/server/openai/structured-json";
@@ -15,6 +15,7 @@ import { LearningQuizRepository } from "./quiz-repository";
 import { generateLearningQuiz } from "./quiz-service";
 import { freezeLearningAgentScope, readLearningAgentScope } from "./agent-scope";
 import { createLearningAgentScenario, readLearningAgentExplanation } from "./agent-scenario";
+import { withLearningCompletionDecision } from "./agent-context";
 import { LearningAgentRepository, learningAgentOperationId } from "./agent-repository";
 import type { generateStudyJson } from "./framework-generator";
 
@@ -516,5 +517,115 @@ it.each(["failed", "incomplete", "completed"])("retains reported usage but does 
     expect(new LearningAgentRepository(learning).list(pageId, task.id)[0]).toMatchObject({ state: "unknown", body_json: null });
     const retried = await runtime.recover("owner", task.id, { expectedVersion: 1, mode: "retry", eventId: randomUUID() });
     expect(retried.recovery?.kind).toBe("unknown"); expect(generate).toHaveBeenCalledTimes(1);
+  } finally { runtime.close(); store.close(); }
+});
+
+
+it("requires a current immutable plan and sends the actual explanation purpose to the generator", async () => {
+  const inputSeen: unknown[] = [];
+  const generate = vi.fn(async (_config, _name, _prompt, input) => {
+    inputSeen.push(input);
+    return { materialAnswer: "[模拟解释] 先检查前提，前提不成立时不能使用规则。", supplements: [], items: [{ materialId, paragraph: 1 }] };
+  }) as unknown as typeof generateStudyJson;
+  const ctx = context(); ctx.task.scope = { ...(ctx.task.scope as object), completionVersion: 1 };
+  const scene = createLearningAgentScenario(learning, { configure: () => config, generate });
+  await run(scene, "learning.read_scope", {}, ctx);
+  const purpose = { objectiveIds: ["condition"], role: "concept", method: "explain", purpose: "澄清适用前提，不强制考试", priorEvidenceRefs: [] };
+  const args = { question: "为何不能应用？", sources: [{ materialId, paragraph: 1 }], purpose };
+  await expect(scene.tools["learning.explain"].execute(args, ctx)).rejects.toMatchObject({ code: "known_failure", message: "agent_review_plan_required" });
+  expect(generate).not.toHaveBeenCalled();
+  const plan = { kind: "explanation", objectives: [{ id: "condition", label: "理解何时可以使用规则", sources: [{ materialId, paragraph: 1 }], requirements: [] }] };
+  await run(scene, "learning.establish_review_plan", plan, ctx);
+  await expect(scene.tools["learning.establish_review_plan"].execute({ ...plan, objectives: [{ ...plan.objectives[0], label: "降低要求" }] }, ctx)).rejects.toMatchObject({ code: "known_failure", message: "agent_completion_plan_immutable_adjust_required" });
+  ctx.actionId = randomUUID();
+  const saved = await run(scene, "learning.explain", args, ctx);
+  expect(inputSeen).toHaveLength(1);
+  expect(inputSeen[0]).toMatchObject({ question: args.question, reviewContext: { taskVersion: 1, purpose, objectives: [{ id: "condition" }] } });
+  expect(saved.value).toMatchObject({ reviewContext: { taskVersion: 1, purpose } });
+  expect(ctx.task.usage.calls).toBe(1);
+  ctx.actionId = randomUUID();
+  const repeated = await scene.tools["learning.explain"].execute(args, ctx);
+  expect(repeated.handoff).toContain("尚无新的有效进展"); expect(generate).toHaveBeenCalledTimes(1);
+});
+
+it("requires explicit explanation resolution and stops before both decisions and prepared generation", async () => {
+  const generate = vi.fn(async () => ({ materialAnswer: "[模拟解释] 规则需要先满足前提。", supplements: [], items: [{ materialId, paragraph: 1 }] })) as unknown as typeof generateStudyJson;
+  const ctx = context(); ctx.task.scope = { ...(ctx.task.scope as object), completionVersion: 1 };
+  const scene = createLearningAgentScenario(learning, { configure: () => config, generate });
+  await run(scene, "learning.establish_review_plan", { kind: "explanation", objectives: [{ id: "condition", label: "澄清适用前提", sources: [{ materialId, paragraph: 1 }], requirements: [] }] }, ctx);
+  ctx.actionId = randomUUID();
+  const purpose = { objectiveIds: ["condition"], role: "concept", method: "explain", purpose: "解释规则适用条件", priorEvidenceRefs: [] };
+  const saved = await run(scene, "learning.explain", { question: "为什么先检查条件？", sources: [{ materialId, paragraph: 1 }], purpose }, ctx);
+  ctx.task.wait = { kind: "feedback", message: "疑问是否已解决？" };
+  ctx.event = { id: randomUUID(), kind: "feedback", version: 1, message: "谢谢" };
+  const unresolved = await scene.observe(ctx) as { completion: { canAutoFinish: boolean; outcome: string } };
+  expect(unresolved.completion.canAutoFinish).toBe(false); expect(unresolved.completion.outcome).not.toBe("explanation_resolved");
+  ctx.event = { id: randomUUID(), kind: "explanation_feedback", version: 1, refId: saved.result.ref!.id,
+    message: JSON.stringify({ explanationId: saved.result.ref!.id, outcome: "resolved" }) };
+  await scene.validateEvent!(ctx.event, ctx);
+  const resolved = await scene.observe(ctx) as { completion: { canAutoFinish: boolean; outcome: string } };
+  expect(resolved.completion).toMatchObject({ canAutoFinish: true, outcome: "explanation_resolved" });
+  await scene.observe(ctx); // durable event replay does not invent another confirmation
+  const decide = vi.fn(async () => ({ tool: "learning.create_quiz", args: { count: 1, difficulty: "standard", purpose } }));
+  const guarded = withLearningCompletionDecision(learning, decide);
+  expect(await guarded({ task: ctx.task, observation: resolved, results: [], tools: [], event: ctx.event }, ctx)).toHaveProperty("finish");
+  expect(decide).not.toHaveBeenCalled();
+  ctx.actionId = randomUUID();
+  const prepared = await scene.tools["learning.create_quiz"].execute({ count: 1, difficulty: "standard", purpose }, ctx);
+  expect(prepared.handoff).toContain("明确确认"); expect(generate).toHaveBeenCalledTimes(1);
+  expect(new LearningQuizRepository(learning).list(pageId)).toHaveLength(0);
+  expect(ctx.task.usage.calls).toBe(1); expect(globalThis.fetch).not.toHaveBeenCalled();
+  // Newly accepted free text must be handled even if prior evidence is enough.
+  // A navigation read is a prerequisite, not an acknowledgement of the request.
+  ctx.event = { id: randomUUID(), kind: "feedback", version: 1, message: "我还想知道另一个条件的区别，请先查看导航。" };
+  const further = vi.fn(async () => ({ tool: "learning.read_navigation", args: {} }));
+  const handleFeedback = withLearningCompletionDecision(learning, further);
+  const decisionInput = { task: ctx.task, observation: resolved, results: [], tools: [], event: ctx.event };
+  expect(await handleFeedback(decisionInput, ctx)).toMatchObject({ tool: "learning.read_navigation" });
+  ctx.actionId = randomUUID(); await run(scene, "learning.read_navigation", {}, ctx);
+  expect(await handleFeedback(decisionInput, ctx)).toMatchObject({ tool: "learning.read_navigation" });
+  expect(further).toHaveBeenCalledTimes(2);
+});
+
+
+it("accepts a later resolved feedback round for the same explanation across persistent waits and restart", async () => {
+  const generate = vi.fn(async () => ({ materialAnswer: "[模拟解释] 先核对前提，之后才可使用规则。", supplements: [], items: [{ materialId, paragraph: 1 }] })) as unknown as typeof generateStudyJson;
+  const storePath = join(root, "feedback-rounds.sqlite"), checkpointPath = join(root, "feedback-rounds-checkpoints.sqlite");
+  let store = AgentStore.open(storePath);
+  const task = store.createTask({ accountId: "owner", scenario: "learning.adaptive-review.v1", resourceId: pageId, goal: "[合成] 解释规则适用条件",
+    scope: { ...freezeLearningAgentScope(learning, pageId, selection()), completionVersion: 1 } });
+  const decision = vi.fn<AgentDecisionProvider>(async (input, ctx) => ctx.call<AgentDecision>({ kind: "offline_round_decision", inputChars: 100, maxOutputTokens: 100 }, async () => {
+    if (!input.task.actions.some(a => a.tool === "learning.establish_review_plan")) return { value: { tool: "learning.establish_review_plan", args: {
+      kind: "explanation", objectives: [{ id: "condition", label: "理解规则适用条件", sources: [{ materialId, paragraph: 1 }], requirements: [] }] } } };
+    if (!input.task.actions.some(a => a.tool === "learning.explain")) return { value: { tool: "learning.explain", args: {
+      question: "何时可以应用规则？", sources: [{ materialId, paragraph: 1 }], purpose: { objectiveIds: ["condition"], role: "concept", method: "explain", purpose: "说明规则的适用前提", priorEvidenceRefs: [] } } } };
+    return { value: { wait: { kind: "feedback", message: "可以再读刚才的解释；请明确指出疑问是否已解决。" } } };
+  }));
+  const open = () => new AgentRuntime({ store, checkpointPath, scenario: createLearningAgentScenario(learning, { configure: () => config, generate }),
+    decision: withLearningCompletionDecision(learning, decision) });
+  let runtime = open();
+  try {
+    const first = await runtime.advance("owner", task.id);
+    expect(first.status).toBe("waiting"); expect(first.wait?.refId).toMatch(/^feedback:/);
+    const explanationId = first.actions.find(a => a.tool === "learning.explain")!.resultRef!.id;
+    const needs = { id: randomUUID(), kind: "explanation_feedback", version: 1, refId: first.wait!.refId,
+      message: JSON.stringify({ explanationId, outcome: "needs_clarification" }) };
+    const second = await runtime.advance("owner", task.id, needs);
+    expect(second.status).toBe("waiting"); expect(second.wait?.refId).toMatch(/^feedback:/); expect(second.wait?.refId).not.toBe(first.wait!.refId);
+    expect(second.actions.filter(a => a.tool === "learning.explain")).toHaveLength(1);
+    const calls = second.usage.calls, decisions = decision.mock.calls.length;
+    runtime.close(); store.close(); learning.close(); learning = new LearningRepository(root, "owner"); store = AgentStore.open(storePath); runtime = open();
+    const reopened = await runtime.advance("owner", task.id);
+    expect(reopened.status).toBe("waiting"); expect(reopened.usage.calls).toBe(calls); expect(decision).toHaveBeenCalledTimes(decisions);
+    const resolved = { id: randomUUID(), kind: "explanation_feedback", version: 1, refId: second.wait!.refId,
+      message: JSON.stringify({ explanationId, outcome: "resolved" }) };
+    const ended = await runtime.advance("owner", task.id, resolved);
+    expect(ended.status).toBe("ended"); expect(ended.endReason).toContain("明确确认"); expect(ended.usage.calls).toBe(calls);
+    expect(decision).toHaveBeenCalledTimes(decisions); expect(generate).toHaveBeenCalledOnce();
+    const records = new LearningAgentRepository(learning).list(pageId, task.id).filter(r => r.kind === "explanation_feedback").map(r => JSON.parse(r.body_json!));
+    expect(records.map(r => ({ explanationId: r.explanationId, roundId: r.roundId, outcome: r.outcome }))).toEqual([
+      { explanationId, roundId: first.wait!.refId, outcome: "needs_clarification" }, { explanationId, roundId: second.wait!.refId, outcome: "resolved" }
+    ]);
+    expect(globalThis.fetch).not.toHaveBeenCalled();
   } finally { runtime.close(); store.close(); }
 });

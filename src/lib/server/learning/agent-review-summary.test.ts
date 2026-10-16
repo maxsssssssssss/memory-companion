@@ -68,7 +68,7 @@ it("aggregates earlier wrong and later correct groups, groups shared sources and
 });
 it("independent all-correct produces short praise without generation", async () => {
   group("correct"); group("correct"); const generate = enrich(), summary = await saveLearningAgentReviewSummary(learning, ctx, generate);
-  expect(summary.headline).toBe("本轮 2 题全部独立答对，做得不错！"); expect(summary.topics).toEqual([]); expect(summary.reminders).toEqual([]); expect(generate).not.toHaveBeenCalled();
+  expect(summary.headline).toBe("本轮 2 题均答对，应用内未记录提示或提前查看答案。"); expect(summary.topics).toEqual([]); expect(summary.reminders).toEqual([]); expect(generate).not.toHaveBeenCalled();
 });
 it("separates hints, skipped and revealed questions from actual wrong submissions", async () => {
   group("hint"); group("skip"); group("reveal"); const generate = enrich(), summary = await saveLearningAgentReviewSummary(learning, ctx, generate);
@@ -150,15 +150,19 @@ it("fences a late summary after source deletion or a new dispute", async () => {
   await expect(saveLearningAgentReviewSummary(learning, ctx, async input => { new LearningAgentRepository(learning).dispute(pageId, ctx.task.id, a.id); return generate(input); })).rejects.toMatchObject({ code: "source_changed" });
   expect(new LearningAgentRepository(learning).list(pageId, ctx.task.id).filter(r => r.kind === "review_summary")[0].body_json).toBeNull();
 });
-it("uses one formal scenario budgeted generation with bound topic input and no new action prompt", async () => {
-  group("wrong"); const requests: string[] = [], inputSeen: unknown[] = [];
-  const generate = vi.fn(async (_config: unknown, name: string, _prompt: string, input: unknown, schema: z.ZodType) => { requests.push(name); inputSeen.push(input); return schema.parse(await enrich()((input as { topics: Array<{ id: string }> }).topics)); }) as unknown as typeof generateStudyJson;
+it("finishes with persisted facts without depending on an optional summary model call", async () => {
+  group("wrong");
+  const generate = vi.fn(async () => { throw new AgentFailure("unknown", "optional_summary_unavailable"); }) as unknown as typeof generateStudyJson;
   const scene = createLearningAgentScenario(learning, { configure: () => config, generate });
   const reason = await scene.finish!("已经掌握", ctx);
-  expect(reason).toContain("已保存本轮复习总结"); expect(requests).toEqual(["learning_agent_review_summary"]); expect(ctx.task.usage.calls).toBe(1);
-  expect(JSON.stringify(inputSeen)).toContain("先检查规则前提"); expect(JSON.stringify(inputSeen)).not.toContain("apiKey");
-  await scene.finish!("已经掌握", ctx); expect(ctx.task.usage.calls).toBe(1); expect(globalThis.fetch).not.toHaveBeenCalled();
+  expect(reason).toContain("已保存本轮复习总结"); expect(reason).not.toContain("检查通过");
+  expect(generate).not.toHaveBeenCalled(); expect(ctx.task.usage.calls).toBe(0);
+  const summary = projectLearningAgentReviewSummary(learning, { ...ctx.task, status: "ended" })!;
+  expect(summary.stats).toMatchObject({ wrong: 1, correct: 0 });
+  expect(summary.topics[0].explanation).toContain("先检查规则前提");
+  await scene.finish!("已经掌握", ctx); expect(ctx.task.usage.calls).toBe(0); expect(globalThis.fetch).not.toHaveBeenCalled();
 });
+
 it("does not reuse an unrelated explanation merely because it cites the same paragraph", async () => {
   group("wrong"); const artifacts = new LearningAgentRepository(learning), id = randomUUID();
   artifacts.reserve({ id, taskId: ctx.task.id, taskVersion: 1, pageId, kind: "explanation", actionId: randomUUID(), binding: (ctx.task.scope as { fingerprint: string }).fingerprint, materialIds: [materialId] });
@@ -214,10 +218,10 @@ it.each(["cancelled", "budget_exhausted"] as const)("projects current %s notices
   const view = projectLearningAgentReviewSummary(learning, { ...ctx.task, status })!;
   expect(view.kind).toBe("partial"); expect(view.notices.join()).toContain(status === "cancelled" ? "提前取消" : "单次上限");
 });
-it("rejects generation-config input overrun before reserving a Provider request", async () => {
+it("finishes from facts even when optional summary generation configuration cannot fit", async () => {
   group("wrong"); const generate = vi.fn() as unknown as typeof generateStudyJson;
   const scene = createLearningAgentScenario(learning, { configure: () => ({ ...config, maxInputChars: 1 }), generate });
   await scene.finish!("结束", ctx); expect(generate).not.toHaveBeenCalled(); expect(ctx.task.usage.calls).toBe(0);
   const summary = projectLearningAgentReviewSummary(learning, { ...ctx.task, status: "ended" })!;
-  expect(summary.stats.wrong).toBe(1); expect(summary.notices.join()).toContain("暂未完成");
+  expect(summary.stats.wrong).toBe(1); expect(summary.notices.join()).toContain("未额外");
 });

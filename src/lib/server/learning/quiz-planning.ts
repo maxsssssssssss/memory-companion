@@ -6,8 +6,9 @@ import { sourceBatches } from "./generation-sources";
 import { compactQuizRequest } from "./quiz-compact";
 import { GenerationParts } from "./generation-parts";
 import { checkInputBudget, learningRequestChars, type generateStudyJson, type LearningGenerationConfig } from "./framework-generator";
+import type { QuizReviewContext } from "./quiz-review-purpose";
 
-type Input = NonNullable<ReturnType<LearningQuizRepository["begin"]>>;
+type Input = NonNullable<ReturnType<LearningQuizRepository["begin"]>> & { reviewContext?: QuizReviewContext };
 type TextSlice={start:number;end:number;total:number};
 type ExtraSlice=Input["extras"][number]&{slice?:TextSlice;slices?:TextSlice[]};
 const Reading = z.object({ items: z.array(z.object({ title:z.string().min(1).max(300),
@@ -36,6 +37,7 @@ export async function planLargeQuiz(request:Input, config:LearningGenerationConf
   if(sizing && !sizing.legacy) windows=fitQuizWindows(windows,config.maxInputChars,input=>Math.max(
     sizing.questionChars(input),learningRequestChars(READ_PROMPT,compactQuizRequest(input,{...scope,expiresAt:0}).input)));
   const transportConfig=sizing?.transportConfig??config;
+  const reviewContext=request.reviewContext?{reviewContext:request.reviewContext}:{};
   const timeout=transportConfig.requestTimeoutMs??120000;
   // Preserve checkpoint fencing: old prompts cannot silently rebind saved work.
   // Check the live account/source before classifying a changed reading plan.
@@ -68,14 +70,14 @@ export async function planLargeQuiz(request:Input, config:LearningGenerationConf
   for(const entry of catalog) {
     const compact={...entry,topics:entry.topics.map(({title,context})=>({title,context}))};
     const exceeds=sizing?.legacy?JSON.stringify([...index,compact]).length>config.maxInputChars-6000
-      :learningRequestChars(SELECT_PROMPT,{windows:[...index,compact],taskContext:{count:request.count,perGroup,difficulty:request.difficulty}})>config.maxInputChars;
+      :learningRequestChars(SELECT_PROMPT,{windows:[...index,compact],taskContext:{count:request.count,perGroup,difficulty:request.difficulty,...reviewContext}})>config.maxInputChars;
     if(index.length && exceeds){indexBatches.push(index);index=[];}
     index.push(compact as typeof entry);
   }
   if(index.length)indexBatches.push(index);
   const selectedBatches=indexBatches.length<=request.count ? indexBatches : Array.from({length:request.count},(_,i)=>indexBatches[Math.floor(i*indexBatches.length/request.count)]);
   const quotas=selectedBatches.map((_,i)=>Math.floor(request.count/selectedBatches.length)+(i<request.count%selectedBatches.length?1:0));
-  const plans=selectedBatches.map((entries,i)=>({id:`selection-${i}`,input:{windows:entries,taskContext:{count:quotas[i],perGroup,difficulty:request.difficulty},prompt:SELECT_PROMPT,model:config.model}}));
+  const plans=selectedBatches.map((entries,i)=>({id:`selection-${i}`,input:{windows:entries,taskContext:{count:quotas[i],perGroup,difficulty:request.difficulty,...reviewContext},prompt:SELECT_PROMPT,model:config.model}}));
   parts.plan(plans);
   const groups:Array<{windows:string[];count:number}>=[];
   for(const [i,p] of plans.entries()) {

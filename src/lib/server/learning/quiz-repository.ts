@@ -6,6 +6,7 @@ import { quizReferenceId, resolveReferencedQuiz, quizProceduralHint } from "./qu
 import { quizCoverageNotice } from "./quiz-composition";
 import { learningValidationDiagnostics } from "./generation-diagnostics";
 import { generationProgress } from "./generation-parts";
+import { bindPublishedQuizReview, SavedQuizReview, type QuizReviewPublication } from "./quiz-review-purpose";
 
 type Run = { id: string; page_id: string; settings_json: string; binding_json: string; binding_hash: string; status: QuizRunSummary["status"] | "deleted"; created_at: string; failure: string | null; result_json: string | null };
 type Attempt = { id: string; page_id: string; quiz_id: string; mode: "practice" | "test"; revision: number; progress_json: string; events_json: string; evaluation_json: string; created_at: string; completed_at: string | null };
@@ -163,7 +164,17 @@ export class LearningQuizRepository {
     const row=this.run(pageId,id);
     if(hash(this.snapshot(pageId,parse<QuizConfig>(row.settings_json)).binding)!==row.binding_hash)throw new LearningError(409,"source_changed");
   }
-  complete(pageId: string, id: string, value: unknown) {
+  /** Server-only review provenance; no answers or model verdict are exposed. */
+  review(pageId: string, id: string): SavedQuizReview | null {
+    this.assertSources(pageId, id);
+    const row = this.run(pageId, id);
+    if (row.status !== "completed" || !row.result_json) return null;
+    const value = parse<SavedQuiz & { review?: unknown }>(row.result_json).review;
+    if (value === undefined) return null;
+    const checked = SavedQuizReview.safeParse(value);
+    return checked.success ? checked.data : null;
+  }
+  complete(pageId: string, id: string, value: unknown, review?: QuizReviewPublication) {
     if (Buffer.byteLength(JSON.stringify(value)) > FRAMEWORK_MAX_RESULT_BYTES) throw new LearningError(422, "quiz_invalid_result");
     this.db.transaction(() => {
       const r = this.run(pageId, id); if (r.status !== "generating") throw new LearningError(409, "framework_terminal");
@@ -189,7 +200,8 @@ export class LearningQuizRepository {
         // Only new grounded groups use this non-answer-bearing procedural hint.
         if(q.hint)q.hint=quizProceduralHint(q.kind);
       }
-      const saved: SavedQuiz = { ...quiz, ...(referenced ? { optionOrderVersion: 1 as const } : {}), questions: quiz.questions.map(q => ({ ...q, sources: q.sources.map(ref => {
+      const saved: SavedQuiz & { review?: SavedQuizReview } = { ...quiz, ...(referenced ? { optionOrderVersion: 1 as const } : {}),
+        ...(review && referenced ? { review: bindPublishedQuizReview(review, quiz.questions) } : {}), questions: quiz.questions.map(q => ({ ...q, sources: q.sources.map(ref => {
         if (ref.kind !== "material") {
           const extra = current.binding.extras.find(e => e.kind === ref.kind && "id" in e && e.id === ref.id);
           if (!extra) throw new LearningError(422, "framework_invalid_source"); return extra;

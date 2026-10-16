@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import type { LearningRepository } from "./repository";
 import { LearningError } from "./repository";
 
-export type LearningAgentArtifact = { id: string; task_id: string; task_version: number; page_id: string; account_id: string; kind: "quiz" | "explanation" | "note_proposal" | "review_summary";
+export type LearningAgentArtifact = { id: string; task_id: string; task_version: number; page_id: string; account_id: string; kind: "quiz" | "explanation" | "note_proposal" | "review_summary" | "review_plan" | "completion_assessment" | "evidence_proposal" | "explanation_feedback" | "check_purpose" | "completion_feedback";
   action_id: string; binding_hash: string; state: "reserved" | "completed" | "failed" | "unknown" | "invalidated"; body_json: string | null };
 
 export function learningAgentOperationId(actionId: string, kind: string) {
@@ -92,7 +92,7 @@ export class LearningAgentRepository {
     this.learning.get(pageId);
     this.learning.database.prepare("UPDATE learning_agent_artifacts SET body_json=json_set(body_json,'$.disputed',json('true')) WHERE task_id=? AND page_id=? AND account_id=? AND kind='quiz' AND state='completed' AND json_extract(body_json,'$.attemptId')=?")
       .run(taskId, pageId, this.learning.accountId, attemptId);
-    this.learning.database.prepare("UPDATE learning_agent_artifacts SET state='invalidated',body_json=NULL WHERE task_id=? AND page_id=? AND account_id=? AND kind='review_summary' AND state IN ('reserved','completed')")
+    this.learning.database.prepare("UPDATE learning_agent_artifacts SET state='invalidated',body_json=NULL WHERE task_id=? AND page_id=? AND account_id=? AND kind IN ('review_summary','completion_assessment') AND state IN ('reserved','completed')")
       .run(taskId, pageId, this.learning.accountId);
   }
 }

@@ -1,6 +1,8 @@
 import type { AgentDecisionInput, AgentDecisionProvider } from "@/lib/server/agent/types";
 import { agentDecisionRequest, createAgentDecisionProvider, type AgentModelConfig } from "@/lib/server/agent/model";
 import { agentModelConfig } from "./agent-decision-config";
+import type { LearningRepository } from "./repository";
+import { acknowledgeLearningFeedback, assessLearningCompletion, hasPendingLearningFeedback } from "./agent-completion";
 
 type Result = AgentDecisionInput["results"][number];
 function record(value: unknown): Record<string, unknown> | undefined {
@@ -71,5 +73,27 @@ export function createLearningAgentDecisionProvider(configure: () => AgentModelC
     const config = configure();
     const bounded = { ...config, maxInputChars: Math.min(config.maxInputChars, input.task.budget.maxInputChars) };
     return createAgentDecisionProvider(() => bounded)(fitLearningAgentDecisionInput(input, bounded.maxInputChars), ctx);
+  };
+}
+
+/** Both real and offline decisions use the same Learning-owned fact gate. It
+ * never turns the shared ended state into a mastery claim. Prepared actions
+ * also recheck inside their tool, since a checkpoint can bypass this decision. */
+export function withLearningCompletionDecision(learning: LearningRepository, decide: AgentDecisionProvider): AgentDecisionProvider {
+  return async (input, ctx) => {
+    await ctx.assertActive();
+    const completion = assessLearningCompletion(learning, ctx.task, ctx.event);
+    if (completion.canAutoFinish && !hasPendingLearningFeedback(learning, ctx.task, ctx.event)) return { finish: completion.headline };
+    const observation = record(input.observation) ?? {};
+    const decision = await decide({ ...input, observation: { ...observation, completion } }, ctx);
+    // A Learning feedback tool supplies a stable persisted round identity. Keep
+    // the public structured_action_v1 wait choice, while using the existing
+    // business tool internally so later answers can revise an earlier round.
+    if ("wait" in decision && (ctx.task.scope as { completionVersion?: number })?.completionVersion === 1
+      && decision.wait.kind === "feedback" && !decision.wait.refId) {
+      return { tool: "learning.request_feedback", args: { question: decision.wait.message }, reason: "等待用户反馈。" };
+    }
+    if ("wait" in decision || "finish" in decision) acknowledgeLearningFeedback(learning, ctx);
+    return decision;
   };
 }

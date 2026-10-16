@@ -6,6 +6,7 @@ import { learningApi, LearningApiError } from "@/lib/client/learning-api";
 import type { LearningAgentReviewSummary } from "@/lib/domain/learning-agent";
 import type { FrameworkChapter } from "@/lib/domain/learning-framework";
 import type { QuizAttemptView } from "@/lib/domain/learning-quiz";
+import type { LearningCompletionAssessment } from "@/lib/domain/learning-agent-completion";
 
 vi.mock("@/lib/client/learning-agent-api", async original => ({ ...await original<typeof import("@/lib/client/learning-agent-api")>(), learningAgentApi: { list: vi.fn(), start: vi.fn(), control: vi.fn() } }));
 vi.mock("@/lib/client/learning-api", async original => ({ ...await original<typeof import("@/lib/client/learning-api")>(), learningApi: { framework: vi.fn(), quizzes: vi.fn() } }));
@@ -480,7 +481,7 @@ it("shows authoritative whole-task review and opens a specific earlier wrong que
   vi.mocked(learningAgentApi.list).mockResolvedValue({ tasks: [reviewedTask()] });
   mount(); const summary = await screen.findByRole("region", { name: "本轮复习总结" });
   expect(summary).toHaveTextContent("已记录 2 组练习 · 已作答 10/10 题");
-  expect(summary).toHaveTextContent("答对 8 题（独立答对 8 题） · 答错 2 题");
+  expect(summary).toHaveTextContent("答对 8 题（其中 8 题未使用提示或提前看答案） · 答错 2 题");
   expect(within(summary).getByRole("region", { name: "专项讲解" })).toHaveTextContent(reviewSummary.topics[0].explanation);
   expect(within(summary).getAllByRole("listitem")).toHaveLength(2);
   await waitFor(() => expect(screen.getByTestId("inline-quiz")).toHaveTextContent("quiz-two"));
@@ -521,7 +522,7 @@ it("shows supported assistance and exclusion statistics without treating them as
   const summary: LearningAgentReviewSummary = { ...reviewSummary, kind: "partial", headline: "已保存这次练习的作答情况。", stats: { groups: 1, total: 5, answered: 2, correct: 2, wrong: 0, unassistedCorrect: 1, hinted: 1, revealed: 1, skipped: 1, unanswered: 1, excludedGroups: 1 }, topics: [], reminders: [], notices: ["1 组存在疑问的题目未用于诊断。"] };
   vi.mocked(learningAgentApi.list).mockResolvedValue({ tasks: [{ ...reviewedTask(), reviewSummary: summary }] });
   mount(); const region = await screen.findByRole("region", { name: "本轮进度回顾" });
-  expect(region).toHaveTextContent("答对 2 题（独立答对 1 题） · 答错 0 题");
+  expect(region).toHaveTextContent("答对 2 题（其中 1 题未使用提示或提前看答案） · 答错 0 题");
   expect(region).toHaveTextContent("使用提示 1 题 · 看答案 1 题 · 跳过 1 题 · 未完成 1 题");
   expect(region).toHaveTextContent(summary.notices[0]);
   expect(within(region).queryByRole("region", { name: "专项讲解" })).not.toBeInTheDocument();
@@ -559,5 +560,100 @@ it("does not carry a previous version summary into the adjusted round", async ()
   await screen.findByRole("heading", { name: "新的复习范围" });
   expect(screen.queryByRole("region", { name: "本轮复习总结" })).not.toBeInTheDocument();
   expect(screen.queryByText(reviewSummary.topics[0].explanation)).not.toBeInTheDocument();
+  expect(learningAgentApi.control).not.toHaveBeenCalled();
+});
+
+const explanationCompletion: LearningCompletionAssessment = {
+  schemaVersion: 1, taskVersion: 1, planId: "plan-one", sourceFingerprint: "synthetic", evidenceFingerprint: "none", progressFingerprint: "awaiting-feedback",
+  plan: { schemaVersion: 1, taskVersion: 1, sourceFingerprint: "synthetic", goal: "解释条件概率", proposedBy: "model", id: "plan-one", kind: "explanation",
+    objectives: [{ id: "conditional", label: "解释条件概率如何缩小样本空间", sources: [{ materialId: "material-one", paragraph: 1 }], requirements: [] }] },
+  outcome: "insufficient", support: "insufficient", objectives: [{ id: "conditional", label: "解释条件概率如何缩小样本空间", status: "unobserved", requirements: [], evidence: [],
+    gaps: ["等待你确认疑问是否解决。"], unresolvedErrors: [], explanationResolved: false }], canAutoFinish: false, pending: ["feedback"],
+  headline: "等待对本轮讲解的明确反馈。", stopReason: null, limitations: [], longTermMastery: "unverified",
+};
+const explanationTask = (): LearningAgentTaskView => ({ ...waiting, quizLinks: [], completion: explanationCompletion,
+  wait: { kind: "feedback", message: "现在能区分条件概率了吗？" }, explanations: [{ id: "explanation-one", text: "合成讲解：条件概率先缩小样本空间。", sources: [{ materialId: "material-one", paragraph: 1 }] }] });
+
+it.each([
+  { button: "疑问已解决", outcome: "resolved", message: "" },
+  { button: "仍需说明", outcome: "needs_clarification", message: "分母为何变化仍不明白。" },
+] as const)("records explicit explanation feedback via $button with its current explanation and version", async ({ button, outcome, message }) => {
+  const current = explanationTask();
+  vi.mocked(learningAgentApi.list).mockResolvedValue({ tasks: [current] });
+  vi.mocked(learningAgentApi.control).mockResolvedValue({ task: { ...current, status: outcome === "resolved" ? "ended" : "running", wait: null, endReason: outcome === "resolved" ? "你已确认本轮疑问得到解决。" : null } });
+  mount(); await screen.findByRole("button", { name: button });
+  expect(screen.queryByTestId("inline-quiz")).not.toBeInTheDocument();
+  expect(learningAgentApi.control).not.toHaveBeenCalled();
+  if (message) fireEvent.change(screen.getByLabelText("你的反馈"), { target: { value: message } });
+  fireEvent.click(screen.getByRole("button", { name: button }));
+  await waitFor(() => expect(learningAgentApi.control).toHaveBeenCalledExactlyOnceWith("page-one", { id: current.id,
+    action: "explanation_feedback", eventId: expect.any(String), expectedVersion: 1, explanationId: "explanation-one", outcome,
+    ...(message ? { message } : {}) }));
+  expect(learningAgentApi.start).not.toHaveBeenCalled();
+  if (outcome === "resolved") expect(screen.getByRole("button", { name: "开始另一项复习" })).toBeEnabled();
+});
+
+it("does not infer resolution from thanks, refresh or ordinary feedback", async () => {
+  const current = explanationTask();
+  vi.mocked(learningAgentApi.list).mockResolvedValue({ tasks: [current] });
+  vi.mocked(learningAgentApi.control).mockResolvedValue({ task: current });
+  mount(); await screen.findByRole("button", { name: "疑问已解决" });
+  fireEvent.click(screen.getByRole("button", { name: "刷新任务" }));
+  await waitFor(() => expect(learningAgentApi.list).toHaveBeenCalledTimes(2));
+  expect(learningAgentApi.control).not.toHaveBeenCalled();
+  fireEvent.change(screen.getByLabelText("你的反馈"), { target: { value: "谢谢" } });
+  fireEvent.click(screen.getByRole("button", { name: "提交其他反馈" }));
+  await waitFor(() => expect(learningAgentApi.control).toHaveBeenCalledExactlyOnceWith("page-one", { id: current.id,
+    action: "feedback", eventId: expect.any(String), expectedVersion: 1, feedback: "谢谢" }));
+  expect(screen.getByRole("button", { name: "疑问已解决" })).toBeEnabled();
+});
+
+it("does not show resolution controls for a stale plan or reuse a previous version conclusion", async () => {
+  const current = explanationTask();
+  vi.mocked(learningAgentApi.list).mockResolvedValueOnce({ tasks: [current] }).mockResolvedValue({ tasks: [{ ...current, version: 2, goal: "解释新的概念" }] });
+  mount(); await screen.findByRole("button", { name: "疑问已解决" });
+  fireEvent.click(screen.getByRole("button", { name: "刷新任务" }));
+  await screen.findByRole("heading", { name: "解释新的概念" });
+  expect(screen.queryByRole("button", { name: "疑问已解决" })).not.toBeInTheDocument();
+  expect(screen.getByRole("heading", { name: "本轮判断需要更新" })).toBeVisible();
+  expect(screen.queryByText("解释条件概率如何缩小样本空间")).not.toBeInTheDocument();
+  expect(learningAgentApi.control).not.toHaveBeenCalled();
+});
+
+it("reconciles uncertain explanation feedback with the same receipt and does not send a second decision", async () => {
+  const current = explanationTask();
+  vi.mocked(learningAgentApi.list).mockResolvedValue({ tasks: [current] });
+  vi.mocked(learningAgentApi.control).mockRejectedValueOnce(new Error("response lost")).mockResolvedValueOnce({ task: { ...current, status: "ended", wait: null } });
+  mount(); fireEvent.click(await screen.findByRole("button", { name: "疑问已解决" }));
+  await screen.findByRole("button", { name: "核对本次任务操作" });
+  const receipt = vi.mocked(learningAgentApi.control).mock.calls[0][1];
+  expect(screen.getByRole("button", { name: "仍需说明" })).toBeDisabled();
+  fireEvent.click(screen.getByRole("button", { name: "核对本次任务操作" }));
+  await waitFor(() => expect(learningAgentApi.control).toHaveBeenCalledTimes(2));
+  expect(vi.mocked(learningAgentApi.control).mock.calls[1][1]).toEqual(receipt);
+});
+
+it("keeps the current quiz selected ahead of authorized history and does not expose current-task dispute controls for old attempts", async () => {
+  const historical: LearningAgentTaskView = { ...waiting, quizLinks: [
+    ...waiting.quizLinks!, { quizId: "historical-quiz", attemptId: "historical-attempt", historical: true, completed: true },
+  ] };
+  vi.mocked(learningAgentApi.list).mockResolvedValue({ tasks: [historical] });
+  mount(); await screen.findByTestId("inline-quiz");
+  expect(screen.getByTestId("inline-quiz")).toHaveTextContent("quiz-one");
+  fireEvent.click(screen.getByRole("button", { name: "查看历史作答 2" }));
+  expect(screen.getByTestId("inline-quiz")).toHaveTextContent("historical-quiz");
+  expect(screen.getByRole("region", { name: "相关历史作答" })).toHaveTextContent("原题、作答与成绩保持不变");
+  expect(screen.queryByText("这组题有疑问", { selector: "summary" })).not.toBeInTheDocument();
+  expect(learningAgentApi.control).not.toHaveBeenCalled();
+});
+
+it("selects the most recent current task quiz when no quiz is waiting, before a historical evidence link", async () => {
+  vi.mocked(learningAgentApi.list).mockResolvedValue({ tasks: [{ ...waiting, status: "ended", wait: null, quizLinks: [
+    { quizId: "quiz-one", attemptId: "attempt-one", completed: true }, { quizId: "quiz-two", attemptId: "attempt-two", completed: true },
+    { quizId: "historical-quiz", attemptId: "historical-attempt", historical: true, completed: true },
+  ] }] });
+  mount(); await screen.findByTestId("inline-quiz");
+  expect(screen.getByTestId("inline-quiz")).toHaveTextContent("quiz-two");
+  expect(screen.getByRole("button", { name: "查看题组 2" })).toHaveAttribute("aria-pressed", "true");
   expect(learningAgentApi.control).not.toHaveBeenCalled();
 });

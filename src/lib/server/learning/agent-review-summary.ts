@@ -77,7 +77,7 @@ export function buildLearningAgentReviewSummary(task: Pick<AgentTask, "status">,
   const complete = task.status === "ended" && snapshots.length > 0 && snapshots.every(s => s.attempt.completed) && excludedGroups === 0;
   const independentAllCorrect = complete && stats.total > 0 && stats.unassistedCorrect === stats.total && !stats.hinted && !stats.revealed && !stats.skipped;
   let headline = stats.answered ? `本轮已作答 ${stats.answered} 题，答对 ${stats.correct} 题。` : "本轮尚无可用于判断的已提交作答，未完成学习检查。";
-  if (independentAllCorrect) headline = `本轮 ${stats.total} 题全部独立答对，做得不错！`;
+  if (independentAllCorrect) headline = `本轮 ${stats.total} 题均答对，应用内未记录提示或提前查看答案。`;
   else if (stats.wrong) headline += `有 ${stats.wrong} 道错题值得回顾。`;
   else if (stats.answered) headline += "已提交作答中没有错题。";
   const notices: string[] = [];
@@ -86,7 +86,7 @@ export function buildLearningAgentReviewSummary(task: Pick<AgentTask, "status">,
   if (stats.hinted || stats.revealed || stats.skipped) notices.push(`使用提示 ${stats.hinted} 题、查看答案 ${stats.revealed} 题、跳过 ${stats.skipped} 题；这些不算独立答对，跳过与查看答案也不作为知识错误。`);
   if (stats.unanswered || snapshots.some(s => !s.attempt.completed)) notices.push("仍有题组未完成；此处只使用已经保存并可核对的作答。");
   if (excludedGroups) notices.push(`有 ${excludedGroups} 组题因用户疑问、来源或记录不可用而排除，不用于学习诊断。`);
-  if (!independentAllCorrect && stats.answered) notices.push("题目与解析未额外进行语义核验；本轮表现不代表长期掌握或已覆盖全部目标。");
+  if (stats.answered) notices.push("题目与解析未额外进行语义核验；应用内未记录辅助不证明没有外部帮助。本轮表现不代表长期掌握或已覆盖全部目标。");
   return { summary: { kind: complete ? "completed" : "partial", headline, stats, topics: [...groups.values()].map(g => g.topic), reminders, notices },
     input: [...groups.values()].filter(g => !g.reused && g.input.sources.length > 0).map(g => g.input), needsEnrichment: [...groups.values()].some(g => !g.reused && g.input.sources.length > 0) };
 }
@@ -143,7 +143,7 @@ export function projectLearningAgentReviewSummary(learning: LearningRepository, 
   // A plain ended state can also mean explicit user handoff. Only the saved
   // finish artifact establishes a normal completed review summary.
   return { ...summary, kind: "partial" as const,
-    headline: summary.headline.includes("全部独立答对") ? `本轮已保存 ${summary.stats.answered} 题作答，答对 ${summary.stats.correct} 题。` : summary.headline,
+    headline: summary.headline,
     notices: [...summary.notices, ...(task.recovery?.kind === "unknown" ? ["专项归纳的请求结果尚未确认；这里仅回顾已保存的作答与解析，不会自动重新生成。"] : [])] };
 }
 

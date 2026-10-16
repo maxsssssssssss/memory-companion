@@ -1,0 +1,19 @@
+.completion { margin-bottom: 28px; }
+.heading { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 8px 16px; }
+.heading h4 { margin: 0; font-size: 17px; line-height: 1.6; }
+.heading h5, .result h5 { margin: 0; font-size: 15px; line-height: 1.7; }
+.objectives { margin: 16px 0 0; padding-left: 24px; }
+.objective { padding: 16px 0; border-top: 1px solid var(--db-border); }
+.objective::marker { color: var(--db-text-secondary); }
+.support { color: var(--db-text-secondary); font-size: 13px; }
+.requirements, .gaps { padding-left: 20px; margin: 8px 0; font-size: 14px; line-height: 1.8; }
+.requirements { color: var(--db-text-secondary); }
+.evidence { margin-top: 12px; }
+.evidence summary { display: list-item; cursor: pointer; padding-block: 12px; font-size: 14px; color: var(--db-text-secondary); }
+.evidence summary:focus-visible { outline: 2px solid var(--db-focus); outline-offset: 4px; }
+.evidenceList { padding-left: 20px; margin: 8px 0; }
+.evidenceList li + li { margin-top: 16px; }
+.evidenceList p { margin: 4px 0; font-size: 14px; line-height: 1.8; }
+.result { padding: 20px; margin-top: 12px; background: var(--db-surface-muted); border-radius: var(--db-radius-card); }
+.result p { margin: 8px 0 0; line-height: 1.8; }
+@media (max-width: 600px) { .result { padding: 16px; } }

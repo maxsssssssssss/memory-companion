@@ -4,7 +4,7 @@ import type { LearningAgentScope } from "@/lib/domain/learning-agent";
 import type { LearningAgentTaskView } from "@/lib/client/learning-agent-api";
 import { AgentStore } from "@/lib/server/agent/store";
 import { AgentRuntime } from "@/lib/server/agent/runtime";
-import { createLearningAgentDecisionProvider } from "./agent-context";
+import { createLearningAgentDecisionProvider, withLearningCompletionDecision } from "./agent-context";
 import { AgentFailure } from "@/lib/server/agent/types";
 import { LearningError, LearningRepository } from "./repository";
 import { createLearningAgentScenario, readLearningAgentExplanation } from "./agent-scenario";
@@ -13,13 +13,15 @@ import { LearningAgentRepository, learningAgentOperationId } from "./agent-repos
 import { readLearningAgentNotePreview } from "./agent-notes";
 import { LearningQuizRepository } from "./quiz-repository";
 import { projectLearningAgentReviewSummary, unavailableLearningAgentReviewSummary } from "./agent-review-summary";
+import { assessLearningCompletion } from "./agent-completion";
+import { LearningExplanationFeedback } from "@/lib/domain/learning-agent-completion";
 
 export function openLearningAgentStore(learning: LearningRepository) {
   return AgentStore.open(join(learning.accountDataRoot, "agent-tasks.sqlite"));
 }
 export function openLearningAgentRuntime(learning: LearningRepository, store: AgentStore) {
   return new AgentRuntime({ store, checkpointPath: join(learning.accountDataRoot, "agent-checkpoints.sqlite"),
-    scenario: createLearningAgentScenario(learning), decision: createLearningAgentDecisionProvider() });
+    scenario: createLearningAgentScenario(learning), decision: withLearningCompletionDecision(learning, createLearningAgentDecisionProvider()) });
 }
 export function learningAgentFailure(error: unknown): never {
   if (error instanceof AgentFailure) {
@@ -49,7 +51,7 @@ export function projectLearningAgentTask(learning: LearningRepository, task: Age
       ...((a.version ?? 1) === (task.version ?? 1) ? { resultRef: a.resultRef, summary: a.summary, reason: a.reason }
         : { summary: "此前版本的历史操作；不作为当前范围的检查依据。" }) })),
     usage: task.usage, budget: task.budget, recovery: task.recovery,
-    explanations: [], quizLinks: []
+    explanations: [], quizLinks: [], completion: assessLearningCompletion(learning, task, store?.latestEvent(learning.accountId, task.id))
   };
   let current: ReturnType<typeof readLearningAgentScope>;
   try { current = readLearningAgentScope(learning, task.resourceId, task.scope); }
@@ -58,7 +60,9 @@ export function projectLearningAgentTask(learning: LearningRepository, task: Age
       wait: null, currentAction: null, approval: undefined,
       recovery: terminal ? undefined : { kind: "source_invalid", message: "授权来源已变化或不可用，请重新确认当前学习页中的范围。", allowedControls: ["adjust", "cancel"] },
       reviewSummary: terminal ? unavailableLearningAgentReviewSummary() : undefined,
-      endReason: terminal ? task.endReason : "授权来源已变化或不可用；旧解释不再作为证据，请调整本轮复习范围。",
+      endReason: terminal
+        ? scope.completionVersion === 1 ? "本轮已停止，已有记录保留；当前来源或授权已变化，原目标判断不再有效。" : task.endReason
+        : "授权来源已变化或不可用；旧解释不再作为证据，请调整本轮复习范围。",
       actions: base.actions.map(a => ({ ...a, summary: "历史动作；来源已变化。", reason: undefined })) };
   }
   // Finished tasks have no actionable proposal. Later edits to a former target
@@ -91,9 +95,50 @@ export function projectLearningAgentTask(learning: LearningRepository, task: Age
       catch { /* Deleted quiz links are not restored from Agent receipts. */ }
     }
   }
+  // Re-associated, explicitly authorized history is navigable without making it
+  // a current-task artifact or granting this task authority to alter its score.
+  for (const evidence of base.completion?.objectives.flatMap(objective => objective.evidence) ?? []) {
+    if (!evidence.submitted || evidence.quality === "invalid" || base.quizLinks!.some(link => link.quizId === evidence.ref.quizId)) continue;
+    try {
+      const attempt = quizzes.attempt(task.resourceId, evidence.ref.attemptId);
+      quizzes.assertSources(task.resourceId, evidence.ref.quizId);
+      if (attempt.quizId !== evidence.ref.quizId || !attempt.completed) continue;
+      base.quizLinks!.push({ quizId: attempt.quizId, attemptId: attempt.id, completed: true,
+        disputed: evidence.quality === "disputed", historical: true });
+    } catch { /* A current permission/source check never restores an old link. */ }
+  }
   const disputedAttempts = store ? (store.database.prepare("SELECT ref_id FROM agent_events WHERE task_id=? AND version=? AND event_kind='quiz_dispute'").all(task.id, task.version ?? 1) as Array<{ ref_id: string }>).map(row => row.ref_id) : [];
   base.reviewSummary = projectLearningAgentReviewSummary(learning, task, disputedAttempts);
   return base;
+}
+
+/** An explicit user response to a saved explanation at the current feedback
+ * wait. A later wait can receive new feedback; an old receipt stays immutable. */
+export async function submitLearningExplanationFeedback(learning: LearningRepository, store: AgentStore, taskId: string,
+  input: { expectedVersion: number; eventId: string; explanationId: string; outcome: "resolved" | "needs_clarification"; message?: string }) {
+  let task = store.assertVersion(learning.accountId, taskId, input.expectedVersion);
+  const body = LearningExplanationFeedback.parse({ explanationId: input.explanationId, outcome: input.outcome,
+    ...(input.message === undefined ? {} : { message: input.message }) });
+  const message = JSON.stringify(body), byId = store.getEvent(learning.accountId, taskId, input.eventId);
+  if (byId && (byId.kind !== "explanation_feedback" || byId.message !== message)) throw new AgentFailure("conflict", "agent_explanation_feedback_conflict");
+  // A repeated successful click after the wait ended is a read-only receipt,
+  // including when the transport supplied another event ID for the same body.
+  if (!byId && (task.status !== "waiting" || task.wait?.kind !== "feedback")) {
+    const old = store.database.prepare("SELECT event_json FROM agent_events WHERE task_id=? AND version=? AND event_kind='explanation_feedback' AND consumed=1 AND json_extract(event_json,'$.message')=? ORDER BY rowid DESC LIMIT 1")
+      .get(task.id, input.expectedVersion, message) as { event_json: string } | undefined;
+    if (old) return { task, scheduled: false };
+  }
+  const event: AgentEvent = byId ?? { id: input.eventId, kind: "explanation_feedback", refId: task.wait?.refId ?? body.explanationId,
+    version: input.expectedVersion, message };
+  const previous = store.acceptedEvent(learning.accountId, taskId, event);
+  if (previous && previous.event.message !== event.message) throw new AgentFailure("conflict", "agent_explanation_feedback_conflict");
+  if (previous?.consumed) return { task, scheduled: false };
+  const runtime = openLearningAgentRuntime(learning, store);
+  try { task = await runtime.submitEvent(learning.accountId, taskId, event, { expectedVersion: input.expectedVersion, defer: true }); }
+  finally { runtime.close(); }
+  const receipt = store.acceptedEvent(learning.accountId, taskId, event);
+  if (!receipt) throw new AgentFailure("conflict", "agent_feedback_not_ready");
+  return { task, scheduled: !receipt.consumed };
 }
 
 /** A request only schedules work. Waiting uses SQLite, not an open HTTP request. */
@@ -113,7 +158,7 @@ export async function syncLearningAgentQuiz(learning: LearningRepository, store:
   const event: AgentEvent = { id: learningAgentOperationId(task.id + ":" + input.expectedVersion + ":" + input.attemptId, "quiz_submission"),
     kind: "quiz_submission", refId: input.attemptId, version: input.expectedVersion };
   const receipt = store.acceptedEvent(learning.accountId, taskId, event);
-  if (receipt?.consumed) return { task, scheduled: false };
+  if (receipt) return { task, scheduled: !receipt.consumed };
   if (task.status !== "waiting" || task.wait?.kind !== "quiz_submission" || task.wait.refId !== input.attemptId) return { task, scheduled: false };
   const quiz = new LearningQuizRepository(learning), attempt = quiz.attempt(task.resourceId, input.attemptId);
   const artifact = new LearningAgentRepository(learning).get(task.resourceId, task.id, attempt.quizId);

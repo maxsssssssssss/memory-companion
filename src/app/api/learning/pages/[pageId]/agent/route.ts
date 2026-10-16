@@ -1,14 +1,14 @@
 import { after } from "next/server";
 import { z } from "zod";
 import { LearningId } from "@/lib/domain/learning";
-import { LearningAgentSelection } from "@/lib/domain/learning-agent";
+import { LearningAgentSelection, type LearningAgentScope } from "@/lib/domain/learning-agent";
 import { agentModelConfig } from "@/lib/server/learning/agent-decision-config";
 import { AgentFailure } from "@/lib/server/agent/types";
 import { LearningError } from "@/lib/server/learning/repository";
 import { freezeLearningAgentScope } from "@/lib/server/learning/agent-scope";
 import { learningAgentGenerationConfig } from "@/lib/server/learning/agent-scenario";
 import { LearningAgentRepository } from "@/lib/server/learning/agent-repository";
-import { openLearningAgentStore, projectLearningAgentTask, advanceLearningAgent, learningAgentFailure, openLearningAgentRuntime, syncLearningAgentQuiz, disputeLearningAgentQuiz } from "@/lib/server/learning/agent-api-service";
+import { openLearningAgentStore, projectLearningAgentTask, advanceLearningAgent, learningAgentFailure, openLearningAgentRuntime, syncLearningAgentQuiz, disputeLearningAgentQuiz, submitLearningExplanationFeedback } from "@/lib/server/learning/agent-api-service";
 import { learningJson, learningJsonBody, withLearning } from "../../../route-utils";
 export const runtime = "nodejs";
 type Context = { params: Promise<{ pageId: string }> };
@@ -25,7 +25,9 @@ const Control = z.union([
   z.object({ ...identity, action: z.literal("recover"), expectedVersion: version, mode: z.enum(["inspect", "retry"]) }).strict(),
   z.object({ ...identity, action: z.literal("end"), expectedVersion: version }).strict(),
   z.object({ ...identity, action: z.literal("sync_quiz"), expectedVersion: version, attemptId: LearningId }).strict(),
-  z.object({ ...identity, action: z.literal("dispute_quiz"), expectedVersion: version, attemptId: LearningId, feedback: z.string().trim().min(1).max(2000) }).strict()
+  z.object({ ...identity, action: z.literal("dispute_quiz"), expectedVersion: version, attemptId: LearningId, feedback: z.string().trim().min(1).max(2000) }).strict(),
+  z.object({ ...identity, action: z.literal("explanation_feedback"), expectedVersion: version, explanationId: LearningId,
+    outcome: z.enum(["resolved", "needs_clarification"]), message: z.string().trim().min(1).max(1000).optional() }).strict()
 ]);
 export async function GET(request: Request, context: Context) {
   return withLearning(request, async learning => {
@@ -41,7 +43,7 @@ export async function POST(request: Request, context: Context) {
     const store = openLearningAgentStore(learning);
     try {
       agentModelConfig(); learningAgentGenerationConfig();
-      const scope = freezeLearningAgentScope(learning, pageId, value.scope);
+      const scope = { ...freezeLearningAgentScope(learning, pageId, value.scope), completionVersion: 1 as const };
       const task = store.createTask({ id: value.id, accountId: learning.accountId, resourceId: pageId, scenario: "learning.adaptive-review.v1", goal: value.goal, scope });
       const root = learning.accountDataRoot, accountId = learning.accountId;
       if (task.status === "ready") after(() => advanceLearningAgent(root, accountId, task.id).then(() => undefined));
@@ -67,12 +69,18 @@ export async function PATCH(request: Request, context: Context) {
         if (scheduled) after(() => advanceLearningAgent(root, accountId, task.id).then(() => undefined));
       } else if (value.action === "dispute_quiz") {
         task = await disputeLearningAgentQuiz(learning, store, task.id, value);
+      } else if (value.action === "explanation_feedback") {
+        ({ task, scheduled } = await submitLearningExplanationFeedback(learning, store, task.id, value));
+        if (scheduled) after(() => advanceLearningAgent(root, accountId, task.id).then(() => undefined));
       } else if (value.action === "feedback") {
-        const event = { id: value.eventId, kind: value.attemptId ? (value.feedback ? "quiz_dispute" : "quiz_submission") : "feedback", refId: value.attemptId, message: value.feedback,
+        const previous = store.getEvent(accountId, task.id, value.eventId);
+        const event = { id: value.eventId, kind: value.attemptId ? (value.feedback ? "quiz_dispute" : "quiz_submission") : "feedback",
+          refId: value.attemptId ?? (previous?.kind === "feedback" ? previous.refId : task.wait?.kind === "feedback" ? task.wait.refId : undefined), message: value.feedback,
           ...(value.expectedVersion === undefined ? {} : { version: expectedVersion }) };
         // Repeated accepted events are read-only receipts, including after the
         // task reached a different wait or ended. Never trigger another decision.
         const accepted = store.acceptedEvent(accountId, task.id, event);
+        if (accepted && accepted.event.message !== event.message) throw new AgentFailure("conflict", "agent_feedback_conflict");
         if (!accepted?.consumed) {
           if (task.status !== "waiting") throw new LearningError(409, "agent_feedback_not_ready");
           const runtime = openLearningAgentRuntime(learning, store);
@@ -88,7 +96,8 @@ export async function PATCH(request: Request, context: Context) {
         const runtime = openLearningAgentRuntime(learning, store);
         try {
           if (value.action === "adjust") {
-            const scope = freezeLearningAgentScope(learning, pageId, value.scope);
+            const scope = { ...freezeLearningAgentScope(learning, pageId, value.scope),
+              ...((task.scope as LearningAgentScope).completionVersion === 1 ? { completionVersion: 1 as const } : {}) };
             task = await runtime.adjust(accountId, task.id, { expectedVersion, goal: value.goal, scope, eventId: value.eventId });
             new LearningAgentRepository(learning).invalidateNotePreviews(pageId, task.id, task.version ?? 1);
           } else if (value.action === "approval") {

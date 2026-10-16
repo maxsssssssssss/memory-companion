@@ -11,6 +11,8 @@ export const StartLearningAgent = z.object({ id: LearningId, goal: z.string().tr
 export const AdjustLearningAgent = z.object({ expectedVersion: z.number().int().positive(), goal: z.string().trim().min(1).max(2000), selection: LearningAgentSelection }).strict();
 export type LearningAgentScope = {
   version: 1; pageId: string; selection: LearningAgentSelection; fingerprint: string;
+  /** Absent on V1 tasks: their history is never retroactively graded as a goal check. */
+  completionVersion?: 1;
   sources: Array<{ materialId: string; paragraphs: number[] }>;
 };
 export type LearningAgentExplanation = {

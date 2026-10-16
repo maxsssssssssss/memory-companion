@@ -9,6 +9,7 @@ import { learningAgentApi, learningAgentErrorMessage, type LearningAgentTaskView
 import type { QuizAttemptView } from "@/lib/domain/learning-quiz";
 import { LearningQuiz } from "./learning-quiz";
 import { LearningAgentAdjustmentForm } from "./learning-agent-adjustment";
+import { LearningAgentCompletion } from "./learning-agent-completion";
 import styles from "./learning.module.css";
 
 const statusLabels: Record<LearningAgentTaskView["status"], string> = {
@@ -20,6 +21,7 @@ const actionLabels: Record<string, string> = {
   "learning.create_quiz": "准备复习题组", "learning.read_answers": "读取已保存作答", "learning.explain": "生成本轮讲解",
   "learning.request_feedback": "等待用户反馈", "learning.finish": "结束本次任务",
   "learning.append_note": "追加个人笔记（需确认）",
+  "learning.establish_review_plan": "整理本轮目标", "learning.associate_evidence": "核对本轮表现",
 };
 const terminal = new Set(["cancelled", "ended", "budget_exhausted"]);
 const progressSignature = (task: LearningAgentTaskView) => JSON.stringify([task.version ?? 1, task.status, task.wait, task.approval?.status, task.actions.map(action => [action.id, action.status]), task.usage?.calls]);
@@ -36,7 +38,7 @@ function ReviewSummary({ summary, quizLinks, disabled, onReview, onSource }: {
     <p className={styles.agentSummaryHeadline}>{summary.headline}</p>
     {showStats && summary.stats.total > 0 ? <div className={styles.agentSummaryMeta}>
       <p>已记录 {summary.stats.groups} 组练习 · 已作答 {summary.stats.answered}/{summary.stats.total} 题</p>
-      <p>答对 {summary.stats.correct} 题（独立答对 {summary.stats.unassistedCorrect} 题） · 答错 {summary.stats.wrong} 题</p>
+      <p>答对 {summary.stats.correct} 题（其中 {summary.stats.unassistedCorrect} 题未使用提示或提前看答案） · 答错 {summary.stats.wrong} 题</p>
       {summary.stats.hinted || summary.stats.revealed || summary.stats.skipped || summary.stats.unanswered ? <p>使用提示 {summary.stats.hinted} 题 · 看答案 {summary.stats.revealed} 题 · 跳过 {summary.stats.skipped} 题 · 未完成 {summary.stats.unanswered} 题</p> : null}
     </div> : null}
     {summary.topics.length ? <section className={styles.agentSummaryTopics} aria-label="专项讲解">
@@ -169,6 +171,10 @@ export function LearningAgentPanel({ pageId, materials, selected, disabled, acti
   };
   const recover = (mode: "inspect" | "retry") => { if (task) void mutateTask({ id: task.id, action: "recover", eventId: crypto.randomUUID(), expectedVersion: task.version ?? 1, mode }); };
   const end = () => { if (task) void mutateTask({ id: task.id, action: "end", eventId: crypto.randomUUID(), expectedVersion: task.version ?? 1 }); };
+  const explanationFeedback = (explanationId: string, outcome: "resolved" | "needs_clarification") => {
+    if (task) void mutateTask({ id: task.id, action: "explanation_feedback", expectedVersion: task.version ?? 1,
+      eventId: crypto.randomUUID(), explanationId, outcome, ...(feedback.trim() ? { message: feedback.trim() } : {}) });
+  };
   const toggle = (ids: string[], id: string) => ids.includes(id) ? ids.filter(item => item !== id) : [...ids, id];
   const scopedNodes = chapters.flatMap(chapter => chapter.nodes.filter(node => scopeMode === "chapters" ? chapterIds.includes(chapter.id) : nodeIds.includes(node.id)));
   const scopeMaterials = materials.filter(material => scopeMode === "materials" ? selected.includes(material.id) : scopedNodes.some(node => node.sources.some(source => source.materialId === material.id)));
@@ -177,6 +183,10 @@ export function LearningAgentPanel({ pageId, materials, selected, disabled, acti
   const waitingQuiz = task?.wait?.kind === "quiz_submission";
   const attemptId = waitingQuiz ? task.wait?.refId : undefined;
   const approvalWaiting = task?.approval?.status === "pending" && task.approval.taskVersion === (task.version ?? 1);
+  const explanationToConfirm = task?.completion?.plan?.kind === "explanation"
+    && task.completion.taskVersion === (task.version ?? 1) && task.completion.outcome !== "stale"
+    && task.status === "waiting" && task.wait?.kind === "feedback"
+    ? task.explanations?.[task.explanations.length - 1] : undefined;
   const interactionLocked = busy || Boolean(pendingControl.current) || Boolean(task && pendingAdvance?.id === task.id);
   const scopeDescription = (value: LearningAgentTaskView["scope"]) => [
     ...value.materialIds.map(id => materials.find(item => item.id === id)?.title ?? "已不可用的材料"),
@@ -188,7 +198,8 @@ export function LearningAgentPanel({ pageId, materials, selected, disabled, acti
     ? quizLinks.find(link => link.quizId === inlineQuiz.quizId) : undefined;
   useEffect(() => {
     if (!task || shownQuiz || !quizLinks.length) return;
-    const preferred = quizLinks.find(link => link.attemptId === task.wait?.refId) ?? quizLinks[quizLinks.length - 1];
+    const preferred = quizLinks.find(link => link.attemptId === task.wait?.refId)
+      ?? [...quizLinks].reverse().find(link => !link.historical) ?? quizLinks[quizLinks.length - 1];
     setInlineQuiz({ taskId: task.id, version: task.version ?? 1, quizId: preferred.quizId });
   }, [task, shownQuiz, quizLinks]);
   const savedAttempt = useCallback((attempt: QuizAttemptView) => {
@@ -229,7 +240,7 @@ export function LearningAgentPanel({ pageId, materials, selected, disabled, acti
   const quizControls = task && quizLinks.length > 1 ? <div className={styles.row}>{quizLinks.map((link, index) => <button
     type="button" key={link.quizId} disabled={Boolean(editing)} aria-pressed={shownQuiz?.quizId === link.quizId}
     className={waitingQuiz && link.attemptId === attemptId && shownQuiz?.quizId !== link.quizId ? styles.primary : undefined}
-    onClick={() => { setInlineQuiz({ taskId: task.id, version: task.version ?? 1, quizId: link.quizId }); setQuizFeedback(""); }}>查看题组 {index + 1}</button>)}</div> : null;
+    onClick={() => { setInlineQuiz({ taskId: task.id, version: task.version ?? 1, quizId: link.quizId }); setQuizFeedback(""); }}>{link.historical ? "查看历史作答" : "查看题组"} {index + 1}</button>)}</div> : null;
   return <section className={`${styles.section} ${styles.agentSection}`} aria-label="复习向导">
     <header className={`${styles.sectionHeader} ${styles.agentHeader}`}>
       <div><h2>复习向导</h2><p className={styles.muted}>围绕你的目标，结合练习与反馈，一起理清知识。</p></div>
@@ -273,6 +284,8 @@ export function LearningAgentPanel({ pageId, materials, selected, disabled, acti
           <span>材料外补充：{task.scope.includeSupplements ? "已纳入" : "未纳入"}</span>
         </div>
       </div>
+      {task.completion ? <LearningAgentCompletion completion={task.completion} taskVersion={task.version ?? 1} ended={terminal.has(task.status)}
+        quizLinks={quizLinks} materials={materials} disabled={Boolean(editing)} onReview={ref => reviewQuestion({ quizId: ref.quizId, attemptId: ref.attemptId, index: ref.questionIndex })} onSource={onSource} /> : null}
       {task.reviewSummary ? <ReviewSummary summary={task.reviewSummary} quizLinks={quizLinks} disabled={Boolean(editing)} onReview={reviewQuestion} onSource={onSource} /> : null}
       {pendingAdvance?.id === task.id ? <p role="status" className={styles.agentNotice}>反馈已受理，正在读取任务进度…</p> : null}
       {task.status === "budget_exhausted" ? <p className={styles.agentNotice}>{endReason && endReason !== "本任务预算耗尽，已停止；等待用户的时间不计入计算预算。"
@@ -301,9 +314,10 @@ export function LearningAgentPanel({ pageId, materials, selected, disabled, acti
           <button type="button" disabled={interactionLocked || Boolean(editing) || task.status !== "waiting"} onClick={() => approvalDecision("reject")}>拒绝这项笔记提议</button></div>
         <p className={styles.muted}>只会保存你确认的这份内容。关闭页面不会保存；调整范围或来源变化后，需要重新确认。</p>
       </section> : null}
-      {shownQuiz ? <section ref={quizSection} tabIndex={-1} className={styles.agentQuizArchive} aria-label="本轮练习">
-        <h4>本轮练习</h4>{quizControls}
-        <p className={styles.muted}>{terminal.has(task.status) ? "本轮已结束。题组、作答与解析保留在这里，查看记录不会重新启动复习。"
+      {shownQuiz ? <section ref={quizSection} tabIndex={-1} className={styles.agentQuizArchive} aria-label={shownQuiz.historical ? "相关历史作答" : "本轮练习"}>
+        <h4>{shownQuiz.historical ? "相关历史作答" : "本轮练习"}</h4>{quizControls}
+        <p className={styles.muted}>{shownQuiz.historical ? "这组历史作答用于本轮核对，原题、作答与成绩保持不变。查看记录不会重新启动复习。"
+          : terminal.has(task.status) ? "本轮已结束。题组、作答与解析保留在这里，查看记录不会重新启动复习。"
           : task.status === "paused" ? "本轮已暂停。作答仍会保存，继续复习后再读取结果。"
           : "整组作答保存后，复习向导会自动读取结果并继续。你可以留在这里查看解析。"}</p>
         <LearningQuiz key={task.id + ":" + (task.version ?? 1) + ":" + shownQuiz.quizId} pageId={pageId} materials={materials} selected={selected}
@@ -313,7 +327,7 @@ export function LearningAgentPanel({ pageId, materials, selected, disabled, acti
         {shownQuiz.completed && (pendingAdvance?.id === task.id || task.status === "running" || task.status === "ready")
           ? <p role="status">作答已保存，复习向导正在根据这次结果准备下一步。解析会继续保留。</p> : null}
         {shownQuiz.disputed ? <p className={styles.agentNotice}>这组题已标记为有疑问，不再用它的成绩判断薄弱点。已有作答保持原样。</p>
-          : shownQuiz.attemptId && task.status !== "cancelled" ? <details className={styles.agentDispute}><summary>这组题有疑问</summary><div className={styles.agentDisputeBody}>
+          : shownQuiz.attemptId && !shownQuiz.historical && task.status !== "cancelled" ? <details className={styles.agentDispute}><summary>这组题有疑问</summary><div className={styles.agentDisputeBody}>
             <label>说明题目疑问<textarea rows={2} maxLength={1000} value={quizFeedback} disabled={busy || Boolean(pendingControl.current) || Boolean(editing)} onChange={event => setQuizFeedback(event.target.value)} placeholder="说明有疑问的题目或依据，先停止用这组题判断薄弱点。" /></label>
             <button type="button" disabled={busy || !quizFeedback.trim() || Boolean(pendingControl.current) || Boolean(editing)} onClick={disputeQuiz}>提交疑问并暂停</button>
             <p className={styles.muted}>提交后暂停后续复习，并标记这组题不用于诊断。已有答案与成绩保持原样。</p>
@@ -328,7 +342,11 @@ export function LearningAgentPanel({ pageId, materials, selected, disabled, acti
         <p>{task.wait!.message}</p>
         {waitingQuiz && shownQuiz?.attemptId !== attemptId ? <p className={styles.muted}>下一组练习已准备好，可在本轮练习中切换查看。</p> : null}
       {task.status === "waiting" && !waitingQuiz && !approvalWaiting && task.wait?.kind !== "confirmation" && !editing ? <div className={styles.agentFeedback}><label>你的反馈<textarea rows={3} maxLength={1000} value={feedback} disabled={busy || Boolean(pendingControl.current) || pendingAdvance?.id === task.id} onChange={event => setFeedback(event.target.value)} placeholder="例如：这段讲解有帮助，我想练习一下；或说明仍不明白的地方。" /></label>
-        <button type="button" className={styles.primary} disabled={busy || !feedback.trim() || Boolean(pendingControl.current) || pendingAdvance?.id === task.id} onClick={() => void control("feedback")}>提交反馈并继续</button></div> : null}
+        {explanationToConfirm ? <><p className={styles.muted}>针对最近一次讲解，请明确告诉我们疑问是否已解决。只记录这次反馈，不把它当作学习检查通过。</p>
+          <div className={styles.row}><button type="button" className={styles.primary} disabled={interactionLocked} onClick={() => explanationFeedback(explanationToConfirm.id, "resolved")}>疑问已解决</button>
+          <button type="button" disabled={interactionLocked} onClick={() => explanationFeedback(explanationToConfirm.id, "needs_clarification")}>仍需说明</button>
+          <button type="button" disabled={interactionLocked || !feedback.trim()} onClick={() => void control("feedback")}>提交其他反馈</button></div></>
+          : <button type="button" className={styles.primary} disabled={busy || !feedback.trim() || Boolean(pendingControl.current) || pendingAdvance?.id === task.id} onClick={() => void control("feedback")}>提交反馈并继续</button>}</div> : null}
 
       </section> : null}
       {!terminal.has(task.status) ? <div className={styles.agentTaskControls}>

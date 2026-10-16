@@ -399,6 +399,10 @@ describe("versioned Learning Agent controls with offline decisions and real busi
     // Only decisions/generation are fixtures. The bad address is the same
     // relationship as the Windows reproduction: material ID used as both IDs.
     const initialDecision = vi.fn<AgentDecisionProvider>(async (input, ctx) => ctx.call<AgentDecision>({ kind: "offline_decision_fixture", inputChars: 100, maxOutputTokens: 100 }, async () => {
+      if (!input.task.actions.some(action => action.tool === "learning.establish_review_plan" && action.status === "succeeded")) {
+        return { value: { tool: "learning.establish_review_plan", args: { kind: "explanation", objectives: [{ id: "condition", label: "解释规则适用前提",
+          sources: [{ materialId, paragraph: 1 }], requirements: [] }] } }, usage: { inputTokens: 10, outputTokens: 5 } };
+      }
       const explanation = input.task.actions.find(action => action.tool === "learning.explain")?.resultRef;
       const failed = input.results.find(result => result.tool === "learning.append_note" && result.status === "failed");
       if (failed) {
@@ -408,18 +412,19 @@ describe("versioned Learning Agent controls with offline decisions and real busi
       }
       return { value: explanation
         ? { tool: "learning.append_note", args: { explanationId: explanation.id, chapterId: materialId, nodeId: materialId } }
-        : { tool: "learning.explain", args: { question: "[合成] 为什么要先核对前提？", sources: [{ materialId, paragraph: 1 }] } },
+        : { tool: "learning.explain", args: { question: "[合成] 为什么要先核对前提？", sources: [{ materialId, paragraph: 1 }],
+          purpose: { objectiveIds: ["condition"], role: "concept", method: "explain", purpose: "澄清规则的适用前提", priorEvidenceRefs: [] } } },
         usage: { inputTokens: 10, outputTokens: 5 } };
     }));
     const waiting = await runOffline(body.id, initialDecision, generate);
     expect(waiting.status).toBe("waiting"); expect(waiting.wait?.kind).toBe("feedback");
     expect(waiting.recovery).toBeUndefined(); expect(waiting.approval).toBeUndefined();
-    expect(waiting.usage.calls).toBe(4); expect(initialDecision).toHaveBeenCalledTimes(3); expect(generate).toHaveBeenCalledOnce();
+    expect(waiting.usage.calls).toBe(5); expect(initialDecision).toHaveBeenCalledTimes(4); expect(generate).toHaveBeenCalledOnce();
     const failedAction = waiting.actions.find(action => action.tool === "learning.append_note")!;
     expect(failedAction).toMatchObject({ status: "failed", resultRef: undefined });
     stores((learning, store) => {
       expect(store.getTask("owner", body.id).scope).toEqual(originalScope);
-      expect(new LearningAgentRepository(learning).list(pageId, body.id).map(artifact => artifact.kind)).toEqual(["explanation"]);
+      expect(new LearningAgentRepository(learning).list(pageId, body.id).map(artifact => artifact.kind)).toEqual(["review_plan", "explanation", "check_purpose"]);
       expect(new LearningFrameworkRepository(learning).view(pageId).chapters[0].nodes[0].note).toBe("");
     });
     const projection = (await (await GET(request(), context())).json()).tasks[0];
@@ -445,7 +450,7 @@ describe("versioned Learning Agent controls with offline decisions and real busi
     }));
     const proposed = await runOffline(body.id, recoveredDecision);
     expect(proposed.status).toBe("waiting"); expect(proposed.approval?.status).toBe("pending");
-    expect(proposed.version).toBe(1); expect(proposed.scope).toEqual(originalScope); expect(proposed.usage.calls).toBe(6);
+    expect(proposed.version).toBe(1); expect(proposed.scope).toEqual(originalScope); expect(proposed.usage.calls).toBe(7);
     expect(recoveredDecision).toHaveBeenCalledTimes(2); expect(generate).toHaveBeenCalledOnce();
     expect(proposed.actions.filter(action => action.tool === "learning.append_note").map(action => action.status)).toEqual(["failed", "prepared"]);
     const preview = (await (await GET(request(), context())).json()).tasks[0].approval;
@@ -454,7 +459,7 @@ describe("versioned Learning Agent controls with offline decisions and real busi
       fingerprint: proposed.approval!.fingerprint, decision: "approve", eventId: randomUUID() };
     expect((await PATCH(request("PATCH", approve), context())).status).toBe(202);
     const ended = await runOffline(body.id, noDecision);
-    expect(ended.status).toBe("ended"); expect(ended.usage.calls).toBe(6); expect(noDecision).not.toHaveBeenCalled();
+    expect(ended.status).toBe("ended"); expect(ended.usage.calls).toBe(7); expect(noDecision).not.toHaveBeenCalled();
     const note = stores(learning => new LearningFrameworkRepository(learning).view(pageId).chapters[0].nodes[0].note);
     expect(note).toBe(preview.content);
     const schedules = deferred.length;
