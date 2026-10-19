@@ -42,15 +42,15 @@ export const LearningCheckPurpose = z.object({
   role: LearningCheckRole,
   method: z.enum(["explain", "worked_example", "contrast", "retrieval", "application", "boundary", "clarify", "evidence_review"]),
   purpose: short,
-  priorEvidenceRefs: z.array(LearningEvidenceRef).max(20).default([]),
+  priorEvidenceRefs: z.array(LearningEvidenceRef).max(20).default([]).describe("复查已有表现时引用当前版本已读回并关联的具体作答；followup不是仅改role标签，必须说明与前序表现或当前疑问的关系。"),
   methodChange: z.object({ previousResultId: LearningId, difference: short, expectedObservation: short }).strict().optional()
 }).strict();
 export type LearningCheckPurpose = z.infer<typeof LearningCheckPurpose>;
 export const LearningEvidenceProposal = z.object({
   ref: LearningEvidenceRef, objectiveId, role: LearningCheckRole, rationale: short,
-  relevance: z.enum(["supported", "uncertain"]),
-  relation: z.enum(["initial", "repeat", "followup", "new_context", "unknown"]),
-  priorEvidenceRefs: z.array(LearningEvidenceRef).max(20).default([]),
+  relevance: z.enum(["supported", "uncertain"]).describe("按该role的具体requirement核对题干及全部选项实际要求的作答。主题相近/来源相交不等于覆盖；成员归属选择不支持计算元素个数。不能确认则uncertain。"),
+  relation: z.enum(["initial", "repeat", "followup", "new_context", "unknown"]).describe("initial不满足followup要求。后续检查须根据实际前序作答/解释声明followup或new_context及依据；不同题组ID或数值不自动证明迁移。"),
+  priorEvidenceRefs: z.array(LearningEvidenceRef).max(20).default([]).describe("复查已有表现时引用当前版本已读回并关联的具体作答；followup不是仅改role标签，必须说明与前序表现或当前疑问的关系。"),
   contentStatus: z.enum(["no_known_issue", "uncertain", "known_issue"])
 }).strict();
 export type LearningEvidenceProposal = z.infer<typeof LearningEvidenceProposal>;
@@ -68,7 +68,7 @@ export type LearningCompletionEvidence = {
   historical: boolean; quality: "pending" | "tentative" | "disputed" | "known_issue" | "uncertain" | "historical_unknown" | "invalid";
   eligible: boolean; independentInApp: boolean; reasons: string[]; rationale: string;
   relation: LearningEvidenceProposal["relation"]; semanticProvenance: "model_proposal";
-  diagnosticCode?: "record_unavailable" | "history_forbidden" | "source_changed" | "source_forbidden" | "objective_missing" | "plan_source_mismatch";
+  diagnosticCode?: "record_unavailable" | "history_forbidden" | "source_changed" | "source_forbidden" | "objective_missing" | "plan_source_mismatch" | "requirement_mismatch";
   priorEvidenceRefs: LearningEvidenceRef[]; sources: Array<z.infer<typeof LearningCompletionSource> & { parsed?: import("./learning-pdf-study").ParsedTextBinding }>;
 };
 export type LearningObjectiveAssessment = {
@@ -76,6 +76,7 @@ export type LearningObjectiveAssessment = {
   requirements: Array<{ role: z.infer<typeof LearningCheckRole>; description: string; supported: boolean }>;
   evidence: LearningCompletionEvidence[]; gaps: string[]; unresolvedErrors: LearningEvidenceRef[];
   explanationResolved: boolean;
+  explanationState?: "missing" | "available" | "needs_review" | "resolved";
 };
 export type LearningCompletionAssessment = {
   schemaVersion: 1; taskVersion: number; planId: string | null; sourceFingerprint: string | null;
@@ -84,6 +85,8 @@ export type LearningCompletionAssessment = {
   support: "sufficient" | "partial" | "insufficient" | "not_assessed";
   objectives: LearningObjectiveAssessment[]; canAutoFinish: boolean; pending: string[];
   technicalBlocker?: { kind: "plan_source_mismatch"; objectiveIds: string[]; explanationIds?: string[]; message: string };
+  contentIssues?: Array<{ explanationId: string; objectiveIds: string[]; codes: string[]; message: string; active?: boolean }>;
+  historyReview?: { pending: Array<{ ref: LearningEvidenceRef; objectiveIds: string[]; read: boolean; unassociatedObjectiveIds: string[] }>; blocked: boolean; notice: string };
   headline: string; stopReason: string | null; limitations: string[]; longTermMastery: "unverified";
 };
 

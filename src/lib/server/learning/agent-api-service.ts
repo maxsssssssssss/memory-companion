@@ -87,7 +87,7 @@ export function projectLearningAgentTask(learning: LearningRepository, task: Age
     if (artifact.state !== "completed" || artifact.task_version !== (task.version ?? 1)) continue;
     if (artifact.kind === "explanation") {
       const answer = readLearningAgentExplanation(learning, task, artifact.id);
-      base.explanations!.push({ id: answer.id, text: [answer.materialAnswer,
+      base.explanations!.push({ id: answer.id, contentIssue: answer.contentIssue, text: [answer.materialAnswer,
         ...answer.supplements.map(s => `补充解释（材料外）：${s.text}`)].filter(Boolean).join("\n\n"), sources: answer.items.map(ref => ({ ...ref,
           parsed: current.materials.find(m => m.materialId === ref.materialId)?.paragraphs.find(p => p.number === ref.paragraph)?.parsed })) });
     } else if (artifact.kind === "quiz") {

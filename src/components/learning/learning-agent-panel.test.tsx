@@ -714,3 +714,83 @@ it("selects the most recent current task quiz when no quiz is waiting, before a 
   expect(screen.getByRole("button", { name: "查看题组 2" })).toHaveAttribute("aria-pressed", "true");
   expect(learningAgentApi.control).not.toHaveBeenCalled();
 });
+
+it("distinguishes missing current explanation from confirmation while allowing necessary information feedback", async () => {
+  const current = explanationTask();
+  current.explanations = [];
+  current.completion = { ...explanationCompletion, objectives: explanationCompletion.objectives.map(objective => ({ ...objective, explanationState: "missing" })) };
+  current.wait = { kind: "feedback", message: "请说明最想先澄清的区别。" };
+  vi.mocked(learningAgentApi.list).mockResolvedValue({ tasks: [current] });
+  vi.mocked(learningAgentApi.control).mockResolvedValue({ task: current });
+  mount(); await screen.findByText("本轮还没有相关讲解。你可以先补充困惑或需要核对的材料。");
+  expect(screen.queryByRole("button", { name: "疑问已解决" })).not.toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "仍需说明" })).not.toBeInTheDocument();
+  fireEvent.change(screen.getByLabelText("你的反馈"), { target: { value: "先解释为什么要缩小样本空间。" } });
+  fireEvent.click(screen.getByRole("button", { name: "提交反馈并继续" }));
+  await waitFor(() => expect(learningAgentApi.control).toHaveBeenCalledExactlyOnceWith("page-one", {
+    id: current.id, action: "feedback", eventId: expect.any(String), expectedVersion: 1, feedback: "先解释为什么要缩小样本空间。",
+  }));
+});
+
+it("retains a known contradictory explanation and source links, blocks resolution, and permits clarification", async () => {
+  const current = explanationTask();
+  const text = "交集为 {3}。元素 3 同时属于两个集合，所以不满足交集的双条件。";
+  current.explanations = [{ ...current.explanations![0], text, sources: [{ materialId: "material-one", paragraph: 1 }], contentIssue: { status: "known_issue", issues: [{ code: "intersection_membership_contradiction", start: 8, end: text.length }] } }];
+  current.completion = { ...explanationCompletion,
+    objectives: explanationCompletion.objectives.map(objective => ({ ...objective, explanationState: "needs_review" })),
+    contentIssues: [{ explanationId: "explanation-one", objectiveIds: ["conditional"], codes: ["intersection_membership_contradiction"], message: "这段讲解存在内容矛盾。" }],
+  };
+  vi.mocked(learningAgentApi.list).mockResolvedValue({ tasks: [current] });
+  vi.mocked(learningAgentApi.control).mockResolvedValue({ task: current });
+  mount(); await screen.findByRole("alert");
+  expect(screen.getByText(text)).toBeVisible();
+  expect(screen.queryByRole("button", { name: "疑问已解决" })).not.toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "提交其他反馈" })).toBeDisabled();
+  fireEvent.click(screen.getByRole("button", { name: "查看引用原文 1" }));
+  expect(onSource).toHaveBeenCalledWith("material-one", 1, undefined);
+  fireEvent.change(screen.getByLabelText("你的反馈"), { target: { value: "这里的结论与前文矛盾，请先重新核对。" } });
+  fireEvent.click(screen.getByRole("button", { name: "仍需说明" }));
+  await waitFor(() => expect(learningAgentApi.control).toHaveBeenCalledExactlyOnceWith("page-one", {
+    id: current.id, action: "explanation_feedback", eventId: expect.any(String), expectedVersion: 1,
+    explanationId: "explanation-one", outcome: "needs_clarification", message: "这里的结论与前文矛盾，请先重新核对。",
+  }));
+});
+
+it("does not block feedback on an available explanation merely because another objective still lacks one", async () => {
+  const current = explanationTask();
+  current.completion = { ...explanationCompletion,
+    plan: { ...explanationCompletion.plan!, objectives: [...explanationCompletion.plan!.objectives,
+      { id: "other", label: "另一项尚待说明的疑问", requirements: [], sources: [{ materialId: "material-one", paragraph: 1 }] }] },
+    objectives: [
+      { ...explanationCompletion.objectives[0], explanationState: "available" },
+      { ...explanationCompletion.objectives[0], id: "other", label: "另一项尚待说明的疑问", explanationState: "missing" },
+    ],
+  };
+  vi.mocked(learningAgentApi.list).mockResolvedValue({ tasks: [current] });
+  vi.mocked(learningAgentApi.control).mockResolvedValue({ task: current });
+  mount(); fireEvent.click(await screen.findByRole("button", { name: "疑问已解决" }));
+  await waitFor(() => expect(learningAgentApi.control).toHaveBeenCalledExactlyOnceWith("page-one", {
+    id: current.id, action: "explanation_feedback", eventId: expect.any(String), expectedVersion: 1,
+    explanationId: "explanation-one", outcome: "resolved",
+  }));
+  expect(screen.queryByText("本轮检查通过")).not.toBeInTheDocument();
+});
+
+it("keeps an older content warning visible without blocking explicit feedback on the newer valid explanation", async () => {
+  const current = explanationTask();
+  current.explanations = [{ id: "old-bad", text: "[离线历史反例] 元素3同时属于两个集合，所以不满足交集的双条件。",
+    contentIssue: { status: "known_issue", issues: [{ code: "intersection_membership_contradiction", start: 9, end: 36 }] } }, ...current.explanations!];
+  current.completion = { ...explanationCompletion,
+    objectives: explanationCompletion.objectives.map(objective => ({ ...objective, explanationState: "available" })),
+    contentIssues: [{ explanationId: "old-bad", objectiveIds: ["conditional"], codes: ["intersection_membership_contradiction"], message: "旧讲解保留供核对。", active: false }],
+  };
+  vi.mocked(learningAgentApi.list).mockResolvedValue({ tasks: [current] });
+  vi.mocked(learningAgentApi.control).mockResolvedValue({ task: current });
+  mount(); await screen.findByRole("alert");
+  expect(screen.getByText(current.explanations[0].text)).toBeVisible();
+  fireEvent.click(screen.getByRole("button", { name: "疑问已解决" }));
+  await waitFor(() => expect(learningAgentApi.control).toHaveBeenCalledExactlyOnceWith("page-one", {
+    id: current.id, action: "explanation_feedback", eventId: expect.any(String), expectedVersion: 1,
+    explanationId: "explanation-one", outcome: "resolved",
+  }));
+});

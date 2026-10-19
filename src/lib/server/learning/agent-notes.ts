@@ -8,11 +8,29 @@ import { LearningFrameworkRepository, frameworkHash } from "./framework-reposito
 import { LearningStudyRepository } from "./study-repository";
 import { LearningAgentRepository, learningAgentOperationId } from "./agent-repository";
 import { freezeLearningAgentScope, readLearningAgentScope } from "./agent-scope";
+import { inspectLearningExplanationContent } from "./agent-explanation-content";
 
 export const AppendLearningAgentNote = z.object({ explanationId: LearningId, chapterId: LearningId, nodeId: LearningId }).strict();
 type TaskIdentity = Pick<AgentTask, "id" | "accountId" | "resourceId" | "scope"> & { version?: number };
 type NoteBody = { preview: LearningAgentNotePreview; written?: { nodeId: string; chapterId: string; revision: number; contentHash: string; noteHash: string; sourceFingerprint: string } };
 const taskVersion = (task: TaskIdentity) => task.version ?? 1;
+
+function noteExplanation(learning: LearningRepository, task: TaskIdentity, explanationId: string, scope: ReturnType<typeof readLearningAgentScope>, previewContent?: string) {
+  const row = new LearningAgentRepository(learning).get(task.resourceId, task.id, explanationId);
+  if (!row || row.kind !== "explanation" || row.state !== "completed" || row.task_version !== taskVersion(task)
+    || row.binding_hash !== scope.fingerprint || !row.body_json) throw new AgentFailure("forbidden", "agent_explanation_forbidden");
+  const answer = JSON.parse(row.body_json) as LearningAgentExplanation;
+  const originals = answer.items.map(ref => {
+    const paragraph = scope.materials.find(material => material.materialId === ref.materialId)?.paragraphs.find(item => item.number === ref.paragraph);
+    if (!paragraph) throw new AgentFailure("source_changed", "agent_note_source_changed");
+    return { ...ref, text: paragraph.text };
+  });
+  if ([answer.materialAnswer, previewContent].some(text => inspectLearningExplanationContent(text, originals).status === "known_issue")) {
+    throw new AgentFailure("known_failure", "agent_note_explanation_content_issue", undefined,
+      "该解释存在已识别的内容矛盾，不能追加为个人笔记。原解释及已保存的笔记保留；请先结合原文澄清，不自动重新生成或改写内容。");
+  }
+  return answer;
+}
 
 function currentTarget(learning: LearningRepository, task: TaskIdentity, chapterId: string, nodeId: string, existingPreview = false) {
   if (task.accountId !== learning.accountId) throw new AgentFailure("forbidden", "agent_account_forbidden");
@@ -43,6 +61,10 @@ export function readLearningAgentNotePreview(learning: LearningRepository, task:
   if (!body.written && (current.chapter.revision !== preview.targetRevision || frameworkHash(current.node.note) !== preview.noteHash)) throw new AgentFailure("source_changed", "agent_note_preview_changed");
   if (preview.taskVersion !== taskVersion(task) || !preview.sources.length
     || preview.sources.some(ref => !current.node.sources.some(source => source.materialId === ref.materialId && source.paragraph === ref.paragraph))) throw new AgentFailure("source_changed", "agent_note_target_changed");
+  // Recheck pending pre-upgrade previews against the saved explanation and
+  // currently authorized original text. A completed append is a historical fact
+  // and must not be rewritten or mistaken for an unperformed operation.
+  if (!body.written) noteExplanation(learning, task, preview.explanationId, current.scope, preview.content);
   return preview;
 }
 
@@ -50,9 +72,7 @@ export function createLearningAgentNoteTool(learning: LearningRepository): Agent
   const artifacts = new LearningAgentRepository(learning);
   function buildPreview(args: z.infer<typeof AppendLearningAgentNote>, ctx: AgentContext) {
     const target = currentTarget(learning, ctx.task, args.chapterId, args.nodeId);
-    const explanation = artifacts.get(ctx.task.resourceId, ctx.task.id, args.explanationId);
-    if (!explanation || explanation.kind !== "explanation" || explanation.state !== "completed" || explanation.task_version !== taskVersion(ctx.task)) throw new AgentFailure("forbidden", "agent_explanation_forbidden");
-    const answer = JSON.parse(explanation.body_json!) as LearningAgentExplanation;
+    const answer = noteExplanation(learning, ctx.task, args.explanationId, target.scope);
     if (!answer.items.length || answer.items.some(ref => !target.node.sources.some(source => source.materialId === ref.materialId && source.paragraph === ref.paragraph))) throw new AgentFailure("known_failure", "agent_note_target_unreliable", undefined,
       "agent_note_target_unreliable：目标知识点未覆盖解释的全部来源，尚未创建提案或写入笔记。请从 learning.read_navigation 重新选择覆盖解释来源的授权知识点；无可靠目标时请等待用户选择或取消。");
     if (answer.supplements.length && !target.scope.scope.selection.includeSupplements) throw new AgentFailure("forbidden", "agent_supplements_not_authorized");

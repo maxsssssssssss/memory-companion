@@ -6,6 +6,7 @@ import type { QuizConfig } from "@/lib/domain/learning-quiz";
 import { GeneratedNodeAnswer } from "@/lib/domain/learning-study";
 import { AgentFailure, type AgentContext, type AgentScenario, type AgentTool, type AgentToolResult } from "@/lib/server/agent/types";
 import type { StructuredJsonDiagnostics } from "@/lib/server/openai/structured-json";
+import { inspectLearningExplanationContent } from "./agent-explanation-content";
 import { LearningError, type LearningRepository } from "./repository";
 import { LearningQuizRepository } from "./quiz-repository";
 import { generateLearningQuiz } from "./quiz-service";
@@ -25,7 +26,9 @@ const SourceArguments = z.object({ materialId: LearningId, paragraph: z.number()
 const QuizArguments = z.object({ count: z.number().int().min(1).max(5), difficulty: z.enum(["basic", "standard", "challenging"]), nodeId: LearningId.nullable().optional(), purpose: LearningCheckPurpose.optional() }).strict();
 const ExplainArguments = z.object({ question: z.string().trim().min(1).max(2000), sources: z.array(SourceArguments).min(1).max(20), purpose: LearningCheckPurpose.optional() }).strict();
 const AnswerArguments = z.object({ attemptId: LearningId }).strict();
-const FeedbackArguments = z.object({ question: z.string().trim().min(1).max(800) }).strict();
+const FeedbackArguments = z.object({ question: z.string().trim().min(1).max(800),
+  intent: z.enum(["clarification", "source_review", "explanation_resolution"]).optional().describe("澄清信息/核对来源不要求已有讲解；只有当前版本存在相关且无已知内容问题的解释时才能询问是否讲清。"),
+  explanationId: LearningId.optional().describe("intent=explanation_resolution时引用当前版本实际解释ID，不得引用旧版本或不存在的讲解。") }).strict();
 
 /** Explicit Agent generation settings, independent from manual study defaults. */
 export function learningAgentGenerationConfig(env: Readonly<Record<string, string | undefined>> = process.env) {
@@ -108,9 +111,7 @@ export function createLearningAgentScenario(learning: LearningRepository,
   };
   const readExplanation = (ctx: AgentContext, id: string): LearningAgentExplanation => {
     const row = artifact(ctx, id, "explanation");
-    const answer = JSON.parse(row.body_json!) as LearningAgentExplanation;
-    for (const ref of answer.items) source(ctx, ref);
-    return answer;
+    return readLearningAgentExplanation(learning, ctx.task, row.id);
   };
   const quizReceipt = (ctx: AgentContext, quizId: string): AgentToolResult => {
     const row = artifact(ctx, quizId, "quiz"), saved = JSON.parse(row.body_json!) as { attemptId: string; disputed?: boolean };
@@ -198,7 +199,11 @@ export function createLearningAgentScenario(learning: LearningRepository,
     "learning.associate_evidence": {
       description: "将实际保存的题目和作答关联到约定目标，说明相关性、检查角度、前序问题与已知内容疑问。必须先读取实际题目和作答；这里只保存语义建议，程序重读评分、来源、辅助及争议，模型不能填写通过状态。",
       parameters: LearningEvidenceProposal,
-      execute: async (args, ctx) => { await check(ctx); const proposal = recordLearningEvidenceProposal(learning, ctx, LearningEvidenceProposal.parse(args));
+      execute: async (args, ctx) => { await check(ctx);
+        const value = LearningEvidenceProposal.parse(args);
+        if (!ctx.task.actions.some(a => (a.version ?? 1) === version(ctx) && a.status === "succeeded" && a.tool === "learning.read_answers" && a.resultRef?.kind === "learning.answers" && a.resultRef.id === value.ref.attemptId))
+          throw new AgentFailure("known_failure", "agent_completion_answers_read_required", undefined, "请先用learning.read_answers读取这次已提交作答的完整题干、选项、辅助和评分，再逐项核对当前requirement并关联。没有读取收据不能猜测证据。");
+        const proposal = recordLearningEvidenceProposal(learning, ctx, LearningEvidenceProposal.parse(args));
         return { ref: { kind: "learning.completion_evidence", id: proposal.ref.attemptId }, summary: "已关联作答依据，当前支持与缺口由实际保存事实重新核对。" }; },
       readResult: async (_receipt, ctx) => { await check(ctx); return assessLearningCompletion(learning, ctx.task); }
     },
@@ -365,6 +370,10 @@ export function createLearningAgentScenario(learning: LearningRepository,
           if (guarded.purpose) {
             recordLearningExplanationContext(learning, ctx, id, guarded.purpose);
           }
+          const content = inspectLearningExplanationContent(answer.materialAnswer, originals.filter(s => answer.items.some(ref => ref.materialId === s.materialId && ref.paragraph === s.paragraph.number))
+            .map(s => ({ materialId: s.materialId, paragraph: s.paragraph.number, text: s.paragraph.text })));
+          if (content.status === "known_issue") return { ref: { kind: "learning.explanation", id }, summary: "讲解已保存，但发现明确内容矛盾，不能作为解决依据或追加笔记。",
+            wait: { kind: "feedback", refId: `feedback:${ctx.actionId}`, message: "这段讲解存在明确矛盾，原文本保留供核对，暂不能确认疑问解决。你可以指出需重新说明的部分，或结束本轮。" } };
           return { ref: { kind: "learning.explanation", id }, summary: "已保存本轮讲解；这不是个人笔记或学习效果结论。" };
         } catch (error) { const failure = safeFailure(error); artifacts.fail(ctx.task.resourceId, ctx.task.id, id, failure.code === "unknown"); throw failure; }
       },
@@ -387,7 +396,19 @@ export function createLearningAgentScenario(learning: LearningRepository,
     "learning.append_note": createLearningAgentNoteTool(learning),
     "learning.request_feedback": {
       description: "向用户请求必要信息、对解释的反馈或有疑问题目的说明，并持久等待。等待期间不调用模型。", parameters: FeedbackArguments,
-      execute: async (args, ctx) => { await check(ctx); const { question } = FeedbackArguments.parse(args); return { summary: "等待用户反馈。", wait: { kind: "feedback", message: question,
+      execute: async (args, ctx) => { await check(ctx); const { question, intent, explanationId } = FeedbackArguments.parse(args);
+        const completion = assessLearningCompletion(learning, ctx.task);
+        // Preserve legacy clarification calls; reject the bounded explicit
+        // resolution premise even when an old caller omitted the intent field.
+        const asksResolved = intent === "explanation_resolution" || /(?:是否|已经|现在|确认).{0,70}(?:讲清|讲明白|已解决|已经解决|疑问.{0,6}解决)/u.test(question);
+        if (asksResolved && completion.plan?.kind === "explanation") {
+          if (explanationId) {
+            try { validateLearningExplanationFeedback(learning, ctx.task, { explanationId, outcome: "resolved" }); }
+            catch { throw new AgentFailure("known_failure", "agent_explanation_confirmation_unavailable", undefined, "尚无可确认的当前相关讲解，或讲解存在已知问题；请先结合原文解释/核对，必要信息仍可用clarification或source_review询问。"); }
+          } else if (!completion.objectives.some(o => o.explanationState === "available"))
+            throw new AgentFailure("known_failure", "agent_explanation_confirmation_unavailable", undefined, "当前版本尚无可确认的相关讲解，不能询问已经讲清；可以先澄清必要信息、核对来源或生成讲解。");
+        }
+        return { summary: "等待用户反馈。", wait: { kind: "feedback", message: question,
         ...((ctx.task.scope as { completionVersion?: number })?.completionVersion === 1 ? { refId: `feedback:${ctx.actionId}` } : {}) } }; }
     }
   };
@@ -478,8 +499,15 @@ create_quiz和explain的purpose必须对应尚有意义的目标缺口和方法�
 /** Authenticated UI reads the same product-owned explanation; no model transcript. */
 export function readLearningAgentExplanation(learning: LearningRepository, task: { id: string; accountId: string; resourceId: string; scope: unknown; version?: number }, id: string) {
   if (task.accountId !== learning.accountId) throw new LearningError(403, "agent_account_forbidden");
-  readLearningAgentScope(learning, task.resourceId, task.scope);
+  const scope = readLearningAgentScope(learning, task.resourceId, task.scope);
   const row = new LearningAgentRepository(learning).get(task.resourceId, task.id, id);
   if (!row || row.task_version !== (task.version ?? 1) || row.kind !== "explanation" || row.state !== "completed") throw new LearningError(404, "agent_explanation_not_found");
-  return JSON.parse(row.body_json!) as LearningAgentExplanation;
+  if (row.binding_hash !== scope.fingerprint) throw new LearningError(409, "agent_source_changed");
+  const answer = JSON.parse(row.body_json!) as LearningAgentExplanation;
+  const originals = answer.items.map(ref => {
+    const paragraph = scope.materials.find(m => m.materialId === ref.materialId)?.paragraphs.find(p => p.number === ref.paragraph);
+    if (!paragraph) throw new LearningError(403, "agent_scope_forbidden");
+    return { ...ref, text: paragraph.text };
+  });
+  return { ...answer, contentIssue: inspectLearningExplanationContent(answer.materialAnswer, originals) };
 }

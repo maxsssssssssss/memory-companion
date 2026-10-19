@@ -189,6 +189,11 @@ export function LearningAgentPanel({ pageId, materials, selected, disabled, acti
     && task.completion.taskVersion === (task.version ?? 1) && task.completion.outcome !== "stale"
     && task.status === "waiting" && task.wait?.kind === "feedback"
     ? task.explanations?.[task.explanations.length - 1] : undefined;
+  const explanationHasKnownIssue = explanationToConfirm?.contentIssue?.status === "known_issue"
+    || Boolean(explanationToConfirm && task?.completion?.contentIssues?.some(issue => issue.explanationId === explanationToConfirm.id));
+  const explanationMissing = task?.completion?.plan?.kind === "explanation"
+    && task.completion.taskVersion === (task.version ?? 1) && task.completion.outcome !== "stale"
+    && !task.explanations?.length && task.completion.objectives.some(objective => objective.explanationState === "missing");
   const interactionLocked = busy || Boolean(pendingControl.current) || Boolean(task && pendingAdvance?.id === task.id);
   const scopeDescription = (value: LearningAgentTaskView["scope"]) => [
     ...value.materialIds.map(id => materials.find(item => item.id === id)?.title ?? "已不可用的材料"),
@@ -337,7 +342,10 @@ export function LearningAgentPanel({ pageId, materials, selected, disabled, acti
           </div></details> : null}
       </section> : null}
       {task.explanations?.length ? <p className={styles.muted}>本轮讲解根据本轮授权材料生成，随本轮保存，不会自动写入个人笔记；材料外补充会明确标注。</p> : null}
-      {task.explanations?.map((explanation, index) => <details key={explanation.id} className={styles.agentExplanation} open><summary>本轮讲解 {index + 1}</summary><p className={styles.original}>{explanation.text}</p>
+      {task.explanations?.map((explanation, index) => <details key={explanation.id} className={styles.agentExplanation} open><summary>本轮讲解 {index + 1}</summary>
+        {explanation.contentIssue?.status === "known_issue" || task.completion?.contentIssues?.some(issue => issue.explanationId === explanation.id)
+          ? <p className={styles.agentNotice} role="alert">这段讲解存在内容矛盾，暂不用于判断疑问是否已解决。请核对引用原文，或说明需要重新讲清的地方。</p> : null}
+        <p className={styles.original}>{explanation.text}</p>
         {explanation.sources?.length ? <div className={styles.sources}>{explanation.sources.map((source, i) => <button key={i} type="button" onClick={() => onSource(source.materialId, source.parsed?.physicalPage ?? source.paragraph, source.parsed)}>查看引用原文 {i + 1}</button>)}</div> : null}</details>)}
 
       {showNextStep ? <section className={styles.agentNextStep} aria-label="接下来">
@@ -346,8 +354,9 @@ export function LearningAgentPanel({ pageId, materials, selected, disabled, acti
         {sourceAssociationBlocked ? <button type="button" disabled={interactionLocked} onClick={end}>结束本轮复习</button> : null}
         {!sourceAssociationBlocked && waitingQuiz && shownQuiz?.attemptId !== attemptId ? <p className={styles.muted}>下一组练习已准备好，可在本轮练习中切换查看。</p> : null}
       {task.status === "waiting" && !sourceAssociationBlocked && !waitingQuiz && !approvalWaiting && task.wait?.kind !== "confirmation" && !editing ? <div className={styles.agentFeedback}><label>你的反馈<textarea rows={3} maxLength={1000} value={feedback} disabled={busy || Boolean(pendingControl.current) || pendingAdvance?.id === task.id} onChange={event => setFeedback(event.target.value)} placeholder="例如：这段讲解有帮助，我想练习一下；或说明仍不明白的地方。" /></label>
-        {explanationToConfirm ? <><p className={styles.muted}>针对最近一次讲解，请明确告诉我们疑问是否已解决。只记录这次反馈，不把它当作学习检查通过。</p>
-          <div className={styles.row}><button type="button" className={styles.primary} disabled={interactionLocked} onClick={() => explanationFeedback(explanationToConfirm.id, "resolved")}>疑问已解决</button>
+        {explanationMissing && !explanationToConfirm ? <p className={styles.muted}>本轮还没有相关讲解。你可以先补充困惑或需要核对的材料。</p> : null}
+        {explanationToConfirm ? <><p className={styles.muted}>{explanationHasKnownIssue ? "这段讲解需要重新核对。你可以说明问题，已有讲解会保留。" : "针对最近一次讲解，请明确告诉我们疑问是否已解决。只记录这次反馈，不把它当作学习检查通过。"}</p>
+          <div className={styles.row}>{!explanationHasKnownIssue && !explanationMissing ? <button type="button" className={styles.primary} disabled={interactionLocked} onClick={() => explanationFeedback(explanationToConfirm.id, "resolved")}>疑问已解决</button> : null}
           <button type="button" disabled={interactionLocked} onClick={() => explanationFeedback(explanationToConfirm.id, "needs_clarification")}>仍需说明</button>
           <button type="button" disabled={interactionLocked || !feedback.trim()} onClick={() => void control("feedback")}>提交其他反馈</button></div></>
           : <button type="button" className={styles.primary} disabled={busy || !feedback.trim() || Boolean(pendingControl.current) || pendingAdvance?.id === task.id} onClick={() => void control("feedback")}>提交反馈并继续</button>}</div> : null}

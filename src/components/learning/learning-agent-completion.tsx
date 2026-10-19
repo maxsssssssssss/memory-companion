@@ -39,6 +39,7 @@ export function LearningAgentCompletion({ completion, taskVersion, ended, quizLi
   return <section className={completionStyles.completion} aria-label="本轮目标与依据">
     <div className={completionStyles.heading}><h4>本轮要检查什么</h4><span className={styles.muted}>{goalLabels[plan.kind]}</span></div>
     {completion.technicalBlocker ? <div className={styles.agentNotice} role="status"><strong>先核对目标与来源</strong><p>{completion.technicalBlocker.message}</p></div> : null}
+    {completion.historyReview && (completion.historyReview.pending.length || completion.historyReview.blocked) ? <div className={styles.agentNotice} role="status"><strong>先核对相关作答</strong><p>{completion.historyReview.notice}</p></div> : null}
     <p className={styles.muted}>以下是本轮约定的目标。{plan.kind === "chapter_check" ? "这些核心目标不代表整章全部知识。" : "需要更改时，可调整本轮复习。"}</p>
     <ol className={completionStyles.objectives}>{plan.objectives.map(objective => {
       const assessed = completion.objectives.find(item => item.id === objective.id);
@@ -58,7 +59,10 @@ export function LearningAgentCompletion({ completion, taskVersion, ended, quizLi
               {completed && evidence.submitted && evidence.rationale ? <p className={styles.muted}>关联说明：{evidence.rationale}（模型提出，未作独立教学核验）</p> : null}
             </li>;
           })}</ul> : <p className={styles.muted}>{assessed?.explanationResolved ? "依据是你对本轮讲解的明确反馈。"
-            : plan.kind === "explanation" ? completion.technicalBlocker ? "讲解已保留，但它与本轮目标的来源关联需要先核对，暂不能记录为疑问已解决。" : "等待对本轮相关讲解的明确反馈，不要求先完成练习。"
+            : plan.kind === "explanation" ? completion.technicalBlocker ? "讲解已保留，但它与本轮目标的来源关联需要先核对，暂不能记录为疑问已解决。"
+              : assessed?.explanationState === "missing" ? "本轮还没有相关讲解。可以先说明困惑，再结合原文解释，不要求先完成练习。"
+              : assessed?.explanationState === "needs_review" ? "讲解中有需要核对的内容，暂不能作为疑问已解决的依据。原文和讲解均保留供核对。"
+              : "等待对本轮相关讲解的明确反馈，不要求先完成练习。"
               : "暂未关联可用于判断的已保存作答。"}</p>}
           {objective.sources.length ? <div className={styles.sources}>{objective.sources.map((source, index) => {
             const material = materials.find(item => item.id === source.materialId);

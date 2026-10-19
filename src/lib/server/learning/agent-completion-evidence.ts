@@ -7,6 +7,8 @@ import { LearningAgentRepository } from "./agent-repository";
 import { LearningQuizRepository } from "./quiz-repository";
 import { readLearningAgentScope } from "./agent-scope";
 
+import { inspectLearningRequirementAlignment } from "./agent-requirement-alignment";
+
 type Scope = ReturnType<typeof readLearningAgentScope>;
 type QuizEvent = { action: string; question: number; at: string };
 export const evidenceRefKey = (ref: LearningEvidenceRef) => `${ref.quizId}:${ref.attemptId}:${ref.questionIndex}`;
@@ -113,10 +115,20 @@ export function loadLearningCompletionEvidence(learning: LearningRepository, tas
       else if (proposal.contentStatus === "uncertain" || proposal.relevance === "uncertain") { base.quality = "uncertain"; reasons.push("内容或语义关联尚不能可靠判断"); }
       return base;
     }
+    const requirement = objective.requirements.find(r => r.role === proposal.role);
+    const alignment = requirement ? inspectLearningRequirementAlignment(question, requirement) : { status: "unverified" as const };
+    if (alignment.status === "incompatible") {
+      base.diagnosticCode = "requirement_mismatch"; base.rationale = proposal.rationale;
+      base.quality = disputed ? "disputed" : knownIssue || proposal.contentStatus === "known_issue" ? "known_issue" : "invalid";
+      reasons.push(alignment.reason);
+      return base;
+    }
     base.rationale = proposal.rationale;
     base.quality = disputed ? "disputed" : (proposal.contentStatus === "known_issue" || knownIssue) ? "known_issue" : proposal.contentStatus === "uncertain" || proposal.relevance === "uncertain" ? "uncertain"
       : historical && !ownIds.has(ref.quizId) && !knownRows.length ? "historical_unknown" : "tentative";
     if (base.quality !== "tentative") reasons.push(base.quality === "disputed" ? "题组存在尚未解决的疑问" : base.quality === "known_issue" ? "已记录影响判断的题目问题" : "内容或语义关联尚不能可靠判断");
+    if (proposal.relevance === "uncertain") reasons.push("模型对本题是否覆盖具体检查要求保留不确定；需回读题目后明确重新关联，不能当作学习反证");
+    if (proposal.contentStatus === "uncertain") reasons.push("模型对题目内容本身保留不确定；当前不能据此作出通过判断");
     const identity = learningQuestionIdentity(question);
     let repeated = proposal.relation === "repeat", exposed = facts?.revealed ?? false;
     for (const other of snapshots.values()) for (const old of other.attempt.questions) {

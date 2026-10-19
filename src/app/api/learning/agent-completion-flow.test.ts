@@ -218,7 +218,10 @@ describe("Learning completion: frozen offline scenarios through formal API and S
 
   it("C06 excludes an explicit known content issue without pretending it was independently verified", async () => {
     const waiting = await firstQuiz(plan("chapter_check", ["concept", "boundary"])); const a = await answer(waiting);
-    candidates.push(association(reference(a), { contentStatus: "known_issue" }), { finish: "停止判断" }); await run(waiting.id);
+    // Formal association now requires a successful read in this task version;
+    // the provider fixture must observe the actual saved answer before judging it.
+    candidates.push({ tool: "learning.read_answers", args: { attemptId: a.id } }, association(reference(a), { contentStatus: "known_issue" }), { finish: "停止判断" }); await run(waiting.id);
+    expect(task(waiting.id).actions).toContainEqual(expect.objectContaining({ tool: "learning.read_answers", status: "succeeded" }));
     const evidence = assessment(waiting.id).objectives[0].evidence[0];
     expect(evidence).toMatchObject({ quality: "known_issue", eligible: false, semanticProvenance: "model_proposal" });
     expect(assessment(waiting.id).outcome).not.toBe("check_passed"); expect(attempt(a.id).score?.correct).toBe(1);
@@ -389,7 +392,12 @@ describe("Learning completion: frozen offline scenarios through formal API and S
     candidates.push(waitAction); await run(waiting.id);
     await control(waiting.id, { action: "adjust", goal: "[合成] 在新范围核对前提，允许使用相关历史", scope: { ...selection(), includeHistory: true } });
     expect(assessment(waiting.id).plan).toBeNull();
-    candidates.push(planAction(), association(reference(a))); const ended = await run(waiting.id);
+    // History authorization permits reading; it does not carry a prior-version
+    // read receipt forward or replace a fresh read before explicit association.
+    const callsBefore = task(waiting.id).usage.calls;
+    candidates.push(planAction(), { tool: "learning.read_answers", args: { attemptId: a.id } }, association(reference(a))); const ended = await run(waiting.id);
+    expect(ended.actions).toContainEqual(expect.objectContaining({ tool: "learning.read_answers", status: "succeeded", version: ended.version }));
+    expect(ended.usage.calls).toBe(callsBefore + 3); // plan, actual answer read and explicit association decisions
     expect(ended.status).toBe("ended"); expect(assessment(waiting.id).outcome).toBe("check_passed");
     const response = await GET(request(), routeContext()), body = await response.json();
     expect(body.tasks.find((t: { id: string }) => t.id === waiting.id).quizLinks).toContainEqual({ quizId: a.quizId, attemptId: a.id, completed: true, disputed: false, historical: true });

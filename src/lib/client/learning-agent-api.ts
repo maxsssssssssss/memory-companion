@@ -18,7 +18,7 @@ export type LearningAgentTaskView = {
   budget?: AgentBudget;
   approval?: AgentApproval & { sources?: LearningAgentSource[]; includesSupplement?: boolean };
   recovery?: AgentRecovery;
-  explanations?: Array<{ id: string; text: string; sources?: Array<{ materialId: string; paragraph: number; parsed?: import("@/lib/domain/learning-pdf-study").ParsedTextBinding }> }>;
+  explanations?: Array<{ id: string; text: string; contentIssue?: { status: "known_issue" | "no_known_issue"; issues: Array<{ code: string; start: number; end: number }> }; sources?: Array<{ materialId: string; paragraph: number; parsed?: import("@/lib/domain/learning-pdf-study").ParsedTextBinding }> }>;
   reviewSummary?: LearningAgentReviewSummary;
   completion?: LearningCompletionAssessment;
   sourceAdjustment?: {
@@ -85,7 +85,7 @@ export function learningAgentErrorMessage(error: unknown) {
     agent_explanation_feedback_invalid: "这条讲解已变化或不属于当前复习，请刷新后再确认。",
     agent_completion_plan_required: "本轮需要先明确要检查的目标，请刷新查看复习安排。",
     agent_completion_plan_locked: "本轮检查要求已确定。需要更改时，请使用“调整本轮复习”。",
-    agent_completion_feedback_invalid: "这次讲解与本轮目标或来源尚未对应，请刷新后核对；来源关联有误时可调整本轮复习。",
+    agent_completion_feedback_invalid: "这次讲解暂不能记录为疑问已解决，请刷新后核对当前目标、来源和讲解内容；来源关联有误时可调整本轮复习。",
     agent_source_adjustment_goal_changed: "核对来源时需保留原目标和检查要求；如需改目标，请取消“仅核对来源关联”后重新预览。",
     agent_source_adjustment_objectives_changed: "本轮目标已变化，请刷新并重新核对各项目标的来源。",
   };

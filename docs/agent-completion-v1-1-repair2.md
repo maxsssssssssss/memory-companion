@@ -1,5 +1,7 @@
 # Learning Agent V1.1：R1–R3 集中返修交接
 
+> 后续 Windows 在 24eead0 发现 B1–B3，当前接回请使用 [新整包交接](agent-completion-v1-1-repair3.md)。本页历史验证与预算数字不代表当前余额，不据此重跑付费请求或重建数据。
+
 基线：`b7d8fcc1ada69ffe5c76402cd9f5fe5d823aceee`。分支：`feat/learning-agent-completion-v1-1`。本轮仅处理 Windows 第二份整包确认的解释反馈、目标来源关联与预算分类问题。Windows 对该基线的结论仍是 **BLOCKED**；本交付的真实 DS 验收 **PENDING**。早前 F1/F2/F3 的实现、严格行动协议及工程证据保留，但不能代替这轮真实验收。
 
 ## 证据身份

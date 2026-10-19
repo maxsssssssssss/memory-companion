@@ -456,3 +456,73 @@ it("does not classify unauthorized or absent explanation references as a repaira
   expect(assessLearningCompletion(learning, ctx.task)).toMatchObject({ outcome: "stale", objectives: [] });
   expect(() => validateLearningExplanationFeedback(learning, ctx.task, { explanationId: id, outcome: "resolved" })).toThrow();
 });
+
+it("requires an actual current read receipt before the model can associate a saved answer", async () => {
+  plan(); const attempt = group(), value: LearningEvidenceProposal = { ref: { quizId: attempt.quizId, attemptId: attempt.id, questionIndex: 0 },
+    objectiveId: "rule", role: "concept", rationale: "[离线] 已核对题目实际要求规则前提", relevance: "supported", relation: "initial", contentStatus: "no_known_issue", priorEvidenceRefs: [] };
+  const scenario = createLearningAgentScenario(learning), tool = scenario.tools["learning.associate_evidence"];
+  await expect(tool.execute(value, ctx)).rejects.toThrow("answers_read_required");
+  const read = await scenario.tools["learning.read_answers"].execute({ attemptId: attempt.id }, ctx);
+  ctx.task.actions.push({ id: randomUUID(), version: 1, tool: "learning.read_answers", status: "succeeded", summary: read.summary, resultRef: read.ref, createdAt: "offline" });
+  await expect(tool.execute(value, ctx)).resolves.toMatchObject({ ref: { kind: "learning.completion_evidence" } });
+  ctx.task.actions[0].version = 0;
+  await expect(tool.execute(value, ctx)).rejects.toThrow("answers_read_required");
+  expect(globalThis.fetch).not.toHaveBeenCalled();
+});
+
+it("carries declared prior evidence through published followup checks without asserting transfer", () => {
+  const savedPlan = plan("targeted_review", ["followup"]), old = group("wrong", "[合成] 未满足前提时可否套用规则？"), prior = associate(old, { role: "followup" });
+  const id = randomUUID(), input = quizzes.begin(pageId, { id, settings: settings() }, 24000)!;
+  const ref = input.materials[0].paragraphs[0].referenceId;
+  const question = { stem: "[合成] 新案例中前提未成立，此规则的结论能否直接使用？", kind: "concept" as const,
+    options: [{ id: "A" as const, text: "不能直接使用", reason: "前提未成立。", evidenceIds: [ref] }, { id: "B" as const, text: "可以直接使用", reason: "不能忽略前提。", evidenceIds: [ref] }], correctOptionId: "A" as const, hint: null,
+    explanation: "先检查前提。", stemEvidenceIds: [ref], explanationEvidenceIds: [ref] };
+  quizzes.complete(pageId, id, { contractVersion: "references-v2", title: "[合成] 相关复查", reason: null, items: [question] }, {
+    context: { planId: savedPlan.id, taskVersion: 1, objectives: savedPlan.objectives, purpose: purpose({ role: "followup", method: "contrast", priorEvidenceRefs: [prior.ref] }) },
+    candidates: [{ questionKey: quizReviewQuestionKey(question), check: { objectiveIds: ["rule"], role: "followup", rationale: "[离线语义提案] 复查同一前提判断" } }] });
+  let attempt = quizzes.startAttempt(pageId, { id: randomUUID(), quizId: id, mode: "test" });
+  const artifacts = new LearningAgentRepository(learning);
+  artifacts.reserve({ id, taskId: ctx.task.id, taskVersion: 1, pageId, kind: "quiz", actionId: randomUUID(), binding: (ctx.task.scope as { fingerprint: string }).fingerprint, materialIds: [materialId] });
+  artifacts.complete(pageId, ctx.task.id, id, { attemptId: attempt.id });
+  expect(assessLearningCompletion(learning, ctx.task).canAutoFinish).toBe(false);
+  attempt = act(attempt, "choose", "A"); act(attempt, "finish");
+  const result = assessLearningCompletion(learning, ctx.task);
+  expect(result.objectives[0].evidence.find(e => e.ref.quizId === id)).toMatchObject({ relation: "followup", priorEvidenceRefs: [prior.ref], semanticProvenance: "model_proposal", independentInApp: true });
+  expect(result.objectives[0].unresolvedErrors).toEqual([]); expect(result.outcome).toBe("check_passed");
+  expect(result.longTermMastery).toBe("unverified");
+});
+
+it("uses new useful observation once without calling it learning progress or allowing repeated IDs to loop", () => {
+  plan("targeted_review", ["followup"]); const p = purpose({ role: "followup", method: "retrieval" });
+  const initial = assessLearningCompletion(learning, ctx.task).progressFingerprint;
+  recordLearningPurpose(learning, ctx, "quiz", p, randomUUID()); ctx.actionId = randomUUID();
+  const first = group("wrong", "[合成] 初次条件检查"); associate(first, { role: "followup" });
+  expect(assessLearningCompletion(learning, ctx.task).progressFingerprint).toBe(initial);
+  expect(guardLearningCompletionAction(learning, ctx, "quiz", p).stop).toBeUndefined();
+  recordLearningPurpose(learning, ctx, "quiz", p, randomUUID()); ctx.actionId = randomUUID();
+  associate(group("wrong", "[合成] 换ID的同类错误检查"), { role: "followup" });
+  expect(guardLearningCompletionAction(learning, ctx, "quiz", p).stop).toContain("尚无新的有效进展");
+});
+
+it("does not let another objective's feedback unlock repeated work or a method rename for this objective", () => {
+  establishLearningReviewPlan(learning, ctx, { kind: "targeted_review", objectives: ["rule", "other"].map(id => ({
+    id, label: `[合成] ${id}的条件检查`, sources: source(),
+    requirements: [{ role: "followup", description: `[合成] 复查${id}的前提判断`, independent: true }]
+  })) });
+  const p = purpose({ role: "followup", method: "retrieval" });
+  const initial = assessLearningCompletion(learning, ctx.task).progressFingerprint;
+  recordLearningPurpose(learning, ctx, "quiz", p, randomUUID()); ctx.actionId = randomUUID();
+  associate(group("wrong", "[合成] 另一目标的首次条件题"), { objectiveId: "other", role: "followup" });
+  expect(assessLearningCompletion(learning, ctx.task).progressFingerprint).toBe(initial);
+  expect(guardLearningCompletionAction(learning, ctx, "quiz", p).stop).toContain("尚无新的有效进展");
+  expect(guardLearningCompletionAction(learning, ctx, "quiz", { ...p, method: "contrast" }).stop).toContain("仅更换方法名称不足以继续");
+
+  associate(group("wrong", "[合成] 本目标的首次条件题"), { role: "followup" });
+  expect(assessLearningCompletion(learning, ctx.task).progressFingerprint).toBe(initial);
+  expect(guardLearningCompletionAction(learning, ctx, "quiz", p).stop).toBeUndefined();
+  recordLearningPurpose(learning, ctx, "quiz", p, randomUUID()); ctx.actionId = randomUUID();
+  associate(group("hint", "[合成] 另一目标的提示后答对"), { objectiveId: "other", role: "followup" });
+  expect(assessLearningCompletion(learning, ctx.task).progressFingerprint).toBe(initial);
+  expect(guardLearningCompletionAction(learning, ctx, "quiz", p).stop).toContain("尚无新的有效进展");
+  expect(globalThis.fetch).not.toHaveBeenCalled();
+});

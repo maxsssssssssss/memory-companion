@@ -140,3 +140,24 @@ it("explains an existing explanation-source mismatch without requiring a quiz or
   expect(screen.queryByText("暂未关联可用于判断的已保存作答。")).not.toBeInTheDocument();
   expect(screen.queryByText("你已明确确认这项疑问得到解决。")).not.toBeInTheDocument();
 });
+
+it.each([
+  { state: "missing" as const, message: "本轮还没有相关讲解。可以先说明困惑，再结合原文解释，不要求先完成练习。" },
+  { state: "available" as const, message: "等待对本轮相关讲解的明确反馈，不要求先完成练习。" },
+  { state: "needs_review" as const, message: "讲解中有需要核对的内容，暂不能作为疑问已解决的依据。原文和讲解均保留供核对。" },
+])("distinguishes explanation state $state without claiming a previous explanation is current", ({ state, message }) => {
+  mount({ ...assessment, plan: { ...assessment.plan!, kind: "explanation", objectives: [{ ...assessment.plan!.objectives[0], requirements: [] }] },
+    objectives: [{ ...assessment.objectives[0], requirements: [], evidence: [], gaps: [], explanationResolved: false, explanationState: state }] });
+  fireEvent.click(screen.getByText("查看依据与来源", { selector: "summary" }));
+  expect(screen.getByText(message)).toBeVisible();
+  expect(screen.queryByText("你已明确确认这项疑问得到解决。")).not.toBeInTheDocument();
+  if (state !== "available") expect(screen.queryByText("等待对本轮相关讲解的明确反馈，不要求先完成练习。")).not.toBeInTheDocument();
+});
+
+it("shows authorized history still needing review without displaying answers or treating absence of linked errors as success", () => {
+  const notice = "已有获准的相关作答需要读取并重新核对，暂不据此判断困难已经解决。";
+  mount({ ...assessment, historyReview: { pending: [{ ref: evidence.ref, objectiveIds: ["boundary"], unassociatedObjectiveIds: ["boundary"], read: false }], blocked: true, notice } });
+  expect(screen.getByRole("status")).toHaveTextContent(notice);
+  expect(screen.queryByText("本轮检查通过")).not.toBeInTheDocument();
+  expect(screen.getByRole("region", { name: "本轮目标与依据" })).not.toHaveTextContent(/预算|tokens|调用次数/);
+});

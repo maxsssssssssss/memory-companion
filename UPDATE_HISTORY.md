@@ -15588,3 +15588,15 @@ Learning与UI：新增 `agent-scope.ts`、`agent-repository.ts`、`agent-scenari
 - 实际失败与修复：新测试曾缺createdAt造成首次类型exit1、用错repository方法名、错误预期JSON undefined/未交卷score/本地计算与finish步骤；回放初稿错误预期score undefined；浏览器首轮精确标签locator失败exit1。均按实际原合同修正测试/脚本并复验，不降低既有断言、不重seed制造PASS。曾有定向命令含不存在client路径，按实际发现文件计数，最终精确59路径全部存在。失败证据保留。无关全仓扩展回归NOT RUN。
 - 限制与交接：新包缺W3原raw codec envelope、原逐题关联rationale和完整WindowsDB，故该回放明确为保存内容投影；旧129原库单独回放。首次解释#21的准确底层解析路径未保存，旧首次拒绝decision不能恢复，不猜测。S32、有限数学、语义支持、迁移判断与长期掌握限制保留；模拟学生不代表教学效果。来源上下文10,000字符/60完整段落，更正预览20,000/60，省略项须回读或明确缩小范围；收据仅证明曾读，不证明模型理解。
 - Cloud相关离线修复PASS；Windows本基线仍BLOCKED，新SHA真实验收PENDING。原账本35/36余1，总授权200不绕过guard；不重置、不加额度，1次不足以承诺完整W1/W3真实链。W2原任务16/16不重置，第三组不伪装完成。交接/备份/回退见docs/agent-completion-v1-1-repair2.md；代码回退不自动回退数据。保护进入任务前已有95行历史追加，提交只包含本条；不集成dev/cloud-code、不合并main、不部署，不联系Windows会话。
+
+
+## 2026-10-19 Learning Agent V1.1 B1–B3 整包返修（Cloud 离线）
+
+- 背景与基线：按 Windows 冻结 SHA `24eead02f2825dbc029ab4b62c211c291982de73` 的实际公开证据集中处理解释前提、明确内容矛盾、历史反证恢复及目标错配；保留同一功能分支与原本地未提交历史。新包 257/257、旧包 137/137、原 W2 包 129/129 哈希一致，独立 REPORT 与包内字节相同。新包不是 Windows 全量 SQLite/raw Provider 参数，7 道已交卷原题按原稳定选项正式保存/提交，第 8 道未答题不猜隐藏答案；原文本、来源、成绩及失败证据不改写。
+- 实现：Learning completion 明确区分当前解释缺失、可确认、需核对和已解决；保留普通澄清，拒绝无当前解释的明确解决询问。新增 Learning 专属有限内容检查，复用有限集合字面解析识别本次肯定因果反向交集句；原解释保留并提示问题，不允许 resolved、新笔记提案或旧待批准笔记写入，合法新解释可恢复明确确认。当前来源每次重新检查，不复制第二份原文。
+- 历史与进展：`agent-completion-history` 在显式来源更正、历史授权、同目标/requirements 条件下列出原作答待核对引用，要求当前版本真实 read_answers 收据及新 associate_evidence；提示与错误不自动继承/消除。缺映射、撤权、来源失效或超限安全交回。followup 保留实际前序引用；观察指纹按当前目的目标限定，有新反馈才允许下一次有目的行动，无关目标反馈、新 ID/同类重复/方法改名不解锁生成，不冒充学习进展。
+- 逐题关联：`agent-requirement-alignment` 仅识别明确基数计算要求与纯成员归属选项的错配；原 W2 index2 不贡献计数支持，原 index0 uncertain 保留并允许实际回读后有据重新关联。技术错配不是学生反证，真实错答、提示、争议、已知错题、重复及来源保护保持。对应 API/UI 只增加产品状态与问题提示，不新增工程日志面板。
+- 文件与兼容：主要在 Learning completion/evidence/history/content/alignment、scenario、notes、领域投影及现有 UI/API 测试中修改；新增 `completion-repair3-replay.ts` 与 `docs/agent-completion-v1-1-repair3.md`，原交接文档指向新版本。无依赖、锁文件、表或列迁移；AgentRuntime、LangGraph、正式 Prompt、structured_action_v1、Quiz codec/发布门禁与产品预算未改。Windows 本地 Guard36→67 补丁未混入分支。
+- 验证：最终 `cloud:test` 精确 64 文件 / 1171 用例 exit0；`cloud:check` 环境合同9项及完整项目 lint/Next typegen/TypeScript exit0；`cloud:build` exit0，180 trace manifests、forbidden0。原证据正式回放分别25/23/16检查 exit0；原提供只读脚本9项仅证明旧失败事实，不累计为修复覆盖。生产构建浏览器重启前8/后5共13组通过，普通谢谢不解决，合法明确确认/重复确认零额外调用；13个 SQLite integrity_check 均ok，两次自有 launcher/子进程正常退出0并关闭端口，保留合成数据。Cloud真实Provider0，Windows仍54/67余13、unknown0。
+- 失败留存：首轮集中64文件1170用例有2失败，旧fixture缺当前read_answers收据，补正式读取并保持原known_issue/分数/结束断言；增加多目标回归后最终1171通过。开发期新fixture AgentAction字段/投影类型、内容正则/集合定义边界、等待排程及UI-only option.label比较失败均如实保留并修正，未降低原安全断言。无关扩展全仓回归未运行；本轮浏览器无失败。
+- 限制与交接：有限负例检查不是通用数学/语义Verifier，没有命中不等于verified；来源存在不等于蕴含，原index0私有uncertain字段缺失不可推断。S32、有限数学、迁移判断、模拟学生非真人效果及长期掌握未验证保留。原W1/旧W2已用尽任务预算、W3已ended，不改库或加预算伪恢复。新SHA Windows真实验收PENDING，旧冻结版仍BLOCKED；不集成dev/cloud-code、不合并main、不部署，用户手动接回。

@@ -1,6 +1,6 @@
 # Learning Agent V1.1：集中 Windows 验收交接
 
-> 当前整包 R1–R3 返修优先按 [集中交接](agent-completion-v1-1-repair2.md) 验收；以下内容保留原阶段证据身份，旧请求数量不代表当前余额。
+> 当前 24eead0 冻结版的 B1–B3 整包返修优先按 [集中交接](agent-completion-v1-1-repair3.md) 验收；Windows 同一账本为 54/67、余 13，真实复验另行安排。以下内容保留原阶段证据身份，旧请求数量不代表当前余额，不能重新 seed 原数据。
 
 本文件只针对本次最终交付 SHA。旧 Agent V1 的真实 PASS 不代表 V1.1 的目标拆解、证据关联或自主停止通过。Cloud 使用合成材料与离线模型响应；Windows 真实语义验收为 PENDING。本文件不授予真实请求预算，也不继承此前 34/36 的账本余额。
 

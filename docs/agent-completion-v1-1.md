@@ -1,5 +1,7 @@
 # Learning Agent V1.1：目标、证据与结束结果
 
+> 最新 B1–B3 修复、证据边界及 Windows 接回步骤见 [集中返修交接](agent-completion-v1-1-repair3.md)。本文保留原实现阶段说明；旧 Cloud 通过不代表最新真实语义验收通过。
+
 本轮基线为 `dev/cloud-code` 的 `d77a6911b2b9d626ab0f82950214ac073e54ec35`，开发线 `feat/learning-agent-completion-v1-1`。最终源码身份、实际命令/数量/退出码和浏览器证据以交付报告为准。Cloud 不调用真实 Provider；Windows 真实模型语义验收不由离线响应代替。
 
 2026-10-16 Windows 首次 V1.1 集中验收在 `495c2e1fa81a892080f55cc5bcf56cbfe3ab48e6` 发现 F1–F3 阻塞。后续定向修复、两项 nullable 诊断列与原 W2 保守交回流程见 [整包返修交接](agent-completion-v1-1-repair.md)；本文以下“本轮无迁移”描述的是初始 V1.1 实现，不涵盖此次诊断增量。

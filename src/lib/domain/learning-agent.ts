@@ -18,6 +18,7 @@ export type LearningAgentScope = {
   sources: Array<{ materialId: string; paragraphs: number[] }>;
 };
 export type LearningAgentExplanation = {
+  contentIssue?: { status: "known_issue" | "no_known_issue"; issues: Array<{ code: string; start: number; end: number }> };
   id: string; taskId: string; taskVersion?: number; question: string; materialAnswer: string | null;
   supplements: Array<{ kind: "explanation" | "example"; text: string }>;
   items: Array<{ materialId: string; paragraph: number }>;
