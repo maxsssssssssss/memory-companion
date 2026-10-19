@@ -15607,3 +15607,9 @@ Learning与UI：新增 `agent-scope.ts`、`agent-repository.ts`、`agent-scenari
 - 背景：用户连续反馈云端绝对路径及 sandbox 构件链接均无法下载；文件实际存在且 ZIP 内容无损。当前客户端没有可用的通用附件导出工具，GitHub CLI GraphQL 元数据查询也返回 Forbidden，改用已授权仓库的正常 Git 文件交付通道。
 - 处理：新增 `docs/agent-evidence/learning-agent-v1-1-repair3-392fb07.zip` 及 README，保持原 ZIP 字节和 SHA256 不变（a99528cb27a07f7cb7465cf9a7b06b9fd736b4f68b9605928701517ed2efa87b）。包内50项哈希逐项验证，文件清单及凭据形态扫描无发现；不包含用户数据库、浏览器会话或私人配置。
 - 验证与边界：只交付证据，业务代码仍对应 `392fb07edd2f31d8299e50cefd34717df22c858c`；本次未重复执行业务测试、类型或构建，不将旧验证冒充新运行。保留原本地95行历史追加，不改预算或原数据，不调用Provider、不集成dev/cloud-code、不合并main、不部署。下载可通过同仓库GitHub文件页或git fetch取得；浏览器是否已登录该仓库由用户本地环境决定。
+
+
+## 2026-10-19 移除已完成交付的临时验收 ZIP
+
+- 用户已确认下载并明确要求移除。删除当前分支的 `docs/agent-evidence/learning-agent-v1-1-repair3-392fb07.zip`，更新同目录 README 为交付记录，保留原文件名、大小、SHA256、交付提交及 Windows 接回文档；原 Git 历史和 Cloud 忽略产物保留。
+- 核对删除前 ZIP 哈希与交付记录一致，检查 diff 和业务源码未变；仅删除证据文件及更新文档，不重复运行业务测试、类型或构建。复验代码仍为 `392fb07edd2f31d8299e50cefd34717df22c858c`。原本地95行未提交历史追加保持；本次正常提交推送，不重写历史、不force-push、不调用Provider、不合并或部署。
