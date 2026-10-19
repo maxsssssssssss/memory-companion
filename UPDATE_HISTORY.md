@@ -15600,3 +15600,10 @@ Learning与UI：新增 `agent-scope.ts`、`agent-repository.ts`、`agent-scenari
 - 验证：最终 `cloud:test` 精确 64 文件 / 1171 用例 exit0；`cloud:check` 环境合同9项及完整项目 lint/Next typegen/TypeScript exit0；`cloud:build` exit0，180 trace manifests、forbidden0。原证据正式回放分别25/23/16检查 exit0；原提供只读脚本9项仅证明旧失败事实，不累计为修复覆盖。生产构建浏览器重启前8/后5共13组通过，普通谢谢不解决，合法明确确认/重复确认零额外调用；13个 SQLite integrity_check 均ok，两次自有 launcher/子进程正常退出0并关闭端口，保留合成数据。Cloud真实Provider0，Windows仍54/67余13、unknown0。
 - 失败留存：首轮集中64文件1170用例有2失败，旧fixture缺当前read_answers收据，补正式读取并保持原known_issue/分数/结束断言；增加多目标回归后最终1171通过。开发期新fixture AgentAction字段/投影类型、内容正则/集合定义边界、等待排程及UI-only option.label比较失败均如实保留并修正，未降低原安全断言。无关扩展全仓回归未运行；本轮浏览器无失败。
 - 限制与交接：有限负例检查不是通用数学/语义Verifier，没有命中不等于verified；来源存在不等于蕴含，原index0私有uncertain字段缺失不可推断。S32、有限数学、迁移判断、模拟学生非真人效果及长期掌握未验证保留。原W1/旧W2已用尽任务预算、W3已ended，不改库或加预算伪恢复。新SHA Windows真实验收PENDING，旧冻结版仍BLOCKED；不集成dev/cloud-code、不合并main、不部署，用户手动接回。
+
+
+## 2026-10-19 Cloud 返修证据改用 GitHub 文件交付
+
+- 背景：用户连续反馈云端绝对路径及 sandbox 构件链接均无法下载；文件实际存在且 ZIP 内容无损。当前客户端没有可用的通用附件导出工具，GitHub CLI GraphQL 元数据查询也返回 Forbidden，改用已授权仓库的正常 Git 文件交付通道。
+- 处理：新增 `docs/agent-evidence/learning-agent-v1-1-repair3-392fb07.zip` 及 README，保持原 ZIP 字节和 SHA256 不变（a99528cb27a07f7cb7465cf9a7b06b9fd736b4f68b9605928701517ed2efa87b）。包内50项哈希逐项验证，文件清单及凭据形态扫描无发现；不包含用户数据库、浏览器会话或私人配置。
+- 验证与边界：只交付证据，业务代码仍对应 `392fb07edd2f31d8299e50cefd34717df22c858c`；本次未重复执行业务测试、类型或构建，不将旧验证冒充新运行。保留原本地95行历史追加，不改预算或原数据，不调用Provider、不集成dev/cloud-code、不合并main、不部署。下载可通过同仓库GitHub文件页或git fetch取得；浏览器是否已登录该仓库由用户本地环境决定。
