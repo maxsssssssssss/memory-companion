@@ -72,6 +72,7 @@ export function loadLearningCompletionEvidence(learning: LearningRepository, tas
       skipped: question?.progress.skipped ?? false, answerAvailability: "unknown", repetition: "unknown", historical, quality: "invalid", eligible: false, independentInApp: false,
       reasons, rationale: "", relation: proposal.relation, semanticProvenance: "model_proposal", priorEvidenceRefs: proposal.priorEvidenceRefs, sources: [] };
     if (!snapshot || !question || snapshot.attempt.id !== ref.attemptId) { base.diagnosticCode = "record_unavailable"; reasons.push("缺少当前授权内的完整作答记录"); return base; }
+    base.responseMode = "single_choice";
     if (!own && !scope.scope.selection.includeHistory) { base.diagnosticCode = "history_forbidden"; reasons.push("未授权读取相关历史"); return base; }
     const ownRow = rows.find(r => r.id === ref.quizId && r.kind === "quiz");
     if (own && (ownRow?.state !== "completed" || ownRow.binding_hash !== scope.fingerprint)) { base.diagnosticCode = "source_changed"; reasons.push("题组来源或版本已变化"); return base; }
@@ -124,6 +125,9 @@ export function loadLearningCompletionEvidence(learning: LearningRepository, tas
       return base;
     }
     base.rationale = proposal.rationale;
+    if (/(?:用|使用|以)自己的(?:话|语言|表述)(?:来)?(?:解释|说明|阐述)|独立(?:口述|书写|撰写)|自行(?:组织语言|写出解释)/u.test(proposal.rationale)) {
+      reasons.push("正式保存的是选择作答；关联说明中的自主表达措辞属于模型提案，不能证明学生曾自行口述或书写。");
+    }
     base.quality = disputed ? "disputed" : (proposal.contentStatus === "known_issue" || knownIssue) ? "known_issue" : proposal.contentStatus === "uncertain" || proposal.relevance === "uncertain" ? "uncertain"
       : historical && !ownIds.has(ref.quizId) && !knownRows.length ? "historical_unknown" : "tentative";
     if (base.quality !== "tentative") reasons.push(base.quality === "disputed" ? "题组存在尚未解决的疑问" : base.quality === "known_issue" ? "已记录影响判断的题目问题" : "内容或语义关联尚不能可靠判断");

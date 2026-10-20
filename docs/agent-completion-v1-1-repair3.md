@@ -1,5 +1,7 @@
 # Learning Agent V1.1：B1–B3 集中返修与 Windows 交接
 
+> 本文保留上一包证据身份。Windows 后续对 392fb07 的收口结果为 W1 PASS、W3/W2 PARTIAL，集中修复 C1–C4 的当前步骤见 [新交接](agent-completion-v1-1-repair4.md)；最新唯一账本 93/200，不沿用本文旧余额。
+
 冻结验收基线：`24eead02f2825dbc029ab4b62c211c291982de73`。开发分支：`feat/learning-agent-completion-v1-1`。最终修复 SHA 以本轮提交报告及远端核对结果为准。
 
 Windows 对冻结基线的真实验收仍为 **BLOCKED**，本交付新 SHA 的真实 DS 验收为 **PENDING**。本轮 Cloud 只修复本包 B1a/B1b/B2/B3，真实 LLM、ASR、OCR 请求为 **0**；不集成 `dev/cloud-code`、不合并 main、不部署。旧 V1、之前离线通过或 Windows 安全审计不代替本轮语义场景验收。

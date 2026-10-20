@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
+import { AgentFailure } from "../agent/types";
 import { LearningError, type LearningRepository } from "./repository";
 import { learningValidationDiagnostics, learningValidationError } from "./generation-diagnostics";
 
@@ -7,6 +8,18 @@ export type GenerationProgress = { completed: number; total: number; canResume: 
 type Part = { part_id: string; input_hash: string; state: string; attempts: number; token: string | null; deadline: number; result_json: string | null; failure: string | null; diagnostics_json: string | null };
 const tables = { framework: "learning_framework_runs", quiz: "learning_quiz_runs", overview: "learning_overview_runs" } as const;
 export const generationHash = (v: unknown) => createHash("sha256").update(JSON.stringify(v)).digest("hex");
+const agentBudgetFailures = new Set(["agent_call_limit", "agent_request_input_limit", "agent_request_output_limit", "agent_compute_limit", "agent_generation_budget_exhausted"]);
+/** An explicit Agent outcome is not an unclassified transport exception. Keep
+ * only safe reason codes; a compute stop can also follow a completed response,
+ * so its identity does not by itself assert that no request was sent. */
+export function agentGenerationFailure(error: unknown): { state: "failed" | "unknown"; failure: string } | undefined {
+  if (!(error instanceof AgentFailure)) return undefined;
+  if (error.code === "budget") return { state: "failed", failure: agentBudgetFailures.has(error.message) ? error.message : "agent_generation_budget_exhausted" };
+  if (error.code === "known_failure") return { state: "failed", failure: "generation_part_failed" };
+  if (error.code === "forbidden" || error.code === "invalid_action") return { state: "failed", failure: "generation_request_rejected" };
+  if (error.code === "unknown") return { state: "unknown", failure: "generation_result_unknown" };
+  return undefined;
+}
 function partDiagnostics(value: string | null): Record<string, unknown> | null {
   try {
     const parsed: unknown = JSON.parse(value ?? "null");
@@ -30,7 +43,8 @@ export function generationProgress(repo: LearningRepository, pageId: string, kin
   const unfinished=rows.some(p=>p.state!=="completed");
   const saveRetry=["framework_save_failed","learning_storage_unavailable","framework_interrupted"].includes(run?.failure??"");
   return { completed: rows.filter(p => p.state === "completed").length, total: rows.length, uncertain,
-    canResume: (unfinished||saveRetry) && !uncertain && !rows.some(p => p.state === "running" || (p.state === "failed" && p.attempts >= 2 && !(kind === "quiz" && recoverableLocalFitFailure(p)))) };
+    canResume: (unfinished||saveRetry) && !uncertain && !agentBudgetFailures.has(run?.failure??"")
+      && !rows.some(p => agentBudgetFailures.has(p.failure??"") || p.state === "running" || (p.state === "failed" && p.attempts >= 2 && !(kind === "quiz" && recoverableLocalFitFailure(p)))) };
 }
 
 /** Checkpoints have no source text and never publish chapters or answers by themselves.
@@ -65,6 +79,7 @@ export class GenerationParts {
       if (!row) throw new LearningError(409, "generation_plan_changed");
       if (row.state === "completed") return { saved: JSON.parse(row.result_json!) as T };
       if (row.state === "unknown" || row.state === "running") throw new LearningError(409, "generation_result_unknown");
+      if (agentBudgetFailures.has(row.failure??"")) throw new LearningError(409, row.failure!);
       const recoverLocalFit = this.kind === "quiz" && Boolean(preflight) && recoverableLocalFitFailure(row);
       if (row.attempts >= 2 && !recoverLocalFit) throw new LearningError(409, "generation_part_failed");
       preflight?.();
@@ -112,9 +127,11 @@ export class GenerationParts {
           .run(JSON.stringify({ ...(current.diagnostics_json ? JSON.parse(current.diagnostics_json) : {}), validationResult: "failed", ...issues }), this.pageId, this.kind, this.runId, id, token);
       }
       // No automatic retry. Unknown transport outcomes cannot be replayed on resume.
-      const known = received || terminalKnown || (e instanceof LearningError && (e.status < 500 || e.code==="generation_request_does_not_fit"));
+      const agentFailure = agentGenerationFailure(e);
+      const known = agentFailure ? agentFailure.state === "failed"
+        : received || terminalKnown || (e instanceof LearningError && (e.status < 500 || e.code==="generation_request_does_not_fit"));
       this.repo.database.prepare("UPDATE learning_generation_parts SET state=?,failure=?,token=NULL WHERE page_id=? AND kind=? AND run_id=? AND part_id=? AND token=? AND state='running'")
-        .run(known ? "failed" : "unknown", e instanceof LearningError ? e.code : known ? "generation_part_failed" : "generation_result_unknown", this.pageId, this.kind, this.runId, id, token);
+        .run(known ? "failed" : "unknown", agentFailure?.failure ?? (e instanceof LearningError ? e.code : known ? "generation_part_failed" : "generation_result_unknown"), this.pageId, this.kind, this.runId, id, token);
       throw e;
     }
   }

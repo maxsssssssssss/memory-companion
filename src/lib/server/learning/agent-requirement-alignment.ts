@@ -3,7 +3,7 @@
  * does not evaluate mathematics, correctness, or a learner's reasoning. */
 type RequirementAlignment =
   | { status: "unverified" }
-  | { status: "incompatible"; code: "membership_not_cardinality"; reason: string };
+  | { status: "incompatible"; code: "membership_not_cardinality" | "choice_not_self_expression"; reason: string };
 
 type Question = { stem: string; options: ReadonlyArray<{ id: string; text: string }> };
 type Requirement = { role: string; description: string };
@@ -16,10 +16,24 @@ const predicate = String.raw`(?:既|也|只|同时)?(?:不)?(?:属于|计入)${s
 // particular, a numeric/formula answer or an explanation of duplicate counting
 // must not be mistaken for a pure membership choice.
 const membershipChoice = new RegExp(String.raw`^${member}${predicate}(?:(?:[,，;；]|(?:和|与))(?:但|也|而|又|且)?${member}${predicate})*[。.]?$`, "u");
+const selfExpression = /(?:用|使用|以)自己的(?:话|语言|表述)(?:来)?(?:解释|说明|阐述)|独立(?:口述|书写|撰写)|自行(?:组织语言|写出解释)/gu;
+const directlyNegated = /(?:不(?:必|用|需要?|要求)|无需|无须)(?:学生|学习者|用户|你)?(?:再|另行)?$/u;
 
 export function inspectLearningRequirementAlignment(question: Question, requirement: Requirement): RequirementAlignment {
   const unverified = { status: "unverified" } as const;
   const description = compact(requirement.description);
+  // Every question in this business service records a choice among supplied
+  // answers. Selecting a correct explanation cannot prove self-authored speech
+  // or writing, even when the supplied answer is semantically correct. Only a
+  // negation immediately governing that demand exempts it; "无需计算数值"
+  // elsewhere cannot cancel a later affirmative self-expression requirement.
+  const requiresSelfExpression = [...description.matchAll(selfExpression)]
+    .some(match => !directlyNegated.test(description.slice(0, match.index)));
+  if (question.options.length >= 2 && new Set(question.options.map(option => option.id)).size === question.options.length
+    && requiresSelfExpression) {
+    return { status: "incompatible", code: "choice_not_self_expression",
+      reason: "本题正式记录是选择已给出的选项，没有记录学生自行组织语言的口述或书写，不能支持本要求中明确的自主表达表现。选择正确解释仍可作为对应选择判断的暂定证据，不改原成绩。" };
+  }
   // Only an explicit application calculation requirement is recognized. Other
   // subject areas, conceptual explanations and mixed demands remain semantic
   // proposals; absence of this mismatch is not a positive verification.

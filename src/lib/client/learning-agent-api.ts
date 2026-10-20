@@ -88,6 +88,7 @@ export function learningAgentErrorMessage(error: unknown) {
     agent_completion_feedback_invalid: "这次讲解暂不能记录为疑问已解决，请刷新后核对当前目标、来源和讲解内容；来源关联有误时可调整本轮复习。",
     agent_source_adjustment_goal_changed: "核对来源时需保留原目标和检查要求；如需改目标，请取消“仅核对来源关联”后重新预览。",
     agent_source_adjustment_objectives_changed: "本轮目标已变化，请刷新并重新核对各项目标的来源。",
+    agent_plan_requirement_adjustment_required: "本轮有只描述复习流程的检查要求，仅更正来源不能修复。请取消“仅核对来源关联”，明确本轮要检查的知识表现后预览并提交调整；原计划和作答保留。",
   };
   return error instanceof LearningApiError && messages[error.code] ? messages[error.code] : learningErrorMessage(error);
 }

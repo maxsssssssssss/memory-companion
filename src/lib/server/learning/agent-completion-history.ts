@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import type { AgentTask } from "@/lib/domain/agent";
 import type { LearningAgentScope } from "@/lib/domain/learning-agent";
-import { LearningReviewPlanInput, type LearningEvidenceProposal, type LearningEvidenceRef, type LearningReviewPlan } from "@/lib/domain/learning-agent-completion";
+import { StoredLearningReviewPlanInput, type LearningEvidenceProposal, type LearningEvidenceRef, type LearningReviewPlan } from "@/lib/domain/learning-agent-completion";
 import type { QuizConfig } from "@/lib/domain/learning-quiz";
 import { LearningError, type LearningRepository } from "./repository";
 import { LearningAgentRepository, type LearningAgentArtifact } from "./agent-repository";
@@ -42,7 +42,7 @@ export function projectPendingLearningHistory(learning: LearningRepository, task
   if (!previousRow || previousRow.kind !== "review_plan" || previousRow.state !== "completed"
     || previousRow.task_version !== adjustment.previousVersion || !previousRow.body_json) return blocked("plan_mismatch");
   const previous = JSON.parse(previousRow.body_json) as LearningReviewPlan;
-  const shape = LearningReviewPlanInput.safeParse({ kind: previous.kind, objectives: previous.objectives });
+  const shape = StoredLearningReviewPlanInput.safeParse({ kind: previous.kind, objectives: previous.objectives });
   if (!shape.success || hash(previous) !== adjustment.previousPlanHash || previous.id !== adjustment.previousPlanId
     || previous.taskVersion !== adjustment.previousVersion || previous.goal !== task.goal || previous.kind !== plan.kind
     || JSON.stringify(unchangedObjectives(previous)) !== JSON.stringify(unchangedObjectives(plan))) return blocked("plan_mismatch");
@@ -71,7 +71,7 @@ export function projectPendingLearningHistory(learning: LearningRepository, task
         || historicalRow.task_version !== row.task_version || !historicalRow.body_json || review.context.taskVersion !== row.task_version)
         return blocked("historical_record_unavailable");
       const historicalPlan = JSON.parse(historicalRow.body_json) as LearningReviewPlan;
-      if (!LearningReviewPlanInput.safeParse({ kind: historicalPlan.kind, objectives: historicalPlan.objectives }).success
+      if (!StoredLearningReviewPlanInput.safeParse({ kind: historicalPlan.kind, objectives: historicalPlan.objectives }).success
         || historicalPlan.id !== historicalRow.id || historicalPlan.taskVersion !== row.task_version) return blocked("historical_record_unavailable");
       if (review.context.objectives.some(objective => !historicalPlan.objectives.some(saved => JSON.stringify(saved) === JSON.stringify(objective)))
         || review.checks.some(check => check.role !== review.context.purpose.role || check.objectiveIds.some(id => !review.context.purpose.objectiveIds.includes(id))))

@@ -81,6 +81,16 @@ it("keeps hints distinct from independent support", () => {
   plan(); associate(group("hint")); const result = assessLearningCompletion(learning, ctx.task);
   expect(result.outcome).not.toBe("check_passed"); expect(result.objectives[0].evidence[0]).toMatchObject({ correct: true, hintedBeforeSubmission: true, independentInApp: false });
 });
+it("keeps a model rationale's self-expression claim distinct from the saved choice response", () => {
+  plan(); const attempt = group();
+  const rationale = "本题要求用自己的话解释规则的适用条件，所以支持概念要求。";
+  associate(attempt, { rationale });
+  const result = assessLearningCompletion(learning, ctx.task), proof = result.objectives[0].evidence[0];
+  expect(proof).toMatchObject({ responseMode: "single_choice", rationale, semanticProvenance: "model_proposal", correct: true });
+  expect(proof.reasons).toContain("正式保存的是选择作答；关联说明中的自主表达措辞属于模型提案，不能证明学生曾自行口述或书写。");
+  expect(quizzes.attempt(pageId, attempt.id).score?.correct).toBe(1);
+  expect(result.longTermMastery).toBe("unverified");
+});
 it("retains an uncovered boundary even when every observed answer is correct", () => {
   plan("chapter_check", ["concept", "boundary"]); associate(group());
   expect(assessLearningCompletion(learning, ctx.task).objectives[0].requirements).toMatchObject([{ supported: true }, { supported: false }]);

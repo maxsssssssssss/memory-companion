@@ -15613,3 +15613,18 @@ Learning与UI：新增 `agent-scope.ts`、`agent-repository.ts`、`agent-scenari
 
 - 用户已确认下载并明确要求移除。删除当前分支的 `docs/agent-evidence/learning-agent-v1-1-repair3-392fb07.zip`，更新同目录 README 为交付记录，保留原文件名、大小、SHA256、交付提交及 Windows 接回文档；原 Git 历史和 Cloud 忽略产物保留。
 - 核对删除前 ZIP 哈希与交付记录一致，检查 diff 和业务源码未变；仅删除证据文件及更新文档，不重复运行业务测试、类型或构建。复验代码仍为 `392fb07edd2f31d8299e50cefd34717df22c858c`。原本地95行未提交历史追加保持；本次正常提交推送，不重写历史、不force-push、不调用Provider、不合并或部署。
+
+
+## 2026-10-20：Learning Agent V1.1 Windows 392fb07 整包 C1–C4 离线返修
+
+- 背景与基线：处理用户集中转交的预算子层分类、授权历史错答总结、不可观察流程要求及连续生成失败无进展问题。Windows 冻结业务 SHA 为 `392fb07edd2f31d8299e50cefd34717df22c858c`；实际在同一功能分支 `feat/learning-agent-completion-v1-1` 的 `b327075d948eb0a794504a24c0eeccb33eb9afc3` 开发，中间仅证据交付/移除文档变更。开工前 95 行历史追加完整保留，不混入本轮提交。
+- 证据调查：附件 299 文件、manifest 298 项大小/哈希全匹配，独立 REPORT 相同；原 verify-evidence 六事实通过。先运行 C1 原四项脚本确认两项缺陷及两项保护对照，再用独立副本验证修后分类。公开投影不是完整 Windows 库、checkpoint 或私有参数；12 个被拒候选缺原文，只保留 8 个位置依赖和 4 个 reviewCheck 标记，不推断都是误杀或正确拒绝。
+- C1：在 `generation-parts.ts`、`quiz-service.ts` 及客户端失败展示中识别明确 Agent 预算/已知失败/真 unknown。调用前预算拒绝准确持久化 failed，不误报 Provider unknown；预算耗尽不允许脱离原任务 resume。响应后的 compute 拒绝仍记录已发生调用；真 unknown 不自动重发，旧误标行无证据不改写。
+- C2：`agent-review-summary.ts` 只在当前历史授权、成功 read_answers 收据、当前显式关联与 assessor/来源核对后读取具体旧题，保留旧错答、提示、成绩，分开失败生成/未知/争议/来源不可用。总结范围可见，GET 零生成，不成为第二评分或完成权威。
+- C3：Learning 计划合同及 `learning-review-requirements.ts` 有限拒绝本包两类纯流程要求；保留严格旧计划读取，旧要求不删除而标技术阻断并交回现有明确调整。`agent-plan-sources.ts` 保留已冻结来源更正的幂等兼容，不能借来源更正改目标标准。证据增加 single_choice 事实，明确自主表达要求不能由选择题满足；UI 区分计划问题和来源问题。此为有界负例检查，非通用语义验证；其他不可观察表达或不同题型需求出现时应由用户明确调整，不能自动预建新平台。
+- C4：`agent-completion.ts`、`agent-scenario.ts` 为已知失败保存稳定检查目的、结果身份和安全原因并传回下一决策。同目标/方法无新有效观察时阻止重复生成；无关目标进展、角色/题量/ID 改名不能绕过。明确不同方法仍可合法执行；原 operation 显式重试与真 unknown 保留原安全边界。方法差异仍是语义提案，不是教学进展证明。
+- 回归及原证据回放：最终 `cloud:test` 固定 67 文件、1229 用例全通过，失败/跳过 0；`cloud:check` 9 环境合同、Next typegen、完整 TypeScript（项目 lint）通过；`cloud:build` 通过、180 trace forbidden 0，命令均 exit 0。新正式投影回放 31 检查，经正式 Quiz 服务保存/提交 9 道原题，题文/全部理由/稳定选项/来源/实际选择和成绩保持；旧事实 9、repair3 25、repair2 23、129 文件原 W2 回放 16、修后 C1 4 均 exit 0，各层不重复累计为更大覆盖数。prepared、unknown、撤权/来源、跨账号/页、重复/并发、答案隐藏、历史兼容及非 Learning 运行时覆盖在固定清单内。
+- 浏览器：最终 production 16 组（4+5+7）检查通过，W1 正常重启后的明确解决/重复确认/刷新/重登零追加调用；授权旧错答可展开并保留 0/1 与提示事实，计划技术交回和失败停止可见。两次 Next 子进程实际 exit 0、signal null；自有四 PID 消失、端口关闭，15 个 SQLite integrity_check 全 ok。数据保留 `output/learning-completion-repair4/browser/data`，未改 Windows 原退出 1 记录。
+- 实际失败保留：开发期来源更正测试期望错误码不准确 1 例、已知失败 fixture 用无响应 HTTP502 1 例，修正准确断言/材料后安全对照仍在。浏览器准备期两次新合成理由被现有字母位置依赖保护拒绝，仅改新合成表述；脚本另两次 exit 1（局部变量未声明、已提交历史结果误用未作答角色定位），均保留日志截图，修后完成原要求，没有删除断言或修改原题。无关全仓回归 NOT RUN。
+- 交付与限制：新增三份定向服务测试、正式 `completion-repair4-replay.ts` 和 `docs/agent-completion-v1-1-repair4.md`，更新现有交接索引。没有新依赖/锁文件、SQL 表列迁移、共享 Runtime/协议/Quiz Prompt/发布保护/Guard 变更。S32、有限数学、来源存在非蕴含、模型提案非 verified、模拟学生非教学效果、长期掌握未验证保留；原 W2 稳定 E=3 理由措辞问题原样记录。旧结束或耗尽任务不复活，原 W2 待答不制造成绩，旧计划不追认通过。当前版本总结仍是业务回顾而非内容核验器。新 SHA 真实 DS 语义与自适应收口待 Windows，Cloud 不宣称真实 PASS。
+- 边界：Cloud 真实 LLM/ASR/OCR 请求 0；Windows 原账本 93/200、余 107、unknown 0 不变，不加入本地 Guard200 补丁、不自动联系 Windows。按用户授权提交推送同一功能分支；不集成 dev/cloud-code/main、不部署，不开展新阶段。完整命令、逐文件计数、原样证据边界、失败、回退及 Windows 集中步骤见交接文档与 `output/learning-completion-repair4/verification-matrix.json`。

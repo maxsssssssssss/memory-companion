@@ -7,7 +7,7 @@ import { LearningQuizRepository } from "./quiz-repository";
 import { learningModelInput, LEARNING_INPUT_BOUNDARY } from "./model-input";
 import { compactQuizRequest } from "./quiz-compact";
 import { composedQuizRequest, composedQuizPrompt } from "./quiz-composition";
-import { GenerationParts } from "./generation-parts";
+import { agentGenerationFailure, GenerationParts } from "./generation-parts";
 import { planLargeQuiz } from "./quiz-planning";
 import { limitReferencedQuizCandidates } from "./quiz-grounding";
 import { QuizReviewContext, decodeReviewQuiz, quizReviewQuestionKey, QUIZ_REVIEW_INSTRUCTION, type ReviewedQuizResponse } from "./quiz-review-purpose";
@@ -109,7 +109,7 @@ export async function generateLearningQuiz(learning: LearningRepository, pageId:
     received = true;
     repo.complete(pageId, v.id, result, reviewContext ? { context: reviewContext, candidates: results.flatMap(result=>result.reviewCandidates??[]) } : undefined);
   } catch (e) {
-    repo.fail(pageId, v.id, e instanceof LearningError ? e.code : e instanceof ZodError || e instanceof StructuredJsonResponseError ? "quiz_invalid_result" : received ? "learning_storage_unavailable" : "framework_provider_failed");
+    repo.fail(pageId, v.id, agentGenerationFailure(e)?.failure ?? (e instanceof LearningError ? e.code : e instanceof ZodError || e instanceof StructuredJsonResponseError ? "quiz_invalid_result" : received ? "learning_storage_unavailable" : "framework_provider_failed"));
   }
   return repo.list(pageId);
 }

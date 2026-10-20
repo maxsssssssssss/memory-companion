@@ -4,7 +4,8 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import Database from "better-sqlite3";
-import { LearningReviewPlanInput } from "@/lib/domain/learning-agent-completion";
+import { LearningReviewPlanInput, StoredLearningReviewPlanInput } from "@/lib/domain/learning-agent-completion";
+import { findUnobservableLearningRequirements, isUnobservableLearningRequirement } from "@/lib/domain/learning-review-requirements";
 import { agentDecisionRequest } from "@/lib/server/agent/model";
 import { AgentStore } from "@/lib/server/agent/store";
 import type { AgentScenario } from "@/lib/server/agent/types";
@@ -60,6 +61,9 @@ describe("formal Learning review-plan parameter contract", () => {
     if (!result.success) expect(result.error.issues.map(({ code, message, path }) => ({ code, message, path })))
       .toEqual([{ code: "custom", message: rule, path }]);
     expect(schema.safeParse(corrected).success).toBe(true);
+    // Compatibility for frozen plans never relaxes the original five rules.
+    expect(StoredLearningReviewPlanInput.safeParse(invalid).success).toBe(false);
+    expect(StoredLearningReviewPlanInput.safeParse(corrected).success).toBe(true);
   });
 
   it.each([
@@ -86,6 +90,8 @@ describe("formal Learning review-plan parameter contract", () => {
         expect(plan.description).toContain(clause);
       }
       expect(plan.description).toContain("来源语义或学习结论");
+      expect(plan.description).toContain("可观察的具体知识表现");
+      expect(plan.description).toContain("选择正确解释不等于学生用自己的话解释");
       for (const name of ["learning.create_quiz", "learning.explain"]) {
         expect(JSON.stringify(payload.tools.find(tool => tool.name === name)!.parameters))
           .toContain("只能选择当前计划中的目标，数组内不得重复");
@@ -105,5 +111,39 @@ describe("formal Learning review-plan parameter contract", () => {
     const diagnosis = make("diagnosis"); diagnosis.objectives[0].requirements[0].independent = false;
     expect(LearningReviewPlanInput.safeParse(explanation).success).toBe(true);
     expect(LearningReviewPlanInput.safeParse(diagnosis).success).toBe(true);
+  });
+
+  it.each([
+    "根据前序作答表现，检查该小点是否已经充分验证",
+    "先完成两道了解性题目，再针对实际困难继续检查",
+    "根据此前答题结果，确认这个目标是否已得到充分验证。",
+  ])("rejects the bounded procedural requirement without rewriting its frozen form: %s", description => {
+    const input = make("targeted_review");
+    input.objectives[0].requirements = [{ role: "followup", description, independent: true }];
+    const before = JSON.stringify(input);
+    expect(LearningReviewPlanInput.innerType().safeParse(input).success).toBe(true);
+    const parsed = scene.tools["learning.establish_review_plan"].parameters.safeParse(input);
+    expect(parsed.success).toBe(false);
+    if (!parsed.success) expect(parsed.error.issues).toMatchObject([{
+      code: "custom", message: "procedure_not_learning_requirement", path: ["objectives", 0, "requirements", 0, "description"]
+    }]);
+    expect(StoredLearningReviewPlanInput.parse(input)).toEqual(input);
+    expect(findUnobservableLearningRequirements(input)).toEqual([{
+      objectiveId: "objective_1", requirementIndex: 0, role: "followup", code: "procedure_not_learning_requirement"
+    }]);
+    expect(JSON.stringify(input)).toBe(before);
+  });
+
+  it.each([
+    "针对之前混淆共同元素归属的表现，判断另一个不相交集合中的指定元素是否属于交集，并选择理由。",
+    "根据前序作答表现，检查学生能否计算并集元素个数并区分交集数量。",
+    "先根据条件列出交集，再计算并集元素个数。",
+    "能从选项中选择说明重复计数原因的正确解释。",
+    "复查集合的元素归属。",
+  ])("leaves an actual or unrecognized knowledge requirement as a semantic proposal: %s", description => {
+    const input = make("targeted_review");
+    input.objectives[0].requirements = [{ role: "followup", description, independent: true }];
+    expect(isUnobservableLearningRequirement(description)).toBe(false);
+    expect(LearningReviewPlanInput.safeParse(input).success).toBe(true);
   });
 });

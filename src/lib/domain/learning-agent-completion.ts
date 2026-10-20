@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { LearningId } from "./learning";
+import { findUnobservableLearningRequirements } from "./learning-review-requirements";
 
 const short = z.string().trim().min(1).max(600);
 const objectiveId = z.string().regex(/^[a-zA-Z0-9_-]{1,64}$/);
@@ -8,17 +9,18 @@ export const LearningCheckRole = z.enum(["concept", "application", "boundary", "
 export const LearningCompletionSource = z.object({ materialId: LearningId, paragraph: z.number().int().positive() }).strict();
 export const LearningEvidenceRef = z.object({ quizId: LearningId, attemptId: LearningId, questionIndex: z.number().int().nonnegative().max(49) }).strict();
 export type LearningEvidenceRef = z.infer<typeof LearningEvidenceRef>;
-export const LearningReviewPlanInput = z.object({
+const reviewPlanShape = z.object({
   kind: LearningGoalKind.describe("explanation允许requirements为空；diagnosis、targeted_review、chapter_check的每个目标至少有一个requirement。targeted_review每个目标必须包含role=followup；targeted_review和chapter_check的所有requirement必须independent=true。"),
   objectives: z.array(z.object({ id: objectiveId.describe("本计划内唯一的目标ID；不能与另一个objective.id重复。"), label: short,
     sources: z.array(LearningCompletionSource).min(1).max(20),
     requirements: z.array(z.object({
       role: LearningCheckRole.describe("同一目标内role必须唯一，不能重复；targeted_review的每个目标必须包含followup。"),
-      description: short,
+      description: short.describe("描述学生可观察的具体知识表现，并与用户目标和所引原文有关；不能只写检查是否充分、先答题再检查等执行流程。followup须说明要复查哪一种知识表现或区别，不仅安排前序/后序步骤。选择正确解释只是选择作答，不能写成学生用自己的话解释。"),
       independent: z.boolean().describe("targeted_review和chapter_check必须为true；explanation和diagnosis按约定检查要求明确填写。")
     }).strict()).max(4).describe("同目标内role唯一。仅explanation可以为空；其他kind至少一个。targeted_review必须含followup，且与chapter_check一样全部independent=true。")
   }).strict()).min(1).max(12).describe("1至12个目标，所有objective.id在本计划内唯一。")
-}).strict().superRefine((value, ctx) => {
+}).strict();
+function validatePlanContract(value: z.infer<typeof reviewPlanShape>, ctx: z.RefinementCtx) {
   const duplicateObjective = value.objectives.findIndex((item, index) => value.objectives.findIndex(other => other.id === item.id) !== index);
   if (duplicateObjective !== -1) ctx.addIssue({ code: "custom", message: "duplicate_objective", path: ["objectives", duplicateObjective, "id"] });
   for (const [index, item] of value.objectives.entries()) {
@@ -30,10 +32,22 @@ export const LearningReviewPlanInput = z.object({
     const assisted = item.requirements.findIndex(r => !r.independent);
     if ((value.kind === "targeted_review" || value.kind === "chapter_check") && assisted !== -1) ctx.addIssue({ code: "custom", message: "independent_check_required", path: [...requirementsPath, assisted, "independent"] });
   }
+}
+/** Frozen plans keep their original strict structural/cross-field contract.
+ * New observability rules must not make old plans unreadable or silently rewrite
+ * them. The assessor diagnoses these old requirements and requests an explicit
+ * user adjustment; it never treats this compatibility read as approval. */
+export const StoredLearningReviewPlanInput = reviewPlanShape.superRefine(validatePlanContract);
+export const LearningReviewPlanInput = reviewPlanShape.superRefine((value, ctx) => {
+  validatePlanContract(value, ctx);
+  for (const issue of findUnobservableLearningRequirements(value)) {
+    const objectiveIndex = value.objectives.findIndex(objective => objective.id === issue.objectiveId);
+    ctx.addIssue({ code: "custom", message: issue.code, path: ["objectives", objectiveIndex, "requirements", issue.requirementIndex, "description"] });
+  }
 // The locked toJsonSchema converter cannot encode superRefine. Keep the exact
 // validator and expose these cross-field requirements in the parameter schema
 // itself, so every formal caller receives the contract without a prompt fork.
-}).describe("计划参数的强制约束：1. objectives中的id全部唯一；2. kind不是explanation时，每个目标的requirements至少一项；3. 同一目标的requirements中role唯一；4. kind=targeted_review时，每个目标必须包含role=followup；5. kind=targeted_review或chapter_check时，所有requirements的independent必须为true。违反任一项均拒绝整个行动，不会自动修正或重试。来源必须由当前授权原文支持，参数通过不等于来源语义或学习结论已核实。");
+}).describe("计划参数的强制约束：1. objectives中的id全部唯一；2. kind不是explanation时，每个目标的requirements至少一项；3. 同一目标的requirements中role唯一；4. kind=targeted_review时，每个目标必须包含role=followup；5. kind=targeted_review或chapter_check时，所有requirements的independent必须为true；6. 每项description必须描述学生可观察的具体知识表现，不能用“根据前序作答表现，检查该小点是否已经充分验证”或“先完成两道了解性题目，再针对实际困难继续检查”这类流程代替知识要求；followup也要说明具体复查内容。违反任一项均拒绝整个行动，不会自动修正或重试。选择正确解释不等于学生用自己的话解释。来源必须由当前授权原文支持，参数通过不等于来源语义或学习结论已核实。");
 export type LearningReviewPlanInput = z.infer<typeof LearningReviewPlanInput>;
 export type LearningReviewPlan = LearningReviewPlanInput & { schemaVersion: 1; taskVersion: number; sourceFingerprint: string; goal: string; proposedBy: "model"; id: string };
 export const LearningCheckPurpose = z.object({
@@ -47,7 +61,8 @@ export const LearningCheckPurpose = z.object({
 }).strict();
 export type LearningCheckPurpose = z.infer<typeof LearningCheckPurpose>;
 export const LearningEvidenceProposal = z.object({
-  ref: LearningEvidenceRef, objectiveId, role: LearningCheckRole, rationale: short,
+  ref: LearningEvidenceRef, objectiveId, role: LearningCheckRole,
+  rationale: short.describe("只能按已保存的实际作答方式说明关联。单选题选中一个正确解释不是学生用自己的话解释、口述或独立书写；模型关联说明不改变实际作答事实。"),
   relevance: z.enum(["supported", "uncertain"]).describe("按该role的具体requirement核对题干及全部选项实际要求的作答。主题相近/来源相交不等于覆盖；成员归属选择不支持计算元素个数。不能确认则uncertain。"),
   relation: z.enum(["initial", "repeat", "followup", "new_context", "unknown"]).describe("initial不满足followup要求。后续检查须根据实际前序作答/解释声明followup或new_context及依据；不同题组ID或数值不自动证明迁移。"),
   priorEvidenceRefs: z.array(LearningEvidenceRef).max(20).default([]).describe("复查已有表现时引用当前版本已读回并关联的具体作答；followup不是仅改role标签，必须说明与前序表现或当前疑问的关系。"),
@@ -68,6 +83,7 @@ export type LearningCompletionEvidence = {
   historical: boolean; quality: "pending" | "tentative" | "disputed" | "known_issue" | "uncertain" | "historical_unknown" | "invalid";
   eligible: boolean; independentInApp: boolean; reasons: string[]; rationale: string;
   relation: LearningEvidenceProposal["relation"]; semanticProvenance: "model_proposal";
+  responseMode?: "single_choice";
   diagnosticCode?: "record_unavailable" | "history_forbidden" | "source_changed" | "source_forbidden" | "objective_missing" | "plan_source_mismatch" | "requirement_mismatch";
   priorEvidenceRefs: LearningEvidenceRef[]; sources: Array<z.infer<typeof LearningCompletionSource> & { parsed?: import("./learning-pdf-study").ParsedTextBinding }>;
 };
@@ -84,7 +100,7 @@ export type LearningCompletionAssessment = {
   outcome: "check_passed" | "explanation_resolved" | "diagnosis_complete" | "partial" | "insufficient" | "legacy" | "stale";
   support: "sufficient" | "partial" | "insufficient" | "not_assessed";
   objectives: LearningObjectiveAssessment[]; canAutoFinish: boolean; pending: string[];
-  technicalBlocker?: { kind: "plan_source_mismatch"; objectiveIds: string[]; explanationIds?: string[]; message: string };
+  technicalBlocker?: { kind: "plan_source_mismatch" | "plan_requirement_unobservable"; objectiveIds: string[]; explanationIds?: string[]; message: string };
   contentIssues?: Array<{ explanationId: string; objectiveIds: string[]; codes: string[]; message: string; active?: boolean }>;
   historyReview?: { pending: Array<{ ref: LearningEvidenceRef; objectiveIds: string[]; read: boolean; unassociatedObjectiveIds: string[] }>; blocked: boolean; notice: string };
   headline: string; stopReason: string | null; limitations: string[]; longTermMastery: "unverified";

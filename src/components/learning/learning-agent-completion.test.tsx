@@ -65,6 +65,20 @@ it("does not expose result or semantic explanation before the quiz has been subm
   expect(screen.queryByText("本题答错", { exact: false })).not.toBeInTheDocument();
   expect(screen.getByRole("button", { name: "查看作答 · 题组 1 第 3 题" })).toBeDisabled();
 });
+it("shows the recorded choice modality next to an unverified model rationale without claiming oral expression", () => {
+  mount({ ...assessment, objectives: [{ ...assessment.objectives[0], evidence: [{
+    ...evidence, responseMode: "single_choice", rationale: "本题要求用自己的话解释规则。"
+  }] }] });
+  fireEvent.click(screen.getByText("查看依据与来源", { selector: "summary" }));
+  expect(screen.getByText("本题记录为选择作答，不代表独立组织语言作答。")).toBeVisible();
+  expect(screen.getByText(/本题要求用自己的话解释规则。（模型提出，未作独立教学核验）/)).toBeVisible();
+});
+it("labels an old workflow-only requirement as plan repair rather than source loss or learner difficulty", () => {
+  mount({ ...assessment, technicalBlocker: { kind: "plan_requirement_unobservable", objectiveIds: ["boundary"],
+    message: "请调整本轮复习，明确可观察的知识表现；原要求和作答保留。" } });
+  expect(screen.getByText("先明确可检查的知识表现")).toBeVisible();
+  expect(screen.queryByText("先核对目标与来源")).not.toBeInTheDocument();
+});
 
 it.each([
   { change: { hintedBeforeSubmission: true }, expected: "使用提示后作答；不作为独立检查的支持。" },

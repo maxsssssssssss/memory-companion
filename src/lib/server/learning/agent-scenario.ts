@@ -287,7 +287,17 @@ export function createLearningAgentScenario(learning: LearningRepository,
           artifacts.complete(ctx.task.resourceId, ctx.task.id, id, { attemptId });
           if (guarded.purpose) recordLearningPurpose(learning, ctx, "quiz", guarded.purpose, id);
           return quizReceipt(ctx, id);
-        } catch (error) { const failure = safeFailure(error); artifacts.fail(ctx.task.resourceId, ctx.task.id, id, failure.code === "unknown"); throw failure; }
+        } catch (error) {
+          const failure = safeFailure(error);
+          artifacts.fail(ctx.task.resourceId, ctx.task.id, id, failure.code === "unknown");
+          if (failure.code === "known_failure") {
+            await check(ctx);
+            recordLearningPurpose(learning, ctx, "quiz", guarded.purpose, id, { code: failure.message });
+            throw new AgentFailure(failure.code, failure.message, failure.usage,
+              `${failure.publicSummary ?? "本次题组生成明确失败，未取得可用题组。"} 原生成结果ID：${id}。这不是学生作答反证；相同缺口没有新观察时不再重复同类生成，可读取相关原文、改为讲解、请求必要反馈或诚实交回。`);
+          }
+          throw failure;
+        }
       },
       validateResult: validateCompletionResult,
       readResult: async (receipt, ctx) => {
@@ -375,7 +385,17 @@ export function createLearningAgentScenario(learning: LearningRepository,
           if (content.status === "known_issue") return { ref: { kind: "learning.explanation", id }, summary: "讲解已保存，但发现明确内容矛盾，不能作为解决依据或追加笔记。",
             wait: { kind: "feedback", refId: `feedback:${ctx.actionId}`, message: "这段讲解存在明确矛盾，原文本保留供核对，暂不能确认疑问解决。你可以指出需重新说明的部分，或结束本轮。" } };
           return { ref: { kind: "learning.explanation", id }, summary: "已保存本轮讲解；这不是个人笔记或学习效果结论。" };
-        } catch (error) { const failure = safeFailure(error); artifacts.fail(ctx.task.resourceId, ctx.task.id, id, failure.code === "unknown"); throw failure; }
+        } catch (error) {
+          const failure = safeFailure(error);
+          artifacts.fail(ctx.task.resourceId, ctx.task.id, id, failure.code === "unknown");
+          if (failure.code === "known_failure") {
+            await check(ctx);
+            recordLearningPurpose(learning, ctx, "explanation", guarded.purpose, id, { code: failure.message });
+            throw new AgentFailure(failure.code, failure.message, failure.usage,
+              `${failure.publicSummary ?? "本次讲解生成明确失败，未取得可用讲解。"} 原生成结果ID：${id}。这不是学习困难证据；可核对相关原文、明确换法、请求必要信息或交回，不应盲目重复。`);
+          }
+          throw failure;
+        }
       },
       validateResult: validateCompletionResult,
       readResult: async (receipt, ctx) => {

@@ -22,6 +22,31 @@ const q2 = { stem: "设 A={1,2,3}，B={3,4}，元素 1 在并集计算中应如�
 ] };
 
 describe("bounded answer-demand and Learning requirement alignment", () => {
+  it.each(["用自己的话解释并集为什么减去交集", "能独立口述两个概念的区别", "以自己的语言说明理由"])("does not turn a supplied multiple-choice answer into %s", description => {
+    expect(inspectLearningRequirementAlignment(q1, { role: "concept", description })).toMatchObject({
+      status: "incompatible", code: "choice_not_self_expression"
+    });
+  });
+  it.each(["能说明并集计数为什么需要减去交集", "选择解释并集去重的正确说法", "不要求用自己的话解释，只需选择正确理由"])("does not reject recognition evidence for %s", description => {
+    expect(inspectLearningRequirementAlignment(q1, { role: "concept", description })).toEqual({ status: "unverified" });
+  });
+  it.each([
+    "无需计算数值，用自己的话解释为什么并集要减去交集",
+    "不必列举元素；需独立口述为什么共同元素不能重复计算",
+    "无需用自己的话解释公式，但需独立书写使用它的理由",
+  ])("does not let an unrelated or earlier negation waive self-expression: %s", description => {
+    expect(inspectLearningRequirementAlignment(q1, { role: "concept", description })).toMatchObject({
+      status: "incompatible", code: "choice_not_self_expression"
+    });
+  });
+  it.each([
+    "无需用自己的话解释为什么并集要减去交集，只需选择正确理由",
+    "不必独立口述为什么共同元素不能重复计算；选择对应理由即可",
+    "不要求学生另行独立书写，选择解释即可",
+    "不需要用自己的话解释，只需选择一个给定的理由",
+  ])("keeps a directly negated self-expression demand eligible for semantic review: %s", description => {
+    expect(inspectLearningRequirementAlignment(q1, { role: "concept", description })).toEqual({ status: "unverified" });
+  });
   it("rejects original W2 index2 membership choices as cardinality application despite stem saying 计算", () => {
     expect(inspectLearningRequirementAlignment(q2, counting)).toMatchObject({ status: "incompatible", code: "membership_not_cardinality" });
   });

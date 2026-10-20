@@ -1,18 +1,18 @@
 // @vitest-environment node
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AgentTask } from "@/lib/domain/agent";
 import type { LearningAgentScope } from "@/lib/domain/learning-agent";
-import type { LearningCheckPurpose, LearningReviewPlanInput } from "@/lib/domain/learning-agent-completion";
+import type { LearningCheckPurpose, LearningReviewPlan, LearningReviewPlanInput } from "@/lib/domain/learning-agent-completion";
 import type { AgentContext } from "@/lib/server/agent/types";
 import { AgentStore } from "@/lib/server/agent/store";
 import { LearningRepository } from "./repository";
 import { freezeLearningAgentScope } from "./agent-scope";
-import { establishLearningReviewPlan, readLearningReviewPlan } from "./agent-completion";
-import { LearningAgentRepository } from "./agent-repository";
+import { assessLearningCompletion, establishLearningReviewPlan, guardLearningCompletionAction, readLearningReviewPlan } from "./agent-completion";
+import { LearningAgentRepository, learningAgentOperationId } from "./agent-repository";
 import { createLearningAgentScenario } from "./agent-scenario";
 import type { generateStudyJson } from "./framework-generator";
 import { assertLearningPlanSourcesPresented, learningPlanSourceContext, materializeLearningPlanSourceAdjustment,
@@ -24,6 +24,20 @@ const context = (value = task): AgentContext => ({ task: value, actionId: "sourc
 const plan = (): LearningReviewPlanInput => ({ kind: "explanation", objectives: [{ id: "intersection", label: "交集包含什么元素", sources: [{ materialId, paragraph: 1 }], requirements: [] }] });
 const corrections = () => [{ objectiveId: "intersection", sources: [{ materialId, paragraph: 2 }] }];
 const selection = () => ({ materialIds: [materialId], chapterIds: [], nodeIds: [], includeHistory: false, includeNotes: false, includeSupplements: false });
+// Import an explicitly synthetic pre-upgrade snapshot through the artifact
+// repository. This tests compatibility, not a new-plan creation bypass.
+function frozenProceduralPlan(): LearningReviewPlan {
+  const id = learningAgentOperationId(`${task.id}:${task.version ?? 1}`, "review_plan");
+  const value: LearningReviewPlan = { ...plan(), kind: "targeted_review",
+    objectives: [{ ...plan().objectives[0], requirements: [{ role: "followup", description: "根据前序作答表现，检查该小点是否已经充分验证", independent: true }] }],
+    id, schemaVersion: 1, taskVersion: task.version ?? 1, sourceFingerprint: (task.scope as LearningAgentScope).fingerprint,
+    goal: task.goal, proposedBy: "model" };
+  const artifacts = new LearningAgentRepository(learning);
+  artifacts.reserve({ id, taskId: task.id, taskVersion: task.version ?? 1, pageId: task.resourceId, kind: "review_plan",
+    actionId: "offline-legacy-plan-import", binding: value.sourceFingerprint, materialIds: [materialId] });
+  artifacts.complete(task.resourceId, task.id, id, value);
+  return value;
+}
 beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), "learning-plan-sources-")); learning = new LearningRepository(dir, "owner"); store = AgentStore.open(join(dir, "tasks.sqlite"));
   const pageId = randomUUID(); materialId = randomUUID(); learning.create({ id: pageId, title: "[合成] 资料关联" });
@@ -86,6 +100,44 @@ describe("Learning plan sources and explicit versioned corrections", () => {
     store.close(); learning.close(); learning = new LearningRepository(dir, "owner"); store = AgentStore.open(join(dir, "tasks.sqlite")); task = store.getTask("owner", task.id);
     const ctx = context(); const call = vi.spyOn(ctx, "call"); await createLearningAgentScenario(learning).observe(ctx);
     expect(readLearningReviewPlan(learning, task)!.objectives[0].sources).toEqual(corrections()[0].sources); expect(call).not.toHaveBeenCalled();
+  });
+  it("preserves an old procedural plan and requests a goal adjustment instead of weakening it or misreporting source loss", () => {
+    const old = frozenProceduralPlan(), scope = task.scope as LearningAgentScope;
+    expect(readLearningReviewPlan(learning, task)).toEqual(old);
+    const assessment = assessLearningCompletion(learning, task);
+    expect(assessment).toMatchObject({ canAutoFinish: false, technicalBlocker: { kind: "plan_requirement_unobservable", objectiveIds: ["intersection"] } });
+    expect(assessment.plan).toEqual(old);
+    expect(assessment.objectives[0].requirements).toEqual([{ role: "followup", description: old.objectives[0].requirements[0].description, supported: false }]);
+    expect(guardLearningCompletionAction(learning, context(), "quiz").wait).toContain("调整本轮复习");
+    expect(() => prepareLearningPlanSourceAdjustment(learning, task, { goal: task.goal, scope }, corrections())).toThrow("agent_plan_requirement_adjustment_required");
+    const before = task.usage;
+    task = store.adjust("owner", task.id, { expectedVersion: 1, goal: "检查共同元素是否属于交集，后续用不同给定集合检查归属判断", scope });
+    const next = plan(); next.kind = "targeted_review"; next.objectives[0].requirements = [{
+      role: "followup", description: "针对先前的归属判断，在不同给定集合中判断指定元素是否属于交集并选择理由", independent: true
+    }];
+    establishLearningReviewPlan(learning, context(), next);
+    expect(readLearningReviewPlan(learning, task)!.taskVersion).toBe(2);
+    expect(assessLearningCompletion(learning, task).technicalBlocker).toBeUndefined();
+    expect(store.getTask("owner", task.id).usage).toEqual(before);
+    expect(JSON.parse(new LearningAgentRepository(learning).get(task.resourceId, task.id, old.id)!.body_json!)).toEqual(old);
+  });
+  it("materializes an already-consented old source-only checkpoint after restart without rewriting requirements or passing it", async () => {
+    const old = frozenProceduralPlan(), scope = task.scope as LearningAgentScope;
+    const snapshot = { previousPlanId: old.id, previousVersion: 1,
+      previousPlanHash: createHash("sha256").update(JSON.stringify(old)).digest("hex"), reason: "user_confirmed_sources" as const, corrections: corrections() };
+    task = store.adjust("owner", task.id, { expectedVersion: 1, goal: task.goal, scope: { ...scope, planSourceAdjustment: snapshot } });
+    const usage = task.usage;
+    store.close(); learning.close(); learning = new LearningRepository(dir, "owner"); store = AgentStore.open(join(dir, "tasks.sqlite")); task = store.getTask("owner", task.id);
+    const ctx = context(), call = vi.spyOn(ctx, "call");
+    await materializeLearningPlanSourceAdjustment(learning, ctx);
+    await materializeLearningPlanSourceAdjustment(learning, ctx);
+    expect(readLearningReviewPlan(learning, task)!.objectives).toEqual([{ ...old.objectives[0], sources: corrections()[0].sources }]);
+    expect(assessLearningCompletion(learning, task)).toMatchObject({ canAutoFinish: false, technicalBlocker: { kind: "plan_requirement_unobservable" } });
+    expect(call).not.toHaveBeenCalled(); expect(store.getTask("owner", task.id).usage).toEqual(usage);
+    expect(new LearningAgentRepository(learning).list(task.resourceId, task.id).filter(row => row.kind === "review_plan")).toHaveLength(2);
+    expect(JSON.parse(new LearningAgentRepository(learning).get(task.resourceId, task.id, old.id)!.body_json!)).toEqual(old);
+    const changed = plan(); changed.kind = "targeted_review"; changed.objectives[0].requirements = [{ role: "followup", description: "降低旧要求", independent: true }];
+    expect(() => establishLearningReviewPlan(learning, ctx, changed, { frozenSourcePlan: old })).toThrow("agent_completion_source_adjustment_plan_changed");
   });
   it("rejects stale source snapshots and does not turn a removed source into a new plan", async () => {
     establishLearningReviewPlan(learning, context(), plan()); const scope = task.scope as LearningAgentScope;

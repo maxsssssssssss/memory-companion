@@ -38,7 +38,7 @@ export function LearningAgentCompletion({ completion, taskVersion, ended, quizLi
   const { plan } = completion;
   return <section className={completionStyles.completion} aria-label="本轮目标与依据">
     <div className={completionStyles.heading}><h4>本轮要检查什么</h4><span className={styles.muted}>{goalLabels[plan.kind]}</span></div>
-    {completion.technicalBlocker ? <div className={styles.agentNotice} role="status"><strong>先核对目标与来源</strong><p>{completion.technicalBlocker.message}</p></div> : null}
+    {completion.technicalBlocker ? <div className={styles.agentNotice} role="status"><strong>{completion.technicalBlocker.kind === "plan_requirement_unobservable" ? "先明确可检查的知识表现" : "先核对目标与来源"}</strong><p>{completion.technicalBlocker.message}</p></div> : null}
     {completion.historyReview && (completion.historyReview.pending.length || completion.historyReview.blocked) ? <div className={styles.agentNotice} role="status"><strong>先核对相关作答</strong><p>{completion.historyReview.notice}</p></div> : null}
     <p className={styles.muted}>以下是本轮约定的目标。{plan.kind === "chapter_check" ? "这些核心目标不代表整章全部知识。" : "需要更改时，可调整本轮复习。"}</p>
     <ol className={completionStyles.objectives}>{plan.objectives.map(objective => {
@@ -56,10 +56,11 @@ export function LearningAgentCompletion({ completion, taskVersion, ended, quizLi
             return <li key={`${evidence.ref.attemptId}:${evidence.ref.questionIndex}:${index}`}>
               <p>{evidenceDescription(evidence, completed)}</p>
               <button type="button" disabled={disabled || !canOpen} onClick={() => onReview(evidence.ref)}>{group < 0 ? "原题组当前不可打开" : quizLinks[group].historical ? `查看历史作答 · 第 ${evidence.ref.questionIndex + 1} 题` : `查看作答 · 题组 ${group + 1} 第 ${evidence.ref.questionIndex + 1} 题`}</button>
+              {completed && evidence.submitted && evidence.responseMode === "single_choice" ? <p className={styles.muted}>本题记录为选择作答，不代表独立组织语言作答。</p> : null}
               {completed && evidence.submitted && evidence.rationale ? <p className={styles.muted}>关联说明：{evidence.rationale}（模型提出，未作独立教学核验）</p> : null}
             </li>;
           })}</ul> : <p className={styles.muted}>{assessed?.explanationResolved ? "依据是你对本轮讲解的明确反馈。"
-            : plan.kind === "explanation" ? completion.technicalBlocker ? "讲解已保留，但它与本轮目标的来源关联需要先核对，暂不能记录为疑问已解决。"
+            : plan.kind === "explanation" ? completion.technicalBlocker?.kind === "plan_source_mismatch" ? "讲解已保留，但它与本轮目标的来源关联需要先核对，暂不能记录为疑问已解决。"
               : assessed?.explanationState === "missing" ? "本轮还没有相关讲解。可以先说明困惑，再结合原文解释，不要求先完成练习。"
               : assessed?.explanationState === "needs_review" ? "讲解中有需要核对的内容，暂不能作为疑问已解决的依据。原文和讲解均保留供核对。"
               : "等待对本轮相关讲解的明确反馈，不要求先完成练习。"

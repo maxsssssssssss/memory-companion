@@ -2,7 +2,8 @@ import { createHash } from "node:crypto";
 import { z } from "zod";
 import type { AgentTask } from "@/lib/domain/agent";
 import type { LearningAgentScope } from "@/lib/domain/learning-agent";
-import { LearningCompletionSource, LearningReviewPlanInput, type LearningReviewPlan } from "@/lib/domain/learning-agent-completion";
+import { LearningCompletionSource, StoredLearningReviewPlanInput, type LearningReviewPlanInput, type LearningReviewPlan } from "@/lib/domain/learning-agent-completion";
+import { findUnobservableLearningRequirements } from "@/lib/domain/learning-review-requirements";
 import { AgentFailure, type AgentContext } from "@/lib/server/agent/types";
 import { LearningError, type LearningRepository } from "./repository";
 import { readLearningAgentScope } from "./agent-scope";
@@ -69,6 +70,9 @@ export function prepareLearningPlanSourceAdjustment(learning: LearningRepository
   proposed: { goal: string; scope: LearningAgentScope }, input: unknown): LearningPlanSourceAdjustment {
   const corrections = LearningPlanSourceCorrections.parse(input), plan = readLearningReviewPlan(learning, task);
   if (!plan || task.goal !== proposed.goal || plan.goal !== proposed.goal) throw new LearningError(409, "agent_source_adjustment_goal_changed");
+  // A source-only correction must preserve requirements. It cannot silently
+  // convert a procedural frozen requirement into an easier knowledge check.
+  if (findUnobservableLearningRequirements(plan).length) throw new LearningError(409, "agent_plan_requirement_adjustment_required");
   const scope = readLearningAgentScope(learning, task.resourceId, proposed.scope);
   if (corrections.length !== plan.objectives.length || corrections.some(c => !plan.objectives.some(o => o.id === c.objectiveId)))
     throw new LearningError(409, "agent_source_adjustment_objectives_changed");
@@ -96,12 +100,12 @@ export async function materializeLearningPlanSourceAdjustment(learning: Learning
   const previous = JSON.parse(row.body_json) as LearningReviewPlan;
   if (hash(previous) !== snapshot.previousPlanHash || previous.goal !== ctx.task.goal)
     throw new LearningError(409, "agent_completion_plan_stale");
-  const input = LearningReviewPlanInput.parse({ kind: previous.kind, objectives: previous.objectives.map(objective => {
+  const input = StoredLearningReviewPlanInput.parse({ kind: previous.kind, objectives: previous.objectives.map(objective => {
     const correction = snapshot.corrections.find(c => c.objectiveId === objective.id);
     if (!correction) throw new LearningError(409, "agent_source_adjustment_objectives_changed");
     for (const ref of correction.sources) if (!scope.materials.some(m => m.materialId === ref.materialId && m.paragraphs.some(p => p.number === ref.paragraph)))
       throw new LearningError(403, "agent_scope_forbidden");
     return { ...objective, sources: correction.sources };
   }) });
-  establishLearningReviewPlan(learning, ctx, input);
+  establishLearningReviewPlan(learning, ctx, input, { frozenSourcePlan: previous });
 }

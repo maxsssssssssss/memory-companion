@@ -1,7 +1,8 @@
 import { createHash } from "node:crypto";
 import type { AgentTask, AgentEvent } from "@/lib/domain/agent";
-import { LearningCheckPurpose, LearningEvidenceProposal, LearningExplanationFeedback, LearningReviewPlanInput, SavedLearningCompletionAssessment,
+import { LearningCheckPurpose, LearningEvidenceProposal, LearningExplanationFeedback, LearningReviewPlanInput, StoredLearningReviewPlanInput, SavedLearningCompletionAssessment,
   type LearningCompletionAssessment, type LearningReviewPlan, type LearningObjectiveAssessment } from "@/lib/domain/learning-agent-completion";
+import { findUnobservableLearningRequirements } from "@/lib/domain/learning-review-requirements";
 import { AgentFailure, type AgentContext } from "@/lib/server/agent/types";
 import { LearningError, type LearningRepository } from "./repository";
 import { LearningAgentRepository, learningAgentOperationId, type LearningAgentArtifact } from "./agent-repository";
@@ -43,11 +44,21 @@ export function readLearningReviewPlan(learning: LearningRepository, task: Agent
   if (!row) return null;
   const plan = parse<LearningReviewPlan>(row);
   if (!plan || row.binding_hash !== scope.fingerprint || plan.taskVersion !== version(task) || plan.goal !== task.goal) throw new LearningError(409, "agent_completion_plan_stale");
-  LearningReviewPlanInput.parse({ kind: plan.kind, objectives: plan.objectives });
+  StoredLearningReviewPlanInput.parse({ kind: plan.kind, objectives: plan.objectives });
   return plan;
 }
-export function establishLearningReviewPlan(learning: LearningRepository, ctx: AgentContext, input: unknown): LearningReviewPlan {
-  const scope = scoped(learning, ctx.task), value = LearningReviewPlanInput.parse(input);
+export function establishLearningReviewPlan(learning: LearningRepository, ctx: AgentContext, input: unknown,
+  options?: { frozenSourcePlan?: LearningReviewPlan }): LearningReviewPlan {
+  const scope = scoped(learning, ctx.task);
+  const frozen = options?.frozenSourcePlan;
+  const value = frozen ? StoredLearningReviewPlanInput.parse(input) : LearningReviewPlanInput.parse(input);
+  if (frozen) {
+    const withoutSources = (objectives: LearningReviewPlan["objectives"]) => objectives.map(({ sources: _sources, ...objective }) => objective);
+    if (frozen.taskVersion !== version(ctx.task) - 1 || frozen.goal !== ctx.task.goal || frozen.kind !== value.kind
+      || JSON.stringify(withoutSources(frozen.objectives)) !== JSON.stringify(withoutSources(value.objectives))) {
+      throw new AgentFailure("known_failure", "agent_completion_source_adjustment_plan_changed");
+    }
+  }
   if (!enabled(ctx.task)) throw new AgentFailure("known_failure", "agent_completion_legacy_task", undefined, "此历史任务没有本轮完成计划；保留历史回顾，需要新的目标检查请开始新任务。");
   for (const objective of value.objectives) for (const ref of objective.sources) {
     if (!scope.materials.some(m => m.materialId === ref.materialId && m.paragraphs.some(p => p.number === ref.paragraph))) throw new AgentFailure("forbidden", "agent_completion_source_forbidden");
@@ -117,23 +128,33 @@ export function recordLearningEvidenceProposal(learning: LearningRepository, ctx
   save(learning, ctx.task, "evidence_proposal", ctx.actionId, proposal);
   return proposal;
 }
-type PurposeRecord = { kind: "quiz" | "explanation"; resultId: string; purpose: LearningCheckPurpose; progressFingerprint: string; observationFingerprint?: string; actionId: string };
+type PurposeRecord = { kind: "quiz" | "explanation"; resultId: string; purpose: LearningCheckPurpose; progressFingerprint: string; observationFingerprint?: string; actionId: string;
+  failure?: { code: string; objectiveProgressFingerprint?: string } };
 // New usable feedback can justify one further purposeful action without being
 // labelled learning success. Only this purpose's goals participate: unrelated
 // feedback and repeated IDs with the same observation cannot unlock repetition.
 const observationFingerprint = (assessment: LearningCompletionAssessment, objectiveIds: string[]) => hash(assessment.objectives.filter(o => objectiveIds.includes(o.id)).map(o => ({ id: o.id,
   observations: [...new Set(o.evidence.filter(e => e.eligible).map(e => `${e.role}:${e.correct}:${e.independentInApp}`))].sort() })));
-export function recordLearningPurpose(learning: LearningRepository, ctx: AgentContext, kind: "quiz" | "explanation", purpose: LearningCheckPurpose | undefined, resultId: string) {
+const objectiveProgressFingerprint = (assessment: LearningCompletionAssessment, objectiveIds: string[]) => hash(assessment.objectives.filter(o => objectiveIds.includes(o.id))
+  .map(o => ({ id: o.id, requirements: o.requirements.map(r => [r.role, r.supported]), resolved: o.explanationResolved, corrected: errorsCorrected(o) })));
+export function recordLearningPurpose(learning: LearningRepository, ctx: AgentContext, kind: "quiz" | "explanation", purpose: LearningCheckPurpose | undefined, resultId: string,
+  failure?: { code: string }) {
   if (!enabled(ctx.task) || !purpose) return;
+  // A completed purpose and an explicitly retried failure keep separate immutable
+  // receipts. This is an execution observation, never evidence of learning.
+  const failed = failure ? { code: /^[a-z][a-z0-9_]{0,79}$/.test(failure.code) ? failure.code : "agent_generation_failed" } : undefined;
   const checkedPurpose = LearningCheckPurpose.parse(purpose);
-  const existing = rows(learning, ctx.task).filter(r => r.kind === "check_purpose").map(r => parse<PurposeRecord>(r)).find(r => r?.actionId === ctx.actionId);
+  const existing = rows(learning, ctx.task).filter(r => r.kind === "check_purpose").map(r => parse<PurposeRecord>(r))
+    .find(r => r?.actionId === ctx.actionId && Boolean(r.failure) === Boolean(failed));
   if (existing) {
     if (existing.kind !== kind || existing.resultId !== resultId || JSON.stringify(existing.purpose) !== JSON.stringify(checkedPurpose)) throw new LearningError(409, "agent_completion_conflict");
     return;
   }
   const assessment = assessLearningCompletion(learning, ctx.task);
-  const record: PurposeRecord = { kind, resultId, purpose: checkedPurpose, progressFingerprint: assessment.progressFingerprint, observationFingerprint: observationFingerprint(assessment, checkedPurpose.objectiveIds), actionId: ctx.actionId };
-  save(learning, ctx.task, "check_purpose", ctx.actionId, record);
+  const record: PurposeRecord = { kind, resultId, purpose: checkedPurpose, progressFingerprint: assessment.progressFingerprint,
+    observationFingerprint: observationFingerprint(assessment, checkedPurpose.objectiveIds), actionId: ctx.actionId,
+    ...(failed ? { failure: { ...failed, objectiveProgressFingerprint: objectiveProgressFingerprint(assessment, checkedPurpose.objectiveIds) } } : {}) };
+  save(learning, ctx.task, "check_purpose", `${ctx.actionId}${failed ? ":failed" : ""}`, record);
 }
 export function recordLearningExplanationContext(learning: LearningRepository, ctx: AgentContext, explanationId: string, purpose: LearningCheckPurpose | undefined) {
   recordLearningPurpose(learning, ctx, "explanation", purpose, explanationId);
@@ -189,6 +210,9 @@ export function assessLearningCompletion(learning: LearningRepository, task: Age
   try { scope = scoped(learning, task); plan = readLearningReviewPlan(learning, task); }
   catch (error) { if (!(error instanceof LearningError)) throw error; return emptyAssessment(task, "stale", "当前目标、来源或授权已变化，完成依据需要更新。"); }
   if (!plan) return emptyAssessment(task, "insufficient", "正在明确本轮要检查的目标。");
+  // Existing plans are immutable historical records. Detect the known planning
+  // defect without dropping a requirement or converting it into a learner gap.
+  const unobservableRequirements = findUnobservableLearningRequirements(plan);
   const currentRows = rows(learning, task), proposals = collectProposals(learning, task, plan, currentRows), evidence = loadLearningCompletionEvidence(learning, task, plan, proposals, scope);
   const explanations = currentRows.filter(r => r.kind === "explanation").map(r => explanationAssociation(task, plan, scope, currentRows, r.id)).filter((association): association is NonNullable<typeof association> => Boolean(association));
   const feedback = currentRows.filter(r => r.kind === "explanation_feedback").map(r => parse<FeedbackRecord>(r)).filter((r): r is FeedbackRecord => Boolean(r))
@@ -203,23 +227,25 @@ export function assessLearningCompletion(learning: LearningRepository, task: Age
     const unresolvedErrors = errors.filter(error => !valid.some(later => later.correct === true && later.independentInApp && later.role === error.role && ["followup", "new_context"].includes(later.relation)
       && later.priorEvidenceRefs.some(ref => evidenceRefKey(ref) === evidenceRefKey(error.ref)) && later.firstSubmittedAt && error.firstSubmittedAt && later.firstSubmittedAt >= error.firstSubmittedAt
       && evidenceRefKey(later.ref) !== evidenceRefKey(error.ref))).map(e => e.ref);
-    const requirements = objective.requirements.map(requirement => ({ role: requirement.role, description: requirement.description,
-      supported: valid.some(e => e.role === requirement.role && (plan.kind === "diagnosis" || e.correct === true)
+    const unobservable = unobservableRequirements.filter(requirement => requirement.objectiveId === objective.id);
+    const requirements = objective.requirements.map((requirement, index) => ({ role: requirement.role, description: requirement.description,
+      supported: !unobservable.some(item => item.requirementIndex === index) && valid.some(e => e.role === requirement.role && (plan.kind === "diagnosis" || e.correct === true)
         && (!requirement.independent || e.independentInApp)
         && (requirement.role !== "followup" || ["followup", "new_context"].includes(e.relation))) }));
     const badEvidence = relevant.some(e => ["disputed", "known_issue", "uncertain", "invalid", "historical_unknown"].includes(e.quality)
       && !(e.quality === "invalid" && e.diagnosticCode === "requirement_mismatch"));
     const contentProblem = relatedExplanations.at(-1)?.content.status === "known_issue";
     const associationMismatch = relevant.some(e => e.diagnosticCode === "plan_source_mismatch") || explanations.some(explanation => explanation.mismatchIds.includes(objective.id));
-    const supported = !associationMismatch && !contentProblem && (plan.kind === "explanation" ? explanationResolved : requirements.every(r => r.supported) && (plan.kind === "diagnosis" || unresolvedErrors.length === 0) && !badEvidence);
-    const gaps = requirements.filter(r => !r.supported).map(r => `尚缺：${r.description}`);
+    const supported = !associationMismatch && !contentProblem && !unobservable.length && (plan.kind === "explanation" ? explanationResolved : requirements.every(r => r.supported) && (plan.kind === "diagnosis" || unresolvedErrors.length === 0) && !badEvidence);
+    const gaps = requirements.filter((r, index) => !r.supported && !unobservable.some(item => item.requirementIndex === index)).map(r => `尚缺：${r.description}`);
+    if (unobservable.length) gaps.push("计划包含无法对应具体学习表现的流程要求，需要明确调整；这不是学生知识缺口，不能靠补题满足");
     if (plan.kind === "explanation" && !explanationResolved) gaps.push(hasUsableExplanation ? "还没有收到对相关解释的明确解决确认" : relatedExplanations.length ? "当前讲解存在关联或内容问题，需要先核对；不能确认解决" : "尚未生成当前版本的相关讲解；可先澄清必要信息或结合原文解释");
     if (contentProblem) gaps.push("讲解存在已识别的明确矛盾，不能作为解决依据；原文与讲解保留供核对");
     if (relevant.some(e => e.diagnosticCode === "requirement_mismatch")) gaps.push("有题目未覆盖所关联的具体检查要求，已排除该关联；这不是学生错答");
     if (unresolvedErrors.length && plan.kind !== "diagnosis") gaps.push("仍有反向表现尚未得到相关的新检查支持；不推定具体心理原因");
     if (associationMismatch) gaps.push("题目或解释与计划来源的关联需要核对；这是资料关联问题，不能当作学习困难继续补题");
     if (relevant.some(e => ["disputed", "known_issue", "uncertain", "historical_unknown"].includes(e.quality) || (e.quality === "invalid" && e.diagnosticCode !== "plan_source_mismatch"))) gaps.push("有来源、争议或语义问题尚不能用于当前判断");
-    return { id: objective.id, label: objective.label, status: supported ? "supported" : badEvidence || associationMismatch || contentProblem ? "uncertain" : valid.length ? "partial" : "unobserved",
+    return { id: objective.id, label: objective.label, status: supported ? "supported" : badEvidence || associationMismatch || contentProblem || unobservable.length ? "uncertain" : valid.length ? "partial" : "unobserved",
       requirements, evidence: relevant, gaps, unresolvedErrors, explanationResolved,
       ...(plan.kind === "explanation" ? { explanationState: explanationResolved ? "resolved" as const : contentProblem || associationMismatch ? "needs_review" as const : hasUsableExplanation ? "available" as const : "missing" as const } : {}) };
   });
@@ -249,11 +275,14 @@ export function assessLearningCompletion(learning: LearningRepository, task: Age
     kind: "plan_source_mismatch", objectiveIds: mismatchIds,
     ...(explanations.some(explanation => explanation.mismatchIds.length) ? { explanationIds: explanations.filter(explanation => explanation.mismatchIds.length).map(explanation => explanation.explanationId) } : {}),
     message: "题目或解释来源与本轮计划的来源关联需要核对，已停止继续生成。这不代表你未学会；已有解释、作答、其他待检查项与题目疑问均保留。请使用“调整本轮复习”核对目标和范围，在新版本重新读取原文并建立计划；本版本目标与检查要求不自动改写。"
+  } : unobservableRequirements.length ? {
+    kind: "plan_requirement_unobservable", objectiveIds: [...new Set(unobservableRequirements.map(item => item.objectiveId))],
+    message: "本轮计划包含无法对应具体学习表现的流程要求，已停止继续生成；这不代表你未学会。已有目标、要求、作答与反证保持原样，请使用“调整本轮复习”明确本轮要检查的知识表现，在新版本重新建立计划。不能仅更正来源、自动删除要求或降低标准来宣布通过。"
   } : undefined;
   const contentIssues = explanations.filter(e => e.content.status === "known_issue").map(e => ({ explanationId: e.explanationId,
     objectiveIds: e.purpose.objectiveIds, active: e.purpose.objectiveIds.some(id => explanations.filter(item => item.purpose.objectiveIds.includes(id)).at(-1)?.explanationId === e.explanationId), codes: e.content.issues.map(i => i.code), message: "这段讲解存在已识别的内容矛盾，暂不能确认疑问解决或保存为笔记。原文本保留，请结合所引原文核对。" }));
   const activeContentIssue = contentIssues.some(issue => issue.active);
-  const headline = activeContentIssue ? "本轮讲解有明确矛盾，需要先核对，不能据此判断疑问已经解决。" : technicalBlocker ? "本轮资料关联需要核对，暂不判断通过，也不据此要求补题。" : plan.kind === "explanation" && outcome !== "explanation_resolved" ? partial ? "部分疑问已明确解决，仍有疑问需要你的确认或进一步说明。" : objectives.some(o => o.explanationState === "available") ? "等待你确认本轮疑问是否已解决，或指出仍需说明的部分。" : "尚未生成当前版本的相关讲解；先明确疑问或结合原文说明。" : outcome === "check_passed" ? "本轮约定目标检查通过（基于当前暂定证据）。" : outcome === "explanation_resolved" ? "你已明确确认本轮疑问得到解决。" : outcome === "diagnosis_complete" ? "本轮约定诊断已完成；诊断完成不代表所有目标都会。" : outcome === "partial" ? "部分目标已有表现支持，仍有未覆盖或需要巩固的部分。" : "当前证据不足或存在问题，无法可靠给出本轮检查通过。";
+  const headline = activeContentIssue ? "本轮讲解有明确矛盾，需要先核对，不能据此判断疑问已经解决。" : technicalBlocker?.kind === "plan_requirement_unobservable" ? "本轮检查要求需要明确，暂不判断通过，也不据此要求补题。" : technicalBlocker ? "本轮资料关联需要核对，暂不判断通过，也不据此要求补题。" : plan.kind === "explanation" && outcome !== "explanation_resolved" ? partial ? "部分疑问已明确解决，仍有疑问需要你的确认或进一步说明。" : objectives.some(o => o.explanationState === "available") ? "等待你确认本轮疑问是否已解决，或指出仍需说明的部分。" : "尚未生成当前版本的相关讲解；先明确疑问或结合原文说明。" : outcome === "check_passed" ? "本轮约定目标检查通过（基于当前暂定证据）。" : outcome === "explanation_resolved" ? "你已明确确认本轮疑问得到解决。" : outcome === "diagnosis_complete" ? "本轮约定诊断已完成；诊断完成不代表所有目标都会。" : outcome === "partial" ? "部分目标已有表现支持，仍有未覆盖或需要巩固的部分。" : "当前证据不足或存在问题，无法可靠给出本轮检查通过。";
   const progressFingerprint = hash(objectives.map(o => ({ id: o.id, requirements: o.requirements.map(r => [r.role, r.supported]), resolved: o.explanationResolved,
     // New question IDs/wrong scores do not count as progress. Only follow-up
     // support changes this signal; unresolved mistakes themselves are retained.
@@ -300,13 +329,23 @@ export function guardLearningCompletionAction(learning: LearningRepository, ctx:
     if (objective.status === "supported" && purpose.method !== "evidence_review" && !(kind === "explanation" && purpose.method === "clarify" && hasPendingLearningFeedback(learning, ctx.task, ctx.event))) throw new AgentFailure("known_failure", "agent_objective_already_supported", undefined, "这一目标已有当前证据支持，请处理其他缺口或结束；有新疑问可先澄清，不能机械重复出题。");
   }
   for (const ref of purpose.priorEvidenceRefs) if (!assessment.objectives.some(o => purpose.objectiveIds.includes(o.id) && o.evidence.some(e => evidenceRefKey(e.ref) === evidenceRefKey(ref)))) throw new AgentFailure("known_failure", "agent_completion_prior_evidence_invalid", undefined, "前序引用不是当前目标下已记录的实际证据，请先读取并关联已有作答。");
-  const previous = rows(learning, ctx.task).filter(r => r.kind === "check_purpose").map(r => parse<PurposeRecord>(r)).filter((r): r is PurposeRecord => Boolean(r));
+  const recorded = rows(learning, ctx.task).filter(r => r.kind === "check_purpose").map(r => parse<PurposeRecord>(r)).filter((r): r is PurposeRecord => Boolean(r));
+  const recoveredActions = new Set(recorded.filter(record => !record.failure).map(record => record.actionId));
+  const previous = recorded.filter(record => !record.failure || !recoveredActions.has(record.actionId));
   const currentObservations = observationFingerprint(assessment, purpose.objectiveIds);
-  const same = previous.find(p => p.actionId !== ctx.actionId && p.kind === kind && p.purpose.role === purpose.role && p.purpose.method === purpose.method
-    && [...p.purpose.objectiveIds].sort().join(",") === [...purpose.objectiveIds].sort().join(",") && p.progressFingerprint === assessment.progressFingerprint && (!p.observationFingerprint || p.observationFingerprint === currentObservations));
-  if (same) return { assessment, purpose, stop: "同一目标使用同类方法后尚无新的有效进展，本轮先交回；可调整目标或选择有明确区别的检查方法。" };
-  const noProgress = previous.filter(p => p.actionId !== ctx.actionId && p.kind === kind && p.purpose.role === purpose.role
-    && [...p.purpose.objectiveIds].sort().join(",") === [...purpose.objectiveIds].sort().join(",") && p.progressFingerprint === assessment.progressFingerprint && (!p.observationFingerprint || p.observationFingerprint === currentObservations)).at(-1);
+  const currentProgress = objectiveProgressFingerprint(assessment, purpose.objectiveIds);
+  const unchanged = (p: PurposeRecord) => (p.failure
+    ? !p.failure.objectiveProgressFingerprint || p.failure.objectiveProgressFingerprint === currentProgress
+    : p.progressFingerprint === assessment.progressFingerprint) && (!p.observationFingerprint || p.observationFingerprint === currentObservations);
+  // Failed generation produced no learner observation. Relabeling its role or
+  // improving an unrelated objective must not unlock another identical method.
+  const same = previous.find(p => p.actionId !== ctx.actionId && p.kind === kind && (p.failure || p.purpose.role === purpose.role) && p.purpose.method === purpose.method
+    && [...p.purpose.objectiveIds].sort().join(",") === [...purpose.objectiveIds].sort().join(",") && unchanged(p));
+  if (same) return { assessment, purpose, stop: same.failure
+    ? `${same.failure.code === "agent_quiz_insufficient" ? "上次生成未能提供满足发布条件的题目" : "上次生成明确失败，未取得可用结果"}，当前没有新的有效观察；这不是你的作答错误。已停止同类重复生成，本轮先交回核对生成问题，也可换用有明确区别的方法。`
+    : "同一目标使用同类方法后尚无新的有效进展，本轮先交回；可调整目标或选择有明确区别的检查方法。" };
+  const noProgress = previous.filter(p => p.actionId !== ctx.actionId && p.kind === kind && (p.failure || p.purpose.role === purpose.role)
+    && [...p.purpose.objectiveIds].sort().join(",") === [...purpose.objectiveIds].sort().join(",") && unchanged(p)).at(-1);
   if (noProgress && noProgress.purpose.method !== purpose.method && (!purpose.methodChange || purpose.methodChange.previousResultId !== noProgress.resultId))
     return { assessment, purpose, stop: "尚无新的有效进展；仅更换方法名称不足以继续，需要说明与前次的具体区别和希望观察到什么，或先交回。" };
   return { assessment, purpose };
