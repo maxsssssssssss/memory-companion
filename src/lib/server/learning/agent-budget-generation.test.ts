@@ -38,14 +38,15 @@ afterEach(async () => {
   await rm(root, { recursive: true, force: true });
 });
 
-async function runtimeFixture(generate: typeof generateStudyJson, maxCalls: number, maxComputeMs = 100000) {
+async function runtimeFixture(generate: typeof generateStudyJson, maxCalls: number, maxComputeMs = 100000,
+  count = 1, generationConfig = config) {
   const store = AgentStore.open(join(root, "agent.sqlite"));
-  const scenario = createLearningAgentScenario(learning, { configure: () => config, generate });
+  const scenario = createLearningAgentScenario(learning, { configure: () => generationConfig, generate });
   const choices: AgentDecision[] = [
     { tool: "learning.establish_review_plan", args: { kind: "chapter_check", objectives: [{ id: "membership", label: "交集元素归属",
       sources: [{ materialId: material, paragraph: 1 }],
       requirements: [{ role: "concept", description: "区分同时属于与至少属于一个集合的归属条件", independent: true }] }] } },
-    { tool: "learning.create_quiz", args: { count: 1, difficulty: "basic", purpose: {
+    { tool: "learning.create_quiz", args: { count, difficulty: "basic", purpose: {
       objectiveIds: ["membership"], role: "concept", method: "retrieval", purpose: "检查交集元素归属", priorEvidenceRefs: [] } } },
   ];
   let decisions = 0;
@@ -91,6 +92,49 @@ it("persists a known pre-request call-limit refusal through Runtime → Scenario
     expect(store.database.pragma("integrity_check", { simple: true })).toBe("ok");
     expect(learning.database.pragma("integrity_check", { simple: true })).toBe("ok");
   } finally { runtime.close(); store.close(); }
+});
+
+it("keeps a formally published prefix answerable when a later complete response fails schema inside the Agent generator", async () => {
+  let generations = 0;
+  const generate = vi.fn(async (_config, _name, _prompt, input, schema, _signal, diagnostics) => {
+    const wire = input as { materials: Array<{ paragraphs: Array<{ referenceId: string }> }> };
+    const refs = [wire.materials[0].paragraphs[0].referenceId];
+    if (++generations === 2) {
+      diagnostics?.({ responseStatus: "completed", responseTextLength: 100, parseResult: "success",
+        validationResult: "failed", validationIssueCount: 1,
+        validationIssues: [{ path: "referenceScope", code: "invalid_string" }], inputTokens: 30, outputTokens: 10 });
+      // The actual provider wrapper validates before returning. Exercise that
+      // same failure boundary, not only a later standalone codec rejection.
+      return schema.parse({ contractVersion: "references-v2", referenceScope: "synthetic-invalid",
+        title: "坏格式", reason: null, items: [] });
+    }
+    diagnostics?.({ responseStatus: "completed", responseTextLength: 300, parseResult: "success",
+      validationResult: "success", inputTokens: 30, outputTokens: 20 });
+    return schema.parse({ contractVersion: "references-v2", title: "[合成] 部分可用", reason: null,
+      materialPlan: [{ material: 1, contribution: "交集定义", references: refs }],
+      items: [{ stem: "[合成] 交集中的元素需要满足什么条件？", scenario: null, kind: "concept", stemEvidenceIds: refs,
+        options: [{ id: "F", text: "同时属于两个集合", reasonParts: [{ text: "交集需要两个归属条件都成立。", evidenceIds: refs }] },
+          { id: "A", text: "只属于其中一个集合", reasonParts: [{ text: "只满足一个归属条件不足以属于交集。", evidenceIds: refs }] }],
+        correctOptionId: "F", reviewCheck: undefined }] });
+  }) as unknown as typeof generateStudyJson;
+  // Three planned parts, each one question, without changing the task budget.
+  const f = await runtimeFixture(generate, 16, 100000, 3, { ...config, maxOutputTokens: 1000 });
+  try {
+    const waiting = await f.runtime.advance("owner", f.task.id);
+    expect(waiting).toMatchObject({ status: "waiting", wait: { kind: "quiz_submission" }, usage: { calls: 4 } });
+    expect(waiting.actions.at(-1)?.status).toBe("succeeded");
+    expect(generations).toBe(2); expect(f.decisions()).toBe(2);
+    expect(quiz.list(page)[0]).toMatchObject({ status: "completed", count: 1, delivery: {
+      requested: 3, published: 1, candidates: null, rejected: [{ code: "format", count: 1 }]
+    } });
+    const attempt = quiz.attempt(page, waiting.wait!.refId!);
+    expect(attempt.questions).toHaveLength(1); expect(JSON.stringify(attempt)).not.toContain("correctOptionId");
+    expect(savedParts()).toMatchObject([{ state: "completed" }, { state: "failed" }, { state: "pending" }]);
+    await f.runtime.advance("owner", f.task.id);
+    expect(generations).toBe(2); expect(fetch).not.toHaveBeenCalled();
+    const calls = f.store.database.prepare("SELECT kind,status FROM agent_calls WHERE task_id=? ORDER BY rowid").all(f.task.id);
+    expect(calls).toMatchObject([{ status: "succeeded" }, { status: "succeeded" }, { status: "succeeded" }, { status: "failed" }]);
+  } finally { f.runtime.close(); f.store.close(); }
 });
 
 it("keeps a completed call billable when compute expires after its response, without marking the child outcome unknown or unsent", async () => {

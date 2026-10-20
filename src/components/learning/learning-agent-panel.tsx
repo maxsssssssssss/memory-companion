@@ -180,6 +180,7 @@ export function LearningAgentPanel({ pageId, materials, selected, disabled, acti
   const scopeMaterials = materials.filter(material => scopeMode === "materials" ? selected.includes(material.id) : scopedNodes.some(node => node.sources.some(source => source.materialId === material.id)));
   const hasScope = scopeMode === "materials" ? selected.length > 0 : scopeMode === "chapters" ? chapterIds.length > 0 : nodeIds.length > 0;
   const quizLinks = task?.quizLinks ?? [];
+  const latestDelivery = task?.quizDeliveries?.at(-1)?.delivery;
   const waitingQuiz = task?.wait?.kind === "quiz_submission";
   const attemptId = waitingQuiz ? task.wait?.refId : undefined;
   const approvalWaiting = task?.approval?.status === "pending" && task.approval.taskVersion === (task.version ?? 1);
@@ -260,7 +261,8 @@ export function LearningAgentPanel({ pageId, materials, selected, disabled, acti
     {!loaded ? <p role="status">正在读取复习任务…</p> : null}
     {loaded && (creating || !task) ? <div className={styles.agentPanel}>
       <fieldset className={`${styles.quizSettings} ${styles.agentStart}`} disabled={disabled || busy || Boolean(pendingStart.current)}><legend>确认本次复习</legend>
-        <label>复习目标<textarea maxLength={1000} rows={3} value={goal} placeholder="例如：我不理解条件概率，先帮我理清它的含义。" onChange={event => setGoal(event.target.value)} /></label>
+        <label>复习目标<textarea maxLength={1000} rows={3} value={goal} placeholder="例如：考考我；练习交集与并集；这部分我不懂。" onChange={event => setGoal(event.target.value)} /></label>
+        <p className={styles.muted}>一句话说说你想学什么就好。复习向导会结合所选材料安排起点；你也可以说“先出两道题”或“只解释，不要做题”。</p>
         <label>复习范围<select value={scopeMode} onChange={event => setScopeMode(event.target.value)}><option value="materials">当前勾选材料（{selected.length} 份）</option><option value="chapters">明确选择章节</option><option value="nodes">明确选择知识点</option></select></label>
         {scopeMode !== "materials" ? <div>{chapters.length ? chapters.map(chapter => <div key={chapter.id}>
           {scopeMode === "chapters" ? <label className={styles.materialCheck}><input type="checkbox" checked={chapterIds.includes(chapter.id)} onChange={() => setChapterIds(toggle(chapterIds, chapter.id))} />{chapter.title}</label>
@@ -294,6 +296,12 @@ export function LearningAgentPanel({ pageId, materials, selected, disabled, acti
       {task.completion ? <LearningAgentCompletion completion={task.completion} taskVersion={task.version ?? 1} ended={terminal.has(task.status)}
         quizLinks={quizLinks} materials={materials} disabled={Boolean(editing)} onReview={ref => reviewQuestion({ quizId: ref.quizId, attemptId: ref.attemptId, index: ref.questionIndex })} onSource={onSource} /> : null}
       {task.reviewSummary ? <ReviewSummary summary={task.reviewSummary} quizLinks={quizLinks} disabled={Boolean(editing)} onReview={reviewQuestion} onSource={onSource} /> : null}
+      {latestDelivery && latestDelivery.published < latestDelivery.requested ? <section className={styles.agentNotice} aria-label={latestDelivery.published ? "部分练习已准备好" : "这次练习未准备好"}>
+        <h4>{latestDelivery.published ? `已准备好 ${latestDelivery.published} 道练习`
+          : latestDelivery.rejected.some(reason => reason.code === "unknown") ? "这次题目的生成结果尚未确认" : "这次未能准备好可靠的题目"}</h4>
+        <p>{latestDelivery.message}</p>
+        <p className={styles.muted}>{latestDelivery.nextStep}</p>
+      </section> : null}
       {pendingAdvance?.id === task.id ? <p role="status" className={styles.agentNotice}>反馈已受理，正在读取任务进度…</p> : null}
       {task.status === "budget_exhausted" ? <p className={styles.agentNotice}>{endReason && endReason !== "本任务预算耗尽，已停止；等待用户的时间不计入计算预算。"
         ? endReason : "本轮复习因执行限制停止，旧记录未保存具体原因。已有内容已保留，你可以开始新的复习。"}</p>

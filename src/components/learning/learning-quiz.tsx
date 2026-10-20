@@ -22,6 +22,25 @@ export function LearningQuiz(props: LearningQuizProps) {
   return <LearningQuizSession key={`${props.pageId}:${props.embedded ? `embedded:${props.openQuizId ?? ""}` : "standalone"}`} {...props} />;
 }
 
+function QuizDeliveryNotice({ run, alert = false }: { run: QuizRunSummary; alert?: boolean }) {
+  if (run.status === "generating" || (run.status === "completed" && run.count >= run.settings.count)) return null;
+  // These saved failures happened before candidate generation. Keep their
+  // stage-specific recovery instructions rather than implying rejected questions.
+  if (run.status === "failed" && /^quiz_(?:reading|selection)_/.test(run.failure ?? "")) return <p role={alert ? "alert" : undefined} className={styles.error}>
+    {learningErrorMessage(new LearningApiError(422, run.failure!))}
+  </p>;
+  if (run.delivery) return <div role={alert ? "alert" : undefined} className={styles.muted}>
+    <p>{run.delivery.message}</p><p>{run.delivery.nextStep}</p>
+  </div>;
+  if (run.status === "insufficient") return <p role={alert ? "alert" : undefined}>
+    这次未能生成可靠的题目，未提供可作答题组。这不代表你没有掌握；你可以先查看原文，或选择一个具体知识点再练习。
+  </p>;
+  if (run.status === "failed") return <p role={alert ? "alert" : undefined} className={styles.error}>
+    {learningErrorMessage(new LearningApiError(422, run.failure ?? "quiz_invalid_result"))}
+  </p>;
+  return <p className={styles.muted}>本次准备了 {run.count}/{run.settings.count} 道可作答题目，其余未发布。你可以先完成这些题；题量不代表已覆盖全部复习目标。</p>;
+}
+
 function LearningQuizSession({ pageId, materials, selected, disabled, saveSelection, onSource, openQuizId, openQuizRequest, onReturnToAgent, embedded = false, onAttemptSaved, openReview }: LearningQuizProps) {
   const open = true;
   const [stage, setStage] = useState<"prepare" | "history" | "ready" | "answer" | "results">("prepare");
@@ -219,6 +238,7 @@ function LearningQuizSession({ pageId, materials, selected, disabled, saveSelect
     if (!unanswered || window.confirm("还有 " + unanswered + " 题未选择，交卷后记为跳过。确定交卷？")) void act("finish");
   };
   const questionCount = (r: QuizRunSummary) => r.count < r.settings.count ? r.count + "/" + r.settings.count + " 题" : "共 " + r.count + " 题";
+  const attemptRun = attempt ? runs.find(run => run.id === attempt.quizId) : undefined;
   // Mirror the existing selection semantics for display only. Publication still
   // resolves the actual sources on the server; this never adds missing context.
   const scopedNodes = chapters.flatMap(c => c.nodes.filter(n => scope === "chapters" ? chapterIds.includes(c.id) : scope === "nodes" && nodeIds.includes(n.id)));
@@ -280,14 +300,13 @@ function LearningQuizSession({ pageId, materials, selected, disabled, saveSelect
       {active ? <p role="status">正在阅读资料与准备题目，完成后统一展示。{runs.find(r=>r.status==="generating")?.progress ? `已完成 ${runs.find(r=>r.status==="generating")!.progress!.completed}/${runs.find(r=>r.status==="generating")!.progress!.total} 部分。` : ""}旧练习仍可查看。</p> : null}
       {pollStopped ? <p role="status">已暂停自动查询。<button onClick={() => void load()}>查看生成进度</button></p> : null}
       {runs.some(r => r.status === "completed") ? <button type="button" onClick={history}>使用已有题组</button> : null}
-      {!active && runs.slice(0,1).filter(r => r.status === "failed" || r.status === "insufficient").map(r => <p role="alert" key={r.id}>{r.status === "failed" ? learningErrorMessage(new LearningApiError(422, r.failure ?? "quiz_invalid_result")) : r.reason ?? "材料不足，请调整范围再生成。"}</p>)}
+      {!active && runs.slice(0,1).filter(r => r.status === "failed" || r.status === "insufficient").map(r => <QuizDeliveryNotice key={r.id} run={r} alert />)}
       {!active && runs.slice(0,1).filter(r=>r.status==="failed"&&r.progress?.canResume).map(r=><button key={r.id} disabled={busy} onClick={()=>void resumeGeneration(r)}>继续未完成部分</button>)}
     </> : null}
     {!embedded && stage === "history" ? <>
       {!runs.length ? <p>还没有题组，选择材料后可以开始生成。</p> : <ul className={styles.quizHistory}>{runs.map(r => <li key={r.id}>
         <div><h3>{r.title ?? "本次题组"}</h3><p className={styles.muted}>{r.createdAt.slice(0,16).replace("T", " ")} · {r.status === "generating" ? "生成中" : questionCount(r)}</p>
-        {r.reason ? <p>{r.reason}</p> : null}{r.status === "failed" ? <p className={styles.error}>{learningErrorMessage(new LearningApiError(422, r.failure ?? "quiz_invalid_result"))}</p> : null}
-        {r.status === "insufficient" ? <p>依据不足，未生成可作答题组。</p> : null}</div>
+        {r.status === "completed" && r.reason ? <p>{r.reason}</p> : null}<QuizDeliveryNotice run={r} /></div>
         <div className={styles.row}>{r.status === "completed" ? <button type="button" disabled={busy} onClick={() => { if (r.attemptId) void start(r); else { setChosen(r); setStage("ready"); } }}>{r.attemptId ? "续做 / 查看记录" : "使用这组题"}</button> : null}
         {r.status==="failed"&&r.progress?.canResume ? <button type="button" disabled={busy||active} onClick={()=>void resumeGeneration(r)}>继续未完成部分</button>:null}
         <button type="button" className={styles.danger} disabled={busy || disabled} aria-label={`删除题组 ${r.title ?? "本次题组"}`} onClick={() => { setDeleting(r); setDeleteError(""); }}>删除</button></div>
@@ -296,6 +315,7 @@ function LearningQuizSession({ pageId, materials, selected, disabled, saveSelect
     {embedded && (stage === "prepare" || stage === "history") && !notice && !error ? <p role="status">正在读取本轮题组…</p> : null}
     {stage === "ready" && chosen ? <div className={styles.quizReady}>
       <h3>{chosen.title}</h3><p>{questionCount(chosen)}</p>{chosen.reason ? <p>{chosen.reason}</p> : null}
+      <QuizDeliveryNotice run={chosen} />
       <fieldset disabled={busy || Boolean(pendingStart.current)}><legend>选择作答方式</legend>
         <label className={styles.quizOption}><input type="radio" name="quiz-mode" checked={mode === "practice"} onChange={() => setMode("practice")} /><span><strong>练习</strong><small>确认一题后查看反馈，再继续下一题。</small></span></label>
         <label className={styles.quizOption}><input type="radio" name="quiz-mode" checked={mode === "test"} onChange={() => setMode("test")} /><span><strong>测验</strong><small>先保存选择，交卷后查看全部答案与解析。</small></span></label>
@@ -305,6 +325,7 @@ function LearningQuizSession({ pageId, materials, selected, disabled, saveSelect
     </div> : null}
     {stage === "answer" && attempt && q ? <article className={styles.quizAttempt} aria-label="当前作答">
       <h3>{attempt.title}</h3><p>第 {index + 1}/{attempt.questions.length} 题 · 已{attempt.mode === "practice" ? "确认" : "选择"} {attempt.questions.filter(q => q.progress.submitted || q.progress.skipped || q.progress.revealed || (attempt.mode === "test" && q.progress.optionId)).length} 题</p>
+      {attemptRun ? <QuizDeliveryNotice run={attemptRun} /> : null}
       <progress aria-label="作答进度" max={attempt.questions.length} value={attempt.questions.filter(q => q.progress.submitted || q.progress.skipped || q.progress.revealed || (attempt.mode === "test" && q.progress.optionId)).length} />
       <fieldset disabled={busy || disabled || Boolean(done) || Boolean(pendingAction.current)}><legend>{q.stem}</legend>{q.options.map(o => <label className={styles.quizOption} key={o.id}><input type="radio" name={"quiz-" + attempt.id + "-" + index} value={o.id} checked={q.progress.optionId === o.id} onChange={() => void act("choose", o.id)} />{o.label ?? o.id}. {o.text}</label>)}</fieldset>
       <p className={styles.muted} role="status">{busy ? "正在保存…" : pendingAction.current ? "保存尚未确认" : done ? q.progress.skipped ? "已跳过 · 记录已保存" : q.progress.revealed ? "已看答案 · 记录已保存" : "已确认 · 记录已保存" : q.progress.optionId ? "选择已保存" : "请选择一个选项"}</p>

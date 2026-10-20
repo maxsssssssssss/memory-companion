@@ -71,11 +71,12 @@ export function compactQuizRequest(input: Input, scope: QuizReferenceScope, view
         const item = compactItem.safeParse(raw);
         // Preserve independent valid questions. A bad item cannot pass through as
         // legacy full IDs, be guessed, or lose only the inconvenient reference.
-        const rejected = { compactReferenceRejected: true };
+        const rejected = { compactReferenceRejected: true, rejectionReason: "structure_or_evidence" };
+        const sourceRejected = { compactReferenceRejected: true, rejectionReason: "source_binding" };
         if (!item.success) return rejected;
         const q = item.data;
         const used = [...q.stemEvidenceIds, ...q.explanationEvidenceIds, ...q.options.flatMap(o => o.evidenceIds)];
-        if (used.some(id => !originals.has(id))) return rejected;
+        if (used.some(id => !originals.has(id))) return sourceRejected;
         const expand = (ids: string[]) => ids.map(id => originals.get(id)!);
         const literals = new Set(literalNames);
         for (const match of `${q.scenario ?? ""}\n${q.stem}`.matchAll(/(?:变量|参数|令|设)\s*(r[1-9]\d*)\b|\b(r[1-9]\d*)\s*=/g)) literals.add(match[1] ?? match[2]);
@@ -86,7 +87,7 @@ export function compactQuizRequest(input: Input, scope: QuizReferenceScope, view
             stemEvidenceIds: expand(q.stemEvidenceIds), explanationEvidenceIds: expand(q.explanationEvidenceIds),
             options: q.options.map(o => ({ ...o, text: prose(o.text, new Set(o.evidenceIds), literals),
               reason: prose(o.reason, new Set(o.evidenceIds), literals), evidenceIds: expand(o.evidenceIds) })) };
-        } catch (e) { if (e instanceof LearningError) return rejected; throw e; }
+        } catch (e) { if (e instanceof LearningError) return sourceRejected; throw e; }
       }) };
     }
   };

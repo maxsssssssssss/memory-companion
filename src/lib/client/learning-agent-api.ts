@@ -1,5 +1,6 @@
 import type { LearningAgentReviewSummary } from "@/lib/domain/learning-agent";
 import type { LearningCompletionAssessment } from "@/lib/domain/learning-agent-completion";
+import type { QuizDeliverySummary } from "@/lib/domain/learning-quiz";
 import { LearningApiError, learningErrorMessage } from "./learning-api";
 import type { AgentApproval, AgentBudget, AgentRecovery, AgentResultRef, AgentUsage } from "@/lib/domain/agent";
 
@@ -27,6 +28,8 @@ export type LearningAgentTaskView = {
     omitted?: number;
   };
   quizLinks?: Array<{ quizId: string; attemptId?: string | null; completed?: boolean; disputed?: boolean; historical?: boolean }>;
+  /** Current-scope delivery facts only; never contains discarded questions or answers. */
+  quizDeliveries?: Array<{ quizId: string; delivery: QuizDeliverySummary }>;
 };
 export type LearningAgentSource = { materialId: string; paragraph: number; parsed?: import("@/lib/domain/learning-pdf-study").ParsedTextBinding };
 export type StartLearningAgent = { id: string; goal: string; scope: LearningAgentScope };

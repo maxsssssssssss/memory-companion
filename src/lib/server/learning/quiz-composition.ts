@@ -20,7 +20,12 @@ const itemSchema = originalItem.omit({ explanation: true, explanationEvidenceIds
 });
 const planEntry = z.object({ material: z.number().int().positive(), contribution: z.string().trim().min(1).max(1200),
   references: z.array(z.string().regex(/^r[1-9]\d*$/)).max(100) }).strict();
-const envelope = CompactQuizEnvelope.extend({ reason: CompactQuizEnvelope.shape.reason.default(null), materialPlan: z.array(z.unknown()).max(1000).default([]) });
+// This composed request already owns the reference map and the exact account /
+// page / request / source snapshot in its server closure. The model need not
+// retype a fixed 64-character digest. Earlier responses may still echo it:
+// explicit echoes must retain both strict format and exact binding checks.
+const envelope = CompactQuizEnvelope.extend({ referenceScope: CompactQuizEnvelope.shape.referenceScope.optional(),
+  reason: CompactQuizEnvelope.shape.reason.default(null), materialPlan: z.array(z.unknown()).max(1000).default([]) });
 const normalize = (text: string) => text.replace(/\s/g, "").toLowerCase();
 const joinParts = (parts: z.infer<typeof reasonParts>) => ({ text: parts.map(p => p.text).join("\n"), ids: [...new Set(parts.flatMap(p => p.evidenceIds))] });
 
@@ -71,7 +76,7 @@ export function composedQuizRequest(...args: Parameters<typeof compactQuizReques
             return { ...option, reason: reason.text, evidenceIds: reason.ids };
           }) };
       });
-      const decoded = codec.decode({ ...body, items }, scope);
+      const decoded = codec.decode({ ...body, referenceScope: body.referenceScope ?? codec.input.taskContext.referenceScope, items }, scope);
       const seen = new Set<string>();
       decoded.items = decoded.items.map((raw, index) => {
         if (rejections.has(index)) return { compositionRejected: true, rejectionReason: rejections.get(index)! };
@@ -110,7 +115,8 @@ export function composedQuizPrompt(prompt: string) {
     .join("\n") + `
 本次按以下顺序组织同一份响应，不增加调用：先写materialPlan，逐份说明有何独有考点并选择相应referenceId；仅为背景、与其他内容重复、无法确定或受本组题量限制时写明原因，references可为空。不要凭文件名认定没有价值。再写items，每题focus用一句话明确实际考查的判断，先安排互补考点，避免两题反复考同一分类。
 每个选项的reasonParts把解释与依据就近放在一起；一句解释用到规则和案例时同时引用两处，涉及另一条件时另写一段并关联其依据。正确选项的reasonParts须完整说明推理和适用条件，程序复用它作为总解析，不再要求另一份重复结论。不要输出选项reason/evidenceIds、explanation/explanationEvidenceIds、explanationParts或hint；程序完整拼接解释、合并来源并提供不泄题的思考步骤，不猜补相邻段落。片段不需要按每个词或逐claim拆分，也不代表语义已核验。
-仅输出JSON：{"contractVersion":"references-v2","referenceScope":"原样回传taskContext.referenceScope","title":"题组标题","reason":null,"materialPlan":[{"material":1,"contribution":"独有考点或本组未考查的原因","references":["r1"]}],"items":[{"focus":"本题考查的判断","scenario":null,"stem":"待判断的问题","kind":"concept|relationship|application","stemEvidenceIds":["r1"],"options":[{"id":"A","text":"选项","reasonParts":[{"text":"为何正确或错误及适用条件","evidenceIds":["r1"]}]},{"id":"B","text":"选项","reasonParts":[{"text":"为何正确或错误","evidenceIds":["r1","r2"]}]}],"correctOptionId":"A"}]}。
+referenceScope是应用已绑定的请求元数据，无需输出或重新计算；它不是课程依据。各处evidenceIds仍必须逐项选择本次实际给出的r编号，不能猜测、借用别题或补造来源。
+仅输出JSON：{"contractVersion":"references-v2","title":"题组标题","reason":null,"materialPlan":[{"material":1,"contribution":"独有考点或本组未考查的原因","references":["r1"]}],"items":[{"focus":"本题考查的判断","scenario":null,"stem":"待判断的问题","kind":"concept|relationship|application","stemEvidenceIds":["r1"],"options":[{"id":"A","text":"选项","reasonParts":[{"text":"为何正确或错误及适用条件","evidenceIds":["r1"]}]},{"id":"B","text":"选项","reasonParts":[{"text":"为何正确或错误","evidenceIds":["r1","r2"]}]}],"correctOptionId":"A"}]}。
 解释的每个片段都应有实际依据；一个片段缺少依据时不能借用其他选项或整题的来源补齐。引用未知或不属于本次范围就不可发布该题。所有选项稳定ID与事实保持关联，不写显示位置字母。`;
 }
 

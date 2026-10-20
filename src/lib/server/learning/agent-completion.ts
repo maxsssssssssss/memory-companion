@@ -339,25 +339,68 @@ export function guardLearningCompletionAction(learning: LearningRepository, ctx:
     : p.progressFingerprint === assessment.progressFingerprint) && (!p.observationFingerprint || p.observationFingerprint === currentObservations);
   // Failed generation produced no learner observation. Relabeling its role or
   // improving an unrelated objective must not unlock another identical method.
-  const same = previous.find(p => p.actionId !== ctx.actionId && p.kind === kind && (p.failure || p.purpose.role === purpose.role) && p.purpose.method === purpose.method
+  const same = [...previous].reverse().find(p => p.actionId !== ctx.actionId && p.kind === kind && (p.failure || p.purpose.role === purpose.role) && p.purpose.method === purpose.method
     && [...p.purpose.objectiveIds].sort().join(",") === [...purpose.objectiveIds].sort().join(",") && unchanged(p));
+  const clarification = pendingLearningExplanationClarification(learning, ctx.task, ctx.event);
+  // One accepted, concrete explanation response can justify another explanation
+  // even when the high-level method name is unchanged. It never unlocks Quiz
+  // retries or declares learning progress. A completed handling action consumes
+  // this event, so the next decision cannot spend it again.
+  if (kind === "explanation" && clarification && previous.some(record => record.kind === "explanation"
+    && !record.failure && record.resultId === clarification.explanationId
+    && [...record.purpose.objectiveIds].sort().join(",") === [...purpose.objectiveIds].sort().join(","))) {
+    validateLearningExplanationFeedback(learning, ctx.task, clarification, ctx.event!.refId);
+    return { assessment, purpose };
+  }
+  // A repeated explanation is not a learner response. Preserve the first
+  // opportunity to respond to the actual saved explanation instead of turning
+  // the generation guard into terminal completion. Quiz failure protection and
+  // the evidence/authorization checks above remain unchanged.
+  const existingExplanationFeedback = (previous: PurposeRecord) => {
+    if (kind !== "explanation" || previous.failure) return undefined;
+    const scope = scoped(learning, ctx.task), currentRows = rows(learning, ctx.task);
+    const association = explanationAssociation(ctx.task, assessment.plan!, scope, currentRows, previous.resultId);
+    if (!association || association.mismatchIds.length || association.content.status === "known_issue") return undefined;
+    return { explanationId: previous.resultId,
+      message: "这段说明已经保存。还有哪里不清楚？你可以确认疑问已解决，或指出希望换个例子、进一步说明的地方。" };
+  };
+  const feedback = same ? existingExplanationFeedback(same) : undefined;
+  if (feedback) return { assessment, purpose, feedback };
   if (same) return { assessment, purpose, stop: same.failure
     ? `${same.failure.code === "agent_quiz_insufficient" ? "上次生成未能提供满足发布条件的题目" : "上次生成明确失败，未取得可用结果"}，当前没有新的有效观察；这不是你的作答错误。已停止同类重复生成，本轮先交回核对生成问题，也可换用有明确区别的方法。`
     : "同一目标使用同类方法后尚无新的有效进展，本轮先交回；可调整目标或选择有明确区别的检查方法。" };
   const noProgress = previous.filter(p => p.actionId !== ctx.actionId && p.kind === kind && (p.failure || p.purpose.role === purpose.role)
     && [...p.purpose.objectiveIds].sort().join(",") === [...purpose.objectiveIds].sort().join(",") && unchanged(p)).at(-1);
-  if (noProgress && noProgress.purpose.method !== purpose.method && (!purpose.methodChange || purpose.methodChange.previousResultId !== noProgress.resultId))
+  if (noProgress && noProgress.purpose.method !== purpose.method && (!purpose.methodChange || purpose.methodChange.previousResultId !== noProgress.resultId)) {
+    const feedback = existingExplanationFeedback(noProgress);
+    if (feedback) return { assessment, purpose, feedback };
     return { assessment, purpose, stop: "尚无新的有效进展；仅更换方法名称不足以继续，需要说明与前次的具体区别和希望观察到什么，或先交回。" };
+  }
   return { assessment, purpose };
 }
 
-/** An accepted free-text feedback event gets one meaningful turn before a
- * previous assessment can automatically stop. Tool acknowledgement occurs only
- * after success, so a crash/prepared replay cannot silently consume it. */
+/** Accepted feedback gets one meaningful turn before a previous assessment can
+ * stop. Explicit resolution uses its own fact gate; further clarification is
+ * acknowledged after handling (including a completed unusable generation), so
+ * one event cannot unlock repeated generation. */
 export function hasPendingLearningFeedback(learning: LearningRepository, task: AgentTask, event?: AgentEvent) {
-  if (!enabled(task) || event?.kind !== "feedback" || (event.version ?? 1) !== version(task)) return false;
+  if (!enabled(task) || !event || (event.version ?? 1) !== version(task)) return false;
+  if (event.kind !== "feedback") {
+    if (event.kind !== "explanation_feedback" || !event.message) return false;
+    let input: unknown;
+    try { input = JSON.parse(event.message); } catch { return false; }
+    const parsed = LearningExplanationFeedback.safeParse(input);
+    if (!parsed.success || parsed.data.outcome !== "needs_clarification") return false;
+  }
   scoped(learning, task);
   return !rows(learning, task).some(r => r.kind === "completion_feedback" && parse<{ eventId: string }>(r)?.eventId === event.id);
+}
+export function pendingLearningExplanationClarification(learning: LearningRepository, task: AgentTask, event?: AgentEvent) {
+  if (event?.kind !== "explanation_feedback" || !event.message || !hasPendingLearningFeedback(learning, task, event)) return undefined;
+  let input: unknown;
+  try { input = JSON.parse(event.message); } catch { return undefined; }
+  const parsed = LearningExplanationFeedback.safeParse(input);
+  return parsed.success && parsed.data.outcome === "needs_clarification" && parsed.data.message?.trim() ? parsed.data : undefined;
 }
 export function acknowledgeLearningFeedback(learning: LearningRepository, ctx: AgentContext) {
   if (!hasPendingLearningFeedback(learning, ctx.task, ctx.event)) return;

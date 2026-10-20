@@ -2,6 +2,7 @@ import { randomInt } from "node:crypto";
 import { ReferencedGeneratedQuiz, type ModelQuiz, type ReferencedQuizResponse } from "@/lib/domain/learning-quiz";
 import { frameworkHash } from "./framework-repository";
 import { inspectLiteralSetCardinality, parseFiniteSetAtoms } from "./quiz-set-cardinality";
+import type { QuizCandidateReport } from "./quiz-delivery";
 
 export type QuizReference = { referenceId: string; source: ModelQuiz["items"][number]["sources"][number]; text: string };
 export const quizReferenceId = (binding: unknown) => `ref_${frameworkHash(JSON.stringify(binding))}`;
@@ -190,45 +191,51 @@ function inspectReferencedQuiz(value: ReferencedQuizResponse, catalog: QuizRefer
   const references = new Map(catalog.map(r => [r.referenceId, r]));
   const items: ModelQuiz["items"] = [], rejected: string[] = [];
   const acceptedIndexes: number[] = [];
+  const diagnostics: QuizCandidateReport = { candidates: value.items.length, rejected: [] };
   const stems = new Set<string>();
   for (const [index, raw] of value.items.entries()) {
-    const reject = (reason: string) => rejected.push(`第 ${index + 1} 题${reason}`);
+    const reject = (reason: string, code: QuizCandidateReport["rejected"][number]["code"]) => {
+      rejected.push(`第 ${index + 1} 题${reason}`);
+      diagnostics.rejected.push({ index, code });
+    };
     const checked = ReferencedGeneratedQuiz.shape.items.element.safeParse(raw);
     if (!checked.success) {
       // Local composition diagnostics survive candidate filtering/publication;
       // a rejected marker can only reject, never bypass the question schema.
-      const marker = raw as { compositionRejected?: unknown; rejectionReason?: unknown } | null;
+      const marker = raw as { compositionRejected?: unknown; compactReferenceRejected?: unknown; reviewCheckRejected?: unknown; rejectionReason?: unknown } | null;
       const reason = marker?.compositionRejected === true && typeof marker.rejectionReason === "string"
         && Object.hasOwn(QUIZ_REJECTION_DETAILS, marker.rejectionReason) ? marker.rejectionReason as QuizRejectionReason : null;
-      reject(`${reason ? QUIZ_REJECTION_DETAILS[reason] : "题目结构或依据ID格式不合法"}，未发布`); continue;
+      reject(`${reason ? QUIZ_REJECTION_DETAILS[reason] : "题目结构或依据ID格式不合法"}，未发布`,
+        reason ?? (marker?.reviewCheckRejected === true ? "goal_mismatch"
+          : marker?.compactReferenceRejected === true && marker.rejectionReason === "source_binding" ? "source_binding" : "structure_or_evidence")); continue;
     }
     const q = checked.data;
     const { scenario, ...question } = q;
     const fullStem = scenario ? `${scenario}\n\n${q.stem}` : q.stem;
     const stem = fullStem.replace(/\s/g, "").toLowerCase();
-    if (stems.has(stem)) { reject("重复，未发布"); continue; }
+    if (stems.has(stem)) { reject("重复，未发布", "repeated_focus"); continue; }
     if (new Set(q.options.map(o => o.id)).size !== q.options.length || !q.options.some(o => o.id === q.correctOptionId)) {
-      reject(`${QUIZ_REJECTION_DETAILS.option_identity}，未发布`); continue;
+      reject(`${QUIZ_REJECTION_DETAILS.option_identity}，未发布`, "option_identity"); continue;
     }
     if (new Set(q.options.map(o => optionContentKey(o.text, literalSetContext(fullStem)))).size !== q.options.length) {
-      reject("选项重复：文本相同或显式集合值等价，未发布"); continue;
+      reject("选项重复：文本相同或显式集合值等价，未发布", "equivalent_options"); continue;
     }
     if ([scenario ?? "", q.stem, q.explanation, q.hint ?? "", ...q.options.flatMap(o => [o.text, o.reason])].some(text => hasQuizPositionDependency(text, fullStem))) {
-      reject(`${QUIZ_REJECTION_DETAILS.position_dependency}，未发布`); continue;
+      reject(`${QUIZ_REJECTION_DETAILS.position_dependency}，未发布`, "position_dependency"); continue;
     }
     if (literalSetContext(fullStem) && contradictsLiteralSetEquality(fullStem, q.options.find(o => o.id === q.correctOptionId)!.text)) {
-      reject("正确项与显式整数集合的相等关系矛盾，未发布"); continue;
+      reject("正确项与显式整数集合的相等关系矛盾，未发布", "answer_contradiction"); continue;
     }
     const cardinality = inspectLiteralSetCardinality(fullStem, q.options, q.correctOptionId);
     if (cardinality.status === "invalid") {
       const reason = cardinality.code === "multiple_answers" ? "答案不唯一：多个选项符合显式有限集合的元素个数"
         : cardinality.code === "no_answer" ? "无正确答案：没有选项符合显式有限集合的元素个数"
         : "答案矛盾：正确选项ID与显式有限集合的元素个数不符";
-      reject(`${reason}，未发布`); continue;
+      reject(`${reason}，未发布`, cardinality.code === "incorrect_answer" ? "answer_contradiction" : "answer_not_unique"); continue;
     }
     const used = [...new Set([...q.stemEvidenceIds, ...q.explanationEvidenceIds, ...q.options.flatMap(o => o.evidenceIds)])];
     if (used.some(id => !references.has(id))) {
-      reject("依据不在所选范围或依据关联缺失，未发布"); continue;
+      reject("依据不在所选范围或依据关联缺失，未发布", "source_binding"); continue;
     }
     // No model-created alias or repeated quote: evidence is the exact selected paragraph/block.
     const evidence = used.map(id => ({ id, referenceId: id, source: references.get(id)!.source, quote: references.get(id)!.text }));
@@ -237,7 +244,12 @@ function inspectReferencedQuiz(value: ReferencedQuizResponse, catalog: QuizRefer
     acceptedIndexes.push(index);
     stems.add(stem);
   }
-  return { acceptedIndexes, rejected, quiz: { title: value.title, reason: [value.reason, rejected.length ? `发布检查排除 ${rejected.length} 题：${rejected.join("；")}。实际保留 ${items.length} 题，未补调用。` : null].filter(Boolean).join("\n") || null, items } };
+  return { acceptedIndexes, rejected, diagnostics, quiz: { title: value.title, reason: [value.reason, rejected.length ? `发布检查排除 ${rejected.length} 题：${rejected.join("；")}。实际保留 ${items.length} 题，未补调用。` : null].filter(Boolean).join("\n") || null, items } };
+}
+
+/** Bounded local diagnosis only: no question, answer, rationale or source body. */
+export function inspectQuizCandidateDelivery(value: ReferencedQuizResponse, catalog: QuizReference[]): QuizCandidateReport {
+  return inspectReferencedQuiz(value, catalog).diagnostics;
 }
 
 /** Surplus candidates are inspected before selecting in model order. Invalid

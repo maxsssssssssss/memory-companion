@@ -2,13 +2,14 @@ import { BeginQuizAttempt, GeneratedQuiz, ReferencedQuizEnvelope, QuizAction, St
 import { FRAMEWORK_DEADLINE_MS, FRAMEWORK_MAX_RESULT_BYTES } from "@/lib/domain/learning-framework";
 import { LearningFrameworkRepository, frameworkHash } from "./framework-repository";
 import { LearningError, type LearningRepository } from "./repository";
-import { quizReferenceId, resolveReferencedQuiz, quizProceduralHint } from "./quiz-grounding";
+import { quizReferenceId, resolveReferencedQuiz, quizProceduralHint, inspectQuizCandidateDelivery } from "./quiz-grounding";
 import { quizCoverageNotice } from "./quiz-composition";
 import { learningValidationDiagnostics } from "./generation-diagnostics";
 import { generationProgress } from "./generation-parts";
 import { bindPublishedQuizReview, SavedQuizReview, type QuizReviewPublication } from "./quiz-review-purpose";
+import { QuizCandidateReport, quizDeliverySummary } from "./quiz-delivery";
 
-type Run = { id: string; page_id: string; settings_json: string; binding_json: string; binding_hash: string; status: QuizRunSummary["status"] | "deleted"; created_at: string; failure: string | null; result_json: string | null };
+type Run = { id: string; page_id: string; settings_json: string; binding_json: string; binding_hash: string; status: QuizRunSummary["status"] | "deleted"; created_at: string; failure: string | null; result_json: string | null; diagnostics_json: string | null };
 type Attempt = { id: string; page_id: string; quiz_id: string; mode: "practice" | "test"; revision: number; progress_json: string; events_json: string; evaluation_json: string; created_at: string; completed_at: string | null };
 type Evaluation = { correct: Array<boolean | null>; score: QuizAttemptView["score"] };
 type Extra = { id: string; kind: "note" | "supplement"; chapterId: string; nodeId: string; text: string };
@@ -117,8 +118,21 @@ export class LearningQuizRepository {
         }
       }
       if (r.status === "failed" && failure === "quiz_reading_restart_required" && progress) progress.canResume = false;
+      if ((r.status === "completed" || r.status === "insufficient") && progress) progress.canResume = false;
+      const diagnostics = parse<Record<string, unknown>>(r.diagnostics_json ?? "{}");
+      const candidateReports = diagnostics.candidateReports && typeof diagnostics.candidateReports === "object"
+        ? Object.entries(diagnostics.candidateReports).sort(([a], [b]) => Number(a.split("-")[1]) - Number(b.split("-")[1]))
+          .flatMap(([, value]) => { const checked = QuizCandidateReport.safeParse(value); return checked.success ? [checked.data] : []; }) : [];
+      const publicationReport = QuizCandidateReport.safeParse(diagnostics.publicationReport);
       return { id: r.id, createdAt: r.created_at, status: r.status, failure, settings: parse<QuizConfig>(r.settings_json), title: result?.title ?? null,
         count: result?.questions.length ?? 0, reason: result?.reason ?? null, attemptId: attempt?.id ?? null,
+        ...(r.status !== "generating" ? { delivery: quizDeliverySummary({ requested: parse<QuizConfig>(r.settings_json).count,
+          published: result?.questions.length ?? 0, status: r.status, failure, uncertain: progress?.uncertain,
+          validationFailed: diagnostics.validationResult === "failed",
+          incompleteParts: diagnostics.partialGeneration === true ? 1 : 0,
+          ...(diagnostics.partialFailure === "format" || diagnostics.partialFailure === "known_failure" || diagnostics.partialFailure === "source_binding"
+            ? { partialFailure: diagnostics.partialFailure } : {}),
+          reports: candidateReports, ...(publicationReport.success ? { publicationReport: publicationReport.data } : {}) }) } : {}),
         ...(progress ? {progress} : {}) };
     });
   }
@@ -181,10 +195,16 @@ export class LearningQuizRepository {
       const settings = parse<QuizConfig>(r.settings_json), current = this.snapshot(pageId, settings);
       if (hash(current.binding) !== r.binding_hash) throw new LearningError(409, "source_changed");
       const referenced = typeof value === "object" && value !== null && "contractVersion" in value;
-      const parsed = referenced ? resolveReferencedQuiz(ReferencedQuizEnvelope.parse(value), [
+      const catalog = [
         ...current.input.materials.flatMap(m => m.paragraphs.map(p => ({ referenceId: p.referenceId, text: p.text, source: { kind: "material" as const, materialId: m.materialId, paragraph: p.number } }))),
         ...current.input.extras.map(e => ({ referenceId: e.referenceId, text: e.text, source: { kind: e.kind, id: e.id } }))
-      ]) : GeneratedQuiz.parse(value);
+      ];
+      const parsed = referenced ? resolveReferencedQuiz(ReferencedQuizEnvelope.parse(value), catalog) : GeneratedQuiz.parse(value);
+      if (referenced) {
+        const report = inspectQuizCandidateDelivery(ReferencedQuizEnvelope.parse(value), catalog);
+        this.db.prepare("UPDATE learning_quiz_runs SET diagnostics_json=json_patch(coalesce(diagnostics_json,'{}'),?) WHERE id=? AND page_id=?")
+          .run(JSON.stringify({ publicationReport: report }), id, pageId);
+      }
       const quiz = { title: parsed.title, reason: parsed.reason, questions: parsed.items };
       if (quiz.questions.length > settings.count || (quiz.questions.length < settings.count && !quiz.reason)
         || new Set(quiz.questions.map(q => q.stem.replace(/\s/g, "").toLowerCase())).size !== quiz.questions.length) throw new LearningError(422, "quiz_invalid_result");
@@ -221,6 +241,20 @@ export class LearningQuizRepository {
   fail(pageId: string, id: string, code: string) {
     this.learning.get(pageId);
     this.db.prepare("UPDATE learning_quiz_runs SET status='failed',failure=? WHERE id=? AND page_id=? AND status='generating'").run(code, id, pageId);
+  }
+  /** Local per-part diagnostic, saved before surplus filtering. Bound to this
+   * run's existing source snapshot; deleted with the run and never raw content. */
+  candidateDiagnostics(pageId: string, id: string, partId: string, value: QuizCandidateReport) {
+    if (!/^questions-(?:[0-9]|[1-4][0-9])$/.test(partId)) throw new LearningError(422, "quiz_invalid_result");
+    const report = QuizCandidateReport.parse(value);
+    this.assertSources(pageId, id);
+    this.db.prepare("UPDATE learning_quiz_runs SET diagnostics_json=json_patch(coalesce(diagnostics_json,'{}'),?) WHERE id=? AND page_id=? AND status='generating'")
+      .run(JSON.stringify({ candidateReports: { [partId]: report } }), id, pageId);
+  }
+  partialDelivery(pageId: string, id: string, failure: "format" | "known_failure" | "source_binding") {
+    this.assertSources(pageId, id);
+    this.db.prepare("UPDATE learning_quiz_runs SET diagnostics_json=json_patch(coalesce(diagnostics_json,'{}'),?) WHERE id=? AND page_id=? AND status='generating'")
+      .run(JSON.stringify({ partialGeneration: true, partialFailure: failure }), id, pageId);
   }
   /** Freeze only transport scheduling, not content. A larger runtime allowance
    * must not rebind already saved question/reading checkpoints on explicit resume. */

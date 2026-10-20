@@ -545,7 +545,9 @@ it("requires a current immutable plan and sends the actual explanation purpose t
   expect(ctx.task.usage.calls).toBe(1);
   ctx.actionId = randomUUID();
   const repeated = await scene.tools["learning.explain"].execute(args, ctx);
-  expect(repeated.handoff).toContain("尚无新的有效进展"); expect(generate).toHaveBeenCalledTimes(1);
+  expect(repeated.handoff).toBeUndefined();
+  expect(repeated.wait).toMatchObject({ kind: "feedback", message: expect.stringContaining("进一步说明") });
+  expect(repeated.ref).toEqual(saved.result.ref); expect(generate).toHaveBeenCalledTimes(1);
 });
 
 it("requires explicit explanation resolution and stops before both decisions and prepared generation", async () => {

@@ -69,8 +69,14 @@ export const QuizAction = z.object({
 }).strict();
 export type QuizActionInput = z.infer<typeof QuizAction>;
 export type QuizProgress = { optionId: string | null; submitted: boolean; skipped: boolean; hinted: boolean; revealed: boolean };
+/** Answer-free delivery facts, not learning achievement or a content-verification verdict. */
+export type QuizDeliveryReason = "structure_or_evidence" | "option_identity" | "position_dependency" | "answer_contradiction"
+  | "repeated_focus" | "equivalent_options" | "answer_not_unique" | "source_binding" | "goal_mismatch"
+  | "format" | "unknown" | "budget" | "known_failure";
+export type QuizDeliverySummary = { requested: number; candidates: number | null; published: number;
+  rejected: Array<{ code: QuizDeliveryReason; count: number }>; message: string; nextStep: string };
 export type QuizRunSummary = { id: string; createdAt: string; status: "generating" | "completed" | "insufficient" | "failed"; failure: string | null; settings: QuizConfig; title: string | null; count: number; reason: string | null; attemptId: string | null;
-  progress?: {completed:number;total:number;canResume:boolean;uncertain:boolean} };
+  progress?: {completed:number;total:number;canResume:boolean;uncertain:boolean}; delivery?: QuizDeliverySummary };
 export type QuizAttemptView = {
   id: string; quizId: string; title: string; mode: "practice" | "test"; revision: number; completed: boolean; createdAt: string; completedAt: string | null;
   questions: Array<{ index: number; stem: string; kind: string; options: Array<{ id: string; text: string; label?: string }>; progress: QuizProgress;

@@ -52,7 +52,7 @@ export function projectLearningAgentTask(learning: LearningRepository, task: Age
       ...((a.version ?? 1) === (task.version ?? 1) ? { resultRef: a.resultRef, summary: a.summary, reason: a.reason }
         : { summary: "此前版本的历史操作；不作为当前范围的检查依据。" }) })),
     usage: task.usage, budget: task.budget, recovery: task.recovery,
-    explanations: [], quizLinks: [], completion: assessLearningCompletion(learning, task, store?.latestEvent(learning.accountId, task.id))
+    explanations: [], quizLinks: [], quizDeliveries: [], completion: assessLearningCompletion(learning, task, store?.latestEvent(learning.accountId, task.id))
   };
   let current: ReturnType<typeof readLearningAgentScope>;
   try { current = readLearningAgentScope(learning, task.resourceId, task.scope); }
@@ -83,8 +83,23 @@ export function projectLearningAgentTask(learning: LearningRepository, task: Age
     }
   }
   const quizzes = new LearningQuizRepository(learning);
+  const quizRuns = new Map(quizzes.list(task.resourceId).map(run => [run.id, run]));
   for (const artifact of new LearningAgentRepository(learning).list(task.resourceId, task.id)) {
-    if (artifact.state !== "completed" || artifact.task_version !== (task.version ?? 1)) continue;
+    if (artifact.task_version !== (task.version ?? 1)) continue;
+    // Report delivery independently from an answerable attempt. Failed and
+    // partial generation are not evidence of the learner's understanding.
+    // Recheck the current scope and live source binding before publishing even
+    // these content-free counts; an old artifact cannot restore revoked access.
+    if (artifact.kind === "quiz" && artifact.state !== "invalidated" && artifact.binding_hash === current.fingerprint) {
+      const run = quizRuns.get(artifact.id);
+      if (run?.delivery) {
+        try {
+          quizzes.assertSources(task.resourceId, artifact.id);
+          base.quizDeliveries!.push({ quizId: artifact.id, delivery: run.delivery });
+        } catch { /* Removed or changed sources do not reappear via diagnostics. */ }
+      }
+    }
+    if (artifact.state !== "completed") continue;
     if (artifact.kind === "explanation") {
       const answer = readLearningAgentExplanation(learning, task, artifact.id);
       base.explanations!.push({ id: answer.id, contentIssue: answer.contentIssue, text: [answer.materialAnswer,

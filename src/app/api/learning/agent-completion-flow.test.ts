@@ -287,11 +287,61 @@ describe("Learning completion: frozen offline scenarios through formal API and S
     expect(task(id).usage).toEqual(after); expect(decision).toHaveBeenCalledTimes(calls);
   });
 
-  it("C07 stops a repeated explanation without calling the generator again when the same gap has no new progress", async () => {
+  it("C07 blocks repeated explanation generation while retaining a feedback opportunity for the same unresolved gap", async () => {
     candidates.push(planAction(), explainAction(), waitAction); const id = await create(); await run(id);
     await control(id, { action: "feedback", feedback: "[合成] 还是不能区分前提，请再说明。" }); candidates.push(explainAction());
-    const ended = await run(id); expect(ended.status, JSON.stringify(ended)).toBe("ended"); expect(ended.endReason).toContain("同类方法");
+    const waiting = await run(id); expect(waiting.status, JSON.stringify(waiting)).toBe("waiting");
+    expect(waiting.wait).toMatchObject({ kind: "feedback", message: expect.stringContaining("进一步说明") });
+    expect(waiting.endReason).toBeUndefined();
     expect(generation).toHaveBeenCalledTimes(1); expect(assessment(id).outcome).toBe("insufficient");
+  });
+
+  it("NQ-S2 preserves the first explicit explanation response through a repeated action, restart and thanks", async () => {
+    candidates.push(planAction(plan("explanation")), explainAction(), explainAction());
+    const id = await create("我不理解具体的定义 帮帮我");
+    const first = await run(id), explanationId = first.actions.find(action => action.tool === "learning.explain")!.resultRef!.id;
+    expect(first.status).toBe("waiting"); expect(first.wait?.kind).toBe("feedback");
+    expect(first.actions.filter(action => action.tool === "learning.explain")).toHaveLength(2);
+    expect(generation).toHaveBeenCalledTimes(1);
+    const calls = first.usage.calls;
+    // run() closes and reopens the actual repository, task store and checkpoint.
+    expect((await run(id)).usage.calls).toBe(calls);
+    await control(id, { action: "feedback", feedback: "谢谢" });
+    candidates.push(explainAction());
+    const thanks = await run(id);
+    expect(thanks.status).toBe("waiting"); expect(assessment(id).outcome).toBe("insufficient");
+    expect(generation).toHaveBeenCalledTimes(1);
+    const before = thanks.usage.calls, decisions = decision.mock.calls.length;
+    const response = { action: "explanation_feedback", explanationId, outcome: "resolved" };
+    await control(id, response);
+    expect((await run(id)).status).toBe("ended"); expect(assessment(id).outcome).toBe("explanation_resolved");
+    expect(task(id).usage.calls).toBe(before); expect(decision).toHaveBeenCalledTimes(decisions);
+    await control(id, response);
+    expect(task(id).usage.calls).toBe(before); expect(generation).toHaveBeenCalledTimes(1);
+    expect(stores(learning => new LearningQuizRepository(learning).list(pageId))).toEqual([]);
+  });
+
+  it("NQ-S2 handles one concrete clarification with the same method, then waits instead of reusing that feedback", async () => {
+    candidates.push(planAction(plan("explanation")), explainAction(), explainAction());
+    const id = await create("我不理解具体的定义，帮帮我"), first = await run(id);
+    const originalId = first.actions.find(action => action.tool === "learning.explain")!.resultRef!.id;
+    const message = "仍不清楚为什么前提不成立与结论不成立不同，请举例说明。";
+    const feedback = { action: "explanation_feedback", explanationId: originalId, outcome: "needs_clarification", message, eventId: randomUUID() };
+    await control(id, feedback);
+    candidates.push(explainAction(), explainAction());
+    const waiting = await run(id);
+    expect(waiting.status).toBe("waiting"); expect(generation).toHaveBeenCalledTimes(2);
+    expect(generation.mock.calls[1][3]).toMatchObject({ followupFeedback: { explanationId: originalId, message } });
+    expect(assessment(id).outcome).toBe("insufficient");
+    const explained = waiting.actions.filter(action => action.tool === "learning.explain");
+    const latestId = explained.at(-1)!.resultRef!.id;
+    expect(latestId).not.toBe(originalId); expect(explained.at(-2)!.resultRef?.id).toBe(latestId);
+    const calls = waiting.usage.calls;
+    await control(id, feedback);
+    expect((await run(id)).usage.calls).toBe(calls); expect(generation).toHaveBeenCalledTimes(2);
+    await control(id, { action: "explanation_feedback", explanationId: latestId, outcome: "resolved" });
+    expect((await run(id)).status).toBe("ended"); expect(assessment(id).outcome).toBe("explanation_resolved");
+    expect(task(id).usage.calls).toBe(calls);
   });
 
   it("C07 permits a concretely different method while retaining the same unmet objective", async () => {

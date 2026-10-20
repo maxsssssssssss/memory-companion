@@ -188,6 +188,49 @@ it("shows saved material-coverage limits in the existing quiz flow without expos
   expect(screen.queryByText(/正确选项/)).not.toBeInTheDocument();
   expect(learningApi.generateQuiz).not.toHaveBeenCalled();
 });
+
+it("shows a zero-publication failure without blaming insufficient material or exposing a rejected answer", async () => {
+  const delivery = { requested: 3, candidates: 3, published: 0, rejected: [{ code: "equivalent_options" as const, count: 3 }],
+    message: "这次未能生成可靠的题目，没有提供可作答题组。",
+    nextStep: "可以先结合原文理清概念；这次生成不用于判断你是否掌握。" };
+  vi.mocked(learningApi.quizzes).mockResolvedValue({ quizzes: [{ ...run, status: "insufficient", count: 0,
+    reason: "不应展示的原生成说明：正确答案A", delivery }] });
+  await mount();
+  const alert = await screen.findByRole("alert");
+  expect(alert).toHaveTextContent(delivery.message); expect(alert).toHaveTextContent(delivery.nextStep);
+  expect(alert).not.toHaveTextContent(/依据不足|材料不足|正确答案|equivalent_options/);
+  fireEvent.click(screen.getByRole("button", { name: "题组与历史" }));
+  expect(await screen.findByText(delivery.message)).toBeVisible();
+  expect(screen.queryByText(/不应展示的原生成说明|依据不足/)).not.toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "使用这组题" })).not.toBeInTheDocument();
+  expect(learningApi.generateQuiz).not.toHaveBeenCalled(); expect(learningApi.startQuiz).not.toHaveBeenCalled();
+});
+
+it("gives legacy zero-publication runs an honest fallback without guessing their rejection cause", async () => {
+  vi.mocked(learningApi.quizzes).mockResolvedValue({ quizzes: [{ ...run, status: "insufficient", count: 0, reason: "旧模型不可作为诊断的原文" }] });
+  await mount();
+  const alert = await screen.findByRole("alert");
+  expect(alert).toHaveTextContent("这次未能生成可靠的题目");
+  expect(alert).toHaveTextContent("这不代表你没有掌握");
+  expect(alert).not.toHaveTextContent(/材料不足|依据不足|旧模型不可/);
+  expect(learningApi.generateQuiz).not.toHaveBeenCalled();
+});
+
+it("keeps the one valid question from a partial delivery usable and hides answer details until submission", async () => {
+  const delivery = { requested: 3, candidates: 3, published: 1, rejected: [{ code: "option_identity" as const, count: 2 }],
+    message: "本次准备了 1/3 道可作答题目，其余未发布。",
+    nextStep: "你可以先完成这些题；未检查的目标仍然保留。" };
+  vi.mocked(learningApi.quizzes).mockResolvedValue({ quizzes: [{ ...run, settings: { ...settings, count: 3 }, delivery }] });
+  await mount(); await ready();
+  expect(screen.getByText(delivery.message)).toBeVisible();
+  fireEvent.click(screen.getByRole("button", { name: "开始作答" }));
+  expect(await screen.findByText("合成问题")).toBeVisible();
+  expect(screen.getByText(delivery.message)).toBeVisible();
+  expect(screen.getByText(delivery.nextStep)).toBeVisible();
+  expect(screen.queryByText(/正确选项|option_identity|已覆盖全部/)).not.toBeInTheDocument();
+  expect(learningApi.startQuiz).toHaveBeenCalledOnce(); expect(learningApi.generateQuiz).not.toHaveBeenCalled();
+});
+
 it("keeps an older failed generation in history without presenting it as the current generation failure", async () => {
   const old:QuizRunSummary={...run,id:"old-failure",status:"failed",failure:"quiz_invalid_result",progress:{completed:1,total:2,canResume:true,uncertain:false}};
   vi.mocked(learningApi.quizzes).mockResolvedValue({quizzes:[{...run,status:"generating",progress:{completed:2,total:4,canResume:false,uncertain:false}},old]});
@@ -205,7 +248,9 @@ it.each([
   ["quiz_selection_invalid_result", "考点安排阶段的结果不符合要求", true],
 ] as const)("explains %s before any questions and preserves the available recovery action", async (failure, message, canResume) => {
   vi.mocked(learningApi.quizzes).mockResolvedValue({ quizzes: [{ ...run, id: "failed-reading", status: "failed", failure,
-    title: null, count: 0, progress: { completed: 1, total: 3, canResume, uncertain: false } }, run] });
+    title: null, count: 0, progress: { completed: 1, total: 3, canResume, uncertain: false },
+    delivery: { requested: 5, candidates: null, published: 0, rejected: [{ code: "known_failure", count: 1 }],
+      message: "这次生成未能完成。", nextStep: "可先回看原文。" } }, run] });
   await mount();
   const alert = await screen.findByRole("alert");
   expect(alert).toHaveTextContent(message);

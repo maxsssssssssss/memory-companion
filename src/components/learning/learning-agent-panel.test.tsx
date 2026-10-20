@@ -52,6 +52,80 @@ it("requires a goal and visible scope confirmation, with history, notes and supp
   expect(learningAgentApi.start).toHaveBeenCalledExactlyOnceWith("page-one", { id: expect.any(String), goal: waiting.goal, scope });
 });
 
+it("sends a short practice request unchanged without asking for quiz parameters", async () => {
+  mount();
+  const goal = await screen.findByLabelText("复习目标");
+  expect(goal).toHaveAttribute("placeholder", expect.stringContaining("考考我"));
+  fireEvent.change(goal, { target: { value: "练习交集与并集" } });
+  fireEvent.click(screen.getByRole("button", { name: "明确开始复习" }));
+  await waitFor(() => expect(learningAgentApi.start).toHaveBeenCalledOnce());
+  expect(vi.mocked(learningAgentApi.start).mock.calls[0][1]).toMatchObject({ goal: "练习交集与并集", scope });
+  expect(screen.queryByLabelText(/题量|难度|目标类型|requirements/)).not.toBeInTheDocument();
+});
+
+it("guides a short request to select material without starting an unscoped task", async () => {
+  render(<LearningAgentPanel pageId="page-one" materials={materials} selected={[]} disabled={false} saveSelection={saveSelection} onSource={onSource} />);
+  fireEvent.change(await screen.findByLabelText("复习目标"), { target: { value: "考考我" } });
+  expect(screen.getByRole("button", { name: "明确开始复习" })).toBeDisabled();
+  expect(screen.getByText(/本次材料：尚未选择/)).toBeVisible();
+  expect(learningAgentApi.start).not.toHaveBeenCalled();
+});
+
+const failedDelivery = {
+  requested: 3, candidates: 3, published: 0, rejected: [{ code: "equivalent_options" as const, count: 1 }, { code: "option_identity" as const, count: 2 }],
+  message: "这次未能生成可靠的题目，没有提供可作答题组。这不代表你没有掌握。",
+  nextStep: "可以先结合原文理清概念，再决定是否继续练习。",
+};
+
+it("keeps a failed quiz visible alongside a helpful explanation without treating it as a student result", async () => {
+  vi.mocked(learningAgentApi.list).mockResolvedValue({ tasks: [{ ...waiting, quizLinks: [],
+    wait: { kind: "feedback", message: "哪里还不清楚？" }, quizDeliveries: [{ quizId: "failed-quiz", delivery: failedDelivery }],
+    explanations: [{ id: "explanation-one", text: "交集要求同时属于两个集合。", sources: [{ materialId: "material-one", paragraph: 1 }] }] }] });
+  mount();
+  const delivery = await screen.findByRole("region", { name: "这次练习未准备好" });
+  expect(delivery).toHaveTextContent(failedDelivery.message);
+  expect(delivery).toHaveTextContent(failedDelivery.nextStep);
+  expect(delivery).not.toHaveTextContent(/正确选项|referenceScope|equivalent_options|option_identity/);
+  expect(screen.getByText("交集要求同时属于两个集合。")).toBeVisible();
+  expect(screen.getByLabelText("你的反馈")).toBeEnabled();
+  expect(screen.queryByTestId("inline-quiz")).not.toBeInTheDocument();
+  expect(learningAgentApi.control).not.toHaveBeenCalled();
+});
+
+it("makes a partially published quiz answerable while stating its actual delivered count", async () => {
+  const delivery = { ...failedDelivery, published: 1,
+    message: "本次准备了 1/3 道可作答题目，其余未发布。", nextStep: "可以先完成这道题；尚未检查的目标会继续保留。" };
+  vi.mocked(learningAgentApi.list).mockResolvedValue({ tasks: [{ ...waiting, quizDeliveries: [{ quizId: "quiz-one", delivery }] }] });
+  mount();
+  expect(await screen.findByRole("region", { name: "部分练习已准备好" })).toHaveTextContent(delivery.message);
+  expect(await screen.findByTestId("inline-quiz")).toHaveTextContent("quiz-one");
+  expect(screen.getByRole("region", { name: "部分练习已准备好" })).not.toHaveTextContent(/检查通过|已经掌握/);
+  expect(learningAgentApi.start).not.toHaveBeenCalled(); expect(learningAgentApi.control).not.toHaveBeenCalled();
+});
+
+it("does not present an older failed delivery as the current result after a complete quiz arrives", async () => {
+  vi.mocked(learningAgentApi.list).mockResolvedValue({ tasks: [{ ...waiting, quizDeliveries: [
+    { quizId: "failed-quiz", delivery: failedDelivery },
+    { quizId: "quiz-one", delivery: { requested: 1, candidates: 1, published: 1, rejected: [], message: "已准备好 1 道题。", nextStep: "请开始作答。" } },
+  ] }] });
+  mount(); await screen.findByTestId("inline-quiz");
+  expect(screen.queryByRole("region", { name: "这次练习未准备好" })).not.toBeInTheDocument();
+});
+
+it("keeps an unknown generation distinct from a confirmed zero-publication failure and never resends it", async () => {
+  const delivery = { requested: 3, candidates: null, published: 0, rejected: [{ code: "unknown" as const, count: 1 }],
+    message: "这次题目的生成结果尚未确认。", nextStep: "请先核对已有结果，以免重复生成。" };
+  vi.mocked(learningAgentApi.list).mockResolvedValue({ tasks: [{ ...waiting, status: "needs_attention", wait: null, quizLinks: [],
+    quizDeliveries: [{ quizId: "unknown-quiz", delivery }],
+    recovery: { kind: "unknown", message: delivery.message, allowedControls: ["inspect", "cancel"] } }] });
+  mount();
+  expect(await screen.findByRole("heading", { name: "这次题目的生成结果尚未确认" })).toBeVisible();
+  expect(screen.queryByRole("heading", { name: "这次未能准备好可靠的题目" })).not.toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "核对原操作结果" })).toBeEnabled();
+  expect(screen.queryByRole("button", { name: "重试明确失败的操作" })).not.toBeInTheDocument();
+  expect(learningAgentApi.control).not.toHaveBeenCalled(); expect(learningAgentApi.start).not.toHaveBeenCalled();
+});
+
 it("requires explicit node selection and sends only that narrow scope plus checked permissions", async () => {
   mount(); await screen.findByRole("button", { name: "明确开始复习" });
   fireEvent.change(screen.getByLabelText("复习目标"), { target: { value: "我不懂条件概率" } });

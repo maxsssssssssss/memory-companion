@@ -8,6 +8,7 @@ const { respond } = require('./offline-fixtures.cjs');
 const { assertEvidenceDirectory } = require('./evidence-directory.cjs');
 const { decision: a2Decision } = require('./offline-a2-fixtures.cjs');
 const completionFixture = require('./offline-completion-fixtures.cjs');
+const naturalQuizFixture = require('./offline-natural-quiz-fixtures.cjs');
 const { initializeFaultLedger, providerFault, installReceiptFault } = require('./offline-faults.cjs');
 assert.equal(process.env.AGENT_TRIAL_MODE, 'offline', 'offline_mode_must_be_explicit');
 const root = process.env.AGENT_TRIAL_DIR;
@@ -35,7 +36,8 @@ globalThis.fetch = async (input, init) => {
     .run(new Date().toISOString(), 'unclassified', 'received', raw.length, body.max_output_tokens).lastInsertRowid;
   let result;
   try {
-    result = payload.tools && payload.observation && payload.results
+    const naturalCase = naturalQuizFixture.configuredCase(root, payload);
+    result = naturalCase ? naturalQuizFixture.respond(payload, naturalCase.mode) : payload.tools && payload.observation && payload.results
       ? { kind: 'decision_fixture', value: completionFixture.applies(payload) ? completionFixture.decision(payload) : a2Decision(payload) }
       : payload.taskContext?.reviewContext ? { kind: 'quiz_generation_fixture', value: completionFixture.quiz(payload) } : respond(payload);
     db.prepare('UPDATE requests SET kind=? WHERE id=?').run(result.kind, id);

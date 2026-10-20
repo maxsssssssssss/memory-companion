@@ -688,3 +688,63 @@ it("continues the real saved Quiz/Agent checkpoint after completion and reads pe
   for (let i = 0; i < 2; i++) { await PATCH(request("PATCH", syncBody(task.id, attemptId)), context()); await runOffline(task.id, next); }
   expect(next).toHaveBeenCalledTimes(2); expect(generate).toHaveBeenCalledTimes(1); expect(fetch).not.toHaveBeenCalled();
 });
+
+it.each([0, 1, 3])("projects a safe %i/3 Quiz delivery from the real generation service, independently of an attempt", async published => {
+  const task = seedTask();
+  // The existing fixture default deliberately caps generations at one question
+  // per part; this batch test must use the product's three-question envelope.
+  generationConfig.mockReturnValue({ ...generationConfig(), maxOutputTokens: 8000 });
+  const generate = vi.fn(async (_config: unknown, _name: unknown, _prompt: unknown, wire: unknown) => {
+    const input = wire as { materials: Array<{ paragraphs: Array<{ referenceId: string }> }>; taskContext: { referenceScope?: string } };
+    const refs = input.materials[0].paragraphs.map(paragraph => paragraph.referenceId);
+    return { contractVersion: "references-v2", title: "[合成] 发布反馈", reason: null,
+      materialPlan: [{ material: 1, contribution: "核对规则前提", references: refs }],
+      items: Array.from({ length: 3 }, (_, index) => ({
+        scenario: null, stem: `[合成案例${index + 1}] 应用规则前需要检查什么？`, kind: "concept", stemEvidenceIds: refs,
+        options: [{ id: "A", text: "先核对前提", reasonParts: [{ text: "SECRET_CORRECT_REASON 前提满足后才可应用", evidenceIds: refs }] },
+          { id: "B", text: index < published ? "无需核对前提" : "先核对前提",
+            reasonParts: [{ text: "SECRET_WRONG_REASON 忽略前提不能保证规则适用", evidenceIds: refs }] }],
+        correctOptionId: "A", hint: null
+      })) };
+  }) as unknown as typeof generateStudyJson;
+  const decision = vi.fn<AgentDecisionProvider>(async (input, ctx) => ctx.call(
+    { kind: "offline-decision", inputChars: 100, maxOutputTokens: 100 },
+    async () => ({ value: input.task.actions.some(action => action.tool === "learning.create_quiz")
+      ? { wait: { kind: "feedback", message: "这次没有可用练习，可以先结合原文说明。" } }
+      : { tool: "learning.create_quiz", args: { count: 3, difficulty: "basic" } } })));
+  const waiting = await runOffline(task.id, decision, generate);
+  expect(waiting.status, waiting.endReason).toBe("waiting");
+  for (let poll = 0; poll < 2; poll++) {
+    const response = await GET(request(), context());
+    expect(response.status).toBe(200);
+    const view = (await response.json()).tasks[0];
+    expect(view.quizDeliveries).toHaveLength(1);
+    expect(view.quizDeliveries[0].delivery).toMatchObject({ requested: 3, candidates: 3, published });
+    expect(view.quizLinks).toHaveLength(published ? 1 : 0);
+    expect(JSON.stringify(view)).not.toMatch(/SECRET_|correctOptionId|reasonParts|referenceScope|args_json/);
+    expect(view.completion.outcome).not.toBe("check_passed");
+  }
+  expect(generate).toHaveBeenCalledOnce();
+  expect(decision).toHaveBeenCalledTimes(published ? 1 : 2);
+  expect(advance).not.toHaveBeenCalled(); expect(fetch).not.toHaveBeenCalled();
+  expect((await GET(request("GET", undefined, "other"), context())).status).toBe(404);
+
+  const changed = await PATCH(request("PATCH", { id: task.id, action: "adjust", expectedVersion: 1,
+    eventId: randomUUID(), goal: "只解释，不要做题", scope: selection() }), context());
+  expect(changed.status).toBe(202);
+  const updated = (await (await GET(request(), context())).json()).tasks[0];
+  expect(updated).toMatchObject({ version: 2, quizDeliveries: [], quizLinks: [] });
+  // A new version never erases the historical business group or its grading.
+  expect(stores(learning => new LearningQuizRepository(learning).list(pageId)[0].count)).toBe(published);
+});
+
+it("removes safe Quiz delivery projections as well as answer links when the source is deleted", async () => {
+  const task = seedTask(), { quizId } = seedWaitingQuiz(task.id);
+  const before = (await (await GET(request(), context())).json()).tasks[0];
+  expect(before.quizLinks[0].quizId).toBe(quizId);
+  stores(learning => learning.deleteMaterial(pageId, materialId));
+  const after = (await (await GET(request(), context())).json()).tasks[0];
+  expect(after).toMatchObject({ status: "needs_attention", quizLinks: [], quizDeliveries: [] });
+  expect(JSON.stringify(after)).not.toMatch(/SECRET_|correctOptionId/);
+  expect(fetch).not.toHaveBeenCalled();
+});
