@@ -19,6 +19,7 @@ import { assessLearningCompletion, establishLearningReviewPlan } from "./agent-c
 import { loadLearningCompletionEvidence } from "./agent-completion-evidence";
 import { materializeLearningPlanSourceAdjustment, prepareLearningPlanSourceAdjustment } from "./agent-plan-sources";
 import { quizReviewQuestionKey } from "./quiz-review-purpose";
+import { completePreContractQuizFixture } from "./testing/pre-contract-quiz.fixture";
 import { projectPendingLearningHistory } from "./agent-completion-history";
 import { createLearningAgentScenario } from "./agent-scenario";
 import { withLearningCompletionDecision } from "./agent-context";
@@ -50,7 +51,7 @@ function group(answer: "wrong" | "hint" | "pending" = "wrong", ownTaskId = ctx.t
     options: [{ id: "A" as const, text: "不能应用", reason: "只有前提满足才可应用规则。", evidenceIds: [reference] },
       { id: "B" as const, text: "能够应用", reason: "前提未满足时不能直接应用规则。", evidenceIds: [reference] }],
     correctOptionId: "A" as const, hint: null, explanation: "只有前提满足才可应用规则。", stemEvidenceIds: [reference], explanationEvidenceIds: [reference] };
-  quizzes.complete(pageId, id, { contractVersion: "references-v2", title: "[合成] 规则检查", reason: null, items: [question] }, includeReview ? {
+  completePreContractQuizFixture(learning, pageId, id, { contractVersion: "references-v2", title: "[合成] 规则检查", reason: null, items: [question] }, includeReview ? {
     context: { planId: originalPlan.id, taskVersion: reviewVersion, objectives: originalPlan.objectives,
       purpose: { objectiveIds: ["rule"], role: "boundary", method: "boundary", purpose: "检查前提", priorEvidenceRefs: [] } },
     candidates: includeChecks ? [{ questionKey: quizReviewQuestionKey(question), check: { objectiveIds: ["rule"], role: "boundary", rationale: "PRIVATE_RATIONALE：前提不满足时不能使用。" } }] : [] } : undefined);

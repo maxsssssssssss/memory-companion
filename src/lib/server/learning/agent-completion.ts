@@ -374,7 +374,9 @@ export function guardLearningCompletionAction(learning: LearningRepository, ctx:
   if (noProgress && noProgress.purpose.method !== purpose.method && (!purpose.methodChange || purpose.methodChange.previousResultId !== noProgress.resultId)) {
     const feedback = existingExplanationFeedback(noProgress);
     if (feedback) return { assessment, purpose, feedback };
-    return { assessment, purpose, stop: "尚无新的有效进展；仅更换方法名称不足以继续，需要说明与前次的具体区别和希望观察到什么，或先交回。" };
+    return { assessment, purpose, stop: noProgress.failure
+      ? "上次未能生成可用的练习内容，这不是你的作答错误。仅更换方法名称不足以继续，因此没有再次出题；本轮先交回，已有学习内容与作答会保留。后续可以结合原文说明，或采用有明确区别的方法。"
+      : "尚无新的有效进展；仅更换方法名称不足以继续，需要说明与前次的具体区别和希望观察到什么，或先交回。" };
   }
   return { assessment, purpose };
 }

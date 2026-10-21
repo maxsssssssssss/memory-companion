@@ -115,7 +115,8 @@ it("keeps a formally published prefix answerable when a later complete response 
       items: [{ stem: "[合成] 交集中的元素需要满足什么条件？", scenario: null, kind: "concept", stemEvidenceIds: refs,
         options: [{ id: "F", text: "同时属于两个集合", reasonParts: [{ text: "交集需要两个归属条件都成立。", evidenceIds: refs }] },
           { id: "A", text: "只属于其中一个集合", reasonParts: [{ text: "只满足一个归属条件不足以属于交集。", evidenceIds: refs }] }],
-        correctOptionId: "F", reviewCheck: undefined }] });
+        correctOptionId: "F", reviewCheck: { objectiveIds: ["membership"], role: "concept",
+          rationale: "[合成] 区分交集要求两个归属条件同时成立，保留原稳定答案身份。" } }] });
   }) as unknown as typeof generateStudyJson;
   // Three planned parts, each one question, without changing the task budget.
   const f = await runtimeFixture(generate, 16, 100000, 3, { ...config, maxOutputTokens: 1000 });

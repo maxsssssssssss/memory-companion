@@ -6,8 +6,9 @@ import { quizReferenceId, resolveReferencedQuiz, quizProceduralHint, inspectQuiz
 import { quizCoverageNotice } from "./quiz-composition";
 import { learningValidationDiagnostics } from "./generation-diagnostics";
 import { generationProgress } from "./generation-parts";
-import { bindPublishedQuizReview, SavedQuizReview, type QuizReviewPublication } from "./quiz-review-purpose";
+import { bindPublishedQuizReview, filterQuizReviewPublication, SavedQuizReview, type QuizReviewPublication } from "./quiz-review-purpose";
 import { QuizCandidateReport, quizDeliverySummary } from "./quiz-delivery";
+import { clearQuizCandidateDiagnostics, quizCandidateDiagnostics, type QuizCandidateIssue } from "./quiz-candidate-diagnostics";
 
 type Run = { id: string; page_id: string; settings_json: string; binding_json: string; binding_hash: string; status: QuizRunSummary["status"] | "deleted"; created_at: string; failure: string | null; result_json: string | null; diagnostics_json: string | null };
 type Attempt = { id: string; page_id: string; quiz_id: string; mode: "practice" | "test"; revision: number; progress_json: string; events_json: string; evaluation_json: string; created_at: string; completed_at: string | null };
@@ -25,6 +26,7 @@ export class LearningQuizRepository {
   private get db() { return this.learning.database; }
   private page(pageId: string) {
     this.learning.get(pageId);
+    clearQuizCandidateDiagnostics(this.learning, pageId);
     this.db.prepare("UPDATE learning_quiz_runs SET status='failed',failure='framework_interrupted' WHERE page_id=? AND status='generating' AND deadline<=?").run(pageId, Date.now());
   }
   private run(pageId: string, id: string) {
@@ -176,7 +178,14 @@ export class LearningQuizRepository {
   }
   assertSources(pageId:string,id:string) {
     const row=this.run(pageId,id);
-    if(hash(this.snapshot(pageId,parse<QuizConfig>(row.settings_json)).binding)!==row.binding_hash)throw new LearningError(409,"source_changed");
+    try {
+      if(hash(this.snapshot(pageId,parse<QuizConfig>(row.settings_json)).binding)!==row.binding_hash)throw new LearningError(409,"source_changed");
+    } catch (error) {
+      // Failed live bindings cannot be replaced by a retained diagnostic copy.
+      this.db.prepare("UPDATE learning_generation_parts SET diagnostics_json=CASE WHEN json_valid(diagnostics_json) THEN json_remove(diagnostics_json,'$.candidateDiagnostics') ELSE diagnostics_json END WHERE page_id=? AND kind='quiz' AND run_id=?")
+        .run(pageId,id);
+      throw error;
+    }
   }
   /** Server-only review provenance; no answers or model verdict are exposed. */
   review(pageId: string, id: string): SavedQuizReview | null {
@@ -199,11 +208,16 @@ export class LearningQuizRepository {
         ...current.input.materials.flatMap(m => m.paragraphs.map(p => ({ referenceId: p.referenceId, text: p.text, source: { kind: "material" as const, materialId: m.materialId, paragraph: p.number } }))),
         ...current.input.extras.map(e => ({ referenceId: e.referenceId, text: e.text, source: { kind: e.kind, id: e.id } }))
       ];
-      const parsed = referenced ? resolveReferencedQuiz(ReferencedQuizEnvelope.parse(value), catalog) : GeneratedQuiz.parse(value);
+      const publicationIssues: QuizCandidateIssue[] = [];
+      const publishable = referenced ? review ? filterQuizReviewPublication(ReferencedQuizEnvelope.parse(value), review, catalog,
+        issue => publicationIssues.push({ ...issue, stage: "publication" })) : ReferencedQuizEnvelope.parse(value) : null;
+      const parsed = publishable ? resolveReferencedQuiz(publishable, catalog) : GeneratedQuiz.parse(value);
       if (referenced) {
-        const report = inspectQuizCandidateDelivery(ReferencedQuizEnvelope.parse(value), catalog);
+        const report = inspectQuizCandidateDelivery(publishable!, catalog);
         this.db.prepare("UPDATE learning_quiz_runs SET diagnostics_json=json_patch(coalesce(diagnostics_json,'{}'),?) WHERE id=? AND page_id=?")
-          .run(JSON.stringify({ publicationReport: report }), id, pageId);
+          .run(JSON.stringify({ publicationReport: report, ...(publicationIssues.length ? {
+            publicationIssues: quizCandidateDiagnostics(null, publicationIssues, { runId: id, partId: "publication", requestId: id }).issues
+          } : {}) }), id, pageId);
       }
       const quiz = { title: parsed.title, reason: parsed.reason, questions: parsed.items };
       if (quiz.questions.length > settings.count || (quiz.questions.length < settings.count && !quiz.reason)
@@ -250,6 +264,19 @@ export class LearningQuizRepository {
     this.assertSources(pageId, id);
     this.db.prepare("UPDATE learning_quiz_runs SET diagnostics_json=json_patch(coalesce(diagnostics_json,'{}'),?) WHERE id=? AND page_id=? AND status='generating'")
       .run(JSON.stringify({ candidateReports: { [partId]: report } }), id, pageId);
+  }
+  /** Rejected final candidate projections stay private and expire after 7 days.
+   * Store only against a still-running part and current source binding. */
+  candidateDetailDiagnostics(pageId: string, id: string, partId: string, value: ReturnType<typeof quizCandidateDiagnostics>) {
+    this.assertSources(pageId, id);
+    if (value.runId !== id || value.partId !== partId) throw new LearningError(409, "submission_conflict");
+    const part = this.db.prepare("SELECT attempts FROM learning_generation_parts WHERE page_id=? AND kind='quiz' AND run_id=? AND part_id=? AND state='running'")
+      .get(pageId, id, partId) as { attempts: number } | undefined;
+    if (!part) return;
+    this.db.prepare(`UPDATE learning_generation_parts SET diagnostics_json=json_patch(coalesce(diagnostics_json,'{}'),?)
+      WHERE page_id=? AND kind='quiz' AND run_id=? AND part_id=? AND state='running'
+      AND EXISTS(SELECT 1 FROM learning_quiz_runs WHERE id=? AND page_id=? AND status='generating')`)
+      .run(JSON.stringify({ candidateDiagnostics: { ...value, attempt: part.attempts } }), pageId, id, partId, id, pageId);
   }
   partialDelivery(pageId: string, id: string, failure: "format" | "known_failure" | "source_binding") {
     this.assertSources(pageId, id);

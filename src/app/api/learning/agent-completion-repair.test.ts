@@ -29,6 +29,7 @@ import { createLearningAgentScenario } from "@/lib/server/learning/agent-scenari
 import { withLearningCompletionDecision } from "@/lib/server/learning/agent-context";
 import { LearningAgentRepository } from "@/lib/server/learning/agent-repository";
 import { assessLearningCompletion } from "@/lib/server/learning/agent-completion";
+import { SavedQuizReview } from "@/lib/server/learning/quiz-review-purpose";
 import { readLearningAgentScope } from "@/lib/server/learning/agent-scope";
 import type { generateStudyJson } from "@/lib/server/learning/framework-generator";
 import { GET, POST, PATCH } from "./pages/[pageId]/agent/route";
@@ -137,6 +138,38 @@ function mismatchedPlan() {
   value.objectives[0].sources = [{ materialId, paragraph: 2 }];
   return value;
 }
+/** Reopen a synthetic pre-contract association snapshot, not a new generation
+ * acceptance test. Current generation correctly uses P1 and creates the unchanged
+ * question, answer, source and empty attempt through the real Runtime/services.
+ * Restore ONLY the historical plan/quiz-review metadata pointing to P2. The
+ * newer source publication fence is covered separately by G3 contract tests.
+ * All subsequent submissions, recovery, authorization and assessment are real. */
+async function savedMismatchedQuiz() {
+  const waiting = await firstQuiz(), originalTask = task(waiting.id);
+  stores(learning => {
+    const quiz = new LearningQuizRepository(learning), a = quiz.attempt(pageId, waiting.wait!.refId!);
+    const oldAttempt = JSON.stringify(a);
+    const row = new LearningAgentRepository(learning).list(pageId, waiting.id).find(item => item.kind === "review_plan")!;
+    const originalPlan = JSON.parse(row.body_json!), objectives = mismatchedPlan().objectives;
+    const run = learning.database.prepare("SELECT result_json FROM learning_quiz_runs WHERE page_id=? AND id=?")
+      .get(pageId, a.quizId) as { result_json: string };
+    const originalQuiz = JSON.parse(run.result_json), originalReview = SavedQuizReview.parse(originalQuiz.review);
+    const review = SavedQuizReview.parse({ ...originalReview, context: { ...originalReview.context, objectives } });
+    learning.database.transaction(() => {
+      learning.database.prepare("UPDATE learning_agent_artifacts SET body_json=? WHERE page_id=? AND task_id=? AND id=? AND kind='review_plan'")
+        .run(JSON.stringify({ ...originalPlan, objectives }), pageId, waiting.id, row.id);
+      learning.database.prepare("UPDATE learning_quiz_runs SET result_json=? WHERE page_id=? AND id=?")
+        .run(JSON.stringify({ ...originalQuiz, review }), pageId, a.quizId);
+    }).immediate();
+    const restored = JSON.parse((learning.database.prepare("SELECT result_json FROM learning_quiz_runs WHERE page_id=? AND id=?")
+      .get(pageId, a.quizId) as { result_json: string }).result_json);
+    expect({ ...restored, review: originalQuiz.review }).toEqual(originalQuiz);
+    expect(JSON.stringify(quiz.attempt(pageId, a.id))).toBe(oldAttempt);
+  });
+  expect(task(waiting.id)).toEqual(originalTask);
+  return waiting;
+}
+
 const artifacts = (id: string) => stores(learning => new LearningAgentRepository(learning).list(pageId, id));
 function expectNoNewCalls(actual: AgentTask["usage"], before: AgentTask["usage"]) {
   const { computeMs, ...counters } = before;
@@ -223,7 +256,7 @@ describe("R1/R2 explicit source recovery through formal API and SQLite", () => {
   });
 
   it.each(["wrong", "hinted"] as const)("reassociates %s responses only with explicit history and resumes relevant explanation without erasing the learning gap", async problem => {
-    const waiting = await firstQuiz(mismatchedPlan()), a = await answer(waiting, problem !== "wrong", problem === "hinted");
+    const waiting = await savedMismatchedQuiz(), a = await answer(waiting, problem !== "wrong", problem === "hinted");
     await run(waiting.id);
     const before = task(waiting.id), oldPlan = artifacts(waiting.id).find(row => row.kind === "review_plan")!;
     await control(waiting.id, { action: "adjust", goal: before.goal, scope: { ...selection(), includeHistory: true },
@@ -266,7 +299,7 @@ describe("R1/R2 explicit source recovery through formal API and SQLite", () => {
 
 describe("F3 synthetic repair: actual API, business SQLite and checkpoint", () => {
   it("hands an authorized plan/source mismatch back without treating it as a learning gap or calling the model again", async () => {
-    const waiting = await firstQuiz(mismatchedPlan());
+    const waiting = await savedMismatchedQuiz();
     const hidden = await quizGet(new Request(`${origin}/api/learning/pages/${pageId}/quiz?attempt=${waiting.wait!.refId}`, { headers: { "x-synthetic-user": "owner" } }), routeContext());
     expect(JSON.stringify(await hidden.json())).not.toMatch(/correctOptionId|explanation|score":\{/);
     const a = await answer(waiting);
@@ -301,7 +334,7 @@ describe("F3 synthetic repair: actual API, business SQLite and checkpoint", () =
   });
 
   it("requires an explicit new version, keeps prior records and budget, and rechecks an authorized old response under the corrected source plan", async () => {
-    const waiting = await firstQuiz(mismatchedPlan()), a = await answer(waiting);
+    const waiting = await savedMismatchedQuiz(), a = await answer(waiting);
     await run(waiting.id);
     const before = task(waiting.id), oldPlan = artifacts(waiting.id).find(row => row.kind === "review_plan")!;
     const goal = before.goal;
@@ -328,7 +361,7 @@ describe("F3 synthetic repair: actual API, business SQLite and checkpoint", () =
   });
 
   it.each(["wrong", "hinted", "disputed"] as const)("does not erase %s evidence when the user explicitly corrects the source association in a new version", async problem => {
-    const waiting = await firstQuiz(mismatchedPlan()), a = await answer(waiting, problem !== "wrong", problem === "hinted");
+    const waiting = await savedMismatchedQuiz(), a = await answer(waiting, problem !== "wrong", problem === "hinted");
     await run(waiting.id);
     if (problem === "disputed") await control(waiting.id, { action: "dispute_quiz", attemptId: a.id, feedback: "[合成] 本题条件有疑问，请保留原记录并暂停判断。" });
     const before = task(waiting.id), oldPlan = artifacts(waiting.id).find(row => row.kind === "review_plan")!;
@@ -347,7 +380,7 @@ describe("F3 synthetic repair: actual API, business SQLite and checkpoint", () =
   });
 
   it.each(["learning.create_quiz", "learning.explain"] as const)("rechecks %s at its real tool boundary before reserving or generating after reopen", async toolName => {
-    const waiting = await firstQuiz(mismatchedPlan()), a = await answer(waiting);
+    const waiting = await savedMismatchedQuiz(), a = await answer(waiting);
     const learning = new LearningRepository(join(directory, "owner"), "owner");
     const beforeArtifacts = artifacts(waiting.id), beforeCalls = task(waiting.id).usage.calls;
     const invoke = vi.fn(async () => { throw Error("A technical source mismatch must not start a generation"); });

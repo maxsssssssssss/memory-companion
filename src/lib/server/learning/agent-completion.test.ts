@@ -16,6 +16,7 @@ import { freezeLearningAgentScope, readLearningAgentScope } from "./agent-scope"
 import { assessLearningCompletion, establishLearningReviewPlan, recordLearningEvidenceProposal, persistLearningCompletion, recordLearningPurpose,
   recordExplanationFeedback, validateLearningExplanationFeedback, guardLearningCompletionAction, hasPendingLearningFeedback, acknowledgeLearningFeedback } from "./agent-completion";
 import { quizReviewQuestionKey } from "./quiz-review-purpose";
+import { completePreContractQuizFixture } from "./testing/pre-contract-quiz.fixture";
 import { firstSubmissionFacts, learningQuestionIdentity, loadLearningCompletionEvidence } from "./agent-completion-evidence";
 import { withLearningCompletionDecision } from "./agent-context";
 import { createLearningAgentScenario } from "./agent-scenario";
@@ -322,7 +323,7 @@ function misassociatedReviewedGroup() {
     options: [{ id: "A" as const, text: "不能应用", reason: "只有前提满足才可应用规则。", evidenceIds: [reference] },
       { id: "B" as const, text: "能够应用", reason: "前提未满足时不能应用规则。", evidenceIds: [reference] }],
     correctOptionId: "A" as const, hint: null, explanation: "只有前提满足才可应用规则。", stemEvidenceIds: [reference], explanationEvidenceIds: [reference] };
-  quizzes.complete(pageId, id, { contractVersion: "references-v2", title: "[合成] 来源关联冲突", reason: null, items: [question] }, {
+  completePreContractQuizFixture(learning, pageId, id, { contractVersion: "references-v2", title: "[合成] 来源关联冲突", reason: null, items: [question] }, {
     context: { planId: savedPlan.id, taskVersion: 1, objectives: savedPlan.objectives, purpose: purpose({ method: "retrieval" }) },
     candidates: [{ questionKey: quizReviewQuestionKey(question), check: { objectiveIds: ["rule"], role: "concept", rationale: "[合成错误关联] 题目提供规则检查" } }] });
   let attempt = quizzes.startAttempt(pageId, { id: randomUUID(), quizId: id, mode: "test" });

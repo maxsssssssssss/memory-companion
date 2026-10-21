@@ -15656,3 +15656,17 @@ Learning与UI：新增 `agent-scope.ts`、`agent-repository.ts`、`agent-scenari
 - 按用户明确要求，从 `feat/learning-agent-natural-language-quiz` 当前文件树移除 `docs/agent-evidence/learning-agent-natural-quiz-c79fbf2.zip`，更新原 README 为交付身份记录并去掉失效下载链接。原上传提交 `3d354c5c54d14218978764c4847bada0906968eb` 及业务代码 `c79fbf241d5367de191ccd6a92e66fe1636cabf8` 保持可追溯，不重写 Git 历史。
 - 删除前核对临时文件和 `output/natural-language-quiz/` 本地原始 ZIP 均为 SHA256 `f45cdfb124998049cc5efeb36e777df69a96ee9803e29fd3211cce0dad83fac8`；仅删除前者，完整本地证据、合成数据及原有 95 行未提交历史均保留。本轮新增记录单独暂存，正常提交推送同一功能分支。
 - 验证限于文件移除、保留包哈希、提交范围和 `git diff --check`；不改产品代码，未重跑业务测试、类型或构建，不将旧验收升级为新真实 PASS。未调用 Provider、未启动服务、未集成 dev/cloud-code/main、未部署。无新增依赖或迁移，Git 历史中的旧 ZIP 对象不会由普通移除提交清除。
+
+
+### 2026-10-21：Learning 自然语言 Quiz 的 G1—G5 集中返修（Cloud 离线）
+
+- 背景与基线：Windows 冻结 c79fbf241d5367de191ccd6a92e66fe1636cabf8，在同功能线 feat/learning-agent-natural-language-quiz 的 e20a867ff010c16181dd59b33dc0ce43696e3904 继续；后两次提交仅证据交付文档。本地原有 95 行历史追加完整保留，不擅自纳入本次提交。
+- 原包完整校验：238 文件、主 manifest 237/237、子 manifest 20/20。读完整报告、语义矩阵和 G1—G5；10 个候选槽仅 5 道完整 decoded 题，3 个位置拒绝和 2 个 reviewCheck 拒绝缺原正文，不能认定具体坏字段或误杀，也不声称完整原响应/私有库回放。
+- F1：quiz-review-purpose/service 将本次冻结目标的已授权来源传入实际生成请求；模型获得确切 role、目标 ID、要求和实际引用 ID。decode 与 repository 发布共同复核目标关联和来源，阻止原 G3 P7 题被发布给 P2/P3/P4 目标；不改旧题/成绩/目标，不扩权限。合法候选继续部分发布。
+- F2：明确注解合同及已知失败后的有意义行动，保留 methodChange、无进展、未知结果禁重发和预算。失败说明不归咎学生，不将格式/ID问题冒称语义不相关。shared AgentRuntime、LangGraph、structured_action_v1、Windows Guard及其他产品业务未改。
+- F3：新增 Learning 私有 quiz-candidate-diagnostics helper，利用已有 generation part diagnostics_json 保存限量拒绝候选白名单投影、准确阶段/Zod path/role/ID差异及 task/version/action/run/part/request/attempt 关联；早期原因不覆盖。最多12候选/48000字符/100问题，7天后在Quiz使用时清理，来源失效/调整/删除清理，晚到失效版本不留正文。不公开到任务/API/模型观察，不保留请求材料正文或私有推理；根schema尚未返回的原响应仍无法捕获，同part只保存最新尝试。无新表/迁移/依赖/全局flag/跨产品路径。
+- 浏览器实际发现 ∅ 与 {} 完整选项未等价归一，修前正式链23例2失败；复用既有有限集合 identity 最小修复，保留表示法/字符串正例和原浏览器负例，不扩数学引擎、不换简单题掩盖失败。
+- 中间失败：首次类型检查3个新增类型错误已修；首轮77文件1399例41失败，其中39是旧错误关联fixture被新发布门槛提前拦截，以明确测试专用旧review元数据快照恢复并保留原断言，2是损坏旧诊断JSON清理SQL崩溃，已修兼容。首轮浏览器A/B由空集等价漏拦失败，重启阶段A缺状态随之失败；全部原日志保留。
+- 最终验证：cloud:test 精确77文件1404例全部通过，0跳过、exit0；cloud:check 的9环境合同及完整lint/Next typegen/TypeScript通过exit0；最终cloud:build exit0，180 trace manifests、forbidden0。原包事实17项+正式候选4组、原保存候选经正式repository/SQLite/原stable-ID模拟作答/重开4组均达各自预期exit0；G3预期为准确发布前拒绝，旧Windows1/1不改。
+- 最终production浏览器：重启前10项、重启后10项分别PASS exit0，不累计重叠覆盖。G1合法部分发布+1/1诊断结束；G3冻结来源一致+1/1无技术阻塞；G5首错0/1→读回关联→解释→用户自然反馈→第二boundary题→重启→1/1→再次读回→partial，保留旧错与followup缺口且16/16预算不增加；G2谢谢不解决、明确解决零额外调用/重复零写；G4只解释0题；全失败转解释/反馈。正常停机/重启、重登、重复提交、来源删除与SQLite检查均保留证据，合成数据不删除。
+- Cloud真实Provider请求0，最终浏览器51次受控离线响应不等于真实DS；Windows仍需在新SHA集中复验G3/G5，原账本161/停止线179余18及unknown#101不改不重发。S32、有限数学、语义提案非verified、来源交集非蕴含、模拟学生非教学效果及长期掌握未验证继续保留。不集成dev/cloud-code/main，不部署。实现说明及Windows步骤见docs/learning-agent-natural-quiz-repair.md；可移植证据留output，不把ZIP纳入Git。

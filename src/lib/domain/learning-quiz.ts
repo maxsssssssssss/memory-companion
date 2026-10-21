@@ -72,6 +72,7 @@ export type QuizProgress = { optionId: string | null; submitted: boolean; skippe
 /** Answer-free delivery facts, not learning achievement or a content-verification verdict. */
 export type QuizDeliveryReason = "structure_or_evidence" | "option_identity" | "position_dependency" | "answer_contradiction"
   | "repeated_focus" | "equivalent_options" | "answer_not_unique" | "source_binding" | "goal_mismatch"
+  | "annotation_schema" | "annotation_role" | "annotation_objective" | "annotation_missing" | "review_source_mismatch"
   | "format" | "unknown" | "budget" | "known_failure";
 export type QuizDeliverySummary = { requested: number; candidates: number | null; published: number;
   rejected: Array<{ code: QuizDeliveryReason; count: number }>; message: string; nextStep: string };

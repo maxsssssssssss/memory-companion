@@ -169,7 +169,11 @@ function atomicSetKey(literal: string) {
   return `{${parseFiniteSetAtoms(literal)!.join(",")}}`;
 }
 function optionContentKey(text: string, setContext: boolean) {
-  return (setContext ? text.replace(atomicSet, atomicSetKey) : text).replace(/\s/g, "").toLowerCase();
+  // A complete finite-set answer can also be the empty-set symbol. Reuse the
+  // same identity as {}, but never canonicalize notation/string questions.
+  const literal = setContext && parseFiniteSetAtoms(text) !== null ? atomicSetKey(text)
+    : setContext ? text.replace(atomicSet, atomicSetKey) : text;
+  return literal.replace(/\s/g, "").toLowerCase();
 }
 function contradictsLiteralSetEquality(stem: string, answer: string) {
   // An incorrect-statement question may intentionally choose an inequality.
@@ -205,8 +209,10 @@ function inspectReferencedQuiz(value: ReferencedQuizResponse, catalog: QuizRefer
       const marker = raw as { compositionRejected?: unknown; compactReferenceRejected?: unknown; reviewCheckRejected?: unknown; rejectionReason?: unknown } | null;
       const reason = marker?.compositionRejected === true && typeof marker.rejectionReason === "string"
         && Object.hasOwn(QUIZ_REJECTION_DETAILS, marker.rejectionReason) ? marker.rejectionReason as QuizRejectionReason : null;
-      reject(`${reason ? QUIZ_REJECTION_DETAILS[reason] : "题目结构或依据ID格式不合法"}，未发布`,
-        reason ?? (marker?.reviewCheckRejected === true ? "goal_mismatch"
+      const reviewReason = marker?.reviewCheckRejected === true && ["annotation_schema", "annotation_role", "annotation_objective", "annotation_missing", "review_source_mismatch"].includes(String(marker.rejectionReason))
+        ? marker.rejectionReason as QuizCandidateReport["rejected"][number]["code"] : "goal_mismatch";
+      reject(`${reason ? QUIZ_REJECTION_DETAILS[reason] : marker?.reviewCheckRejected === true ? "本次检查说明未通过关联检查" : "题目结构或依据ID格式不合法"}，未发布`,
+        reason ?? (marker?.reviewCheckRejected === true ? reviewReason
           : marker?.compactReferenceRejected === true && marker.rejectionReason === "source_binding" ? "source_binding" : "structure_or_evidence")); continue;
     }
     const q = checked.data;

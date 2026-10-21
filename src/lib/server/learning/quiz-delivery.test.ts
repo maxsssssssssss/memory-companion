@@ -202,3 +202,44 @@ it.each([1, 0])("uses actual counts when a short response has %i candidates and 
   expect(generate).toHaveBeenCalledTimes(1);
   if (count) expect(quizzes.startAttempt(page, { id: randomUUID(), quizId: id, mode: "test" }).questions).toHaveLength(1);
 });
+
+it.each(["all-invalid", "partial"])("rejects equivalent empty-set choices through codec and SQLite publication (%s)", async mode => {
+  const id = randomUUID(), generate = provider(wire => {
+    const value = response(wire);
+    // The browser's unchanged candidate used these two spellings for the same
+    // mathematical empty set. Stable identities must not make it single-answer.
+    value.items[2].options[1].text = "{}";
+    return { ...value, items: mode === "all-invalid" ? [value.items[2]] : value.items };
+  });
+  const rows = await generateLearningQuiz(learning, page, { id, settings: settings(mode === "all-invalid" ? 1 : 3) }, { configure: () => config, generate });
+  expect(rows[0]).toMatchObject({ status: mode === "all-invalid" ? "insufficient" : "completed", count: mode === "all-invalid" ? 0 : 2,
+    delivery: { rejected: [{ code: "equivalent_options", count: 1 }] } });
+  const original = saved(id);
+  if (mode === "all-invalid") expect(() => quizzes.startAttempt(page, { id: randomUUID(), quizId: id, mode: "test" })).toThrow("quiz_not_ready");
+  else {
+    expect(original.questions.map(q => q.correctOptionId)).toEqual(["F", "F"]);
+    expect(original.questions.map(q => q.stem)).toEqual(["已知集合 A={1,2,3}，B={3,4}。A∩B 是什么？", "已知集合 A={1,2,3}，B={3,4}。A∪B 是什么？"]);
+    expect(quizzes.startAttempt(page, { id: randomUUID(), quizId: id, mode: "test" }).questions).toHaveLength(2);
+  }
+  learning.close(); learning = new LearningRepository(root, "owner"); quizzes = new LearningQuizRepository(learning);
+  expect(saved(id)).toEqual(original); expect(generate).toHaveBeenCalledTimes(1); expect(fetch).not.toHaveBeenCalled();
+});
+
+it.each(["字符串", "表示法"])("does not collapse distinct empty-set spellings when the question concerns %s", async topic => {
+  learning.deleteMaterial(page, material); material = randomUUID();
+  learning.saveMaterials(page, [{ id: material, kind: "text", filename: null, title: "[合成] 表示",
+    bytes: Buffer.from("集合的表示法中，∅使用一个数学符号，{}使用左右两个花括号。作为字符串，两者的字符数量不同。") }]);
+  const id = randomUUID(), generate = provider(wire => {
+    const value = response(wire), item = value.items[2];
+    item.stem = `讨论集合的${topic}，哪一种写法只包含一个字符？`;
+    item.options[1].text = "{}";
+    item.options[0].reasonParts[0].text = "空集符号只包含一个字符。";
+    item.options[1].reasonParts[0].text = "左右花括号是两个字符。";
+    return { ...value, items: [item] };
+  });
+  const rows = await generateLearningQuiz(learning, page, { id, settings: settings(1) }, { configure: () => config, generate });
+  expect(rows[0]).toMatchObject({ status: "completed", count: 1, delivery: { rejected: [] } });
+  expect(saved(id).questions[0].options.map(option => option.text).sort()).toEqual(["{}", "∅"].sort());
+  const attempt = quizzes.startAttempt(page, { id: randomUUID(), quizId: id, mode: "test" });
+  expect(JSON.stringify(attempt)).not.toContain("correctOptionId"); expect(fetch).not.toHaveBeenCalled();
+});

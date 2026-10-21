@@ -43,7 +43,7 @@ it("multi-round controlled choices branch on saved first answers and preserve th
   const ref = { quizId, attemptId, questionIndex: 0 };
   const receipt = { tool: "learning.create_quiz", status: "succeeded", value: { quizId, attemptId, submitted: true } };
   const answer = (correct: number) => ({ tool: "learning.read_answers", status: "succeeded", value: { quizId, attemptId, score: { correct, total: 1 }, questions: [{ index: 0 }] } });
-  const make = (correct: number, associated = false) => ({ ...payload([scope, ...sources, receipt, answer(correct)], plan),
+  const make = (correct: number, associated = false) => ({ ...payload([scope, ...sources, receipt, answer(correct), ...(associated ? [{ tool: "learning.associate_evidence", status: "succeeded", value: {} }] : [])], plan),
     observation: { completion: { plan, objectives: [{ id: "membership", evidence: associated ? [{ ref }] : [] }] } } });
   const first = fixture.decision(make(0), "multi_round");
   expect(LearningEvidenceProposal.parse(first.args)).toMatchObject({ ref, role: "followup", relation: "initial", priorEvidenceRefs: [] });
@@ -51,8 +51,17 @@ it("multi-round controlled choices branch on saved first answers and preserve th
   expect(fixture.decision(make(1, true), "multi_round").tool).toBe("learning.request_feedback");
   const afterExplanation = make(0, true);
   afterExplanation.results.push({ tool: "learning.explain", status: "succeeded", value: {} });
-  expect(fixture.decision(afterExplanation, "multi_round")).toMatchObject({ tool: "learning.create_quiz", args: { count: 1, purpose: { role: "followup", priorEvidenceRefs: [ref] } } });
-  expect(plan.objectives[0].requirements).toEqual([{ role: "followup", description: "针对混淆，后续独立判断共同元素及只属于一个集合的元素在交集、并集中的归属", independent: true }]);
+  expect(fixture.decision(afterExplanation, "multi_round").tool).toBe("learning.request_feedback");
+  expect(fixture.decision({ ...afterExplanation, feedback: { kind: "feedback", message: "我明白了，再出题试试。" } }, "multi_round")).toMatchObject({ tool: "learning.create_quiz", args: { count: 1, purpose: { role: "boundary", priorEvidenceRefs: [ref] } } });
+  expect(plan.objectives[0].requirements.map((requirement: { role: string }) => requirement.role)).toEqual(["followup", "boundary"]);
+});
+
+
+it("explicit two-question preference keeps fixed P2/P3/P4 sources and exercises only that generation catalog", () => {
+  const withDefinition = [...sources, { tool: "learning.read_source", status: "succeeded", value: { paragraph: { number: 2 } } }];
+  const plan = LearningReviewPlanInput.parse(fixture.decision(payload([scope, ...withDefinition]), "source_contract").args);
+  expect(plan.objectives[0].sources.map(source => source.paragraph)).toEqual([2, 3, 4]);
+  expect(fixture.decision(payload([scope, ...withDefinition], plan), "source_contract")).toMatchObject({ tool: "learning.create_quiz", args: { count: 2, purpose: { role: "concept" } } });
 });
 
 it("successful actual submission must be read before the fixture proposes evidence", () => {
@@ -87,14 +96,37 @@ it.each(["partial", "all_failed"])("%s candidate fixture retains exact bad conte
   const codec = composedQuizRequest(request, codecScope);
   const raw = fixture.quiz({ ...codec.input, taskContext: { ...codec.input.taskContext, reviewContext } }, mode);
   expect(raw.items).toHaveLength(3);
-  expect(raw.items[0].options[1].text).toBe("{1,2,3,3,4}");
+  expect(raw.items[0].options[0].text).toBe("∅");
+  expect(raw.items[0].options[1].text).toBe("{}");
   expect(raw.items.some((item: { stem: string }) => item.stem.includes("正确答案是第3项"))).toBe(true);
-  const result = decodeReviewQuiz(raw, value => codec.decode(value, codecScope), reviewContext);
-  expect(result.reviewCandidates).toEqual([]);
+  const result = decodeReviewQuiz(raw, value => codec.decode(value, codecScope), reviewContext, paragraphs.map(paragraph => ({ referenceId: paragraph.referenceId, source: { kind: "material", materialId, paragraph: paragraph.number } })));
+  expect(result.reviewCandidates).toHaveLength(mode === "partial" ? 2 : 1);
+  expect(result.reviewCandidates?.every(candidate => candidate.check.role === purpose.role && candidate.check.objectiveIds.includes("intersection"))).toBe(true);
   // Composition removes the positional item (and exact repeated focus in the
   // all-failed fixture); publication later rejects equivalent options.
   // Decoded slots are not relabelled as published questions.
   expect(result.items.filter(item => ReferencedGeneratedQuiz.shape.items.element.safeParse(item).success).length).toBe(mode === "partial" ? 2 : 1);
   expect(result.items).toContainEqual({ compositionRejected: true, rejectionReason: "position_dependency" });
   if (mode === "all_failed") expect(result.items).toContainEqual({ compositionRejected: true, rejectionReason: "repeated_focus" });
+});
+
+it("the second controlled Quiz carries the actual boundary contract without relabeling it as followup", () => {
+  const plan = planFor("multi_round");
+  const purpose = { objectiveIds: ["membership"], role: "boundary" as const, method: "boundary" as const,
+    purpose: "检查只属于一个集合时交集与并集的条件边界", priorEvidenceRefs: [{ quizId, attemptId, questionIndex: 0 }] };
+  const context = { planId: quizId, taskVersion: 1, objectives: plan.objectives, purpose };
+  const paragraphs = [
+    "交集 A∩B 包含同时属于 A 和 B 的元素。若 A={1,2,3}，B={3,4}，则 A∩B={3}。",
+    "并集 A∪B 包含属于 A 或属于 B 的元素，这里的或允许同时属于二者。若 A={1,2,3}，B={3,4}，则 A∪B={1,2,3,4}。",
+  ].map((text, i) => ({ number: i + 3, text, referenceId: `ref_${String(i + 1).padStart(64, "0")}` }));
+  const request = { count: 1, difficulty: "basic" as const, materials: [{ materialId, kind: "text" as const, title: "合成教材", paragraphs }], extras: [] };
+  const scope = { accountId: "synthetic", pageId, requestId: quizId, expiresAt: Date.now() + 10000 };
+  const codec = composedQuizRequest(request, scope);
+  const raw = fixture.quiz({ ...codec.input, taskContext: { ...codec.input.taskContext, reviewContext: context } }, "multi_round");
+  const result = decodeReviewQuiz(raw, value => codec.decode(value, scope), context,
+    paragraphs.map(paragraph => ({ referenceId: paragraph.referenceId, source: { kind: "material", materialId, paragraph: paragraph.number } })));
+  expect(result.reviewCandidates).toHaveLength(1);
+  expect(result.reviewCandidates?.[0].check).toMatchObject({ objectiveIds: ["membership"], role: "boundary" });
+  expect(ReferencedGeneratedQuiz.shape.items.element.safeParse(result.items[0]).success).toBe(true);
+  expect(plan.objectives[0].requirements.map((requirement: { role: string }) => requirement.role)).toEqual(["followup", "boundary"]);
 });

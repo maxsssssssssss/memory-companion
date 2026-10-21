@@ -16,6 +16,7 @@ import { freezeLearningAgentScope } from "./agent-scope";
 import { assessLearningCompletion, establishLearningReviewPlan } from "./agent-completion";
 import { materializeLearningPlanSourceAdjustment, prepareLearningPlanSourceAdjustment } from "./agent-plan-sources";
 import { quizReviewQuestionKey } from "./quiz-review-purpose";
+import { completePreContractQuizFixture } from "./testing/pre-contract-quiz.fixture";
 import { createLearningAgentScenario } from "./agent-scenario";
 import { projectLearningAgentTask } from "./agent-api-service";
 import { projectLearningAgentReviewSummary, saveLearningAgentReviewSummary } from "./agent-review-summary";
@@ -48,7 +49,7 @@ function group(answer: "wrong" | "hint" | "correct" = "wrong", count = 1) {
     options: [{ id: "A" as const, text: "不能应用", reason: "只有前提满足才可应用规则。", evidenceIds: [reference] },
       { id: "B" as const, text: "能够应用", reason: "前提未满足时不能直接应用规则。", evidenceIds: [reference] }],
     correctOptionId: "A" as const, hint: "先检查前提。", explanation: "只有前提满足才可应用规则。", stemEvidenceIds: [reference], explanationEvidenceIds: [reference] }));
-  quizzes.complete(pageId, id, { contractVersion: "references-v2", title: "[合成] 规则检查", reason: null, items: questions }, {
+  completePreContractQuizFixture(learning, pageId, id, { contractVersion: "references-v2", title: "[合成] 规则检查", reason: null, items: questions }, {
     context: { planId: plan.id, taskVersion: ctx.task.version ?? 1, objectives: plan.objectives, purpose },
     candidates: questions.map(question => ({ questionKey: quizReviewQuestionKey(question), check: { objectiveIds: ["rule"], role: "boundary", rationale: "[离线提案] 检查必要条件。" } })) });
   let attempt = quizzes.startAttempt(pageId, { id: randomUUID(), quizId: id, mode: "practice" });

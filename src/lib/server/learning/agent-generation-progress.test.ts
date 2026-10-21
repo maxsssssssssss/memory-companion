@@ -139,6 +139,9 @@ it("does not unlock another generation by only renaming the method or referring 
     const result = await engine.advance("owner", task.id);
     expect(result.status).toBe("ended"); expect(insufficient).toHaveBeenCalledTimes(1);
     expect(result.endReason).toContain("仅更换方法名称不足以继续");
+    expect(result.endReason).toContain("上次未能生成可用的练习内容");
+    expect(result.endReason).toContain("这不是你的作答错误");
+    expect(result.endReason).toContain("已有学习内容与作答会保留");
   } finally { engine.close(); }
 });
 

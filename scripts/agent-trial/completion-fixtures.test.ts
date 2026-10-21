@@ -61,7 +61,7 @@ it("agent fixture annotations pass the formal composed codec while preserving ac
   const codecScope = { accountId: "synthetic", pageId: "page", requestId: "request", expiresAt: Date.now() + 10000 };
   const codec = composedQuizRequest(request, codecScope);
   const raw = fixture.quiz({ ...codec.input, taskContext: { ...codec.input.taskContext, reviewContext } });
-  const decoded = decodeReviewQuiz(raw, value => codec.decode(value, codecScope), reviewContext);
+  const decoded = decodeReviewQuiz(raw, value => codec.decode(value, codecScope), reviewContext, paragraphs.map(paragraph => ({ referenceId: paragraph.referenceId, source: { kind: "material", materialId, paragraph: paragraph.number } })));
   const { reviewCandidates: _reviewCandidates, ...officialQuiz } = decoded;
   expect(ReferencedGeneratedQuiz.parse(officialQuiz).items).toHaveLength(2);
   expect(decoded.reviewCandidates?.map(candidate => candidate.check.objectiveIds)).toEqual([["intersection"], ["union"]]);

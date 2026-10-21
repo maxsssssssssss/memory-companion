@@ -4,6 +4,7 @@ import { frameworkHash } from "./framework-repository";
 import type { LearningQuizRepository } from "./quiz-repository";
 import { LearningError } from "./repository";
 import { learningModelInput, quizModelInputView } from "./model-input";
+import { quizCandidateValidationIssues, type QuizCandidateIssue } from "./quiz-candidate-diagnostics";
 
 type Input = NonNullable<ReturnType<LearningQuizRepository["begin"]>>;
 export type QuizReferenceScope = { accountId: string; pageId: string; requestId: string; expiresAt: number };
@@ -58,7 +59,7 @@ export function compactQuizRequest(input: Input, scope: QuizReferenceScope, view
       if (Date.now() >= boundScope.expiresAt || ids.some(id => !originals.has(id))) throw new LearningError(422,"quiz_grounding_invalid");
       return ids.map(id => originals.get(id)!);
     },
-    decode(value: unknown, currentScope: QuizReferenceScope): ReferencedQuizResponse {
+    decode(value: unknown, currentScope: QuizReferenceScope, onIssue?: (issue: QuizCandidateIssue) => void): ReferencedQuizResponse {
       if (consumed || Date.now() >= boundScope.expiresAt || JSON.stringify(currentScope) !== JSON.stringify(boundScope)) {
         throw new LearningError(409, "source_changed");
       }
@@ -67,16 +68,17 @@ export function compactQuizRequest(input: Input, scope: QuizReferenceScope, view
       if (parsed.referenceScope !== binding) throw new LearningError(422, "quiz_grounding_invalid");
       const { referenceScope: _binding, ...result } = parsed;
       return { ...result, title: prose(result.title, new Set(originals.keys())),
-        reason: result.reason === null ? null : prose(result.reason, new Set(originals.keys())), items: result.items.map(raw => {
+        reason: result.reason === null ? null : prose(result.reason, new Set(originals.keys())), items: result.items.map((raw, index) => {
+        if (raw && typeof raw === "object" && "compositionRejected" in raw && raw.compositionRejected === true) return raw;
         const item = compactItem.safeParse(raw);
         // Preserve independent valid questions. A bad item cannot pass through as
         // legacy full IDs, be guessed, or lose only the inconvenient reference.
         const rejected = { compactReferenceRejected: true, rejectionReason: "structure_or_evidence" };
         const sourceRejected = { compactReferenceRejected: true, rejectionReason: "source_binding" };
-        if (!item.success) return rejected;
+        if (!item.success) { onIssue?.({ index, stage: "compact", code: "structure_or_evidence", validationIssues: quizCandidateValidationIssues(item.error) }); return rejected; }
         const q = item.data;
         const used = [...q.stemEvidenceIds, ...q.explanationEvidenceIds, ...q.options.flatMap(o => o.evidenceIds)];
-        if (used.some(id => !originals.has(id))) return sourceRejected;
+        if (used.some(id => !originals.has(id))) { onIssue?.({ index, stage: "compact", code: "source_binding" }); return sourceRejected; }
         const expand = (ids: string[]) => ids.map(id => originals.get(id)!);
         const literals = new Set(literalNames);
         for (const match of `${q.scenario ?? ""}\n${q.stem}`.matchAll(/(?:变量|参数|令|设)\s*(r[1-9]\d*)\b|\b(r[1-9]\d*)\s*=/g)) literals.add(match[1] ?? match[2]);
@@ -87,7 +89,7 @@ export function compactQuizRequest(input: Input, scope: QuizReferenceScope, view
             stemEvidenceIds: expand(q.stemEvidenceIds), explanationEvidenceIds: expand(q.explanationEvidenceIds),
             options: q.options.map(o => ({ ...o, text: prose(o.text, new Set(o.evidenceIds), literals),
               reason: prose(o.reason, new Set(o.evidenceIds), literals), evidenceIds: expand(o.evidenceIds) })) };
-        } catch (e) { if (e instanceof LearningError) return sourceRejected; throw e; }
+        } catch (e) { if (e instanceof LearningError) { onIssue?.({ index, stage: "compact", code: "source_binding" }); return sourceRejected; } throw e; }
       }) };
     }
   };

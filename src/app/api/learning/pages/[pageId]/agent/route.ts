@@ -9,6 +9,7 @@ import { freezeLearningAgentScope } from "@/lib/server/learning/agent-scope";
 import { learningAgentGenerationConfig } from "@/lib/server/learning/agent-scenario";
 import { LearningPlanSourceCorrections, prepareLearningPlanSourceAdjustment, materializeLearningPlanSourceAdjustment } from "@/lib/server/learning/agent-plan-sources";
 import { LearningAgentRepository } from "@/lib/server/learning/agent-repository";
+import { clearQuizCandidateDiagnostics } from "@/lib/server/learning/quiz-candidate-diagnostics";
 import { openLearningAgentStore, projectLearningAgentTask, advanceLearningAgent, learningAgentFailure, openLearningAgentRuntime, syncLearningAgentQuiz, disputeLearningAgentQuiz, submitLearningExplanationFeedback } from "@/lib/server/learning/agent-api-service";
 import { learningJson, learningJsonBody, withLearning } from "../../../route-utils";
 export const runtime = "nodejs";
@@ -111,6 +112,7 @@ export async function PATCH(request: Request, context: Context) {
               } else scope.planSourceAdjustment = prepareLearningPlanSourceAdjustment(learning, task, { goal: value.goal, scope }, value.sourceCorrections);
             }
             task = await runtime.adjust(accountId, task.id, { expectedVersion, goal: value.goal, scope, eventId: value.eventId });
+            clearQuizCandidateDiagnostics(learning, pageId, { taskId: task.id, exceptVersion: task.version ?? 1 });
             new LearningAgentRepository(learning).invalidateNotePreviews(pageId, task.id, task.version ?? 1);
             // Local deterministic write only. If interrupted, the persisted
             // consent recipe is resumed by observe/tools; no paid plan retry.

@@ -30,11 +30,11 @@ const pass = (key, message, evidence = {}) => {
   console.log(`[natural-quiz ${phase} ${checks.length}] ${key}: ${message}; offline responses=${ledger().requests}, real Provider=${ledger().network}`);
 };
 const caseDefinitions = [
-  { key: 'A', mode: 'partial', goal: '练习交集与并集' },
+  { key: 'A', mode: 'partial', goal: '练习交集与并集。' },
   { key: 'B', mode: 'all_failed', goal: '考考我' },
-  { key: 'C', mode: 'repeat_explanation', goal: '我不理解具体的定义，帮帮我' },
-  { key: 'D', mode: 'partial', goal: '我想练练这部分' },
-  { key: 'E', mode: 'multi_round', goal: '我总分不清交集和并集，帮我练练' },
+  { key: 'C', mode: 'repeat_explanation', goal: '我不理解具体的定义，帮帮我。' },
+  { key: 'D', mode: 'source_contract', goal: '先出两道题看看。' },
+  { key: 'E', mode: 'multi_round', goal: '我总分不清交集和并集，帮我练练。' },
 ];
 const expectedControl = { version: 1, cases: caseDefinitions.map(item => {
   const account = accounts.find(account => account.key === item.key); assert(account, 'existing_seed_accounts_required');
@@ -48,7 +48,8 @@ else {
 const browser = await chromium.launch(chromiumLaunchOptions());
 
 async function session(key, work) {
-  const account = accounts.find(account => account.key === key), definition = caseDefinitions.find(item => item.key === key);
+  const definition = key === 'G4' ? { key, accountKey: 'C', goal: '只解释，不要做题。' } : caseDefinitions.find(item => item.key === key);
+  const account = accounts.find(account => account.key === (definition.accountKey ?? key));
   const context = await browser.newContext({ viewport: { width: 1440, height: 1050 }, serviceWorkers: 'block' });
   const errors = [], external = [];
   await context.route('**/*', route => {
@@ -147,12 +148,13 @@ try {
       assert(!JSON.stringify(task).includes('correctOptionId'));
       const delivery = task.quizDeliveries.find(item => item.quizId === link.quizId)?.delivery;
       assert(delivery, 'actual_partial_delivery_required');
-      assert.equal(delivery.published, 1); assert.equal(delivery.requested, 3);
+      assert.equal(delivery.published, 1); assert.equal(delivery.requested, key === 'D' ? 2 : 3);
       assert(task.completion.objectives.every(objective => objective.status === 'unobserved'));
+      assert(task.completion.objectives.every(objective => objective.evidence.every(evidence => evidence.quality === 'pending')));
       state[key] = { ...link, version: task.version }; persist();
       await h.open(task.id); await expect(h.page.getByRole('article', { name: '当前作答', exact: true })).toBeVisible();
-      await h.snapshot('one-valid-question'); await h.quiet(task.id, 'one of three candidates remains answerable');
-      pass(key, 'ordinary goal → diagnosis → 3 candidates/1 real published question; no invented coverage or answer leakage', { taskId: task.id, quizId: link.quizId });
+      await h.snapshot('one-valid-question'); await h.quiet(task.id, 'valid partial publication remains answerable');
+      pass(key, 'ordinary goal → diagnosis → valid partial question bound to fixed objective sources; no invented coverage or answer leakage', { taskId: task.id, quizId: link.quizId });
     });
     await session('B', async h => {
       let task = await h.start(); task = await h.settle(task.id);
@@ -193,6 +195,13 @@ try {
       await h.open(task.id);
       const { attempt: wrong } = await h.submitOne(first, 'A');
       assert.equal(wrong.score.correct, 0); assert.equal(wrong.score.total, 1);
+      task = await h.settle(task.id, value => value.status === 'waiting' && value.wait?.kind === 'feedback' && value.explanations.length === 1);
+      assert.equal(task.quizLinks.length, 1);
+      await h.open(task.id);
+      await h.panel().getByLabel('你的反馈', { exact: true }).fill('我明白了，再出题试试。');
+      const resumed = h.page.waitForResponse(response => response.url().endsWith('/agent') && response.request().method() === 'PATCH');
+      await h.panel().getByRole('button', { name: '提交反馈并继续', exact: true }).click();
+      assert.equal((await resumed).status(), 202);
       task = await h.settle(task.id, value => value.status === 'waiting' && value.quizLinks.length === 2);
       assert.equal(task.wait.kind, 'quiz_submission');
       assert.equal(task.explanations.length, 1);
@@ -215,7 +224,7 @@ try {
       await expect(h.panel()).toContainText(task.explanations[0].text);
       await h.snapshot('wrong-explained-followup-waiting');
       await h.quiet(task.id, 'actual error preserved while second related question awaits submission');
-      pass('E', 'ordinary difficulty → actual first Quiz → UI wrong answer → read_answers/association → targeted explanation → distinct followup Quiz', {
+      pass('E', 'ordinary difficulty → actual first Quiz → UI wrong answer → read_answers/association → targeted explanation → natural user feedback → distinct boundary Quiz', {
         firstQuizId: first.quizId, secondQuizId: second.quizId, firstScore: wrong.score, taskCalls: task.usage.calls,
       });
     });
@@ -245,14 +254,13 @@ try {
       const saved = (await h.api('/quiz?attempt=' + state.A.attemptId)).value.attempt;
       assert.equal(saved.completed, true); assert.equal(saved.score.correct, 1); assert.equal(saved.score.total, 1);
       assert.equal(task.completion.outcome, 'diagnosis_complete'); assert.equal(task.completion.longTermMastery, 'unverified');
-      assert(task.actions.some(action => action.tool === 'learning.read_answers' && action.status === 'succeeded'));
-      assert(task.actions.some(action => action.tool === 'learning.associate_evidence' && action.status === 'succeeded'));
+      assert(task.completion.objectives.some(objective => objective.evidence.some(evidence => evidence.ref.attemptId === saved.id && evidence.correct === true && evidence.eligible)));
       assert.equal(task.quizLinks.length, 1);
       const before = ledger(); assert.equal((await h.api('/quiz', 'PATCH', originalFinish)).status, 200);
       await h.page.waitForTimeout(600); assert.deepEqual(ledger(), before);
       assert.deepEqual((await h.api('/quiz?attempt=' + state.A.attemptId)).value.attempt, saved);
       await h.open(task.id); await h.snapshot('diagnosis-complete'); await h.quiet(task.id, 'finished diagnosis stays read-only');
-      pass('A', 'real component submission → saved 1/1 → read_answers/association → bounded diagnosis completion; exact duplicate submit has zero writes/calls');
+      pass('A', 'real component submission → saved 1/1 → current mapped evidence → bounded diagnosis completion; exact duplicate submit has zero writes/calls');
     });
     await session('C', async h => {
       let task = await h.current(state.tasks.C); assert.equal(task.status, 'waiting'); assert.equal(task.explanations[0].id, state.C.explanationId);
@@ -267,6 +275,21 @@ try {
       await h.open(task.id); await h.snapshot('resolved-once');
       pass('C', 'after normal restart, first explicit resolution ends with no model call; duplicate event neither writes nor generates');
     });
+    await session('G4', async h => {
+      let task = await h.start(); task = await h.settle(task.id);
+      assert.equal(task.status, 'waiting'); assert.equal(task.wait.kind, 'feedback');
+      assert.equal(task.completion.plan.kind, 'explanation'); assert.equal(task.quizLinks.length, 0);
+      assert.equal(task.actions.filter(action => action.tool === 'learning.create_quiz').length, 0);
+      assert.equal(task.explanations.length, 1);
+      await h.open(task.id); const before = ledger();
+      const response = h.page.waitForResponse(response => response.url().endsWith('/agent') && response.request().method() === 'PATCH');
+      await h.panel().getByRole('button', { name: '疑问已解决', exact: true }).click();
+      assert.equal((await response).status(), 202);
+      task = await h.settle(task.id, value => value.status === 'ended');
+      assert.equal(task.completion.outcome, 'explanation_resolved'); assert.deepEqual(ledger(), before);
+      await h.open(task.id); await h.snapshot('only-explain-resolved'); await h.quiet(task.id, 'explicit no-Quiz goal remains explanation-only');
+      pass('G4', '只解释，不要做题。 stays zero-Quiz; explicit resolution adds no decision or generation');
+    });
     await session('E', async h => {
       let task = await h.current(state.tasks.E);
       assert.equal(task.status, 'waiting'); assert.equal(task.version, state.E.version);
@@ -277,37 +300,51 @@ try {
       const { attempt: followup, event } = await h.submitOne(state.E.second, 'B');
       assert.equal(followup.score.correct, 1); assert.equal(followup.score.total, 1);
       task = await h.settle(task.id, value => value.status === 'ended');
-      assert.equal(task.completion.outcome, 'check_passed');
+      assert.equal(task.completion.outcome, 'partial');
       assert.equal(task.completion.longTermMastery, 'unverified');
       const objective = task.completion.objectives.find(objective => objective.id === 'membership');
-      assert.equal(objective.status, 'supported'); assert.equal(objective.unresolvedErrors.length, 0);
+      assert.equal(objective.status, 'partial'); assert.equal(objective.unresolvedErrors.length, 1);
+      assert.equal(objective.requirements.find(requirement => requirement.role === 'boundary').supported, true);
+      assert.equal(objective.requirements.find(requirement => requirement.role === 'followup').supported, false);
       const old = objective.evidence.find(evidence => evidence.ref.attemptId === state.E.first.attemptId);
       const later = objective.evidence.find(evidence => evidence.ref.attemptId === state.E.second.attemptId);
       assert.equal(old.correct, false); assert.equal(old.relation, 'initial');
-      assert.equal(later.correct, true); assert.equal(later.relation, 'followup'); assert.equal(later.independentInApp, true);
-      assert(later.priorEvidenceRefs.some(ref => ref.attemptId === old.ref.attemptId && ref.questionIndex === old.ref.questionIndex));
+      assert.equal(later.correct, true); assert.equal(later.role, 'boundary'); assert.equal(later.independentInApp, true);
+      assert(!objective.evidence.some(evidence => evidence.ref.attemptId === later.ref.attemptId && evidence.role === 'followup'), 'do_not_relabel_boundary_as_followup_to_force_pass');
       assert.equal((await h.api('/quiz?attempt=' + state.E.first.attemptId)).value.attempt.score.correct, 0);
       assert.equal(task.quizLinks.length, 2); assert(task.usage.calls <= 16);
       assert.deepEqual(task.completion.plan, state.E.plan);
-      assert.equal(ledger().requests - beforeSubmission.requests, 2, 'only_read_answers_and_associate_decisions_before_evidence_is_sufficient_no_extra_finish_call');
+      assert.equal(ledger().requests - beforeSubmission.requests, 3, 'read_answers_and_associate_then_honest_finish_with_remaining_followup_gap');
       const reads = task.actions.filter(action => action.tool === 'learning.read_answers' && action.status === 'succeeded');
       assert.equal(reads.length, 2);
       const before = ledger(); assert.equal((await h.api('/quiz', 'PATCH', event)).status, 200);
       await h.page.waitForTimeout(600); assert.deepEqual(ledger(), before);
       await h.open(task.id); await expect(h.panel()).toContainText(task.completion.headline);
-      await h.snapshot('two-round-supported-stop'); await h.quiet(task.id, 'evidence-supported stop does not generate a third group');
-      pass('E', 'second actual UI answer → second read_answers/association → supported followup clears only linked error → zero-extra-call stop; initial wrong score retained', {
+      await h.snapshot('two-round-boundary-partial-handoff'); await h.quiet(task.id, 'honest handoff retains missing followup without a third group');
+      pass('E', 'second actual UI answer → second read_answers/association → boundary supported only → honest partial handoff; original wrong and followup gap retained', {
         firstScore: { correct: 0, total: 1 }, secondScore: followup.score, taskCalls: task.usage.calls, outcome: task.completion.outcome,
       });
     });
     await session('D', async h => {
-      let task = await h.current(state.tasks.D); const before = ledger();
+      let task = await h.current(state.tasks.D);
+      assert.deepEqual(task.completion.plan.objectives[0].sources.map(source => source.paragraph), [2, 3, 4]);
+      const hidden = await h.api('/quiz?attempt=' + state.D.attemptId + '&question=0&source=0');
+      assert.deepEqual(hidden, { status: 403, value: { error: 'quiz_answers_hidden' } });
+      const { attempt } = await h.submitOne(state.D, 'B');
+      assert.equal(attempt.score.correct, 1); assert.equal(attempt.score.total, 1);
+      task = await h.settle(task.id, value => value.status === 'ended');
+      assert.equal(task.completion.outcome, 'diagnosis_complete');
+      assert(!task.completion.technicalBlocker);
+      assert(task.completion.objectives.every(objective => objective.evidence.every(evidence => evidence.diagnosticCode !== 'plan_source_mismatch')));
+      await h.open(task.id); await h.snapshot('source-consistent-after-answer');
+      pass('D', '先出两道题看看。 → partial publication → actual 1/1 → diagnosis ends without plan-source technical blocker');
+      const before = ledger();
       assert.equal((await h.api('/materials/' + h.account.materialId, 'DELETE')).status, 200);
       const exposed = await h.api('/quiz?attempt=' + state.D.attemptId + '&question=0&source=0');
       const deletedSource = await h.api('/materials/' + h.account.materialId);
-      fs.writeFileSync(path.join(archive, 'D-source-http.json'), JSON.stringify({ attemptSource: exposed, deletedSource }, null, 2));
-      assert.deepEqual(exposed, { status: 403, value: { error: 'quiz_answers_hidden' } }, 'unsubmitted_attempt_still_hides_answers_before_source_lookup');
-      assert.deepEqual(deletedSource, { status: 410, value: { error: 'material_deleted' } }, 'deleted_material_original_text_is_unavailable');
+      fs.writeFileSync(path.join(archive, 'D-source-http.json'), JSON.stringify({ beforeSubmission: hidden, attemptSource: exposed, deletedSource }, null, 2));
+      assert.equal(exposed.status, 410); assert.equal(exposed.value.error, 'material_deleted');
+      assert.deepEqual(deletedSource, { status: 410, value: { error: 'material_deleted' } });
       task = await h.current(task.id);
       assert.equal(task.quizLinks.length, 0); assert.equal(task.explanations.length, 0); assert.equal(task.quizDeliveries.length, 0);
       assert.deepEqual(ledger(), before);
@@ -315,7 +352,7 @@ try {
       pass('D', 'deleted source blocks original reads and removes stale task artifacts/delivery details without model calls');
     });
   } else {
-    for (const key of ['A', 'B', 'C', 'D', 'E']) await session(key, async h => {
+    for (const key of ['A', 'B', 'C', 'D', 'E', 'G4']) await session(key, async h => {
       const task = await h.current(state.tasks[key]); await h.quiet(task.id, 'read-only inspection');
       await h.snapshot('retained-final-state');
       if (key === 'E') {

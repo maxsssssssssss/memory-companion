@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { quizCandidateValidationIssues, type QuizCandidateIssue } from "./quiz-candidate-diagnostics";
 import { ReferencedGeneratedQuiz } from "@/lib/domain/learning-quiz";
 import { compactQuizRequest, compactQuizPrompt, CompactQuizEnvelope } from "./quiz-compact";
 import { inspectQuizOptionExplanation, hasQuizPositionDependency, quizProceduralHint, QUIZ_REJECTION_DETAILS, type QuizRejectionReason } from "./quiz-grounding";
@@ -36,7 +37,7 @@ export function composedQuizRequest(...args: Parameters<typeof compactQuizReques
     schema: envelope,
     input: { ...codec.input, taskContext: { ...codec.input.taskContext,
       coverageInstruction: "先按materialCatalog逐份辨别独有知识、重复背景和无法确定的内容，再安排本组考点。材料序号仅供计划；题目依据仍用正文referenceId。题量有限时诚实说明未覆盖内容，不按文件平均配题，也不靠重复考点凑题。" } },
-    decode(value: unknown, scope: Parameters<typeof codec.decode>[1]) {
+    decode(value: unknown, scope: Parameters<typeof codec.decode>[1], onIssue?: (issue: QuizCandidateIssue) => void) {
       const parsed = envelope.parse(value);
       const { materialPlan, ...body } = parsed;
       const notes: string[] = [];
@@ -55,7 +56,8 @@ export function composedQuizRequest(...args: Parameters<typeof compactQuizReques
       if (invalidPlan || seenMaterials.size !== codec.input.materials.length) notes.push("材料考查安排不完整；本组实际涉及范围以已保存题目的来源为准。");
       const focuses: Array<string | undefined> = [];
       const rejections = new Map<number, QuizRejectionReason>();
-      const reject = (index: number, reason: QuizRejectionReason) => {
+      const reject = (index: number, reason: QuizRejectionReason, validationIssues?: QuizCandidateIssue["validationIssues"]) => {
+        onIssue?.({ index, stage: "composition", code: reason, ...(validationIssues ? { validationIssues } : {}) });
         rejections.set(index, reason);
         notes.push(`第 ${index + 1} 题${QUIZ_REJECTION_DETAILS[reason]}，未发布。`);
         return { compositionRejected: true, rejectionReason: reason };
@@ -63,7 +65,7 @@ export function composedQuizRequest(...args: Parameters<typeof compactQuizReques
       const items = body.items.map((raw, index) => {
         const result = itemSchema.safeParse(raw);
         if (!result.success) {
-          return reject(index, "structure_or_evidence");
+          return reject(index, "structure_or_evidence", quizCandidateValidationIssues(result.error));
         }
         const { focus, explanationParts, ...q } = result.data;
         if (new Set(q.options.map(o => o.id)).size !== q.options.length || !q.options.some(o => o.id === q.correctOptionId)) return reject(index, "option_identity");
@@ -76,7 +78,7 @@ export function composedQuizRequest(...args: Parameters<typeof compactQuizReques
             return { ...option, reason: reason.text, evidenceIds: reason.ids };
           }) };
       });
-      const decoded = codec.decode({ ...body, referenceScope: body.referenceScope ?? codec.input.taskContext.referenceScope, items }, scope);
+      const decoded = codec.decode({ ...body, referenceScope: body.referenceScope ?? codec.input.taskContext.referenceScope, items }, scope, onIssue);
       const seen = new Set<string>();
       decoded.items = decoded.items.map((raw, index) => {
         if (rejections.has(index)) return { compositionRejected: true, rejectionReason: rejections.get(index)! };

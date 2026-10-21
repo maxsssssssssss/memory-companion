@@ -7,7 +7,8 @@ export const QuizCandidateReport = z.object({
   forwardedIndexes: z.array(z.number().int().min(0).max(49)).max(50).optional(),
   rejected: z.array(z.object({ index: z.number().int().min(0).max(49),
     code: z.enum(["structure_or_evidence", "option_identity", "position_dependency", "answer_contradiction",
-      "repeated_focus", "equivalent_options", "answer_not_unique", "source_binding", "goal_mismatch"])
+      "repeated_focus", "equivalent_options", "answer_not_unique", "source_binding", "goal_mismatch",
+      "annotation_schema", "annotation_role", "annotation_objective", "annotation_missing", "review_source_mismatch"])
   }).strict()).max(50)
 }).strict();
 export type QuizCandidateReport = z.infer<typeof QuizCandidateReport>;
@@ -17,6 +18,9 @@ const labels: Record<QuizDeliveryReason, string> = {
   position_dependency: "题目依赖选项排列或其他题目", answer_contradiction: "答案与解析矛盾",
   repeated_focus: "题目重复", equivalent_options: "存在等价选项", answer_not_unique: "不能确定唯一正确答案",
   source_binding: "引用未能与本次材料可靠对应", goal_mismatch: "题目与本轮检查目标关联不符",
+  annotation_schema: "题目的检查说明格式不完整", annotation_role: "题目的检查角度与本次安排不符",
+  annotation_objective: "题目未关联本次约定的目标", annotation_missing: "题目缺少本次检查说明",
+  review_source_mismatch: "题目依据与本次目标来源不一致",
   format: "生成结果格式不完整", unknown: "生成结果尚未确认", budget: "本轮可用资源已用完",
   known_failure: "这次生成未能完成"
 };
@@ -45,7 +49,7 @@ export function quizDeliverySummary(input: { requested: number; published: numbe
     failure = input.uncertain || input.failure === "generation_result_unknown" ? "unknown"
       : /^agent_(?:call_limit|request_input_limit|request_output_limit|compute_limit|generation_budget_exhausted)$/.test(input.failure ?? "") ? "budget"
       : input.validationFailed ? "format"
-      : ["source_changed", "quiz_grounding_invalid", "framework_invalid_source", "quiz_reading_invalid_source"].includes(input.failure ?? "") ? "source_binding"
+      : ["source_changed", "quiz_grounding_invalid", "quiz_review_source_mismatch", "framework_invalid_source", "quiz_reading_invalid_source"].includes(input.failure ?? "") ? "source_binding"
       : "known_failure";
     counts.set(failure, (counts.get(failure) ?? 0) + 1);
   }
