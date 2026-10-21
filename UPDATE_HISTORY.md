@@ -15650,3 +15650,9 @@ Learning与UI：新增 `agent-scope.ts`、`agent-repository.ts`、`agent-scenari
 - ZIP 与上一轮交付逐字节一致，19,183,933 bytes，SHA256 `f45cdfb124998049cc5efeb36e777df69a96ee9803e29fd3211cce0dad83fac8`。202 条目中的 201 项 manifest 长度和哈希全部匹配；独立静态检查未发现路径穿越、符号链接、数据库二进制、私有环境配置、账号密码清单或实际认证 token。此为静态检查，不承诺绝对识别所有秘密格式。
 - 验证为 ZIP 完整性、哈希/清单、复制一致性及 `git diff --check`，未重跑业务测试、类型或构建（仅附件与文档变化），不复用它们宣称新真实验收。Cloud 真实 Provider 请求 0；Windows 业务验收仍 PENDING，不改账本、不启动服务、不集成 dev/cloud-code/main、不部署。
 - 原有 95 行本地 UPDATE_HISTORY 未提交内容保留，仅本轮追加记录入 Git；正常 commit/push 同一分支，不 force push。临时移除只删除当前文件树中的附件，不清除 Git 历史；用户确认下载后再按指令处理。
+
+## 2026-10-21：移除 GitHub 临时自然语言 Quiz 证据包
+
+- 按用户明确要求，从 `feat/learning-agent-natural-language-quiz` 当前文件树移除 `docs/agent-evidence/learning-agent-natural-quiz-c79fbf2.zip`，更新原 README 为交付身份记录并去掉失效下载链接。原上传提交 `3d354c5c54d14218978764c4847bada0906968eb` 及业务代码 `c79fbf241d5367de191ccd6a92e66fe1636cabf8` 保持可追溯，不重写 Git 历史。
+- 删除前核对临时文件和 `output/natural-language-quiz/` 本地原始 ZIP 均为 SHA256 `f45cdfb124998049cc5efeb36e777df69a96ee9803e29fd3211cce0dad83fac8`；仅删除前者，完整本地证据、合成数据及原有 95 行未提交历史均保留。本轮新增记录单独暂存，正常提交推送同一功能分支。
+- 验证限于文件移除、保留包哈希、提交范围和 `git diff --check`；不改产品代码，未重跑业务测试、类型或构建，不将旧验收升级为新真实 PASS。未调用 Provider、未启动服务、未集成 dev/cloud-code/main、未部署。无新增依赖或迁移，Git 历史中的旧 ZIP 对象不会由普通移除提交清除。

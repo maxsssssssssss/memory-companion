@@ -13,11 +13,12 @@ Cloud 真实 Provider 请求为 0；Windows 新代码真实验收 PENDING。账�
 
 本次移除只清理临时下载文件、更新说明及历史记录，不重写 Git 历史。Windows 保留已下载的证据，仍可固定上述业务代码 SHA 复验。
 
-## 2026-10-21：自然语言入口与 Quiz 可靠交付临时下载
+## 2026-10-21：自然语言入口与 Quiz 可靠交付证据记录
 
-按用户要求，临时提供本次完整 Cloud 离线证据包，内容与上一轮交付文件逐字节一致。
+按用户要求，临时 ZIP 已从当前分支文件树移除。本地原始证据保留，以下记录用于核对此前交付身份。
 
-- [下载证据 ZIP](learning-agent-natural-quiz-c79fbf2.zip)
+- 原 ZIP：`learning-agent-natural-quiz-c79fbf2.zip`
+- 原临时上传提交：`3d354c5c54d14218978764c4847bada0906968eb`
 - 对应业务代码：`c79fbf241d5367de191ccd6a92e66fe1636cabf8`
 - 分支：`feat/learning-agent-natural-language-quiz`
 - 文件大小：19,183,933 bytes（约 19 MB）
@@ -26,6 +27,6 @@ Cloud 真实 Provider 请求为 0；Windows 新代码真实验收 PENDING。账�
 - 包含报告、完整验证矩阵、命令与日志、公开合成业务投影、浏览器截图及中间失败记录；不包含数据库二进制、账号密码清单、私有配置或依赖目录。
 - [实现说明与 Windows 接回步骤](../learning-agent-natural-language-quiz.md)
 
-本次仅提供下载文件和说明，不改产品代码；验收业务 SHA 仍为上面的 `c79fbf2`。Cloud 离线多轮闭环通过，真实 DS 验收仍为 PENDING，真实 Provider 请求 0。Windows 原始数据与账本不改动，不集成、不部署。
+本次仅移除临时下载文件并更新说明，不改产品代码；验收业务 SHA 仍为上面的 `c79fbf2`。Cloud 离线多轮闭环通过，真实 DS 验收仍为 PENDING，真实 Provider 请求 0。Windows 原始数据与账本不改动，不集成、不部署。
 
-用户确认取得文件后可通过普通提交移除临时 ZIP，不重写 Git 历史。
+本次使用普通提交移除文件，不重写 Git 历史；此前上传提交仍可追溯。
