@@ -15687,3 +15687,8 @@ Learning与UI：新增 `agent-scope.ts`、`agent-repository.ts`、`agent-scenari
 - 浏览器：原G3短句经首轮部分发布、正式0/1、读回关联、针对解释、反馈、第二题1/1后诊断结束，0额外结束调用；原G5短句经相同两轮实际UI/服务链，保留原错答及followup缺口后partial交回。18库和F定向8库完整性通过，重复seed DB/WAL不变，四次正常服务停止均退出0，保留数据及截图。共77受控离线响应、真实请求0，不冒充DS语义或真人效果。
 - 实际失败与修正：修前N1新10项5失败、N2新30项10失败；中间7文件225项有3项旧诊断文字预期失败，保留拒绝断言并同步“有限”措辞后226项通过（不叠加901）。辅助回放误用exam模式、readiness误查/login 404均保留并改为现有test模式/实际根入口。全浏览器重启前12项通过、重启后10项通过及F新脚本断言失败1项、只读14项通过；F误预期充分诊断后仍多调2次，核对实际保存事实后修正为既有零调用结束，只重跑F的重启前/后/只读各2项退出0，原目标、成绩、来源与反证断言保留。
 - 限制与后续：集合字面量和位置识别仍是有界检查，未覆盖语法不猜测；S32来源蕴含、模型语义提案非verified、模拟学生非学习效果、长期掌握未验证均保留。新SHA真实G3/G5验收交Windows按当时授权执行，不更改其177累计账本、Guard补丁或历史unknown；不集成dev/cloud-code/main，不部署。
+
+
+## 2026-10-21：上传 N1/N2 返修证据供 GitHub 下载
+
+用户明确要求从 GitHub 下载已交付证据包。本次在 feat/learning-agent-natural-language-quiz 的 c6dd17158df3d6ac57e90c23554089d0eecfac94 基础上，将原 ZIP 按字节复制至 docs/agent-evidence/learning-agent-natural-quiz-repair2-c6dd171.zip，并追加同目录 README 的下载、业务 SHA、大小、哈希及证据边界说明；没有修改产品源码、依赖、协议、预算或 Windows 数据。ZIP 为 18,113,869 bytes，SHA-256 为 afb0f4bc9319617bba28836aa2c91c49b0b51fb66a3763d7e026154fb1ea9659；126 个文件中 125 个 manifest 条目及 CRC 全部核对，保留原失败日志与 Cloud/Windows 证据区分。本次只交付文件，未重跑业务测试、TypeScript 或构建，业务验收继续固定 c6dd171；真实 Provider 请求为 0，不集成、不部署。原有 95 行本地历史追加保留未纳入本次提交。
