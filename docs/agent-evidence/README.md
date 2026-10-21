@@ -30,3 +30,17 @@ Cloud 真实 Provider 请求为 0；Windows 新代码真实验收 PENDING。账�
 本次仅移除临时下载文件并更新说明，不改产品代码；验收业务 SHA 仍为上面的 `c79fbf2`。Cloud 离线多轮闭环通过，真实 DS 验收仍为 PENDING，真实 Provider 请求 0。Windows 原始数据与账本不改动，不集成、不部署。
 
 本次使用普通提交移除文件，不重写 Git 历史；此前上传提交仍可追溯。
+
+
+## 2026-10-21：G1—G5 集中返修证据下载
+
+按用户要求上传以下同一份可移植证据包，便于从 GitHub 下载；不改动产品代码。
+
+- [下载 ZIP](learning-agent-natural-quiz-repair-d84eaa9.zip?raw=true)（30,636,711 bytes，约 30.6 MB）
+- 对应验收代码 SHA：`d84eaa97173f9fba88c596c94c04e167603589b2`
+- SHA-256：`4dc5c0d7c3c3b966d828da649a9b2f2d034cba960f76d7d90a936f6de15abe0c`
+- ZIP 共 160 文件；159 个 manifest 条目全部核对大小与哈希，ZIP 完整性检查通过。
+- 包含原 Windows 公开证据包、Cloud 报告、完整验证矩阵、命令/日志、公开合成业务投影、截图及中间失败记录。不含本地业务数据库、账号凭据、会话或运行配置。
+- [实现与 Windows 定向复验说明](../learning-agent-natural-quiz-repair.md)
+
+该上传提交只用于交付证据，Windows 业务验收仍固定上面的 d84eaa9 完整 SHA。Cloud 离线通过不等于真实 DS 通过；真实验收 PENDING。原账本、Guard、unknown 和成绩不改动，不集成、不部署。

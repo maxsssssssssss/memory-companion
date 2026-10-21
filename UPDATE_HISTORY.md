@@ -15670,3 +15670,8 @@ Learning与UI：新增 `agent-scope.ts`、`agent-repository.ts`、`agent-scenari
 - 最终验证：cloud:test 精确77文件1404例全部通过，0跳过、exit0；cloud:check 的9环境合同及完整lint/Next typegen/TypeScript通过exit0；最终cloud:build exit0，180 trace manifests、forbidden0。原包事实17项+正式候选4组、原保存候选经正式repository/SQLite/原stable-ID模拟作答/重开4组均达各自预期exit0；G3预期为准确发布前拒绝，旧Windows1/1不改。
 - 最终production浏览器：重启前10项、重启后10项分别PASS exit0，不累计重叠覆盖。G1合法部分发布+1/1诊断结束；G3冻结来源一致+1/1无技术阻塞；G5首错0/1→读回关联→解释→用户自然反馈→第二boundary题→重启→1/1→再次读回→partial，保留旧错与followup缺口且16/16预算不增加；G2谢谢不解决、明确解决零额外调用/重复零写；G4只解释0题；全失败转解释/反馈。正常停机/重启、重登、重复提交、来源删除与SQLite检查均保留证据，合成数据不删除。
 - Cloud真实Provider请求0，最终浏览器51次受控离线响应不等于真实DS；Windows仍需在新SHA集中复验G3/G5，原账本161/停止线179余18及unknown#101不改不重发。S32、有限数学、语义提案非verified、来源交集非蕴含、模拟学生非教学效果及长期掌握未验证继续保留。不集成dev/cloud-code/main，不部署。实现说明及Windows步骤见docs/learning-agent-natural-quiz-repair.md；可移植证据留output，不把ZIP纳入Git。
+
+
+### 2026-10-21：按用户要求将 G1—G5 返修证据上传 GitHub 供下载
+
+用户无法通过工作区链接取得证据，明确要求上传 GitHub。本次在 feat/learning-agent-natural-language-quiz 的 d84eaa97173f9fba88c596c94c04e167603589b2 上仅添加 docs/agent-evidence/learning-agent-natural-quiz-repair-d84eaa9.zip 并追加目录说明及本条历史。原包30,636,711字节，SHA256为4dc5c0d7c3c3b966d828da649a9b2f2d034cba960f76d7d90a936f6de15abe0c；ZIP完整性通过，159个manifest条目大小/哈希全部一致，160文件无缺失或额外条目。保留原有95行本地历史改动，不将其混入本次提交。此为证据交付，不变更业务源码、验收目标SHA或结论，因此未重复测试/类型检查/构建；执行文件哈希、清单、Git diff检查及正常分支push核对。Cloud真实Provider请求0，Windows真实验收仍PENDING；不修改Windows数据或预算，不集成dev/cloud-code/main，不部署。临时证据之后可按用户要求普通提交移除，Git历史不重写。
