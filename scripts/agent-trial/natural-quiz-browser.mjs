@@ -10,6 +10,10 @@ import { studentOption } from './student-policy.mjs';
 
 const phase = process.argv[2];
 assert(['before-restart', 'after-restart', 'inspect'].includes(phase), 'natural_quiz_browser_phase_required');
+const caseFlag = process.argv.indexOf('--case');
+const onlyCase = caseFlag < 0 ? null : process.argv[caseFlag + 1];
+const phaseCases = { 'before-restart': ['A', 'D', 'B', 'C', 'E', 'F'], 'after-restart': ['A', 'C', 'G4', 'E', 'F', 'D'], 'inspect': ['A', 'B', 'C', 'D', 'E', 'F', 'G4'] };
+assert(onlyCase === null || phaseCases[phase].includes(onlyCase), 'natural_quiz_browser_case_invalid_or_not_exercised_in_phase');
 const root = path.resolve(process.env.AGENT_TRIAL_DIR ?? 'output/natural-language-quiz/browser');
 const read = name => JSON.parse(fs.readFileSync(path.join(root, name), 'utf8'));
 const runtime = read('runtime.json'), accounts = read('synthetic-accounts.json');
@@ -35,6 +39,7 @@ const caseDefinitions = [
   { key: 'C', mode: 'repeat_explanation', goal: '我不理解具体的定义，帮帮我。' },
   { key: 'D', mode: 'source_contract', goal: '先出两道题看看。' },
   { key: 'E', mode: 'multi_round', goal: '我总分不清交集和并集，帮我练练。' },
+  { key: 'F', mode: 'diagnostic_rounds', goal: '先出两道题看看。' },
 ];
 const expectedControl = { version: 1, cases: caseDefinitions.map(item => {
   const account = accounts.find(account => account.key === item.key); assert(account, 'existing_seed_accounts_required');
@@ -48,6 +53,7 @@ else {
 const browser = await chromium.launch(chromiumLaunchOptions());
 
 async function session(key, work) {
+  if (onlyCase && key !== onlyCase) return;
   const definition = key === 'G4' ? { key, accountKey: 'C', goal: '只解释，不要做题。' } : caseDefinitions.find(item => item.key === key);
   const account = accounts.find(account => account.key === (definition.accountKey ?? key));
   const context = await browser.newContext({ viewport: { width: 1440, height: 1050 }, serviceWorkers: 'block' });
@@ -186,11 +192,16 @@ try {
       await h.snapshot('first-feedback-retained'); await h.quiet(task.id, 'first explicit explanation feedback remains available');
       pass('C', 'duplicate explanation blocked without terminal lockout; ordinary thanks leaves resolution unconfirmed', { requestsForThanks: ledger().requests - before.requests });
     });
-    await session('E', async h => {
+    for (const key of ['E', 'F']) await session(key, async h => {
       let task = await h.start(); task = await h.settle(task.id);
       assert.equal(task.status, 'waiting'); assert.equal(task.quizLinks.length, 1);
-      assert.equal(task.completion.plan.kind, 'targeted_review');
-      assert.equal(task.completion.plan.objectives[0].requirements[0].role, 'followup');
+      assert.equal(task.completion.plan.kind, key === 'F' ? 'diagnosis' : 'targeted_review');
+      assert.equal(task.completion.plan.objectives[0].requirements[0].role, key === 'F' ? 'concept' : 'followup');
+      if (key === 'F') {
+        const delivery = task.quizDeliveries.find(item => item.quizId === task.quizLinks[0].quizId)?.delivery;
+        assert.equal(delivery.requested, 2); assert.equal(delivery.published, 1);
+        assert.deepEqual(delivery.rejected, [{ code: 'equivalent_options', count: 1 }]);
+      }
       const first = task.quizLinks[0];
       await h.open(task.id);
       const { attempt: wrong } = await h.submitOne(first, 'A');
@@ -218,13 +229,13 @@ try {
       assert(pending.questions.every(question => !question.feedback));
       assert.notEqual(pending.questions[0].stem, wrong.questions[0].stem);
       assert(task.usage.calls <= 16, 'existing_task_budget_must_remain_unchanged');
-      state.E = { first, second, version: task.version, callsBeforeSecondAnswer: task.usage.calls, plan: task.completion.plan }; persist();
+      state[key] = { first, second, version: task.version, callsBeforeSecondAnswer: task.usage.calls, plan: task.completion.plan }; persist();
       await h.open(task.id);
       await expect(h.page.getByRole('article', { name: '当前作答', exact: true })).toBeVisible();
       await expect(h.panel()).toContainText(task.explanations[0].text);
       await h.snapshot('wrong-explained-followup-waiting');
       await h.quiet(task.id, 'actual error preserved while second related question awaits submission');
-      pass('E', 'ordinary difficulty → actual first Quiz → UI wrong answer → read_answers/association → targeted explanation → natural user feedback → distinct boundary Quiz', {
+      pass(key, 'ordinary goal → actual first Quiz → UI wrong answer → read_answers/association → targeted explanation → natural user feedback → distinct boundary Quiz', {
         firstQuizId: first.quizId, secondQuizId: second.quizId, firstScore: wrong.score, taskCalls: task.usage.calls,
       });
     });
@@ -290,38 +301,41 @@ try {
       await h.open(task.id); await h.snapshot('only-explain-resolved'); await h.quiet(task.id, 'explicit no-Quiz goal remains explanation-only');
       pass('G4', '只解释，不要做题。 stays zero-Quiz; explicit resolution adds no decision or generation');
     });
-    await session('E', async h => {
-      let task = await h.current(state.tasks.E);
-      assert.equal(task.status, 'waiting'); assert.equal(task.version, state.E.version);
-      assert.deepEqual(task.completion.plan, state.E.plan, 'fixed_plan_must_not_be_relaxed_for_completion');
+    for (const key of ['E', 'F']) await session(key, async h => {
+      let task = await h.current(state.tasks[key]);
+      assert.equal(task.status, 'waiting'); assert.equal(task.version, state[key].version);
+      assert.deepEqual(task.completion.plan, state[key].plan, 'fixed_plan_must_not_be_relaxed_for_completion');
       assert.equal(task.quizLinks.length, 2); assert.equal(task.explanations.length, 1);
       assert.equal(task.completion.objectives[0].unresolvedErrors.length, 1);
       const beforeSubmission = ledger();
-      const { attempt: followup, event } = await h.submitOne(state.E.second, 'B');
+      const { attempt: followup, event } = await h.submitOne(state[key].second, 'B');
       assert.equal(followup.score.correct, 1); assert.equal(followup.score.total, 1);
       task = await h.settle(task.id, value => value.status === 'ended');
-      assert.equal(task.completion.outcome, 'partial');
+      assert.equal(task.completion.outcome, key === 'F' ? 'diagnosis_complete' : 'partial');
       assert.equal(task.completion.longTermMastery, 'unverified');
       const objective = task.completion.objectives.find(objective => objective.id === 'membership');
-      assert.equal(objective.status, 'partial'); assert.equal(objective.unresolvedErrors.length, 1);
+      assert.equal(objective.status, key === 'F' ? 'supported' : 'partial'); assert.equal(objective.unresolvedErrors.length, 1);
       assert.equal(objective.requirements.find(requirement => requirement.role === 'boundary').supported, true);
-      assert.equal(objective.requirements.find(requirement => requirement.role === 'followup').supported, false);
-      const old = objective.evidence.find(evidence => evidence.ref.attemptId === state.E.first.attemptId);
-      const later = objective.evidence.find(evidence => evidence.ref.attemptId === state.E.second.attemptId);
+      assert.equal(objective.requirements.find(requirement => requirement.role === (key === 'F' ? 'concept' : 'followup')).supported, key === 'F');
+      const old = objective.evidence.find(evidence => evidence.ref.attemptId === state[key].first.attemptId);
+      const later = objective.evidence.find(evidence => evidence.ref.attemptId === state[key].second.attemptId);
       assert.equal(old.correct, false); assert.equal(old.relation, 'initial');
       assert.equal(later.correct, true); assert.equal(later.role, 'boundary'); assert.equal(later.independentInApp, true);
       assert(!objective.evidence.some(evidence => evidence.ref.attemptId === later.ref.attemptId && evidence.role === 'followup'), 'do_not_relabel_boundary_as_followup_to_force_pass');
-      assert.equal((await h.api('/quiz?attempt=' + state.E.first.attemptId)).value.attempt.score.correct, 0);
+      assert.equal((await h.api('/quiz?attempt=' + state[key].first.attemptId)).value.attempt.score.correct, 0);
       assert.equal(task.quizLinks.length, 2); assert(task.usage.calls <= 16);
-      assert.deepEqual(task.completion.plan, state.E.plan);
-      assert.equal(ledger().requests - beforeSubmission.requests, 3, 'read_answers_and_associate_then_honest_finish_with_remaining_followup_gap');
+      assert.deepEqual(task.completion.plan, state[key].plan);
+      assert.equal(ledger().requests - beforeSubmission.requests, key === 'F' ? 0 : 3, 'sufficient_diagnosis_stops_on_saved_submission_without_extra_model_decision');
       const reads = task.actions.filter(action => action.tool === 'learning.read_answers' && action.status === 'succeeded');
-      assert.equal(reads.length, 2);
+      assert.equal(reads.length, key === 'F' ? 1 : 2);
+      assert.equal(task.actions.filter(action => action.tool === 'learning.associate_evidence' && action.status === 'succeeded').length, key === 'F' ? 1 : 2);
+      if (key === 'F') assert.equal(task.usage.calls, state[key].callsBeforeSecondAnswer, 'formal_assessor_reuses_actual_saved_second_answer_without_another_model_call');
       const before = ledger(); assert.equal((await h.api('/quiz', 'PATCH', event)).status, 200);
       await h.page.waitForTimeout(600); assert.deepEqual(ledger(), before);
       await h.open(task.id); await expect(h.panel()).toContainText(task.completion.headline);
-      await h.snapshot('two-round-boundary-partial-handoff'); await h.quiet(task.id, 'honest handoff retains missing followup without a third group');
-      pass('E', 'second actual UI answer → second read_answers/association → boundary supported only → honest partial handoff; original wrong and followup gap retained', {
+      await h.snapshot(key === 'F' ? 'two-round-diagnosis-complete' : 'two-round-boundary-partial-handoff');
+      await h.quiet(task.id, key === 'F' ? 'diagnosis completed from two observations without a third group' : 'honest handoff retains missing followup without a third group');
+      pass(key, key === 'F' ? 'second actual UI answer → formal assessor rereads saved result → diagnosis complete; first read_answers/association and original wrong retained, zero extra decision' : 'second actual UI answer → second read_answers/association → boundary supported only → honest partial handoff; original wrong and followup gap retained', {
         firstScore: { correct: 0, total: 1 }, secondScore: followup.score, taskCalls: task.usage.calls, outcome: task.completion.outcome,
       });
     });
@@ -352,17 +366,17 @@ try {
       pass('D', 'deleted source blocks original reads and removes stale task artifacts/delivery details without model calls');
     });
   } else {
-    for (const key of ['A', 'B', 'C', 'D', 'E', 'G4']) await session(key, async h => {
+    for (const key of ['A', 'B', 'C', 'D', 'E', 'F', 'G4']) await session(key, async h => {
       const task = await h.current(state.tasks[key]); await h.quiet(task.id, 'read-only inspection');
       await h.snapshot('retained-final-state');
-      if (key === 'E') {
+      if (['E', 'F'].includes(key)) {
         const before = ledger();
-        const attempts = await Promise.all([state.E.first, state.E.second].map(async link => {
+        const attempts = await Promise.all([state[key].first, state[key].second].map(async link => {
           const response = await h.api('/quiz?attempt=' + link.attemptId);
           assert.equal(response.status, 200); assert.equal(response.value.attempt.completed, true);
           return response.value.attempt;
         }));
-        fs.writeFileSync(path.join(archive, 'E-two-round-business-facts.json'), JSON.stringify({
+        fs.writeFileSync(path.join(archive, `${key}-two-round-business-facts.json`), JSON.stringify({
           evidence: 'controlled_offline_model_real_ui_submissions_simulated_student',
           taskId: task.id, taskVersion: task.version, plan: task.completion.plan,
           attempts, completion: task.completion, usage: task.usage, actions: task.actions,
@@ -383,8 +397,9 @@ try {
   });
   if (!integrity.every(item => item.result.every(row => row.integrity_check === 'ok')))
     failures.push({ key: 'integrity', message: 'One or more synthetic SQLite integrity checks failed' });
+  if (checks.length === 0) failures.push({ key: 'coverage', message: 'No browser checks executed' });
   if (ledger().network !== 0) failures.push({ key: 'network', message: 'Unexpected real Provider request' });
-  const result = { status: failures.length ? 'FAIL' : 'PASS', phase, checks: checks.length, failures, provider: ledger(),
+  const result = { status: failures.length ? 'FAIL' : 'PASS', phase, ...(onlyCase ? { onlyCase } : {}), checks: checks.length, failures, provider: ledger(),
     evidence: 'controlled_offline_model_real_runtime_api_sqlite_components_simulated_student',
     modelQualityValidated: false, longTermMasteryValidated: false, tasks: state.tasks, integrity, archive };
   save(`natural-quiz-${phase}-result.json`, result);

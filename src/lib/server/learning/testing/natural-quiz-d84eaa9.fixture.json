@@ -1,0 +1,842 @@
+{
+  "provenance": {
+    "sha": "d84eaa97173f9fba88c596c94c04e167603589b2",
+    "source": "Windows public business projection; original HTTP unavailable",
+    "inputFileSha256": {
+      "G3-latest.json": "2ae76ee8c9d894df2904e1fd288b1dfba259ed7dbfa68aeac7dc718512fe728b",
+      "G5-latest.json": "ee2a335cbadc709df51a09cdbdbfe54ef8d127bea1b26b46fab218b774c559d8"
+    }
+  },
+  "accountId": "0fbb2e4b-e530-4943-a554-4dcea2d90e2d",
+  "pageId": "275663be-dff4-4fbe-9ccd-be0dc65b08c2",
+  "source": {
+    "id": "d94349d6-1f4f-473a-aab1-25e8745c5c9f",
+    "page_id": "275663be-dff4-4fbe-9ccd-be0dc65b08c2",
+    "title": "合成教材 · 集合、交集与并集",
+    "kind": "text",
+    "original": "合成教材：集合、交集与并集。本材料由验收脚本手工编写，仅用于隔离软件验证；不是教学效果研究或真实学生资料。以下定义与算例按通常的有限集合约定。\n\n集合由确定的元素组成，花括号表示一个集合。同一元素重复写出不会增加元素个数，元素的书写顺序不影响集合。例如 {1, 2, 2} 与 {2, 1} 都是含两个元素的集合。空集 ∅ 不含任何元素。\n\n交集 A∩B 包含同时属于 A 和 B 的元素。判断一个元素是否在交集中，需要两个归属条件同时成立。若 A={1,2,3}，B={3,4}，则 A∩B={3}。没有共同元素时交集为空集。\n\n并集 A∪B 包含属于 A 或属于 B 的元素，这里的或允许同时属于二者。一个元素只出现一次。若 A={1,2,3}，B={3,4}，则 A∪B={1,2,3,4}。把元素 3 写两次不构成两个不同元素。\n\n比较交集和并集：共同元素 3 同时属于上例的交集与并集；只属于 A 的元素 1 在并集中而不在交集中。交集强调共同满足，并集允许满足至少一个归属条件。A∩B 总是 A∪B 的子集。\n\n若 C={红,蓝}，D={蓝,绿}，则 C∩D={蓝}，C∪D={红,蓝,绿}。若 E={5}，F={6}，则 E∩F=∅，E∪F={5,6}。空交集不代表两个集合都为空。\n\n有限集合的并集元素个数满足 |A∪B|=|A|+|B|−|A∩B|。上例 |A|=3，|B|=2，|A∩B|=1，因此 |A∪B|=4。减去交集数量是为消除对共同元素的一次重复计数；不能把交集数量当作并集数量。",
+    "sha256": "2ffac289182e253758814c73ea7b9c0e77a3075979feb0700f9b103eb6986649"
+  },
+  "groups": [
+    {
+      "id": "G3-1",
+      "taskId": "bef8fdcd-beb1-4be2-a35f-e7abfce471af",
+      "goal": "先出两道题看看。",
+      "runId": "e59840bd-a644-42a6-81c9-5b5b15cfaa93",
+      "settings": {
+        "materialIds": [
+          "d94349d6-1f4f-473a-aab1-25e8745c5c9f"
+        ],
+        "chapterIds": [],
+        "nodeIds": [],
+        "includeNotes": false,
+        "includeSupplements": false,
+        "count": 2,
+        "difficulty": "basic"
+      },
+      "context": {
+        "planId": "1dca8a24-9cff-4266-8fdc-cd8c06385bf9",
+        "taskVersion": 1,
+        "objectives": [
+          {
+            "id": "set_basics",
+            "label": "集合表示与元素重复、顺序的基本理解",
+            "sources": [
+              {
+                "materialId": "d94349d6-1f4f-473a-aab1-25e8745c5c9f",
+                "paragraph": 2
+              }
+            ],
+            "requirements": [
+              {
+                "role": "concept",
+                "description": "能判断同一集合中元素重复书写或顺序变化不会产生额外元素，并能识别空集不含任何元素。",
+                "independent": false
+              }
+            ]
+          },
+          {
+            "id": "intersection_union",
+            "label": "交集与并集的基本计算",
+            "sources": [
+              {
+                "materialId": "d94349d6-1f4f-473a-aab1-25e8745c5c9f",
+                "paragraph": 3
+              },
+              {
+                "materialId": "d94349d6-1f4f-473a-aab1-25e8745c5c9f",
+                "paragraph": 4
+              },
+              {
+                "materialId": "d94349d6-1f4f-473a-aab1-25e8745c5c9f",
+                "paragraph": 6
+              }
+            ],
+            "requirements": [
+              {
+                "role": "application",
+                "description": "能根据给定有限集合正确求出交集与并集，处理无共同元素时交集为空集的情况。",
+                "independent": false
+              }
+            ]
+          }
+        ],
+        "purpose": {
+          "objectiveIds": [
+            "set_basics",
+            "intersection_union"
+          ],
+          "role": "application",
+          "method": "retrieval",
+          "purpose": "按用户要求先出两道基础题：检查集合元素重复与顺序的基本理解，以及有限集合交集、并集的基本计算。",
+          "priorEvidenceRefs": []
+        }
+      },
+      "decoded": {
+        "contractVersion": "references-v2",
+        "title": "集合基础：元素重复与顺序、交集并集计算",
+        "reason": "第 2 题解析选项引用不明确：存在组合引用或序数位置依赖，未发布。",
+        "items": [
+          {
+            "stem": "根据课程内容，下列哪一个说法正确描述了集合中元素重复与顺序的性质？",
+            "kind": "concept",
+            "scenario": null,
+            "options": [
+              {
+                "id": "A",
+                "text": "{1, 2, 2} 与 {2, 1} 都表示含两个元素的集合。",
+                "reason": "正确。课程指出同一元素重复写出不会增加元素个数，元素的书写顺序不影响集合，并举出 {1, 2, 2} 与 {2, 1} 都是含两个元素的集合作为例子。",
+                "evidenceIds": [
+                  "ref_7ae11492d538bba3d1ad1d705ee8c8ec07a054e04d947a4d48f5f6f52c187523"
+                ]
+              },
+              {
+                "id": "B",
+                "text": "{1, 2, 2} 表示三个元素，因为数字 2 出现了两次。",
+                "reason": "错误。课程明确说明同一元素重复写出不会增加元素个数，因此 {1, 2, 2} 不是三个元素。",
+                "evidenceIds": [
+                  "ref_7ae11492d538bba3d1ad1d705ee8c8ec07a054e04d947a4d48f5f6f52c187523"
+                ]
+              },
+              {
+                "id": "C",
+                "text": "{2, 1} 表示两个不同元素，但 {1, 2, 2} 表示三个不同元素。",
+                "reason": "错误。{1, 2, 2} 中重复的 2 不构成额外元素，两个集合都只含两个元素。",
+                "evidenceIds": [
+                  "ref_7ae11492d538bba3d1ad1d705ee8c8ec07a054e04d947a4d48f5f6f52c187523"
+                ]
+              },
+              {
+                "id": "D",
+                "text": "空集 ∅ 含有零个元素，因此可以写成 {0}。",
+                "reason": "错误。课程说明空集 ∅ 不含任何元素，而 {0} 含有一个元素 0，两者不同。",
+                "evidenceIds": [
+                  "ref_7ae11492d538bba3d1ad1d705ee8c8ec07a054e04d947a4d48f5f6f52c187523"
+                ]
+              }
+            ],
+            "correctOptionId": "A",
+            "explanation": "正确。课程指出同一元素重复写出不会增加元素个数，元素的书写顺序不影响集合，并举出 {1, 2, 2} 与 {2, 1} 都是含两个元素的集合作为例子。",
+            "hint": "先找出题干所问的概念，再对照材料中的定义和适用范围，逐项比较差别。",
+            "stemEvidenceIds": [
+              "ref_7ae11492d538bba3d1ad1d705ee8c8ec07a054e04d947a4d48f5f6f52c187523"
+            ],
+            "explanationEvidenceIds": [
+              "ref_7ae11492d538bba3d1ad1d705ee8c8ec07a054e04d947a4d48f5f6f52c187523"
+            ]
+          },
+          {
+            "compositionRejected": true,
+            "rejectionReason": "position_dependency"
+          }
+        ],
+        "reviewCandidates": [
+          {
+            "questionKey": "d7ceb16995cf323e09b5d5fd8880a85e41128495c2e90c89b0efd884fb367c20",
+            "check": {
+              "objectiveIds": [
+                "set_basics"
+              ],
+              "role": "application",
+              "rationale": "本题要求判断集合元素重复与顺序是否影响元素个数，并识别空集与含零集合的区别。题干和选项直接依据 r1 中关于重复元素、书写顺序和空集的陈述，选项 A 复现课程给出的 {1, 2, 2} 与 {2, 1} 两个例子，B、C、D 分别从重复、顺序和空集角度设置错误表述。该题使学习者应用集合表示的基本规则进行判断，不涉及交集并集计算，符合 set_basics 目标下对元素重复、顺序与空集的复习要求。"
+            }
+          }
+        ]
+      },
+      "candidates": [
+        {
+          "index": 1,
+          "candidate": {
+            "focus": "根据给定有限集合正确计算交集与并集，并处理无共同元素时交集为空集的情况。",
+            "scenario": null,
+            "stem": "若 E={5}，F={6}，则 E∩F 与 E∪F 分别是什么？",
+            "kind": "application",
+            "stemEvidenceIds": [
+              "r4"
+            ],
+            "options": [
+              {
+                "id": "A",
+                "text": "E∩F=∅，E∪F={5,6}。",
+                "reasonParts": [
+                  {
+                    "text": "正确。课程给出 E={5}，F={6} 的实例，说明两个集合没有共同元素，因此交集为空集，并集包含两个集合的全部元素且各出现一次。",
+                    "evidenceIds": [
+                      "r4"
+                    ]
+                  }
+                ]
+              },
+              {
+                "id": "B",
+                "text": "E∩F={5,6}，E∪F={5,6}。",
+                "reasonParts": [
+                  {
+                    "text": "错误。E={5} 与 F={6} 没有共同元素，交集不可能是 {5,6}；这是并集的结果。",
+                    "evidenceIds": [
+                      "r4"
+                    ]
+                  }
+                ]
+              },
+              {
+                "id": "C",
+                "text": "E∩F=∅，E∪F=∅。",
+                "reasonParts": [
+                  {
+                    "text": "错误。虽然交集为空集，但并集仍包含元素 5 和 6；课程明确说明空交集不代表两个集合都为空。",
+                    "evidenceIds": [
+                      "r4"
+                    ]
+                  }
+                ]
+              },
+              {
+                "id": "D",
+                "text": "E∩F={5}，E∪F={5,6}。",
+                "reasonParts": [
+                  {
+                    "text": "错误。E 和 F 没有共同元素，交集应为空集，而不是 {5}。",
+                    "evidenceIds": [
+                      "r4"
+                    ]
+                  }
+                ]
+              }
+            ],
+            "correctOptionId": "A",
+            "reviewCheck": {
+              "objectiveIds": [
+                "intersection_union"
+              ],
+              "role": "application",
+              "rationale": "本题要求根据课程给出的 E={5}、F={6} 实例求出交集与并集，并处理无共同元素时交集为空集的情况。题干和选项直接使用 r4 中的实例，正确项复现课程结论，干扰项分别混淆交集与并集、错误认为空交集导致空并集、或错误归属元素。该题属于有限集合上的基本计算，与 intersection_union 目标的应用要求一致，帮助复查学习者对无共同元素情形的实际计算。"
+            }
+          }
+        }
+      ],
+      "expected": [
+        null,
+        null
+      ]
+    },
+    {
+      "id": "G3-2",
+      "taskId": "bef8fdcd-beb1-4be2-a35f-e7abfce471af",
+      "goal": "先出两道题看看。",
+      "runId": "a48fa0b9-6930-4179-8e55-dc2f6185b938",
+      "settings": {
+        "materialIds": [
+          "d94349d6-1f4f-473a-aab1-25e8745c5c9f"
+        ],
+        "chapterIds": [],
+        "nodeIds": [],
+        "includeNotes": false,
+        "includeSupplements": false,
+        "count": 2,
+        "difficulty": "basic"
+      },
+      "context": {
+        "planId": "1dca8a24-9cff-4266-8fdc-cd8c06385bf9",
+        "taskVersion": 1,
+        "objectives": [
+          {
+            "id": "set_basics",
+            "label": "集合表示与元素重复、顺序的基本理解",
+            "sources": [
+              {
+                "materialId": "d94349d6-1f4f-473a-aab1-25e8745c5c9f",
+                "paragraph": 2
+              }
+            ],
+            "requirements": [
+              {
+                "role": "concept",
+                "description": "能判断同一集合中元素重复书写或顺序变化不会产生额外元素，并能识别空集不含任何元素。",
+                "independent": false
+              }
+            ]
+          },
+          {
+            "id": "intersection_union",
+            "label": "交集与并集的基本计算",
+            "sources": [
+              {
+                "materialId": "d94349d6-1f4f-473a-aab1-25e8745c5c9f",
+                "paragraph": 3
+              },
+              {
+                "materialId": "d94349d6-1f4f-473a-aab1-25e8745c5c9f",
+                "paragraph": 4
+              },
+              {
+                "materialId": "d94349d6-1f4f-473a-aab1-25e8745c5c9f",
+                "paragraph": 6
+              }
+            ],
+            "requirements": [
+              {
+                "role": "application",
+                "description": "能根据给定有限集合正确求出交集与并集，处理无共同元素时交集为空集的情况。",
+                "independent": false
+              }
+            ]
+          }
+        ],
+        "purpose": {
+          "objectiveIds": [
+            "intersection_union"
+          ],
+          "role": "application",
+          "method": "application",
+          "purpose": "覆盖尚未观察的交集与并集基本计算，包括无共同元素时交集为空集的情况，补齐用户要求的第二道题。",
+          "priorEvidenceRefs": []
+        }
+      },
+      "decoded": {
+        "contractVersion": "references-v2",
+        "title": "交集与并集的基本计算（应用）",
+        "reason": "第 1 题解析选项引用不明确：存在组合引用或序数位置依赖，未发布。",
+        "items": [
+          {
+            "compositionRejected": true,
+            "rejectionReason": "position_dependency"
+          },
+          {
+            "stem": "根据上述并集定义，M∪N 等于什么？",
+            "kind": "application",
+            "scenario": "假设一个新案例：设集合 M={红,蓝}，集合 N={蓝,绿}。",
+            "options": [
+              {
+                "id": "A",
+                "text": "{红,蓝,绿}",
+                "reason": "并集包含属于 M 或属于 N 的元素。M={红,蓝}，N={蓝,绿}，合并后的元素为红、蓝、绿；蓝同时属于二者，但在并集中只出现一次。",
+                "evidenceIds": [
+                  "ref_4d1858bd22a3363be7f0030c408d759e3bdbe9e20a28adacf1b7b7746f16d253",
+                  "ref_fd775d0d59568237dcad06f79e899b8c6d546e65d402bbc27c0c05104faf4ea1"
+                ]
+              },
+              {
+                "id": "B",
+                "text": "{红,蓝,蓝,绿}",
+                "reason": "并集中一个元素只出现一次。蓝同时属于 M 和 N，但把蓝写两次不代表两个不同元素，因此不能写成 {红,蓝,蓝,绿}。",
+                "evidenceIds": [
+                  "ref_4d1858bd22a3363be7f0030c408d759e3bdbe9e20a28adacf1b7b7746f16d253"
+                ]
+              },
+              {
+                "id": "C",
+                "text": "{蓝}",
+                "reason": "这是 M 与 N 的交集，因为只有蓝同时属于两个集合。并集还要包含只属于 M 的红和只属于 N 的绿。",
+                "evidenceIds": [
+                  "ref_b4a8a7a32cd4b0f8ad3ac69ba0b80976024e47e6adbdc23109f5b12c7cdffe5b",
+                  "ref_4d1858bd22a3363be7f0030c408d759e3bdbe9e20a28adacf1b7b7746f16d253"
+                ]
+              },
+              {
+                "id": "D",
+                "text": "{红,绿}",
+                "reason": "红和绿分别只属于 M 或 N，但并集也要包含同时属于二者的蓝，因此不能漏掉蓝。",
+                "evidenceIds": [
+                  "ref_4d1858bd22a3363be7f0030c408d759e3bdbe9e20a28adacf1b7b7746f16d253",
+                  "ref_fd775d0d59568237dcad06f79e899b8c6d546e65d402bbc27c0c05104faf4ea1"
+                ]
+              }
+            ],
+            "correctOptionId": "A",
+            "explanation": "并集包含属于 M 或属于 N 的元素。M={红,蓝}，N={蓝,绿}，合并后的元素为红、蓝、绿；蓝同时属于二者，但在并集中只出现一次。",
+            "hint": "先区分题干对象、适用前提和实际结果，再逐项对照所选材料中的条件与反例。",
+            "stemEvidenceIds": [
+              "ref_4d1858bd22a3363be7f0030c408d759e3bdbe9e20a28adacf1b7b7746f16d253",
+              "ref_fd775d0d59568237dcad06f79e899b8c6d546e65d402bbc27c0c05104faf4ea1"
+            ],
+            "explanationEvidenceIds": [
+              "ref_4d1858bd22a3363be7f0030c408d759e3bdbe9e20a28adacf1b7b7746f16d253",
+              "ref_fd775d0d59568237dcad06f79e899b8c6d546e65d402bbc27c0c05104faf4ea1"
+            ]
+          }
+        ],
+        "reviewCandidates": [
+          {
+            "questionKey": "81dac2ca2147096ad23fed51cc4d40c8abd4d7a26a6a42c959a925b12b7da3a5",
+            "check": {
+              "objectiveIds": [
+                "intersection_union"
+              ],
+              "role": "application",
+              "rationale": "本题要求根据给定集合 M 和 N 求并集，并处理重复元素只出现一次的情形，属于并集基本计算的应用。材料 r2 给出并集定义和重复元素的处理，r3 提供相同结构的具体例子，支撑正确选项与干扰项分析。"
+            }
+          }
+        ]
+      },
+      "candidates": [
+        {
+          "index": 0,
+          "candidate": {
+            "focus": "根据给定集合求交集，并判断无共同元素时交集为空集",
+            "scenario": "假设一个新案例：设集合 X={2,4,6}，集合 Y={6,8}。",
+            "stem": "根据上述交集定义，X∩Y 等于什么？",
+            "kind": "application",
+            "stemEvidenceIds": [
+              "r1",
+              "r3"
+            ],
+            "options": [
+              {
+                "id": "A",
+                "text": "{6}",
+                "reasonParts": [
+                  {
+                    "text": "交集包含同时属于两个集合的元素。X={2,4,6} 与 Y={6,8} 中，只有 6 同时出现在两个集合中，所以 X∩Y={6}。",
+                    "evidenceIds": [
+                      "r1"
+                    ]
+                  }
+                ]
+              },
+              {
+                "id": "B",
+                "text": "{2,4,6,8}",
+                "reasonParts": [
+                  {
+                    "text": "这是把两个集合并在一起的结果。并集包含属于 X 或属于 Y 的元素，所以 X∪Y={2,4,6,8}；交集只需要同时属于二者的元素，不能把仅属于一个集合的 2、4、8 放进来。",
+                    "evidenceIds": [
+                      "r1",
+                      "r2"
+                    ]
+                  }
+                ]
+              },
+              {
+                "id": "C",
+                "text": "{2,4}",
+                "reasonParts": [
+                  {
+                    "text": "2 和 4 只属于 X，不属于 Y，因此不满足“同时属于 A 和 B”的条件，不能进入交集。",
+                    "evidenceIds": [
+                      "r1"
+                    ]
+                  }
+                ]
+              },
+              {
+                "id": "D",
+                "text": "∅",
+                "reasonParts": [
+                  {
+                    "text": "空集表示两个集合没有共同元素。X 和 Y 都包含 6，因此存在共同元素，交集不是空集。",
+                    "evidenceIds": [
+                      "r1",
+                      "r3"
+                    ]
+                  }
+                ]
+              }
+            ],
+            "correctOptionId": "A",
+            "reviewCheck": {
+              "objectiveIds": [
+                "intersection_union"
+              ],
+              "role": "application",
+              "rationale": "本题要求对给定有限集合 X 和 Y 求交集，且包含存在共同元素时不得误判为空集的情况，属于交集基本计算的应用。材料 r1 给出交集定义和例题，r3 补充空交集的含义，用于支撑选项判断。"
+            }
+          }
+        }
+      ],
+      "expected": [
+        null,
+        "equivalent_options"
+      ]
+    },
+    {
+      "id": "G5-1",
+      "taskId": "96fa1da9-2782-4b28-9645-ebeeb58f96dc",
+      "goal": "我总分不清交集和并集，帮我练练。",
+      "runId": "b677d4c7-bdaa-472d-859b-e4a564a7210f",
+      "settings": {
+        "materialIds": [
+          "d94349d6-1f4f-473a-aab1-25e8745c5c9f"
+        ],
+        "chapterIds": [],
+        "nodeIds": [],
+        "includeNotes": false,
+        "includeSupplements": false,
+        "count": 3,
+        "difficulty": "basic"
+      },
+      "context": {
+        "planId": "5a5b6014-f3eb-4a6c-8337-e41cf5d50049",
+        "taskVersion": 1,
+        "objectives": [
+          {
+            "id": "intersection-union",
+            "label": "理解交集与并集的区别并在简单集合上正确判断",
+            "sources": [
+              {
+                "materialId": "d94349d6-1f4f-473a-aab1-25e8745c5c9f",
+                "paragraph": 3
+              },
+              {
+                "materialId": "d94349d6-1f4f-473a-aab1-25e8745c5c9f",
+                "paragraph": 4
+              },
+              {
+                "materialId": "d94349d6-1f4f-473a-aab1-25e8745c5c9f",
+                "paragraph": 5
+              }
+            ],
+            "requirements": [
+              {
+                "role": "concept",
+                "description": "能说出交集是共同满足两边归属条件，并集是满足至少一边归属条件。",
+                "independent": false
+              },
+              {
+                "role": "application",
+                "description": "能对两个已给有限集合正确写出交集和并集。",
+                "independent": false
+              },
+              {
+                "role": "boundary",
+                "description": "能处理无共同元素时交集为空集以及元素不重复等边界情况。",
+                "independent": false
+              }
+            ]
+          }
+        ],
+        "purpose": {
+          "objectiveIds": [
+            "intersection-union"
+          ],
+          "role": "application",
+          "method": "contrast",
+          "purpose": "用简单有限集合的小型诊断题检查学生能否区分交集和并集，并覆盖无共同元素时交集为空集的情况。",
+          "priorEvidenceRefs": []
+        }
+      },
+      "decoded": {
+        "contractVersion": "references-v2",
+        "title": "交集与并集的应用判断",
+        "reason": "材料包含交集、并集及二者比较的完整基础内容，足以支持3道基础应用题。但材料中示例集合数量有限且均为同一组A、B，无法充分变换数值来覆盖更复杂的变式，因此未设计需要额外常识或更大集合的题目。\n第 1 题解析选项引用不明确：存在组合引用或序数位置依赖，未发布。\n第 3 题解析选项引用不明确：存在组合引用或序数位置依赖，未发布。",
+        "items": [
+          {
+            "compositionRejected": true,
+            "rejectionReason": "position_dependency"
+          },
+          {
+            "stem": "已知集合 A={1,2,3}，B={3,4}，则 A∪B 是什么？",
+            "kind": "application",
+            "scenario": null,
+            "options": [
+              {
+                "id": "A",
+                "text": "{1,2,3,4}",
+                "reason": "并集包含属于A或属于B的元素，且每个元素只出现一次。1、2属于A，3同时属于A和B，4属于B，因此合并后为{1,2,3,4}。",
+                "evidenceIds": [
+                  "ref_4d1858bd22a3363be7f0030c408d759e3bdbe9e20a28adacf1b7b7746f16d253"
+                ]
+              },
+              {
+                "id": "B",
+                "text": "{1,2,3,3,4}",
+                "reason": "并集是集合，集合中元素不重复出现。3同时属于A和B，仍只作为一个元素列出。",
+                "evidenceIds": [
+                  "ref_4d1858bd22a3363be7f0030c408d759e3bdbe9e20a28adacf1b7b7746f16d253"
+                ]
+              },
+              {
+                "id": "C",
+                "text": "{3}",
+                "reason": "{3}是A∩B，因为它只包含同时属于两边的共同元素。并集除3外还应包含只属于A或只属于B的元素。",
+                "evidenceIds": [
+                  "ref_b4a8a7a32cd4b0f8ad3ac69ba0b80976024e47e6adbdc23109f5b12c7cdffe5b",
+                  "ref_4d1858bd22a3363be7f0030c408d759e3bdbe9e20a28adacf1b7b7746f16d253"
+                ]
+              },
+              {
+                "id": "D",
+                "text": "{1,2,4}",
+                "reason": "缺少了两个集合的共同元素3。并集允许满足至少一个归属条件，3同时属于A和B，自然也属于并集。",
+                "evidenceIds": [
+                  "ref_4d1858bd22a3363be7f0030c408d759e3bdbe9e20a28adacf1b7b7746f16d253",
+                  "ref_9f763fada4f32d7e53c6288a2bc69dd2f895c7922ac96416ddaa9f88d504fd05"
+                ]
+              }
+            ],
+            "correctOptionId": "A",
+            "explanation": "并集包含属于A或属于B的元素，且每个元素只出现一次。1、2属于A，3同时属于A和B，4属于B，因此合并后为{1,2,3,4}。",
+            "hint": "先区分题干对象、适用前提和实际结果，再逐项对照所选材料中的条件与反例。",
+            "stemEvidenceIds": [
+              "ref_4d1858bd22a3363be7f0030c408d759e3bdbe9e20a28adacf1b7b7746f16d253"
+            ],
+            "explanationEvidenceIds": [
+              "ref_4d1858bd22a3363be7f0030c408d759e3bdbe9e20a28adacf1b7b7746f16d253"
+            ]
+          },
+          {
+            "compositionRejected": true,
+            "rejectionReason": "position_dependency"
+          }
+        ],
+        "reviewCandidates": [
+          {
+            "questionKey": "bf1281d755a9e7afa93a0d6258f951f89dbdd00da768945a47228be38b1d1b0d",
+            "check": {
+              "objectiveIds": [
+                "intersection-union"
+              ],
+              "role": "application",
+              "rationale": "本题要求学生写出来自同一对有限集合的并集A∪B，并在选项中识别出元素不重复的边界情况。题目直接调用目标‘能对两个已给有限集合正确写出交集和并集’，并通过将重复元素或交集答案作为干扰项，检验学生是否能区分并集至少满足一个归属条件与交集的同时满足条件。"
+            }
+          }
+        ]
+      },
+      "candidates": [
+        {
+          "index": 0,
+          "candidate": {
+            "focus": "根据两个给定有限集合，正确判断其交集。",
+            "scenario": null,
+            "stem": "已知集合 A={1,2,3}，B={3,4}，则 A∩B 是什么？",
+            "kind": "application",
+            "stemEvidenceIds": [
+              "r1",
+              "r3"
+            ],
+            "options": [
+              {
+                "id": "A",
+                "text": "{3}",
+                "reasonParts": [
+                  {
+                    "text": "交集要求同时属于两个集合的元素。3同时属于A和B，且没有其他元素同时满足两个归属条件，所以A∩B={3}。",
+                    "evidenceIds": [
+                      "r1"
+                    ]
+                  }
+                ]
+              },
+              {
+                "id": "B",
+                "text": "{1,2,3,4}",
+                "reasonParts": [
+                  {
+                    "text": "这是两个集合所有元素的合并，属于并集A∪B，不是交集。并集允许满足至少一个归属条件，而交集要求同时属于两边。",
+                    "evidenceIds": [
+                      "r2"
+                    ]
+                  }
+                ]
+              },
+              {
+                "id": "C",
+                "text": "{1,2,4}",
+                "reasonParts": [
+                  {
+                    "text": "1和2只属于A，4只属于B，这些元素都没有同时满足归入A和B的条件，因此不能出现在交集中。",
+                    "evidenceIds": [
+                      "r1",
+                      "r3"
+                    ]
+                  }
+                ]
+              },
+              {
+                "id": "D",
+                "text": "空集",
+                "reasonParts": [
+                  {
+                    "text": "只有当两个集合没有共同元素时交集才为空集。本例中3同时属于A和B，因此交集不是空集。",
+                    "evidenceIds": [
+                      "r1"
+                    ]
+                  }
+                ]
+              }
+            ],
+            "correctOptionId": "A",
+            "reviewCheck": {
+              "objectiveIds": [
+                "intersection-union"
+              ],
+              "role": "application",
+              "rationale": "本题要求学生直接对已给有限集合A和B进行计算并写出A∩B，对应目标中‘能对两个已给有限集合正确写出交集和并集’的应用要求。题干的集合和选项均来自材料已呈现的示例，学生需要判断同时归属的条件并排除只属于一边或合并全部元素的情况，能够有效暴露将交集与并集混淆的典型错误。"
+            }
+          }
+        },
+        {
+          "index": 1,
+          "candidate": {
+            "focus": "根据两个给定有限集合，正确判断其并集及元素不重复的边界。",
+            "scenario": null,
+            "stem": "已知集合 A={1,2,3}，B={3,4}，则 A∪B 是什么？",
+            "kind": "application",
+            "stemEvidenceIds": [
+              "r2"
+            ],
+            "options": [
+              {
+                "id": "A",
+                "text": "{1,2,3,4}",
+                "reasonParts": [
+                  {
+                    "text": "并集包含属于A或属于B的元素，且每个元素只出现一次。1、2属于A，3同时属于A和B，4属于B，因此合并后为{1,2,3,4}。",
+                    "evidenceIds": [
+                      "r2"
+                    ]
+                  }
+                ]
+              },
+              {
+                "id": "B",
+                "text": "{1,2,3,3,4}",
+                "reasonParts": [
+                  {
+                    "text": "并集是集合，集合中元素不重复出现。3同时属于A和B，仍只作为一个元素列出。",
+                    "evidenceIds": [
+                      "r2"
+                    ]
+                  }
+                ]
+              },
+              {
+                "id": "C",
+                "text": "{3}",
+                "reasonParts": [
+                  {
+                    "text": "{3}是A∩B，因为它只包含同时属于两边的共同元素。并集除3外还应包含只属于A或只属于B的元素。",
+                    "evidenceIds": [
+                      "r1",
+                      "r2"
+                    ]
+                  }
+                ]
+              },
+              {
+                "id": "D",
+                "text": "{1,2,4}",
+                "reasonParts": [
+                  {
+                    "text": "缺少了两个集合的共同元素3。并集允许满足至少一个归属条件，3同时属于A和B，自然也属于并集。",
+                    "evidenceIds": [
+                      "r2",
+                      "r3"
+                    ]
+                  }
+                ]
+              }
+            ],
+            "correctOptionId": "A",
+            "reviewCheck": {
+              "objectiveIds": [
+                "intersection-union"
+              ],
+              "role": "application",
+              "rationale": "本题要求学生写出来自同一对有限集合的并集A∪B，并在选项中识别出元素不重复的边界情况。题目直接调用目标‘能对两个已给有限集合正确写出交集和并集’，并通过将重复元素或交集答案作为干扰项，检验学生是否能区分并集至少满足一个归属条件与交集的同时满足条件。"
+            }
+          }
+        },
+        {
+          "index": 2,
+          "candidate": {
+            "focus": "判断无共同元素情况下交集是否为空集，并与并集区分。",
+            "scenario": null,
+            "stem": "假设一个新的案例：集合 C={5,6}，D={7,8}。下列判断正确的是哪一项？",
+            "kind": "application",
+            "stemEvidenceIds": [
+              "r1",
+              "r3"
+            ],
+            "options": [
+              {
+                "id": "A",
+                "text": "C∩D=空集",
+                "reasonParts": [
+                  {
+                    "text": "C和D没有共同元素，5、6不属于D，7、8不属于C，因此不存在同时满足两边归属条件的元素。",
+                    "evidenceIds": [
+                      "r1"
+                    ]
+                  }
+                ]
+              },
+              {
+                "id": "B",
+                "text": "C∩D={5,6,7,8}",
+                "reasonParts": [
+                  {
+                    "text": "这是两个集合所有元素的合并，属于并集C∪D，不是交集。交集只包含共同元素，而本例没有共同元素。",
+                    "evidenceIds": [
+                      "r2",
+                      "r3"
+                    ]
+                  }
+                ]
+              },
+              {
+                "id": "C",
+                "text": "C∪D=空集",
+                "reasonParts": [
+                  {
+                    "text": "并集包含属于C或属于D的元素。即使两个集合没有共同元素，并集仍包含它们各自的元素，这里不会为空。",
+                    "evidenceIds": [
+                      "r2"
+                    ]
+                  }
+                ]
+              },
+              {
+                "id": "D",
+                "text": "C∪D 的元素数量与 C∩D 相同",
+                "reasonParts": [
+                  {
+                    "text": "本案例中C∩D为空集，没有元素；而C∪D仍有元素。空集与含有元素的集合元素数量不同，因此不能认为二者相同。",
+                    "evidenceIds": [
+                      "r1",
+                      "r2",
+                      "r3"
+                    ]
+                  }
+                ]
+              }
+            ],
+            "correctOptionId": "A",
+            "reviewCheck": {
+              "objectiveIds": [
+                "intersection-union"
+              ],
+              "role": "application",
+              "rationale": "本题给出新的有限集合并要求学生判断无共同元素时交集为空集这一边界情况，同时通过并集与交集数量对比的干扰项检查是否混淆两类操作。题目符合目标中‘能对两个已给有限集合正确写出交集和并集’的应用要求，并覆盖材料中‘没有共同元素时交集为空集’的规则。"
+            }
+          }
+        }
+      ],
+      "expected": [
+        null,
+        "equivalent_options",
+        null
+      ]
+    }
+  ]
+}

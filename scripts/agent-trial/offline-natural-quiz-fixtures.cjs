@@ -6,7 +6,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { explanation } = require('./offline-fixtures.cjs');
 
-const modes = ['partial', 'all_failed', 'repeat_explanation', 'multi_round', 'source_contract'];
+const modes = ['partial', 'all_failed', 'repeat_explanation', 'multi_round', 'source_contract', 'diagnostic_rounds'];
 const action = (tool, args = {}) => ({ tool, args, reason: '离线验收受控选择，读取正式业务结果后推进；不代表真实模型质量。' });
 
 function readControl(root) {
@@ -40,7 +40,7 @@ function decision(payload, mode) {
   const paragraphs = mode === 'repeat_explanation' ? [3] : mode === 'source_contract' ? [2, 3, 4] : [3, 4];
   for (const paragraph of paragraphs) if (!results.some(result => result.tool === 'learning.read_source' && result.value.paragraph?.number === paragraph))
     return action('learning.read_source', source(paragraph));
-  if (mode === 'multi_round') return multiRoundDecision(payload, results, completion, source);
+  if (['multi_round', 'diagnostic_rounds'].includes(mode)) return multiRoundDecision(payload, results, completion, source, mode);
   if (!completion.plan) return action('learning.establish_review_plan', {
     kind: mode === 'repeat_explanation' ? 'explanation' : 'diagnosis',
     objectives: [{ id: 'intersection', label: '先观察交集的共同归属判断', sources: mode === 'source_contract' ? [source(2), source(3), source(4)] : [source(3)],
@@ -77,19 +77,21 @@ function decision(payload, mode) {
   return { finish: '本轮仅诊断了共同元素判断；未检查部分仍保留，不据此声称全部知识或长期掌握。' };
 }
 
-function multiRoundDecision(payload, results, completion, source) {
+function multiRoundDecision(payload, results, completion, source, mode) {
+  const diagnosis = mode === 'diagnostic_rounds';
+  const initialRole = diagnosis ? 'concept' : 'followup';
   if (!completion.plan) return action('learning.establish_review_plan', {
-    kind: 'targeted_review',
+    kind: diagnosis ? 'diagnosis' : 'targeted_review',
     objectives: [{ id: 'membership', label: '区分交集与并集的成员归属', sources: [source(3), source(4)],
       requirements: [
-        { role: 'followup', description: '针对混淆，后续独立判断共同元素及只属于一个集合的元素在交集、并集中的归属', independent: true },
+        { role: initialRole, description: diagnosis ? '先观察是否按交集定义判断共同元素' : '针对混淆，后续独立判断共同元素及只属于一个集合的元素在交集、并集中的归属', independent: !diagnosis },
         { role: 'boundary', description: '判断只属于一个集合的元素能否进入交集、并集，区分条件边界', independent: true },
       ] }],
   });
-  const purpose = { objectiveIds: ['membership'], role: 'followup', method: 'application',
+  const purpose = { objectiveIds: ['membership'], role: initialRole, method: 'application',
     purpose: '先观察交集与并集的成员判断；初次观察不当作已纠正或完成复查', priorEvidenceRefs: [] };
   const receipts = results.filter(result => result.tool === 'learning.create_quiz').map(result => result.value);
-  if (!receipts.length) return action('learning.create_quiz', { count: 1, difficulty: 'basic', purpose });
+  if (!receipts.length) return action('learning.create_quiz', { count: diagnosis ? 2 : 1, difficulty: 'basic', purpose });
   const latest = receipts.at(-1);
   assert(latest.quizId && latest.attemptId, 'multiround_requires_actual_quiz');
   if (!latest.submitted) return { wait: { kind: 'feedback', message: '先完成已准备的这道练习。' } };
@@ -103,11 +105,11 @@ function multiRoundDecision(payload, results, completion, source) {
   // The production evidence artifact is returned by the actual tool, not by a fixture score.
   const recorded = completion.objectives?.some(objective => objective.id === 'membership' && objective.evidence.some(evidence => evidence.ref.attemptId === ref.attemptId && evidence.ref.questionIndex === ref.questionIndex));
   const associationAction = results.filter(result => result.tool === 'learning.associate_evidence').length >= receipts.length;
-  if (!(recorded && associationAction)) return action('learning.associate_evidence', { ref, objectiveId: 'membership', role: receipts.length === 1 ? 'followup' : 'boundary', relevance: 'supported',
+  if (!(recorded && associationAction)) return action('learning.associate_evidence', { ref, objectiveId: 'membership', role: receipts.length === 1 ? initialRole : 'boundary', relevance: 'supported',
     rationale: receipts.length === 1 ? '实际首题检查交集的共同归属条件，先保留这次观察与实际错误，不把首答冒充纠正。'
       : '后续题区分只属于一个集合与同时属于两个集合的元素，针对原题共同归属混淆提供相关新观察；不是已核验的迁移或长期掌握。',
     relation: 'initial', priorEvidenceRefs: [], contentStatus: 'no_known_issue' });
-  if (receipts.length > 1) return { finish: '本轮已读取两次实际作答。后题提供边界判断线索，但原followup要求仍缺对应后续证据，先诚实交回；不能把本题重复贴成另一角色来宣称通过。' };
+  if (receipts.length > 1) return { finish: diagnosis ? '约定的共同元素与条件边界诊断均已获得实际观察；原错答保留，诊断完成不等于已经学会。' : '本轮已读取两次实际作答。后题提供边界判断线索，但原followup要求仍缺对应后续证据，先诚实交回；不能把本题重复贴成另一角色来宣称通过。' };
   // Genuine branch on the formal saved first answer, not the account name or a
   // fixture score. This acceptance simulates a wrong answer through the UI.
   if (initialAnswers.score.correct === initialAnswers.score.total)
@@ -139,9 +141,20 @@ function quiz(payload, mode) {
   const base = { contractVersion: 'references-v2', title: '【离线受控发布验收】交集与并集',
     reason: '手工固定题目用于工程验证，不是模型生成质量证据。',
     materialPlan: [{ material: 1, contribution: '按本次固定目标检查共同归属。', references: [intersection] }] };
-  if (mode === 'multi_round') {
-    assert(payload.taskContext.count === 1, 'multiround_one_question_required');
-    if (!context.purpose.priorEvidenceRefs.length) return { ...base, items: [good] };
+  if (['multi_round', 'diagnostic_rounds'].includes(mode)) {
+    const first = !context.purpose.priorEvidenceRefs.length;
+    assert(payload.taskContext.count === (mode === 'diagnostic_rounds' && first ? 2 : 1), 'multiround_question_count_required');
+    if (first) {
+      if (mode !== 'diagnostic_rounds') return { ...base, items: [good] };
+      // Separate frozen synthetic near-neighbors, not edits to the seven retained Windows candidates.
+      good.options[0].reasonParts[0].text = 'A和B都包含3，其他元素没有共同归属，因此交集只有3。';
+      const equivalent = { ...structuredClone(good), focus: '颜色集合的共同元素',
+        scenario: '假设P={红,蓝}，Q={红,蓝,绿}。', stem: '按共同归属条件，P∩Q 是哪个集合？',
+        options: [option('A', '{红,蓝}', '红和蓝同时属于两个集合，交集为这两个元素。'),
+          option('B', '{蓝,红,蓝}', '蓝被重复列出，因此不作为本题答案。'),
+          option('C', '{绿}', '绿只属于Q，不是共同元素。')], correctOptionId: 'A' };
+      return { ...base, items: [good, equivalent] };
+    }
     const union = paragraphs.find(paragraph => paragraph.text.includes('并集 A∪B 包含属于 A 或属于 B 的元素'))?.referenceId;
     assert(union && context.purpose.role === 'boundary', 'multiround_authorized_boundary_required');
     const both = (id, text, reason) => option(id, text, reason, [intersection, union]);

@@ -128,7 +128,7 @@ it.each(["两个集合不同", "{1,2,3,3,4} 与 {1,2,3,4} 是不同的集合", "
   q.options[0].text = answer; q.options[1].text = "两个集合相同";
   quiz.complete(page, id, codec.decode(value, scope));
   expect(saved(id).questions).toHaveLength(0);
-  expect(saved(id).reason).toContain("显式整数集合的相等关系矛盾");
+  expect(saved(id).reason).toContain("显式有限集合的相等关系矛盾");
 });
 it.each([false, true])("keeps a legitimate equality lesson or an explicit incorrect-statement question (negative=%s)", negative => {
   const { id, scope, codec, value } = begin(), q = value.items[0];

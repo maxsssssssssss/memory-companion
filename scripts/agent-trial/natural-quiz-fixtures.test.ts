@@ -6,6 +6,7 @@ import path from "node:path";
 import { afterEach, expect, it } from "vitest";
 import { LearningReviewPlanInput, LearningEvidenceProposal } from "../../src/lib/domain/learning-agent-completion";
 import { composedQuizRequest } from "../../src/lib/server/learning/quiz-composition";
+import { inspectQuizCandidateDelivery } from "../../src/lib/server/learning/quiz-grounding";
 import { decodeReviewQuiz } from "../../src/lib/server/learning/quiz-review-purpose";
 import { ReferencedGeneratedQuiz } from "../../src/lib/domain/learning-quiz";
 const require = createRequire(import.meta.url), fixture = require("./offline-natural-quiz-fixtures.cjs");
@@ -28,14 +29,14 @@ it("selects synthetic fault cases only through an explicit matching page/materia
   expect(fixture.configuredCase(root, { materials: [{ materialId: "another" }] })).toBeNull();
 });
 
-it.each(["partial", "all_failed", "repeat_explanation", "multi_round"])("%s fixture uses scope and current source results to create a strict plan", mode => {
+it.each(["partial", "all_failed", "repeat_explanation", "multi_round", "diagnostic_rounds"])("%s fixture uses scope and current source results to create a strict plan", mode => {
   expect(fixture.decision(payload([]), mode).tool).toBe("learning.read_scope");
   expect(fixture.decision(payload([scope]), mode).tool).toBe("learning.read_source");
   const plan = planFor(mode);
   expect(plan.kind).toBe(mode === "repeat_explanation" ? "explanation" : mode === "multi_round" ? "targeted_review" : "diagnosis");
   const next = fixture.decision(payload([scope, ...sources], plan), mode);
   expect(next.tool).toBe(mode === "repeat_explanation" ? "learning.explain" : "learning.create_quiz");
-  expect(next.args.purpose.objectiveIds).toEqual([mode === "multi_round" ? "membership" : "intersection"]);
+  expect(next.args.purpose.objectiveIds).toEqual([["multi_round", "diagnostic_rounds"].includes(mode) ? "membership" : "intersection"]);
 });
 
 it("multi-round controlled choices branch on saved first answers and preserve the same followup requirement", () => {
@@ -129,4 +130,32 @@ it("the second controlled Quiz carries the actual boundary contract without rela
   expect(result.reviewCandidates?.[0].check).toMatchObject({ objectiveIds: ["membership"], role: "boundary" });
   expect(ReferencedGeneratedQuiz.shape.items.element.safeParse(result.items[0]).success).toBe(true);
   expect(plan.objectives[0].requirements.map((requirement: { role: string }) => requirement.role)).toEqual(["followup", "boundary"]);
+});
+
+
+it("two-round G3 fixture fixes observable diagnosis requirements before the first two-candidate request", () => {
+  const plan = planFor("diagnostic_rounds");
+  expect(plan.kind).toBe("diagnosis");
+  expect(plan.objectives[0].requirements.map((requirement: { role: string }) => requirement.role)).toEqual(["concept", "boundary"]);
+  expect(fixture.decision(payload([scope, ...sources], plan), "diagnostic_rounds")).toMatchObject({ tool: "learning.create_quiz", args: { count: 2, purpose: { role: "concept", objectiveIds: ["membership"] } } });
+});
+
+
+it("the separate G3 browser fixture retains its mathematical pair and rejects only the duplicated Chinese-name set", () => {
+  const plan = planFor("diagnostic_rounds");
+  const purpose = fixture.decision(payload([scope, ...sources], plan), "diagnostic_rounds").args.purpose;
+  const context = { planId: quizId, taskVersion: 1, objectives: plan.objectives, purpose };
+  const paragraphs = [
+    "交集 A∩B 包含同时属于 A 和 B 的元素。若 A={1,2,3}，B={3,4}，则 A∩B={3}。",
+    "并集 A∪B 包含属于 A 或属于 B 的元素，这里的或允许同时属于二者。",
+  ].map((text, i) => ({ number: i + 3, text, referenceId: `ref_${String(i + 1).padStart(64, "0")}` }));
+  const request = { count: 2, difficulty: "basic" as const, materials: [{ materialId, kind: "text" as const, title: "合成教材", paragraphs }], extras: [] };
+  const codecScope = { accountId: "synthetic", pageId, requestId: quizId, expiresAt: Date.now() + 10000 };
+  const codec = composedQuizRequest(request, codecScope);
+  const raw = fixture.quiz({ ...codec.input, taskContext: { ...codec.input.taskContext, reviewContext: context } }, "diagnostic_rounds");
+  expect(raw.items[0].options[0].reasonParts[0].text).toBe("A和B都包含3，其他元素没有共同归属，因此交集只有3。");
+  expect(raw.items[1].options.map((option: { text: string }) => option.text)).toEqual(["{红,蓝}", "{蓝,红,蓝}", "{绿}"]);
+  const catalog = paragraphs.map(paragraph => ({ referenceId: paragraph.referenceId, source: { kind: "material" as const, materialId, paragraph: paragraph.number }, text: paragraph.text }));
+  const result = decodeReviewQuiz(raw, value => codec.decode(value, codecScope), context, catalog);
+  expect(inspectQuizCandidateDelivery(result, catalog)).toMatchObject({ candidates: 2, rejected: [{ index: 1, code: "equivalent_options" }] });
 });

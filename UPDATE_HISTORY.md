@@ -15675,3 +15675,15 @@ Learning与UI：新增 `agent-scope.ts`、`agent-repository.ts`、`agent-scenari
 ### 2026-10-21：按用户要求将 G1—G5 返修证据上传 GitHub 供下载
 
 用户无法通过工作区链接取得证据，明确要求上传 GitHub。本次在 feat/learning-agent-natural-language-quiz 的 d84eaa97173f9fba88c596c94c04e167603589b2 上仅添加 docs/agent-evidence/learning-agent-natural-quiz-repair-d84eaa9.zip 并追加目录说明及本条历史。原包30,636,711字节，SHA256为4dc5c0d7c3c3b966d828da649a9b2f2d034cba960f76d7d90a936f6de15abe0c；ZIP完整性通过，159个manifest条目大小/哈希全部一致，160文件无缺失或额外条目。保留原有95行本地历史改动，不将其混入本次提交。此为证据交付，不变更业务源码、验收目标SHA或结论，因此未重复测试/类型检查/构建；执行文件哈希、清单、Git diff检查及正常分支push核对。Cloud真实Provider请求0，Windows真实验收仍PENDING；不修改Windows数据或预算，不集成dev/cloud-code/main，不部署。临时证据之后可按用户要求普通提交移除，Git历史不重写。
+
+
+## 2026-10-21：Learning Quiz 数学实体与有限集合字面量集中返修（Cloud 离线）
+
+- 背景与范围：依据 Windows d84eaa97173f9fba88c596c94c04e167603589b2 的 N1/N2 证据，在 feat/learning-agent-natural-language-quiz 从 5a15025d9bd09067a90596188b2f9d57f1e08d63 继续；后者仅多证据上传。保留既有本地历史追加和所有 Windows 数据，不改 Agent 架构、Prompt、行动协议、意图、完成标准或请求预算。
+- 调查：收到完整 ZIP（SHA256 773f79d63db86985f9657bb7c4648c781fccc49a89ff83a9d6fa690f56dfc11f），91/91 manifest 一致；原冻结脚本 6 项缺陷/控制复现退出 0，不当作验收通过。4 道合法题因谓词句式保护不足误判选项组合；颜色等价漏拦来自整数/字母限定解析。
+- 实现：Learning 局部 quiz-entity-context.ts 提取本题题干/场景集合声明，按出现位置区分数学名字与显示选项身份，显式前后缀、组合、正反判词、序数及跨题检查保留；quiz-grounding.ts 复用 quiz-set-cardinality.ts 的统一有限字面量解析，整数、字母和中文名称按身份去重、顺序无关，不硬编码颜色、不推断同义词，不把字符串/列表/表示法改为集合。没有新增 production dependency、数据库迁移或持久化 authority。新增 helper 仅整理已有 Learning 校验职责，不进入共享 Agent 底座。
+- 验证：全部原7题保留题文/答案/理由/来源/reviewCheck，正式 codec、绑定、发布、repository.complete、SQLite、稳定ID作答/重复提交/重开为5发布、2在 publication/equivalent_options 拒绝，三批2/2、1/2、2/3。5题用完整候选诊断投影，2题用保存 decoded 字段做无损 codec 往返，不声称原HTTP或缺失scope回放；旧5个缺失候选仍 UNKNOWN。新增独立 synthetic 命名/空格/顺序/重复变化测试与混合位置反例。
+- 集中命令：cloud:test 精确42文件901/901，0跳过、退出0；cloud:check 环境合同9项及完整 lint/Next typegen/TypeScript 退出0；cloud:build 退出0，180 traces、forbidden0；git diff --check 通过。未运行无关全仓回归或真实 Provider。原题便携回放退出0，详细命令/矩阵见 output/natural-quiz-repair2，交接文档 docs/learning-agent-quiz-validator-repair.md。
+- 浏览器：原G3短句经首轮部分发布、正式0/1、读回关联、针对解释、反馈、第二题1/1后诊断结束，0额外结束调用；原G5短句经相同两轮实际UI/服务链，保留原错答及followup缺口后partial交回。18库和F定向8库完整性通过，重复seed DB/WAL不变，四次正常服务停止均退出0，保留数据及截图。共77受控离线响应、真实请求0，不冒充DS语义或真人效果。
+- 实际失败与修正：修前N1新10项5失败、N2新30项10失败；中间7文件225项有3项旧诊断文字预期失败，保留拒绝断言并同步“有限”措辞后226项通过（不叠加901）。辅助回放误用exam模式、readiness误查/login 404均保留并改为现有test模式/实际根入口。全浏览器重启前12项通过、重启后10项通过及F新脚本断言失败1项、只读14项通过；F误预期充分诊断后仍多调2次，核对实际保存事实后修正为既有零调用结束，只重跑F的重启前/后/只读各2项退出0，原目标、成绩、来源与反证断言保留。
+- 限制与后续：集合字面量和位置识别仍是有界检查，未覆盖语法不猜测；S32来源蕴含、模型语义提案非verified、模拟学生非学习效果、长期掌握未验证均保留。新SHA真实G3/G5验收交Windows按当时授权执行，不更改其177累计账本、Guard补丁或历史unknown；不集成dev/cloud-code/main，不部署。
