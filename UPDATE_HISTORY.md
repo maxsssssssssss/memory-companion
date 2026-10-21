@@ -15643,3 +15643,10 @@ Learning与UI：新增 `agent-scope.ts`、`agent-repository.ts`、`agent-scenari
 - 兼容与限制：无新增依赖/锁文件、数据库表/列/迁移、全局开关或新评分权威。正式 Quiz Prompt 输入指纹改变，旧未完成 part 不能静默续发，按既有冲突合同交回，旧已完成题/顺序/成绩不改。S32、有限数学、来源存在非语义蕴含、模型关联暂定非 verified、模拟学生非教学效果与长期掌握未验证继续保留；部分发布摘要目前可在任务卡和内嵌题头各出现一次。新 SHA 的真实 DS 质量与 Windows 执行仍 PENDING。
 - 交接与边界：正式说明 `docs/learning-agent-natural-language-quiz.md`；精确命令、文件数/用例、每步结果、失败与源文件哈希见 `output/natural-language-quiz/verification-matrix.json`。本轮真实 LLM/ASR/OCR 请求 0，未使用 Windows 129/225 账本余额、未修改 Guard 或账本。按授权正常提交推送独立功能线；不集成 dev/cloud-code/main、不部署，不新增 Agent。停止本轮自有服务，保留合成数据及证据供继续查看；回退先停机备份整个隔离数据，不以 checkout 代码冒充数据库回退。
 - 生命周期复核：最终隔离目录两次正常 stop、所属 Next 和启动器实际退出码均为 0；最终所属 PID 已退出、37951 端口关闭。重复 seed exit 0，现有 DB/WAL 与离线账本哈希未变；见 `browser-verified/lifecycle-result.json`。这不改写此前 Windows 强制停止的退出码事实。
+
+## 2026-10-21：临时上传自然语言 Quiz 优化证据包供 GitHub 下载
+
+- 按用户明确要求，在 `feat/learning-agent-natural-language-quiz` 的业务提交 `c79fbf241d5367de191ccd6a92e66fe1636cabf8` 上提供临时下载；未修改产品代码或原证据内容。复用 `docs/agent-evidence/`，新增 `learning-agent-natural-quiz-c79fbf2.zip` 并更新现有 README，说明业务身份、哈希、离线层级和后续普通移除方式。
+- ZIP 与上一轮交付逐字节一致，19,183,933 bytes，SHA256 `f45cdfb124998049cc5efeb36e777df69a96ee9803e29fd3211cce0dad83fac8`。202 条目中的 201 项 manifest 长度和哈希全部匹配；独立静态检查未发现路径穿越、符号链接、数据库二进制、私有环境配置、账号密码清单或实际认证 token。此为静态检查，不承诺绝对识别所有秘密格式。
+- 验证为 ZIP 完整性、哈希/清单、复制一致性及 `git diff --check`，未重跑业务测试、类型或构建（仅附件与文档变化），不复用它们宣称新真实验收。Cloud 真实 Provider 请求 0；Windows 业务验收仍 PENDING，不改账本、不启动服务、不集成 dev/cloud-code/main、不部署。
+- 原有 95 行本地 UPDATE_HISTORY 未提交内容保留，仅本轮追加记录入 Git；正常 commit/push 同一分支，不 force push。临时移除只删除当前文件树中的附件，不清除 Git 历史；用户确认下载后再按指令处理。
