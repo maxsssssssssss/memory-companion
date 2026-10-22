@@ -2,7 +2,7 @@ import { z } from "zod";
 import { quizCandidateValidationIssues, type QuizCandidateIssue } from "./quiz-candidate-diagnostics";
 import { ReferencedGeneratedQuiz } from "@/lib/domain/learning-quiz";
 import { compactQuizRequest, compactQuizPrompt, CompactQuizEnvelope } from "./quiz-compact";
-import { inspectQuizOptionExplanation, hasQuizPositionDependency, quizProceduralHint, QUIZ_REJECTION_DETAILS, type QuizRejectionReason } from "./quiz-grounding";
+import { inspectQuizOptionExplanation, inspectQuizAnswerContract, hasQuizPositionDependency, quizProceduralHint, QUIZ_REJECTION_DETAILS, type QuizRejectionReason } from "./quiz-grounding";
 import { normalizeQuizGeneratedItemKind } from "./quiz-kind";
 
 // A request/response view over the existing references-v2 codec. No new stored
@@ -86,6 +86,8 @@ export function composedQuizRequest(...args: Parameters<typeof compactQuizReques
         const checked = ReferencedGeneratedQuiz.shape.items.element.safeParse(raw);
         if (!checked.success) return raw;
         const q = checked.data;
+        const answerIssue = inspectQuizAnswerContract(q);
+        if (answerIssue) return reject(index, answerIssue);
         // Only post-answer prose is normalized, after exact short-reference
         // restoration. No model text is inserted into a stem, option or hint.
         const context = `${q.scenario ?? ""}\n${q.stem}`;

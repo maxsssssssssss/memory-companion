@@ -4,6 +4,7 @@ import { frameworkHash } from "./framework-repository";
 import { inspectLiteralSetCardinality, parseFiniteSetAtoms, finiteSetLiteralKey, findFiniteSetLiterals } from "./quiz-set-cardinality";
 import { hasQuizChoicePrefix, maskQuizEntities, quizEntityRanges } from "./quiz-entity-context";
 import type { QuizCandidateReport } from "./quiz-delivery";
+import { inspectLiteralSetMembership } from "./quiz-set-membership";
 
 export type QuizReference = { referenceId: string; source: ModelQuiz["items"][number]["sources"][number]; text: string };
 export const quizReferenceId = (binding: unknown) => `ref_${frameworkHash(JSON.stringify(binding))}`;
@@ -53,13 +54,34 @@ export const QUIZ_REJECTION_DETAILS = {
   option_identity: "选项身份不完整或引用未知选项",
   position_dependency: "解析选项引用不明确：存在组合引用或序数位置依赖",
   answer_contradiction: "解析与答案矛盾：判定与正确选项ID不符",
+  answer_not_unique: "答案不唯一：题目自认无唯一答案或显式成员条件不支持单一正确项",
   repeated_focus: "与已保留题的考点和情境重复",
 } as const;
 export type QuizRejectionReason = keyof typeof QUIZ_REJECTION_DETAILS;
 type ExplanationInspection = { text: string; issue: null } | { text: null; issue: QuizRejectionReason };
+/** A rejection-only check of explicit statements about this question/choice
+ * combination. Discussing a multi-solution equation or a hypothetical bad design
+ * is not an admission that this question has multiple answers. */
+function declaresNonUniqueAnswer(text: string) {
+  return text.split(/[。！？!?；;\n]/u).some(sentence => {
+    if (/如果|假如|若|可能|或许|避免|防止|不会|并非|没有|不存在|不产生/u.test(sentence)) return false;
+    return /(?:本题|该题|此题|这道题|该选项|此选项|这组选项|这个选项组合)[^。；\n]{0,80}(?:会出现|存在|导致|出现|有)(?:多个正确答案|多解|不止一个正确答案)/u.test(sentence)
+      || /(?:本题|该题|此题)(?:的)?(?:正确)?答案(?:并)?不唯一/u.test(sentence);
+  });
+}
+export function inspectQuizAnswerContract(question: {
+  scenario?: string | null; stem: string; explanation: string;
+  options: Array<{ id: string; text: string; reason: string }>; correctOptionId: string;
+}): QuizRejectionReason | null {
+  if ([question.explanation, ...question.options.map(option => option.reason)].some(declaresNonUniqueAnswer)) return "answer_not_unique";
+  const membership = inspectLiteralSetMembership(`${question.scenario ?? ""}\n${question.stem}`, question.options, question.correctOptionId);
+  if (membership.status !== "invalid") return null;
+  return membership.code === "incorrect_answer" ? "answer_contradiction" : "answer_not_unique";
+}
 export function inspectQuizOptionExplanation(text: string, options: Array<{ id: string; text: string }>, correctId: string, context = ""): ExplanationInspection {
   const byId = new Map(options.map(o => [o.id, o]));
   if (byId.size !== options.length || !byId.has(correctId)) return { text: null, issue: "option_identity" };
+  if (declaresNonUniqueAnswer(text)) return { text: null, issue: "answer_not_unique" };
   const masked = maskQuizEntities(text, context);
   if (crossQuestion.test(text) || hasOrdinalChoice(masked) || optionCombination.test(masked)) return { text: null, issue: "position_dependency" };
   const protectedRanges = quizEntityRanges(text, context);
@@ -169,6 +191,8 @@ function inspectReferencedQuiz(value: ReferencedQuizResponse, catalog: QuizRefer
     if (new Set(q.options.map(o => optionContentKey(o.text, literalSetContext(fullStem)))).size !== q.options.length) {
       reject("选项重复：文本相同或显式集合值等价，未发布", "equivalent_options"); continue;
     }
+    const answerIssue = inspectQuizAnswerContract(q);
+    if (answerIssue) { reject(`${QUIZ_REJECTION_DETAILS[answerIssue]}，未发布`, answerIssue); continue; }
     if ([scenario ?? "", q.stem, q.explanation, q.hint ?? "", ...q.options.flatMap(o => [o.text, o.reason])].some(text => hasQuizPositionDependency(text, fullStem))) {
       reject(`${QUIZ_REJECTION_DETAILS.position_dependency}，未发布`, "position_dependency"); continue;
     }

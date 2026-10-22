@@ -1,5 +1,28 @@
 # Learning Quiz 集中修复与 Windows 收口
 
+## 2026-10-22：FINAL-G5-1 唯一答案返修
+
+本节是冻结版本 `3c34ced00bbaa64fa179556bb96169f8529fe254` 的后续有界修复；下方原收口记录保持原证据身份。实际开发父提交 `15c5ffa3a6e3b41250eb54a3eb43c7d941e322b7` 仅比冻结版本多证据上传和历史记录，没有产品代码差异。
+
+Windows 新包 `LEARNING_AGENT_NATURAL_QUIZ_FINAL_EVIDENCE_3c34ced.zip` 的 SHA-256 为 `e8562e257d69dc21737174d3478c2ef6cb430137c33238b600baabe98c20a19b`，146,660 bytes；清单 54 个 payload 全部核验。它提供保存的候选/业务投影，不是原 HTTP 或私有数据库。G5 原 attempt 未答、未评分；隔离复现 D 得 0/1、A 得 1/1，不能说 Windows 原成绩已经污染。
+
+修复只影响新候选的两个现有检查入口：`composedQuizRequest` 解码和 `resolveReferencedQuiz` 最终发布。题目/选项理由明确承认本题多解时拒绝为 `answer_not_unique`；同时复用有限集合字面量解析，对完整“两集合定义 + 一个交/并集成员问题 + 字面元素选项”检查满足条件的选项数量及正确 ID。原第 4 题 A=2、D=12 都满足“不属于 P∩Q”，不再依赖模型是否写出自我否定才识别；前三题保持原文、来源、理由和答案，按原部分发布契约保存 3 题。评分、稳定 ID、洗牌、完成标准、修复收据和预算没有改动。
+
+范围严格有限：只处理完整可解析的有限字面集合和直接成员问题；不推断未声明对象、补集、复合量词、代数表达式、同义词或长题干的隐含条件。不适用返回 `not_applicable`，不代表正确。多解说明检查只否决关于当前题目的明确陈述，条件式讨论和一般方程多解不直接否决。模型没有这种声明、或问题超出该有限语法时仍需人工质量验收；不得称为通用数学/语义 verified。
+
+可移植正式回放（输出必须新目录）：
+
+```sh
+node --require ./scripts/cloud/offline.cjs --import tsx scripts/agent-trial/final-g5-publication-evidence.mjs --evidence-dir <解压本次Windows证据目录> --output-dir <全新输出目录>
+npm run cloud:test -- src/lib/server/learning/quiz-final-g5.test.ts src/lib/server/learning/quiz-final-c6dd171.test.ts src/lib/server/learning/quiz-retained-validator.test.ts src/lib/server/learning/agent-quiz-repair.test.ts src/lib/server/learning/agent-generation-progress.test.ts
+```
+
+预期：新四题 index 0/1/2 发布，index 3 在 composition 和最终 publication 均为 `answer_not_unique`。正式 SQLite 作答只存在 3 题，模拟 3/3；提交被拒题索引不会产生事件，关联被拒题不会产生证据。`read_answers` 只读回 0/1/2，旧目标 concept 缺口仍保留，不把三题正确当作全部完成。重复提交及重开不重复写；争议暂停不改旧分。生成服务的一次离线响应保留 3 题及准确私有拒因，不补调用。旧 14 题依然 8 发布 / 6 `equivalent_options`，`boundary` 原值拒绝与入口规范化分开报告。
+
+Windows 最小复验：先运行本节原题脚本及旧 14 题脚本，再按届时有效授权验证原短句 G5 的正常后续体验；G3 已验证能力无需重新设计。保留原有坏题与未答 attempt 作为证据，不在上面作答或追认通过。新代码不会修写历史题目，也没有数据库迁移；回退代码不等于回退题组、作答、checkpoint 或账本，应先停止服务并备份匹配数据。当前交接账本为 **200/220**、本轮新增 10、历史 unknown 1；Cloud 请求 0，本说明不授权任何新增真实调用。Windows 新 SHA 真实验收仍 PENDING，不集成开发主线或部署。
+
+---
+
 本轮以 Windows 产品基线 `c6dd17158df3d6ac57e90c23554089d0eecfac94` 为依据，在 `feat/learning-agent-natural-language-quiz` 的 `d4262511f8e2fa65cda547f5e15cce35f4403840` 继续；后一个提交只上传证据。Cloud 使用合成材料和离线响应，不调用真实 Provider、不改 Windows 账本或 Guard。最终业务 SHA、实际命令及退出码以同批交付报告为准。
 
 ## 本轮行为变化

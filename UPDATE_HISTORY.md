@@ -15708,3 +15708,13 @@ Learning与UI：新增 `agent-scope.ts`、`agent-repository.ts`、`agent-scenari
 ### 2026-10-22 11:57（Asia/Shanghai）上传 A—D 集中修复可移植证据供 GitHub 下载
 
 按用户明确要求，将已交付的 LEARNING_AGENT_NATURAL_QUIZ_FINAL_REPAIR_3c34ced_EVIDENCE.zip 原样复制至 docs/agent-evidence/learning-agent-natural-quiz-final-repair-3c34ced.zip，并追加同目录 README 下载、业务SHA、大小、哈希及证据边界说明。文件12,145,670 bytes，SHA-256 4c28eebd7e13ec85a9b4e599fe9a1de3e57c4233a1dfcb7cf0da4e848bdc9fe0，161文件中的160项manifest及CRC已核验；原Windows公开证据、Cloud回放与离线UI层次保持区分。没有修改产品、依赖、模型协议、预算、Windows数据或既有证据；本轮不重跑业务测试/类型/构建，业务验收仍固定3c34ced00bbaa64fa179556bb96169f8529fe254。真实Provider请求0，不集成、不部署；原有95行本地历史追加保留未提交，仅本条随本次上传提交。
+
+
+## 2026-10-22 15:09（Asia/Shanghai）— Learning Quiz FINAL-G5-1 唯一答案发布保护
+
+- 背景与核对：基于冻结产品 SHA 3c34ced00bbaa64fa179556bb96169f8529fe254，在同功能线 HEAD 15c5ffa3a6e3b41250eb54a3eb43c7d941e322b7 继续（仅证据上传差异）；保留既存 95 行本地历史。Windows 新包 146660 bytes、SHA256 e8562e257d69dc21737174d3478c2ef6cb430137c33238b600baabe98c20a19b，54/54 payload 哈希与大小通过。包为原样公开业务投影，非完整 HTTP/私有 DB。
+- 分析：原题 P∩Q={5,9}，A=2 和 D=12 都符合“不属于”；理由又明确自认多解，但 codec/发布均漏拦。基线脚本仅将 SHA 守卫适配为证据上传后继并强制产品 diff 为空，全部旧缺陷断言保留；正式独立 SQLite 复现 D=0/1、A=1/1（exit0 表示缺陷复现），不修改 Windows 未答原 attempt。
+- 实现：quiz-grounding.ts 增加关于当前题目的明确多解声明拒绝，quiz-set-membership.ts 复用既有有限字面集合解析，仅计算完整二集合声明后的直接交/并集成员问题；quiz-composition.ts 与最终发布同时检查，复用 answer_not_unique/answer_contradiction 分类。此局部 helper 用于避免只依赖一句模型自述，不是通用语义引擎；其余复合题/表达式返回不适用，不作 verified。稳定 ID、评分、来源、洗牌、完成标准、Prompt/协议、预算、单次修复收据均不变，无新依赖/表/迁移/API。
+- 验证：新增原四题 fixture、正式服务回放 helper、quiz-final-g5.test.ts、可移植 final-g5-publication-evidence.mjs 与现有交接文档增补。原四题 0/1/2 发布，3 在 composition/publication 均 answer_not_unique；合法题原样保存，正式模拟 3/3/read_answers/associate；被拒索引提交零事件、关联零证据，concept 缺口保留 partial；争议、重复提交、重开及完整性通过。旧14题保持8发布/6 equivalent_options、boundary原值与入口规范化分层。最终 cloud:test 精确33文件737/737、0跳过，exit0（包括单次修复/unknown/预算/来源/版本/恢复/API/UI/完成保护）；cloud:check 9/9环境契约+Next typegen+完整TypeScript exit0；cloud:build exit0，191.45秒、180 trace/forbidden0；git diff --check exit0。
+- 实际中间失败：初次聚焦命令把 retained-validator 路径误写为复数（该文件未发现），且新增回放在严格 envelope 中误带 reviewCandidates，1套件加载失败；修正后又因 scope 测试输入误带 count/difficulty 导致 beforeAll 失败、19项未执行。仅修复新回放适配和路径，没有放宽断言/原题；最终完整相关集合全部执行通过。
+- 限制与交付：Cloud 真实Provider 0；未重复浏览器全流程或无关全仓回归，当前正式业务服务+API/UI测试不能冒充Windows真实验收。原始候选/来源/理由/正确ID/历史成绩不改写，已保存旧坏题仍需保持隔离。保留S32、语义提案非verified、来源存在非蕴含、模拟学生非真人效果、长期掌握未验证；Windows账本200/220及历史unknown1不变，本记录不授权调用或扩容。功能分支正常commit/push，未集成dev/cloud-code/main、未部署。

@@ -1,0 +1,829 @@
+{
+  "provenance": {
+    "sha": "3c34ced00bbaa64fa179556bb96169f8529fe254",
+    "taskId": "c67aac99-9cba-4c76-8f2a-3fa464f2388e",
+    "quizId": "46212977-db38-4195-8b4e-debe4221b167",
+    "layer": "Exact saved decoded and published business projection, not raw HTTP. New isolated operation IDs only.",
+    "files": {
+      "real/G5-business.json": "c036798b00fad8d7cb39d6709b569c5e7cb9f0ffefd9f94a2f7ed8e11907fee7",
+      "g5-grading-repro/exact-question-evidence.json": "927bb05c776319299407e89a9a66c3a0bb3f557b06aa955b4e09efc6d6f6ef07"
+    }
+  },
+  "goal": "我总分不清交集和并集，帮我练练。",
+  "source": {
+    "id": "d94349d6-1f4f-473a-aab1-25e8745c5c9f",
+    "page_id": "275663be-dff4-4fbe-9ccd-be0dc65b08c2",
+    "title": "合成教材 · 集合、交集与并集",
+    "kind": "text",
+    "original": "合成教材：集合、交集与并集。本材料由验收脚本手工编写，仅用于隔离软件验证；不是教学效果研究或真实学生资料。以下定义与算例按通常的有限集合约定。\n\n集合由确定的元素组成，花括号表示一个集合。同一元素重复写出不会增加元素个数，元素的书写顺序不影响集合。例如 {1, 2, 2} 与 {2, 1} 都是含两个元素的集合。空集 ∅ 不含任何元素。\n\n交集 A∩B 包含同时属于 A 和 B 的元素。判断一个元素是否在交集中，需要两个归属条件同时成立。若 A={1,2,3}，B={3,4}，则 A∩B={3}。没有共同元素时交集为空集。\n\n并集 A∪B 包含属于 A 或属于 B 的元素，这里的或允许同时属于二者。一个元素只出现一次。若 A={1,2,3}，B={3,4}，则 A∪B={1,2,3,4}。把元素 3 写两次不构成两个不同元素。\n\n比较交集和并集：共同元素 3 同时属于上例的交集与并集；只属于 A 的元素 1 在并集中而不在交集中。交集强调共同满足，并集允许满足至少一个归属条件。A∩B 总是 A∪B 的子集。\n\n若 C={红,蓝}，D={蓝,绿}，则 C∩D={蓝}，C∪D={红,蓝,绿}。若 E={5}，F={6}，则 E∩F=∅，E∪F={5,6}。空交集不代表两个集合都为空。\n\n有限集合的并集元素个数满足 |A∪B|=|A|+|B|−|A∩B|。上例 |A|=3，|B|=2，|A∩B|=1，因此 |A∪B|=4。减去交集数量是为消除对共同元素的一次重复计数；不能把交集数量当作并集数量。",
+    "sha256": "2ffac289182e253758814c73ea7b9c0e77a3075979feb0700f9b103eb6986649"
+  },
+  "settings": {
+    "materialIds": [
+      "d94349d6-1f4f-473a-aab1-25e8745c5c9f"
+    ],
+    "chapterIds": [],
+    "nodeIds": [],
+    "includeNotes": false,
+    "includeSupplements": false,
+    "count": 4,
+    "difficulty": "basic"
+  },
+  "reviewContext": {
+    "planId": "cf4a5b5e-4acd-4f10-8d3e-e9049db567ff",
+    "taskVersion": 1,
+    "objectives": [
+      {
+        "id": "intersection_union_diagnosis",
+        "label": "诊断交集与并集的区分",
+        "sources": [
+          {
+            "materialId": "d94349d6-1f4f-473a-aab1-25e8745c5c9f",
+            "paragraph": 3
+          },
+          {
+            "materialId": "d94349d6-1f4f-473a-aab1-25e8745c5c9f",
+            "paragraph": 4
+          },
+          {
+            "materialId": "d94349d6-1f4f-473a-aab1-25e8745c5c9f",
+            "paragraph": 5
+          }
+        ],
+        "requirements": [
+          {
+            "role": "concept",
+            "description": "能识别交集强调同时属于两个集合，并集强调至少属于一个集合。",
+            "independent": false
+          },
+          {
+            "role": "application",
+            "description": "能对给定有限集合正确写出交集和并集的元素。",
+            "independent": true
+          }
+        ]
+      }
+    ],
+    "purpose": {
+      "objectiveIds": [
+        "intersection_union_diagnosis"
+      ],
+      "role": "application",
+      "method": "contrast",
+      "purpose": "诊断学生能否对给定有限集合区分交集和并集：通过要求写出或判断交集与并集元素的对比题，观察是否混淆“同时属于两个集合”与“至少属于一个集合”。",
+      "priorEvidenceRefs": []
+    }
+  },
+  "plan": {
+    "kind": "diagnosis",
+    "objectives": [
+      {
+        "id": "intersection_union_diagnosis",
+        "label": "诊断交集与并集的区分",
+        "sources": [
+          {
+            "materialId": "d94349d6-1f4f-473a-aab1-25e8745c5c9f",
+            "paragraph": 3
+          },
+          {
+            "materialId": "d94349d6-1f4f-473a-aab1-25e8745c5c9f",
+            "paragraph": 4
+          },
+          {
+            "materialId": "d94349d6-1f4f-473a-aab1-25e8745c5c9f",
+            "paragraph": 5
+          }
+        ],
+        "requirements": [
+          {
+            "role": "concept",
+            "description": "能识别交集强调同时属于两个集合，并集强调至少属于一个集合。",
+            "independent": false
+          },
+          {
+            "role": "application",
+            "description": "能对给定有限集合正确写出交集和并集的元素。",
+            "independent": true
+          }
+        ]
+      }
+    ]
+  },
+  "decoded": {
+    "contractVersion": "references-v2",
+    "title": "交集与并集的应用诊断",
+    "reason": null,
+    "items": [
+      {
+        "stem": "在上述集合中，哪个元素属于 P∩Q？",
+        "kind": "application",
+        "scenario": "假设集合 P={2,5,7,9}，集合 Q={5,9,12}。",
+        "options": [
+          {
+            "id": "A",
+            "text": "5",
+            "reason": "5 同时属于 P 和 Q，满足交集要求的两个归属条件，因此属于 P∩Q。",
+            "evidenceIds": [
+              "ref_b4a8a7a32cd4b0f8ad3ac69ba0b80976024e47e6adbdc23109f5b12c7cdffe5b"
+            ]
+          },
+          {
+            "id": "B",
+            "text": "2",
+            "reason": "2 只属于 P，不属于 Q，因此不满足同时属于两个集合的条件，不在 P∩Q 中。",
+            "evidenceIds": [
+              "ref_b4a8a7a32cd4b0f8ad3ac69ba0b80976024e47e6adbdc23109f5b12c7cdffe5b"
+            ]
+          },
+          {
+            "id": "C",
+            "text": "12",
+            "reason": "12 只属于 Q，不属于 P，因此不满足同时属于两个集合的条件，不在 P∩Q 中。",
+            "evidenceIds": [
+              "ref_b4a8a7a32cd4b0f8ad3ac69ba0b80976024e47e6adbdc23109f5b12c7cdffe5b"
+            ]
+          },
+          {
+            "id": "D",
+            "text": "7",
+            "reason": "7 只属于 P，不属于 Q，因此不满足同时属于两个集合的条件，不在 P∩Q 中。",
+            "evidenceIds": [
+              "ref_b4a8a7a32cd4b0f8ad3ac69ba0b80976024e47e6adbdc23109f5b12c7cdffe5b"
+            ]
+          }
+        ],
+        "correctOptionId": "A",
+        "explanation": "5 同时属于 P 和 Q，满足交集要求的两个归属条件，因此属于 P∩Q。",
+        "hint": "先区分题干对象、适用前提和实际结果，再逐项对照所选材料中的条件与反例。",
+        "stemEvidenceIds": [
+          "ref_b4a8a7a32cd4b0f8ad3ac69ba0b80976024e47e6adbdc23109f5b12c7cdffe5b"
+        ],
+        "explanationEvidenceIds": [
+          "ref_b4a8a7a32cd4b0f8ad3ac69ba0b80976024e47e6adbdc23109f5b12c7cdffe5b"
+        ]
+      },
+      {
+        "stem": "在上述集合中，哪个元素属于 P∪Q？",
+        "kind": "application",
+        "scenario": "假设集合 P={2,5,7,9}，集合 Q={5,9,12}。",
+        "options": [
+          {
+            "id": "A",
+            "text": "12",
+            "reason": "12 属于 Q，因此满足至少属于一个集合的条件，属于 P∪Q。",
+            "evidenceIds": [
+              "ref_4d1858bd22a3363be7f0030c408d759e3bdbe9e20a28adacf1b7b7746f16d253"
+            ]
+          },
+          {
+            "id": "B",
+            "text": "3",
+            "reason": "3 既不属于 P 也不属于 Q，因此不满足至少属于一个集合的条件，不在 P∪Q 中。",
+            "evidenceIds": [
+              "ref_4d1858bd22a3363be7f0030c408d759e3bdbe9e20a28adacf1b7b7746f16d253"
+            ]
+          },
+          {
+            "id": "C",
+            "text": "8",
+            "reason": "8 既不属于 P 也不属于 Q，因此不满足至少属于一个集合的条件，不在 P∪Q 中。",
+            "evidenceIds": [
+              "ref_4d1858bd22a3363be7f0030c408d759e3bdbe9e20a28adacf1b7b7746f16d253"
+            ]
+          },
+          {
+            "id": "D",
+            "text": "0",
+            "reason": "0 既不属于 P 也不属于 Q，因此不满足至少属于一个集合的条件，不在 P∪Q 中。",
+            "evidenceIds": [
+              "ref_4d1858bd22a3363be7f0030c408d759e3bdbe9e20a28adacf1b7b7746f16d253"
+            ]
+          }
+        ],
+        "correctOptionId": "A",
+        "explanation": "12 属于 Q，因此满足至少属于一个集合的条件，属于 P∪Q。",
+        "hint": "先区分题干对象、适用前提和实际结果，再逐项对照所选材料中的条件与反例。",
+        "stemEvidenceIds": [
+          "ref_4d1858bd22a3363be7f0030c408d759e3bdbe9e20a28adacf1b7b7746f16d253"
+        ],
+        "explanationEvidenceIds": [
+          "ref_4d1858bd22a3363be7f0030c408d759e3bdbe9e20a28adacf1b7b7746f16d253"
+        ]
+      },
+      {
+        "stem": "在上述集合中，元素 9 是否同时属于 P∩Q 和 P∪Q？",
+        "kind": "application",
+        "scenario": "假设集合 P={2,5,7,9}，集合 Q={5,9,12}。",
+        "options": [
+          {
+            "id": "A",
+            "text": "是，因为 9 同时属于 P 和 Q，也至少属于一个集合。",
+            "reason": "9 同时属于 P 和 Q，所以满足交集条件；同时它也满足并集的至少一个归属条件。",
+            "evidenceIds": [
+              "ref_b4a8a7a32cd4b0f8ad3ac69ba0b80976024e47e6adbdc23109f5b12c7cdffe5b",
+              "ref_4d1858bd22a3363be7f0030c408d759e3bdbe9e20a28adacf1b7b7746f16d253",
+              "ref_9f763fada4f32d7e53c6288a2bc69dd2f895c7922ac96416ddaa9f88d504fd05"
+            ]
+          },
+          {
+            "id": "B",
+            "text": "只属于 P∩Q，不属于 P∪Q。",
+            "reason": "9 同时属于 P 和 Q，因此属于 P∩Q；但并集允许至少属于一个集合，所以 9 也属于 P∪Q，该选项认为不属于并集是错误的。",
+            "evidenceIds": [
+              "ref_4d1858bd22a3363be7f0030c408d759e3bdbe9e20a28adacf1b7b7746f16d253",
+              "ref_9f763fada4f32d7e53c6288a2bc69dd2f895c7922ac96416ddaa9f88d504fd05"
+            ]
+          },
+          {
+            "id": "C",
+            "text": "只属于 P∪Q，不属于 P∩Q。",
+            "reason": "9 同时属于 P 和 Q，满足交集的两个归属条件，因此也属于 P∩Q，该选项认为不属于交集是错误的。",
+            "evidenceIds": [
+              "ref_b4a8a7a32cd4b0f8ad3ac69ba0b80976024e47e6adbdc23109f5b12c7cdffe5b",
+              "ref_9f763fada4f32d7e53c6288a2bc69dd2f895c7922ac96416ddaa9f88d504fd05"
+            ]
+          },
+          {
+            "id": "D",
+            "text": "既不属于 P∩Q，也不属于 P∪Q。",
+            "reason": "9 同时属于 P 和 Q，因此属于 P∩Q；也满足并集条件，因此属于 P∪Q，该选项完全错误。",
+            "evidenceIds": [
+              "ref_b4a8a7a32cd4b0f8ad3ac69ba0b80976024e47e6adbdc23109f5b12c7cdffe5b",
+              "ref_4d1858bd22a3363be7f0030c408d759e3bdbe9e20a28adacf1b7b7746f16d253",
+              "ref_9f763fada4f32d7e53c6288a2bc69dd2f895c7922ac96416ddaa9f88d504fd05"
+            ]
+          }
+        ],
+        "correctOptionId": "A",
+        "explanation": "9 同时属于 P 和 Q，所以满足交集条件；同时它也满足并集的至少一个归属条件。",
+        "hint": "先区分题干对象、适用前提和实际结果，再逐项对照所选材料中的条件与反例。",
+        "stemEvidenceIds": [
+          "ref_b4a8a7a32cd4b0f8ad3ac69ba0b80976024e47e6adbdc23109f5b12c7cdffe5b",
+          "ref_4d1858bd22a3363be7f0030c408d759e3bdbe9e20a28adacf1b7b7746f16d253",
+          "ref_9f763fada4f32d7e53c6288a2bc69dd2f895c7922ac96416ddaa9f88d504fd05"
+        ],
+        "explanationEvidenceIds": [
+          "ref_b4a8a7a32cd4b0f8ad3ac69ba0b80976024e47e6adbdc23109f5b12c7cdffe5b",
+          "ref_4d1858bd22a3363be7f0030c408d759e3bdbe9e20a28adacf1b7b7746f16d253",
+          "ref_9f763fada4f32d7e53c6288a2bc69dd2f895c7922ac96416ddaa9f88d504fd05"
+        ]
+      },
+      {
+        "stem": "在上述集合中，哪个元素不属于 P∩Q？",
+        "kind": "application",
+        "scenario": "假设集合 P={2,5,7,9}，集合 Q={5,9,12}。",
+        "options": [
+          {
+            "id": "A",
+            "text": "2",
+            "reason": "2 只属于 P，不属于 Q，因此不满足交集要求的两个归属条件，确实不属于 P∩Q。",
+            "evidenceIds": [
+              "ref_b4a8a7a32cd4b0f8ad3ac69ba0b80976024e47e6adbdc23109f5b12c7cdffe5b"
+            ]
+          },
+          {
+            "id": "B",
+            "text": "5",
+            "reason": "5 同时属于 P 和 Q，满足交集条件，因此属于 P∩Q，不应被选为不属于交集的元素。",
+            "evidenceIds": [
+              "ref_b4a8a7a32cd4b0f8ad3ac69ba0b80976024e47e6adbdc23109f5b12c7cdffe5b"
+            ]
+          },
+          {
+            "id": "C",
+            "text": "9",
+            "reason": "9 同时属于 P 和 Q，满足交集条件，因此属于 P∩Q，不应被选为不属于交集的元素。",
+            "evidenceIds": [
+              "ref_b4a8a7a32cd4b0f8ad3ac69ba0b80976024e47e6adbdc23109f5b12c7cdffe5b"
+            ]
+          },
+          {
+            "id": "D",
+            "text": "12",
+            "reason": "12 属于 Q，但不属于 P，因此不满足交集条件，确实不属于 P∩Q；该选项与 A 会出现多解，因此本题不能采用这个选项组合。",
+            "evidenceIds": [
+              "ref_b4a8a7a32cd4b0f8ad3ac69ba0b80976024e47e6adbdc23109f5b12c7cdffe5b"
+            ]
+          }
+        ],
+        "correctOptionId": "A",
+        "explanation": "2 只属于 P，不属于 Q，因此不满足交集要求的两个归属条件，确实不属于 P∩Q。",
+        "hint": "先区分题干对象、适用前提和实际结果，再逐项对照所选材料中的条件与反例。",
+        "stemEvidenceIds": [
+          "ref_b4a8a7a32cd4b0f8ad3ac69ba0b80976024e47e6adbdc23109f5b12c7cdffe5b"
+        ],
+        "explanationEvidenceIds": [
+          "ref_b4a8a7a32cd4b0f8ad3ac69ba0b80976024e47e6adbdc23109f5b12c7cdffe5b"
+        ]
+      }
+    ],
+    "reviewCandidates": [
+      {
+        "questionKey": "34ee845b0be6d0f6fb45294bd7ede54c885fac96957ddec8350fd16ac1dde90d",
+        "check": {
+          "objectiveIds": [
+            "intersection_union_diagnosis"
+          ],
+          "role": "application",
+          "rationale": "本题要求学生在给定有限集合中判断一个元素是否属于交集，直接检查其能否运用“同时属于两个集合”的条件，符合 application 目标中正确判断交集元素的要求。"
+        }
+      },
+      {
+        "questionKey": "a51f96a9b1454441ea39cf8e549e69daf6269865928d683797ec4b197ec27242",
+        "check": {
+          "objectiveIds": [
+            "intersection_union_diagnosis"
+          ],
+          "role": "application",
+          "rationale": "本题要求学生在给定有限集合中判断一个元素是否属于并集，直接检查其能否运用“至少属于一个集合”的条件，符合 application 目标中正确判断并集元素的要求。"
+        }
+      },
+      {
+        "questionKey": "e42a2465dcdfc6c30d5a90f9d4c7d89194f51db8f7674e9100cffbaf6c324ffc",
+        "check": {
+          "objectiveIds": [
+            "intersection_union_diagnosis"
+          ],
+          "role": "application",
+          "rationale": "本题要求学生同时判断一个元素与交集、并集的关系，直接检查其是否能区分“同时属于两个集合”和“至少属于一个集合”的条件覆盖范围，符合 application 目标。"
+        }
+      },
+      {
+        "questionKey": "e40d4e54f40ff35ebd61207acc9e7736272006163c51a7b9a5c28fda7f08a925",
+        "check": {
+          "objectiveIds": [
+            "intersection_union_diagnosis"
+          ],
+          "role": "application",
+          "rationale": "本题要求学生找出不属于交集的元素，检查其是否能正确排除只属于一个集合的元素，符合 application 目标中对交集元素判断的要求。"
+        }
+      }
+    ]
+  },
+  "saved": {
+    "title": "交集与并集的应用诊断",
+    "reason": null,
+    "questions": [
+      {
+        "stem": "假设集合 P={2,5,7,9}，集合 Q={5,9,12}。\n\n在上述集合中，哪个元素属于 P∩Q？",
+        "kind": "application",
+        "options": [
+          {
+            "id": "D",
+            "text": "7",
+            "reason": "7 只属于 P，不属于 Q，因此不满足同时属于两个集合的条件，不在 P∩Q 中。",
+            "evidenceIds": [
+              "ref_b4a8a7a32cd4b0f8ad3ac69ba0b80976024e47e6adbdc23109f5b12c7cdffe5b"
+            ]
+          },
+          {
+            "id": "B",
+            "text": "2",
+            "reason": "2 只属于 P，不属于 Q，因此不满足同时属于两个集合的条件，不在 P∩Q 中。",
+            "evidenceIds": [
+              "ref_b4a8a7a32cd4b0f8ad3ac69ba0b80976024e47e6adbdc23109f5b12c7cdffe5b"
+            ]
+          },
+          {
+            "id": "A",
+            "text": "5",
+            "reason": "5 同时属于 P 和 Q，满足交集要求的两个归属条件，因此属于 P∩Q。",
+            "evidenceIds": [
+              "ref_b4a8a7a32cd4b0f8ad3ac69ba0b80976024e47e6adbdc23109f5b12c7cdffe5b"
+            ]
+          },
+          {
+            "id": "C",
+            "text": "12",
+            "reason": "12 只属于 Q，不属于 P，因此不满足同时属于两个集合的条件，不在 P∩Q 中。",
+            "evidenceIds": [
+              "ref_b4a8a7a32cd4b0f8ad3ac69ba0b80976024e47e6adbdc23109f5b12c7cdffe5b"
+            ]
+          }
+        ],
+        "correctOptionId": "A",
+        "explanation": "5 同时属于 P 和 Q，满足交集要求的两个归属条件，因此属于 P∩Q。",
+        "hint": "先区分题干对象、适用前提和实际结果，再逐项对照所选材料中的条件与反例。",
+        "stemEvidenceIds": [
+          "ref_b4a8a7a32cd4b0f8ad3ac69ba0b80976024e47e6adbdc23109f5b12c7cdffe5b"
+        ],
+        "explanationEvidenceIds": [
+          "ref_b4a8a7a32cd4b0f8ad3ac69ba0b80976024e47e6adbdc23109f5b12c7cdffe5b"
+        ],
+        "sources": [
+          {
+            "kind": "material",
+            "materialId": "d94349d6-1f4f-473a-aab1-25e8745c5c9f",
+            "paragraph": 3,
+            "start": 171,
+            "end": 264,
+            "originalSha256": "2ffac289182e253758814c73ea7b9c0e77a3075979feb0700f9b103eb6986649",
+            "paragraphSha256": "ad6371fc407cde1df5674090d56c186ee78c7b405212a979b76db665c9278f05"
+          }
+        ],
+        "evidence": [
+          {
+            "id": "ref_b4a8a7a32cd4b0f8ad3ac69ba0b80976024e47e6adbdc23109f5b12c7cdffe5b",
+            "referenceId": "ref_b4a8a7a32cd4b0f8ad3ac69ba0b80976024e47e6adbdc23109f5b12c7cdffe5b",
+            "source": {
+              "kind": "material",
+              "materialId": "d94349d6-1f4f-473a-aab1-25e8745c5c9f",
+              "paragraph": 3
+            },
+            "quote": "交集 A∩B 包含同时属于 A 和 B 的元素。判断一个元素是否在交集中，需要两个归属条件同时成立。若 A={1,2,3}，B={3,4}，则 A∩B={3}。没有共同元素时交集为空集。"
+          }
+        ]
+      },
+      {
+        "stem": "假设集合 P={2,5,7,9}，集合 Q={5,9,12}。\n\n在上述集合中，哪个元素属于 P∪Q？",
+        "kind": "application",
+        "options": [
+          {
+            "id": "A",
+            "text": "12",
+            "reason": "12 属于 Q，因此满足至少属于一个集合的条件，属于 P∪Q。",
+            "evidenceIds": [
+              "ref_4d1858bd22a3363be7f0030c408d759e3bdbe9e20a28adacf1b7b7746f16d253"
+            ]
+          },
+          {
+            "id": "B",
+            "text": "3",
+            "reason": "3 既不属于 P 也不属于 Q，因此不满足至少属于一个集合的条件，不在 P∪Q 中。",
+            "evidenceIds": [
+              "ref_4d1858bd22a3363be7f0030c408d759e3bdbe9e20a28adacf1b7b7746f16d253"
+            ]
+          },
+          {
+            "id": "D",
+            "text": "0",
+            "reason": "0 既不属于 P 也不属于 Q，因此不满足至少属于一个集合的条件，不在 P∪Q 中。",
+            "evidenceIds": [
+              "ref_4d1858bd22a3363be7f0030c408d759e3bdbe9e20a28adacf1b7b7746f16d253"
+            ]
+          },
+          {
+            "id": "C",
+            "text": "8",
+            "reason": "8 既不属于 P 也不属于 Q，因此不满足至少属于一个集合的条件，不在 P∪Q 中。",
+            "evidenceIds": [
+              "ref_4d1858bd22a3363be7f0030c408d759e3bdbe9e20a28adacf1b7b7746f16d253"
+            ]
+          }
+        ],
+        "correctOptionId": "A",
+        "explanation": "12 属于 Q，因此满足至少属于一个集合的条件，属于 P∪Q。",
+        "hint": "先区分题干对象、适用前提和实际结果，再逐项对照所选材料中的条件与反例。",
+        "stemEvidenceIds": [
+          "ref_4d1858bd22a3363be7f0030c408d759e3bdbe9e20a28adacf1b7b7746f16d253"
+        ],
+        "explanationEvidenceIds": [
+          "ref_4d1858bd22a3363be7f0030c408d759e3bdbe9e20a28adacf1b7b7746f16d253"
+        ],
+        "sources": [
+          {
+            "kind": "material",
+            "materialId": "d94349d6-1f4f-473a-aab1-25e8745c5c9f",
+            "paragraph": 4,
+            "start": 266,
+            "end": 368,
+            "originalSha256": "2ffac289182e253758814c73ea7b9c0e77a3075979feb0700f9b103eb6986649",
+            "paragraphSha256": "1a07aa6c11d316711dd23dcc2b48d65699491b774c239e151aaa0bb889f665eb"
+          }
+        ],
+        "evidence": [
+          {
+            "id": "ref_4d1858bd22a3363be7f0030c408d759e3bdbe9e20a28adacf1b7b7746f16d253",
+            "referenceId": "ref_4d1858bd22a3363be7f0030c408d759e3bdbe9e20a28adacf1b7b7746f16d253",
+            "source": {
+              "kind": "material",
+              "materialId": "d94349d6-1f4f-473a-aab1-25e8745c5c9f",
+              "paragraph": 4
+            },
+            "quote": "并集 A∪B 包含属于 A 或属于 B 的元素，这里的或允许同时属于二者。一个元素只出现一次。若 A={1,2,3}，B={3,4}，则 A∪B={1,2,3,4}。把元素 3 写两次不构成两个不同元素。"
+          }
+        ]
+      },
+      {
+        "stem": "假设集合 P={2,5,7,9}，集合 Q={5,9,12}。\n\n在上述集合中，元素 9 是否同时属于 P∩Q 和 P∪Q？",
+        "kind": "application",
+        "options": [
+          {
+            "id": "B",
+            "text": "只属于 P∩Q，不属于 P∪Q。",
+            "reason": "9 同时属于 P 和 Q，因此属于 P∩Q；但并集允许至少属于一个集合，所以 9 也属于 P∪Q，该选项认为不属于并集是错误的。",
+            "evidenceIds": [
+              "ref_4d1858bd22a3363be7f0030c408d759e3bdbe9e20a28adacf1b7b7746f16d253",
+              "ref_9f763fada4f32d7e53c6288a2bc69dd2f895c7922ac96416ddaa9f88d504fd05"
+            ]
+          },
+          {
+            "id": "A",
+            "text": "是，因为 9 同时属于 P 和 Q，也至少属于一个集合。",
+            "reason": "9 同时属于 P 和 Q，所以满足交集条件；同时它也满足并集的至少一个归属条件。",
+            "evidenceIds": [
+              "ref_b4a8a7a32cd4b0f8ad3ac69ba0b80976024e47e6adbdc23109f5b12c7cdffe5b",
+              "ref_4d1858bd22a3363be7f0030c408d759e3bdbe9e20a28adacf1b7b7746f16d253",
+              "ref_9f763fada4f32d7e53c6288a2bc69dd2f895c7922ac96416ddaa9f88d504fd05"
+            ]
+          },
+          {
+            "id": "C",
+            "text": "只属于 P∪Q，不属于 P∩Q。",
+            "reason": "9 同时属于 P 和 Q，满足交集的两个归属条件，因此也属于 P∩Q，该选项认为不属于交集是错误的。",
+            "evidenceIds": [
+              "ref_b4a8a7a32cd4b0f8ad3ac69ba0b80976024e47e6adbdc23109f5b12c7cdffe5b",
+              "ref_9f763fada4f32d7e53c6288a2bc69dd2f895c7922ac96416ddaa9f88d504fd05"
+            ]
+          },
+          {
+            "id": "D",
+            "text": "既不属于 P∩Q，也不属于 P∪Q。",
+            "reason": "9 同时属于 P 和 Q，因此属于 P∩Q；也满足并集条件，因此属于 P∪Q，该选项完全错误。",
+            "evidenceIds": [
+              "ref_b4a8a7a32cd4b0f8ad3ac69ba0b80976024e47e6adbdc23109f5b12c7cdffe5b",
+              "ref_4d1858bd22a3363be7f0030c408d759e3bdbe9e20a28adacf1b7b7746f16d253",
+              "ref_9f763fada4f32d7e53c6288a2bc69dd2f895c7922ac96416ddaa9f88d504fd05"
+            ]
+          }
+        ],
+        "correctOptionId": "A",
+        "explanation": "9 同时属于 P 和 Q，所以满足交集条件；同时它也满足并集的至少一个归属条件。",
+        "hint": "先区分题干对象、适用前提和实际结果，再逐项对照所选材料中的条件与反例。",
+        "stemEvidenceIds": [
+          "ref_b4a8a7a32cd4b0f8ad3ac69ba0b80976024e47e6adbdc23109f5b12c7cdffe5b",
+          "ref_4d1858bd22a3363be7f0030c408d759e3bdbe9e20a28adacf1b7b7746f16d253",
+          "ref_9f763fada4f32d7e53c6288a2bc69dd2f895c7922ac96416ddaa9f88d504fd05"
+        ],
+        "explanationEvidenceIds": [
+          "ref_b4a8a7a32cd4b0f8ad3ac69ba0b80976024e47e6adbdc23109f5b12c7cdffe5b",
+          "ref_4d1858bd22a3363be7f0030c408d759e3bdbe9e20a28adacf1b7b7746f16d253",
+          "ref_9f763fada4f32d7e53c6288a2bc69dd2f895c7922ac96416ddaa9f88d504fd05"
+        ],
+        "sources": [
+          {
+            "kind": "material",
+            "materialId": "d94349d6-1f4f-473a-aab1-25e8745c5c9f",
+            "paragraph": 3,
+            "start": 171,
+            "end": 264,
+            "originalSha256": "2ffac289182e253758814c73ea7b9c0e77a3075979feb0700f9b103eb6986649",
+            "paragraphSha256": "ad6371fc407cde1df5674090d56c186ee78c7b405212a979b76db665c9278f05"
+          },
+          {
+            "kind": "material",
+            "materialId": "d94349d6-1f4f-473a-aab1-25e8745c5c9f",
+            "paragraph": 4,
+            "start": 266,
+            "end": 368,
+            "originalSha256": "2ffac289182e253758814c73ea7b9c0e77a3075979feb0700f9b103eb6986649",
+            "paragraphSha256": "1a07aa6c11d316711dd23dcc2b48d65699491b774c239e151aaa0bb889f665eb"
+          },
+          {
+            "kind": "material",
+            "materialId": "d94349d6-1f4f-473a-aab1-25e8745c5c9f",
+            "paragraph": 5,
+            "start": 370,
+            "end": 460,
+            "originalSha256": "2ffac289182e253758814c73ea7b9c0e77a3075979feb0700f9b103eb6986649",
+            "paragraphSha256": "913907624e97e012ad7820ed0a1d875f6b012c5efb512a9743e353d3bf9763be"
+          }
+        ],
+        "evidence": [
+          {
+            "id": "ref_b4a8a7a32cd4b0f8ad3ac69ba0b80976024e47e6adbdc23109f5b12c7cdffe5b",
+            "referenceId": "ref_b4a8a7a32cd4b0f8ad3ac69ba0b80976024e47e6adbdc23109f5b12c7cdffe5b",
+            "source": {
+              "kind": "material",
+              "materialId": "d94349d6-1f4f-473a-aab1-25e8745c5c9f",
+              "paragraph": 3
+            },
+            "quote": "交集 A∩B 包含同时属于 A 和 B 的元素。判断一个元素是否在交集中，需要两个归属条件同时成立。若 A={1,2,3}，B={3,4}，则 A∩B={3}。没有共同元素时交集为空集。"
+          },
+          {
+            "id": "ref_4d1858bd22a3363be7f0030c408d759e3bdbe9e20a28adacf1b7b7746f16d253",
+            "referenceId": "ref_4d1858bd22a3363be7f0030c408d759e3bdbe9e20a28adacf1b7b7746f16d253",
+            "source": {
+              "kind": "material",
+              "materialId": "d94349d6-1f4f-473a-aab1-25e8745c5c9f",
+              "paragraph": 4
+            },
+            "quote": "并集 A∪B 包含属于 A 或属于 B 的元素，这里的或允许同时属于二者。一个元素只出现一次。若 A={1,2,3}，B={3,4}，则 A∪B={1,2,3,4}。把元素 3 写两次不构成两个不同元素。"
+          },
+          {
+            "id": "ref_9f763fada4f32d7e53c6288a2bc69dd2f895c7922ac96416ddaa9f88d504fd05",
+            "referenceId": "ref_9f763fada4f32d7e53c6288a2bc69dd2f895c7922ac96416ddaa9f88d504fd05",
+            "source": {
+              "kind": "material",
+              "materialId": "d94349d6-1f4f-473a-aab1-25e8745c5c9f",
+              "paragraph": 5
+            },
+            "quote": "比较交集和并集：共同元素 3 同时属于上例的交集与并集；只属于 A 的元素 1 在并集中而不在交集中。交集强调共同满足，并集允许满足至少一个归属条件。A∩B 总是 A∪B 的子集。"
+          }
+        ]
+      },
+      {
+        "stem": "假设集合 P={2,5,7,9}，集合 Q={5,9,12}。\n\n在上述集合中，哪个元素不属于 P∩Q？",
+        "kind": "application",
+        "options": [
+          {
+            "id": "A",
+            "text": "2",
+            "reason": "2 只属于 P，不属于 Q，因此不满足交集要求的两个归属条件，确实不属于 P∩Q。",
+            "evidenceIds": [
+              "ref_b4a8a7a32cd4b0f8ad3ac69ba0b80976024e47e6adbdc23109f5b12c7cdffe5b"
+            ]
+          },
+          {
+            "id": "D",
+            "text": "12",
+            "reason": "12 属于 Q，但不属于 P，因此不满足交集条件，确实不属于 P∩Q；该选项与 A 会出现多解，因此本题不能采用这个选项组合。",
+            "evidenceIds": [
+              "ref_b4a8a7a32cd4b0f8ad3ac69ba0b80976024e47e6adbdc23109f5b12c7cdffe5b"
+            ]
+          },
+          {
+            "id": "B",
+            "text": "5",
+            "reason": "5 同时属于 P 和 Q，满足交集条件，因此属于 P∩Q，不应被选为不属于交集的元素。",
+            "evidenceIds": [
+              "ref_b4a8a7a32cd4b0f8ad3ac69ba0b80976024e47e6adbdc23109f5b12c7cdffe5b"
+            ]
+          },
+          {
+            "id": "C",
+            "text": "9",
+            "reason": "9 同时属于 P 和 Q，满足交集条件，因此属于 P∩Q，不应被选为不属于交集的元素。",
+            "evidenceIds": [
+              "ref_b4a8a7a32cd4b0f8ad3ac69ba0b80976024e47e6adbdc23109f5b12c7cdffe5b"
+            ]
+          }
+        ],
+        "correctOptionId": "A",
+        "explanation": "2 只属于 P，不属于 Q，因此不满足交集要求的两个归属条件，确实不属于 P∩Q。",
+        "hint": "先区分题干对象、适用前提和实际结果，再逐项对照所选材料中的条件与反例。",
+        "stemEvidenceIds": [
+          "ref_b4a8a7a32cd4b0f8ad3ac69ba0b80976024e47e6adbdc23109f5b12c7cdffe5b"
+        ],
+        "explanationEvidenceIds": [
+          "ref_b4a8a7a32cd4b0f8ad3ac69ba0b80976024e47e6adbdc23109f5b12c7cdffe5b"
+        ],
+        "sources": [
+          {
+            "kind": "material",
+            "materialId": "d94349d6-1f4f-473a-aab1-25e8745c5c9f",
+            "paragraph": 3,
+            "start": 171,
+            "end": 264,
+            "originalSha256": "2ffac289182e253758814c73ea7b9c0e77a3075979feb0700f9b103eb6986649",
+            "paragraphSha256": "ad6371fc407cde1df5674090d56c186ee78c7b405212a979b76db665c9278f05"
+          }
+        ],
+        "evidence": [
+          {
+            "id": "ref_b4a8a7a32cd4b0f8ad3ac69ba0b80976024e47e6adbdc23109f5b12c7cdffe5b",
+            "referenceId": "ref_b4a8a7a32cd4b0f8ad3ac69ba0b80976024e47e6adbdc23109f5b12c7cdffe5b",
+            "source": {
+              "kind": "material",
+              "materialId": "d94349d6-1f4f-473a-aab1-25e8745c5c9f",
+              "paragraph": 3
+            },
+            "quote": "交集 A∩B 包含同时属于 A 和 B 的元素。判断一个元素是否在交集中，需要两个归属条件同时成立。若 A={1,2,3}，B={3,4}，则 A∩B={3}。没有共同元素时交集为空集。"
+          }
+        ]
+      }
+    ],
+    "optionOrderVersion": 1,
+    "review": {
+      "context": {
+        "planId": "cf4a5b5e-4acd-4f10-8d3e-e9049db567ff",
+        "taskVersion": 1,
+        "objectives": [
+          {
+            "id": "intersection_union_diagnosis",
+            "label": "诊断交集与并集的区分",
+            "sources": [
+              {
+                "materialId": "d94349d6-1f4f-473a-aab1-25e8745c5c9f",
+                "paragraph": 3
+              },
+              {
+                "materialId": "d94349d6-1f4f-473a-aab1-25e8745c5c9f",
+                "paragraph": 4
+              },
+              {
+                "materialId": "d94349d6-1f4f-473a-aab1-25e8745c5c9f",
+                "paragraph": 5
+              }
+            ],
+            "requirements": [
+              {
+                "role": "concept",
+                "description": "能识别交集强调同时属于两个集合，并集强调至少属于一个集合。",
+                "independent": false
+              },
+              {
+                "role": "application",
+                "description": "能对给定有限集合正确写出交集和并集的元素。",
+                "independent": true
+              }
+            ]
+          }
+        ],
+        "purpose": {
+          "objectiveIds": [
+            "intersection_union_diagnosis"
+          ],
+          "role": "application",
+          "method": "contrast",
+          "purpose": "诊断学生能否对给定有限集合区分交集和并集：通过要求写出或判断交集与并集元素的对比题，观察是否混淆“同时属于两个集合”与“至少属于一个集合”。",
+          "priorEvidenceRefs": []
+        }
+      },
+      "checks": [
+        {
+          "objectiveIds": [
+            "intersection_union_diagnosis"
+          ],
+          "role": "application",
+          "rationale": "本题要求学生在给定有限集合中判断一个元素是否属于交集，直接检查其能否运用“同时属于两个集合”的条件，符合 application 目标中正确判断交集元素的要求。",
+          "questionIndex": 0,
+          "semanticProvenance": "model_proposal"
+        },
+        {
+          "objectiveIds": [
+            "intersection_union_diagnosis"
+          ],
+          "role": "application",
+          "rationale": "本题要求学生在给定有限集合中判断一个元素是否属于并集，直接检查其能否运用“至少属于一个集合”的条件，符合 application 目标中正确判断并集元素的要求。",
+          "questionIndex": 1,
+          "semanticProvenance": "model_proposal"
+        },
+        {
+          "objectiveIds": [
+            "intersection_union_diagnosis"
+          ],
+          "role": "application",
+          "rationale": "本题要求学生同时判断一个元素与交集、并集的关系，直接检查其是否能区分“同时属于两个集合”和“至少属于一个集合”的条件覆盖范围，符合 application 目标。",
+          "questionIndex": 2,
+          "semanticProvenance": "model_proposal"
+        },
+        {
+          "objectiveIds": [
+            "intersection_union_diagnosis"
+          ],
+          "role": "application",
+          "rationale": "本题要求学生找出不属于交集的元素，检查其是否能正确排除只属于一个集合的元素，符合 application 目标中对交集元素判断的要求。",
+          "questionIndex": 3,
+          "semanticProvenance": "model_proposal"
+        }
+      ]
+    }
+  },
+  "originalAttempt": {
+    "id": "e18b327d-99c7-400e-8e48-da45c2a92b45",
+    "quiz_id": "46212977-db38-4195-8b4e-debe4221b167",
+    "revision": 0,
+    "progress_json": [
+      {
+        "optionId": null,
+        "submitted": false,
+        "skipped": false,
+        "hinted": false,
+        "revealed": false
+      },
+      {
+        "optionId": null,
+        "submitted": false,
+        "skipped": false,
+        "hinted": false,
+        "revealed": false
+      },
+      {
+        "optionId": null,
+        "submitted": false,
+        "skipped": false,
+        "hinted": false,
+        "revealed": false
+      },
+      {
+        "optionId": null,
+        "submitted": false,
+        "skipped": false,
+        "hinted": false,
+        "revealed": false
+      }
+    ],
+    "events_json": [],
+    "evaluation_json": {
+      "correct": [
+        null,
+        null,
+        null,
+        null
+      ],
+      "score": null
+    },
+    "completed_at": null
+  }
+}
