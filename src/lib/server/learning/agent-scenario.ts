@@ -12,6 +12,7 @@ import { LearningError, type LearningRepository } from "./repository";
 import { LearningQuizRepository } from "./quiz-repository";
 import { generateLearningQuiz } from "./quiz-service";
 import { clearQuizCandidateDiagnostics } from "./quiz-candidate-diagnostics";
+import { learningValidationError } from "./generation-diagnostics";
 import { generateStudyJson, learningGenerationConfig, learningRequestChars, type LearningGenerationConfig } from "./framework-generator";
 import { LearningAgentRepository, learningAgentOperationId } from "./agent-repository";
 import { readLearningAgentScope } from "./agent-scope";
@@ -145,6 +146,12 @@ export function createLearningAgentScenario(learning: LearningRepository,
           return { value, usage: { inputTokens: captured?.inputTokens, outputTokens: captured?.outputTokens } };
         } catch (error) {
           const usage = captured ? { inputTokens: captured.inputTokens, outputTokens: captured.outputTokens } : undefined;
+          // Preserve only Learning-owned schema facts before converting the
+          // exception to an Agent failure. Never persist raw keys/values or
+          // turn an unconfirmed transport outcome into a known response.
+          if (error instanceof z.ZodError && captured?.responseStatus === "completed" && captured.parseResult === "success") {
+            diagnostics?.({ ...captured, validationResult: "failed", ...learningValidationError(error) });
+          }
           if (error instanceof AgentFailure) throw new AgentFailure(error.code, error.message, error.usage ?? usage);
           if (error instanceof LearningError) {
             if (!captured) throw error; // Local preflight, before any response diagnostics.

@@ -4,7 +4,7 @@ import { frameworkHash } from "./framework-repository";
 import { inspectLiteralSetCardinality, parseFiniteSetAtoms, finiteSetLiteralKey, findFiniteSetLiterals } from "./quiz-set-cardinality";
 import { hasQuizChoicePrefix, maskQuizEntities, quizEntityRanges } from "./quiz-entity-context";
 import type { QuizCandidateReport } from "./quiz-delivery";
-import { inspectLiteralSetMembership } from "./quiz-set-membership";
+import { inspectLiteralSetMembership, inspectLiteralSetOperationResults } from "./quiz-set-membership";
 
 export type QuizReference = { referenceId: string; source: ModelQuiz["items"][number]["sources"][number]; text: string };
 export const quizReferenceId = (binding: unknown) => `ref_${frameworkHash(JSON.stringify(binding))}`;
@@ -54,7 +54,7 @@ export const QUIZ_REJECTION_DETAILS = {
   option_identity: "选项身份不完整或引用未知选项",
   position_dependency: "解析选项引用不明确：存在组合引用或序数位置依赖",
   answer_contradiction: "解析与答案矛盾：判定与正确选项ID不符",
-  answer_not_unique: "答案不唯一：题目自认无唯一答案或显式成员条件不支持单一正确项",
+  answer_not_unique: "答案不唯一：题目自认无唯一答案或显式集合条件不支持单一正确项",
   repeated_focus: "与已保留题的考点和情境重复",
 } as const;
 export type QuizRejectionReason = keyof typeof QUIZ_REJECTION_DETAILS;
@@ -74,9 +74,12 @@ export function inspectQuizAnswerContract(question: {
   options: Array<{ id: string; text: string; reason: string }>; correctOptionId: string;
 }): QuizRejectionReason | null {
   if ([question.explanation, ...question.options.map(option => option.reason)].some(declaresNonUniqueAnswer)) return "answer_not_unique";
-  const membership = inspectLiteralSetMembership(`${question.scenario ?? ""}\n${question.stem}`, question.options, question.correctOptionId);
-  if (membership.status !== "invalid") return null;
-  return membership.code === "incorrect_answer" ? "answer_contradiction" : "answer_not_unique";
+  const stem = `${question.scenario ?? ""}\n${question.stem}`;
+  for (const check of [inspectLiteralSetMembership, inspectLiteralSetOperationResults]) {
+    const result = check(stem, question.options, question.correctOptionId);
+    if (result.status === "invalid") return result.code === "incorrect_answer" ? "answer_contradiction" : "answer_not_unique";
+  }
+  return null;
 }
 export function inspectQuizOptionExplanation(text: string, options: Array<{ id: string; text: string }>, correctId: string, context = ""): ExplanationInspection {
   const byId = new Map(options.map(o => [o.id, o]));

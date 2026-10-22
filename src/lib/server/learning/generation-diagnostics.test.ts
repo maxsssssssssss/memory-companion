@@ -22,6 +22,29 @@ it("records local validation errors without accepting arbitrary exception text",
   expect(learningValidationError(new Error("SECRET_PROVIDER_BODY"))).toEqual({});
 });
 
+it("identifies misplaced schema-owned keys while redacting arbitrary key names and all values", () => {
+  const parsed = z.object({ items: z.array(z.unknown()) }).strict().safeParse({ items: [],
+    reviewCheck: { rationale: "PRIVATE_ANSWER" }, explanation: "PRIVATE_TEXT", "sk-PRIVATE_SECRET_KEY": "SECRET_VALUE" });
+  expect(parsed.success).toBe(false);
+  if (parsed.success) return;
+  const diagnostics = learningValidationError(parsed.error);
+  expect(diagnostics).toEqual({ validationIssueCount: 1, validationIssues: [{ path: "$", code: "unrecognized_keys",
+    unrecognizedFields: ["reviewCheck", "explanation"], unrecognizedFieldCount: 3 }] });
+  expect(learningValidationDiagnostics({ validationResult: "failed", ...diagnostics })).toEqual(diagnostics);
+  expect(JSON.stringify(diagnostics)).not.toMatch(/PRIVATE|SECRET|sk-/);
+  expect(learningValidationDiagnostics({ validationResult: "failed", validationIssues: [{ path: "$", code: "unrecognized_keys",
+    unrecognizedFields: ["Cookie: private-session", "items", "PRIVATE_TEXT"], unrecognizedFieldCount: 3 }] }))
+    .toEqual({ validationIssues: [{ path: "$", code: "unrecognized_keys", unrecognizedFields: ["items"], unrecognizedFieldCount: 3 }] });
+});
+
+it("bounds field diagnostics and ignores them for other failure types", () => {
+  const extra = { unrecognizedFields: Array.from({ length: 30 }, () => "items"), unrecognizedFieldCount: 30 };
+  expect(learningValidationDiagnostics({ validationResult: "failed", validationIssues: [{ path: "$", code: "unrecognized_keys", ...extra }] }))
+    .toEqual({ validationIssues: [{ path: "$", code: "unrecognized_keys", unrecognizedFields: ["items"], unrecognizedFieldCount: 30 }] });
+  expect(learningValidationDiagnostics({ validationResult: "failed", validationIssues: [{ path: "$", code: "invalid_type", ...extra }] }))
+    .toEqual({ validationIssues: [{ path: "$", code: "invalid_type" }] });
+});
+
 it("keeps reading and selection schema paths without saving source values", () => {
   const result = z.object({ items: z.array(z.object({ context: z.string(), windows: z.array(z.string()), count: z.number() })), limitation: z.string().nullable() }).safeParse({ items: [{ context: 9, windows: [false], count: "PRIVATE" }] });
   expect(result.success).toBe(false);

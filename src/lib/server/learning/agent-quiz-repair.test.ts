@@ -46,12 +46,15 @@ function response(input: unknown, mode: "valid" | "equivalent" | "partial" | "fo
   return { contractVersion: "references-v2", referenceScope: wire.taskContext.referenceScope, title: mode === "format" ? 42 : "[合成] 条件练习", reason: null,
     materialPlan: [{ material: 1, contribution: "必要前提", references: refs }], items: mode === "partial" ? [item, invalid] : [mode === "equivalent" ? invalid : item] };
 }
-function generator(choose: (wire: Wire, invocation: number) => "valid" | "equivalent" | "partial" | "format" | AgentFailure) {
+function generator(choose: (wire: Wire, invocation: number) => "valid" | "equivalent" | "partial" | "format" | "unexpected-root" | AgentFailure) {
   let invocation = 0;
   return vi.fn(async (_config, name, _prompt, input, _schema, _signal, diagnostic) => {
     diagnostic?.({ responseStatus: "completed", responseTextLength: 100, parseResult: "success", validationResult: "success", inputTokens: 31, outputTokens: 17 });
     if (name === "learning_agent_explanation") return { materialAnswer: "[离线] 必要前提未满足，不能直接应用规则。先检查前提。", supplements: [], items: [{ materialId, paragraph: 1 }] };
     const mode = choose(input as Wire, ++invocation); if (mode instanceof AgentFailure) throw mode;
+    // Synthetic malformed envelope: emulate the real transport's schema.parse
+    // before returning to the Quiz service. This is NOT the missing DS payload.
+    if (mode === "unexpected-root") return _schema.parse({ ...response(input), reviewCheck: { rationale: "PRIVATE_VALUE" } });
     return response(input, mode);
   }) as unknown as ReturnType<typeof vi.fn<typeof generateStudyJson>>;
 }
@@ -80,6 +83,32 @@ it("carries the actual rejection and original purpose into one automatic repair,
     expect(assessLearningCompletion(learning, result).outcome).not.toBe("check_passed");
     await runtime.advance("owner", task.id); expect(generate).toHaveBeenCalledTimes(2);
     expect(globalThis.fetch).not.toHaveBeenCalled();
+  } finally { runtime.close(); }
+});
+
+it.each([false, true])("a transport envelope rejection has precise private diagnostics and one budgeted repair (exhausted=%s)", async exhausted => {
+  if (exhausted) seed({ maxCalls: 2 });
+  const generate = generator((wire, invocation) => {
+    if (invocation === 1) return "unexpected-root";
+    expect(wire.taskContext.repairContext).toMatchObject({ attempt: 1, purpose, rejected: [{ code: "format", count: 1 }] });
+    return "valid";
+  });
+  const choose = decide(() => quiz()), runtime = engine(generate, choose);
+  try {
+    const result = await runtime.advance("owner", task.id);
+    expect(result).toMatchObject({ status: exhausted ? "budget_exhausted" : "waiting", usage: { calls: exhausted ? 2 : 4, unknownUsageCalls: 0 } });
+    const failed = learning.database.prepare("SELECT diagnostics_json FROM learning_generation_parts WHERE state='failed'").get() as { diagnostics_json: string };
+    expect(JSON.parse(failed.diagnostics_json)).toMatchObject({ responseStatus: "completed", validationResult: "failed",
+      validationIssues: [{ path: "$", code: "unrecognized_keys", unrecognizedFields: ["reviewCheck"], unrecognizedFieldCount: 1 }] });
+    expect(failed.diagnostics_json).not.toContain("PRIVATE_VALUE");
+    const runs = new LearningQuizRepository(learning).list(pageId);
+    expect(JSON.stringify(runs)).not.toMatch(/unrecognizedFields|reviewCheck|PRIVATE_VALUE/);
+    expect(generate).toHaveBeenCalledTimes(exhausted ? 1 : 2);
+    expect(claims()).toHaveLength(exhausted ? 0 : 1);
+    expect(learning.database.prepare("SELECT COUNT(*) n FROM learning_generation_parts WHERE state='unknown'").get()).toEqual({ n: 0 });
+    await runtime.advance("owner", task.id);
+    expect(generate).toHaveBeenCalledTimes(exhausted ? 1 : 2);
+    expect(assessLearningCompletion(learning, result).outcome).not.toBe("check_passed");
   } finally { runtime.close(); }
 });
 

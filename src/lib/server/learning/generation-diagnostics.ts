@@ -1,10 +1,12 @@
 import { ZodError } from "zod";
 
 // Learning-owned schema paths only. Never persist messages, received values,
-// unrecognised property names, Provider bodies or private reasoning.
+// arbitrary property names, Provider bodies or private reasoning. A schema-owned
+// field in the wrong object can be named; all other unknown keys are count-only.
 const fields = new Set(("overview chapters nodes id title explanation supplement sources materialId paragraph " +
   "items context limitation windows count contractVersion referenceScope materialPlan material contribution references focus scenario stem kind " +
-  "options text reason reasonParts explanationParts evidenceIds stemEvidenceIds explanationEvidenceIds correctOptionId hint").split(" "));
+  "options text reason reasonParts explanationParts evidenceIds stemEvidenceIds explanationEvidenceIds correctOptionId hint " +
+  "reviewCheck objectiveIds role rationale").split(" "));
 const codes = new Set("missing_field invalid_type invalid_enum_value too_small too_big invalid_string unrecognized_keys invalid_union invalid_union_discriminator invalid_literal not_multiple_of not_finite custom".split(" "));
 const object = (v: unknown): Record<string, unknown> | null => v !== null && typeof v === "object" && !Array.isArray(v) ? v as Record<string, unknown> : null;
 function safePath(value: unknown) {
@@ -20,7 +22,13 @@ export function learningValidationDiagnostics(input: unknown): Record<string, un
   const all = Array.isArray(value.validationIssues) ? value.validationIssues : [];
   const issues = all.slice(0, 10).flatMap(item => {
     const issue = object(item);
-    return issue && typeof issue.code === "string" && codes.has(issue.code) ? [{ path: safePath(issue.path), code: issue.code }] : [];
+    if (!issue || typeof issue.code !== "string" || !codes.has(issue.code)) return [];
+    const names = issue.code === "unrecognized_keys" && Array.isArray(issue.unrecognizedFields)
+      ? [...new Set(issue.unrecognizedFields.filter((field): field is string => typeof field === "string" && fields.has(field)))].slice(0, 12) : [];
+    const count = issue.unrecognizedFieldCount;
+    const countValid = issue.code === "unrecognized_keys" && typeof count === "number" && Number.isSafeInteger(count) && count >= names.length && count > 0;
+    return [{ path: safePath(issue.path), code: issue.code,
+      ...(countValid ? { unrecognizedFields: names, unrecognizedFieldCount: count } : {}) }];
   });
   const count = value.validationIssueCount;
   return {
@@ -35,6 +43,7 @@ export function learningValidationError(error: unknown) {
   return learningValidationDiagnostics({ validationResult: "failed", validationIssueCount: error.issues.length,
     validationIssues: error.issues.map(issue => ({
       path: issue.path.reduce<string>((p, part) => typeof part === "number" ? `${p}[${part}]` : `${p ? `${p}.` : ""}${part}`, "") || "$",
-      code: issue.code === "invalid_type" && issue.received === "undefined" ? "missing_field" : issue.code
+      code: issue.code === "invalid_type" && issue.received === "undefined" ? "missing_field" : issue.code,
+      ...(issue.code === "unrecognized_keys" ? { unrecognizedFields: issue.keys, unrecognizedFieldCount: issue.keys.length } : {})
     })) });
 }

@@ -1,0 +1,741 @@
+{
+  "provenance": {
+    "sha": "0b28c3e0c18274271cabf6e93b3e46a950093b57",
+    "exportSha256": "142971e29127f0a3497de7bc6a143e5abe5817156149fe7f9bf65bc8ca9fe2d9",
+    "layer": "Unmodified saved decoded synthetic candidates, not original HTTP"
+  },
+  "source": {
+    "id": "d94349d6-1f4f-473a-aab1-25e8745c5c9f",
+    "page_id": "275663be-dff4-4fbe-9ccd-be0dc65b08c2",
+    "title": "合成教材 · 集合、交集与并集",
+    "kind": "text",
+    "original": "合成教材：集合、交集与并集。本材料由验收脚本手工编写，仅用于隔离软件验证；不是教学效果研究或真实学生资料。以下定义与算例按通常的有限集合约定。\n\n集合由确定的元素组成，花括号表示一个集合。同一元素重复写出不会增加元素个数，元素的书写顺序不影响集合。例如 {1, 2, 2} 与 {2, 1} 都是含两个元素的集合。空集 ∅ 不含任何元素。\n\n交集 A∩B 包含同时属于 A 和 B 的元素。判断一个元素是否在交集中，需要两个归属条件同时成立。若 A={1,2,3}，B={3,4}，则 A∩B={3}。没有共同元素时交集为空集。\n\n并集 A∪B 包含属于 A 或属于 B 的元素，这里的或允许同时属于二者。一个元素只出现一次。若 A={1,2,3}，B={3,4}，则 A∪B={1,2,3,4}。把元素 3 写两次不构成两个不同元素。\n\n比较交集和并集：共同元素 3 同时属于上例的交集与并集；只属于 A 的元素 1 在并集中而不在交集中。交集强调共同满足，并集允许满足至少一个归属条件。A∩B 总是 A∪B 的子集。\n\n若 C={红,蓝}，D={蓝,绿}，则 C∩D={蓝}，C∪D={红,蓝,绿}。若 E={5}，F={6}，则 E∩F=∅，E∪F={5,6}。空交集不代表两个集合都为空。\n\n有限集合的并集元素个数满足 |A∪B|=|A|+|B|−|A∩B|。上例 |A|=3，|B|=2，|A∩B|=1，因此 |A∪B|=4。减去交集数量是为消除对共同元素的一次重复计数；不能把交集数量当作并集数量。",
+    "sha256": "2ffac289182e253758814c73ea7b9c0e77a3075979feb0700f9b103eb6986649"
+  },
+  "goal": "我总分不清交集和并集，帮我练练。",
+  "settings": {
+    "materialIds": [
+      "d94349d6-1f4f-473a-aab1-25e8745c5c9f"
+    ],
+    "chapterIds": [],
+    "nodeIds": [],
+    "includeNotes": false,
+    "includeSupplements": false,
+    "count": 3,
+    "difficulty": "basic"
+  },
+  "reviewContext": {
+    "planId": "9d0c5dfd-700e-458d-877a-d09a6520d8eb",
+    "taskVersion": 1,
+    "objectives": [
+      {
+        "id": "set_union_intersection_diagnosis",
+        "label": "诊断交集与并集混淆点",
+        "sources": [
+          {
+            "materialId": "d94349d6-1f4f-473a-aab1-25e8745c5c9f",
+            "paragraph": 3
+          },
+          {
+            "materialId": "d94349d6-1f4f-473a-aab1-25e8745c5c9f",
+            "paragraph": 4
+          },
+          {
+            "materialId": "d94349d6-1f4f-473a-aab1-25e8745c5c9f",
+            "paragraph": 5
+          }
+        ],
+        "requirements": [
+          {
+            "role": "concept",
+            "description": "能从具体集合例子中区分交集取共同元素、并集取至少属于一个集合的元素，并指出共同元素同时出现在两者中。",
+            "independent": false
+          },
+          {
+            "role": "application",
+            "description": "给定两个有限集合，能正确写出交集与并集，不把共同元素重复计数。",
+            "independent": false
+          },
+          {
+            "role": "boundary",
+            "description": "在无共同元素或空交集情境下，能判断交集为空集而并集含两侧元素。",
+            "independent": false
+          }
+        ]
+      }
+    ],
+    "purpose": {
+      "objectiveIds": [
+        "set_union_intersection_diagnosis"
+      ],
+      "role": "concept",
+      "method": "retrieval",
+      "purpose": "通过基础选择题诊断用户是否能区分交集取共同元素、并集取至少属于一个集合的元素。",
+      "priorEvidenceRefs": []
+    }
+  },
+  "plan": {
+    "kind": "diagnosis",
+    "objectives": [
+      {
+        "id": "set_union_intersection_diagnosis",
+        "label": "诊断交集与并集混淆点",
+        "sources": [
+          {
+            "materialId": "d94349d6-1f4f-473a-aab1-25e8745c5c9f",
+            "paragraph": 3
+          },
+          {
+            "materialId": "d94349d6-1f4f-473a-aab1-25e8745c5c9f",
+            "paragraph": 4
+          },
+          {
+            "materialId": "d94349d6-1f4f-473a-aab1-25e8745c5c9f",
+            "paragraph": 5
+          }
+        ],
+        "requirements": [
+          {
+            "role": "concept",
+            "description": "能从具体集合例子中区分交集取共同元素、并集取至少属于一个集合的元素，并指出共同元素同时出现在两者中。",
+            "independent": false
+          },
+          {
+            "role": "application",
+            "description": "给定两个有限集合，能正确写出交集与并集，不把共同元素重复计数。",
+            "independent": false
+          },
+          {
+            "role": "boundary",
+            "description": "在无共同元素或空交集情境下，能判断交集为空集而并集含两侧元素。",
+            "independent": false
+          }
+        ]
+      }
+    ],
+    "schemaVersion": 1,
+    "taskVersion": 1,
+    "sourceFingerprint": "9ca8e861583eb2fb11ab2085220c5d45295f111fa998bd98d873489439935ad3",
+    "goal": "我总分不清交集和并集，帮我练练。",
+    "proposedBy": "model",
+    "id": "9d0c5dfd-700e-458d-877a-d09a6520d8eb"
+  },
+  "decoded": {
+    "contractVersion": "references-v2",
+    "title": "交集与并集概念辨析",
+    "reason": null,
+    "items": [
+      {
+        "stem": "对于集合 A={1,2,3} 和 B={3,4}，关于交集与并集的构成规则，下列说法正确的是？",
+        "kind": "concept",
+        "scenario": null,
+        "options": [
+          {
+            "id": "A",
+            "text": "交集要求元素同时属于 A 和 B，并集允许元素至少属于 A 或 B 中的一个。",
+            "reason": "正确。交集 A∩B 需要两个归属条件同时成立；并集 A∪B 包含属于 A 或属于 B 的元素，这里的“或”允许同时属于二者。",
+            "evidenceIds": [
+              "ref_b4a8a7a32cd4b0f8ad3ac69ba0b80976024e47e6adbdc23109f5b12c7cdffe5b",
+              "ref_4d1858bd22a3363be7f0030c408d759e3bdbe9e20a28adacf1b7b7746f16d253"
+            ]
+          },
+          {
+            "id": "B",
+            "text": "交集包含所有只属于 A 或只属于 B 的元素，并集只包含同时属于两者的元素。",
+            "reason": "错误。材料说明交集强调共同满足，并集允许满足至少一个归属条件；只属于 A 的元素 1 在并集中而不在交集中。",
+            "evidenceIds": [
+              "ref_b4a8a7a32cd4b0f8ad3ac69ba0b80976024e47e6adbdc23109f5b12c7cdffe5b",
+              "ref_4d1858bd22a3363be7f0030c408d759e3bdbe9e20a28adacf1b7b7746f16d253",
+              "ref_9f763fada4f32d7e53c6288a2bc69dd2f895c7922ac96416ddaa9f88d504fd05"
+            ]
+          },
+          {
+            "id": "C",
+            "text": "共同元素只属于交集，不属于并集。",
+            "reason": "错误。共同元素 3 同时属于上例的交集与并集，因此不能认为它只属于交集而不属于并集。",
+            "evidenceIds": [
+              "ref_9f763fada4f32d7e53c6288a2bc69dd2f895c7922ac96416ddaa9f88d504fd05"
+            ]
+          },
+          {
+            "id": "D",
+            "text": "并集中的每个元素都必须同时属于 A 和 B。",
+            "reason": "错误。并集允许元素至少属于 A 或 B 中的一个，例如只属于 A 的元素 1 也属于并集。",
+            "evidenceIds": [
+              "ref_4d1858bd22a3363be7f0030c408d759e3bdbe9e20a28adacf1b7b7746f16d253",
+              "ref_9f763fada4f32d7e53c6288a2bc69dd2f895c7922ac96416ddaa9f88d504fd05"
+            ]
+          }
+        ],
+        "correctOptionId": "A",
+        "explanation": "正确。交集 A∩B 需要两个归属条件同时成立；并集 A∪B 包含属于 A 或属于 B 的元素，这里的“或”允许同时属于二者。",
+        "hint": "先找出题干所问的概念，再对照材料中的定义和适用范围，逐项比较差别。",
+        "stemEvidenceIds": [
+          "ref_b4a8a7a32cd4b0f8ad3ac69ba0b80976024e47e6adbdc23109f5b12c7cdffe5b",
+          "ref_4d1858bd22a3363be7f0030c408d759e3bdbe9e20a28adacf1b7b7746f16d253",
+          "ref_9f763fada4f32d7e53c6288a2bc69dd2f895c7922ac96416ddaa9f88d504fd05"
+        ],
+        "explanationEvidenceIds": [
+          "ref_b4a8a7a32cd4b0f8ad3ac69ba0b80976024e47e6adbdc23109f5b12c7cdffe5b",
+          "ref_4d1858bd22a3363be7f0030c408d759e3bdbe9e20a28adacf1b7b7746f16d253"
+        ]
+      },
+      {
+        "stem": "设 A={1,2,3}，B={3,4}。下列集合运算结果正确的是？",
+        "kind": "application",
+        "scenario": null,
+        "options": [
+          {
+            "id": "A",
+            "text": "A∩B={3}。",
+            "reason": "正确。判断元素是否在交集中需要两个归属条件同时成立，只有 3 同时属于 A 和 B，所以 A∩B={3}。",
+            "evidenceIds": [
+              "ref_b4a8a7a32cd4b0f8ad3ac69ba0b80976024e47e6adbdc23109f5b12c7cdffe5b"
+            ]
+          },
+          {
+            "id": "B",
+            "text": "A∪B={1,2,3,3,4}。",
+            "reason": "错误。并集中一个元素只出现一次，把元素 3 写两次不构成两个不同元素。",
+            "evidenceIds": [
+              "ref_4d1858bd22a3363be7f0030c408d759e3bdbe9e20a28adacf1b7b7746f16d253"
+            ]
+          },
+          {
+            "id": "C",
+            "text": "A∩B={1,2,3}。",
+            "reason": "错误。交集要求同时属于 A 和 B，1 和 2 只属于 A，不属于 B，因此不在交集中。",
+            "evidenceIds": [
+              "ref_b4a8a7a32cd4b0f8ad3ac69ba0b80976024e47e6adbdc23109f5b12c7cdffe5b",
+              "ref_9f763fada4f32d7e53c6288a2bc69dd2f895c7922ac96416ddaa9f88d504fd05"
+            ]
+          },
+          {
+            "id": "D",
+            "text": "A∪B={3}。",
+            "reason": "错误。并集包含属于 A 或属于 B 的元素，1、2、4 也属于并集，不能只保留共同元素 3。",
+            "evidenceIds": [
+              "ref_4d1858bd22a3363be7f0030c408d759e3bdbe9e20a28adacf1b7b7746f16d253",
+              "ref_9f763fada4f32d7e53c6288a2bc69dd2f895c7922ac96416ddaa9f88d504fd05"
+            ]
+          }
+        ],
+        "correctOptionId": "A",
+        "explanation": "正确。判断元素是否在交集中需要两个归属条件同时成立，只有 3 同时属于 A 和 B，所以 A∩B={3}。",
+        "hint": "先区分题干对象、适用前提和实际结果，再逐项对照所选材料中的条件与反例。",
+        "stemEvidenceIds": [
+          "ref_b4a8a7a32cd4b0f8ad3ac69ba0b80976024e47e6adbdc23109f5b12c7cdffe5b",
+          "ref_4d1858bd22a3363be7f0030c408d759e3bdbe9e20a28adacf1b7b7746f16d253"
+        ],
+        "explanationEvidenceIds": [
+          "ref_b4a8a7a32cd4b0f8ad3ac69ba0b80976024e47e6adbdc23109f5b12c7cdffe5b"
+        ]
+      },
+      {
+        "stem": "对于任意集合 A 和 B，关于交集 A∩B 与并集 A∪B 的关系，下列说法正确的是？",
+        "kind": "relationship",
+        "scenario": null,
+        "options": [
+          {
+            "id": "A",
+            "text": "A∩B 总是 A∪B 的子集。",
+            "reason": "正确。材料比较交集和并集时说明，A∩B 总是 A∪B 的子集。",
+            "evidenceIds": [
+              "ref_9f763fada4f32d7e53c6288a2bc69dd2f895c7922ac96416ddaa9f88d504fd05"
+            ]
+          },
+          {
+            "id": "B",
+            "text": "A∪B 总是 A∩B 的子集。",
+            "reason": "错误。材料明确的包含关系是 A∩B 总是 A∪B 的子集，而不是反向关系。",
+            "evidenceIds": [
+              "ref_9f763fada4f32d7e53c6288a2bc69dd2f895c7922ac96416ddaa9f88d504fd05"
+            ]
+          },
+          {
+            "id": "C",
+            "text": "共同元素属于交集时不必然属于并集。",
+            "reason": "错误。共同元素 3 同时属于上例的交集与并集，说明共同元素属于交集时也属于并集。",
+            "evidenceIds": [
+              "ref_9f763fada4f32d7e53c6288a2bc69dd2f895c7922ac96416ddaa9f88d504fd05"
+            ]
+          },
+          {
+            "id": "D",
+            "text": "只属于 A 的元素属于交集但不属于并集。",
+            "reason": "错误。只属于 A 的元素 1 在并集中而不在交集中，方向表述反了。",
+            "evidenceIds": [
+              "ref_9f763fada4f32d7e53c6288a2bc69dd2f895c7922ac96416ddaa9f88d504fd05"
+            ]
+          }
+        ],
+        "correctOptionId": "A",
+        "explanation": "正确。材料比较交集和并集时说明，A∩B 总是 A∪B 的子集。",
+        "hint": "分别找出关系两端的依据，检查它们的联系是否需要额外条件，以及是否存在例外。",
+        "stemEvidenceIds": [
+          "ref_9f763fada4f32d7e53c6288a2bc69dd2f895c7922ac96416ddaa9f88d504fd05"
+        ],
+        "explanationEvidenceIds": [
+          "ref_9f763fada4f32d7e53c6288a2bc69dd2f895c7922ac96416ddaa9f88d504fd05"
+        ]
+      }
+    ],
+    "reviewCandidates": [
+      {
+        "questionKey": "4ca92d6a40615935fea43b2c6f989c882f29bed9810bfcc503832ce76986c4cd",
+        "check": {
+          "objectiveIds": [
+            "set_union_intersection_diagnosis"
+          ],
+          "role": "concept",
+          "rationale": "本题直接考查交集与并集的基本概念区分：交集需要同时属于两个集合，并集允许至少属于一个集合。题干使用材料中的具体例子作为背景，要求学生识别构成规则而非仅重复计算结果，符合该目标在 concept 角色下从具体集合例子中区分两者规则的要求。选项覆盖了把交集理解为只属于一侧、把并集理解为交集、以及把共同元素排除出并集的常见混淆方向。"
+        }
+      },
+      {
+        "questionKey": "a71c779af6882f4509ae1565f9e2e5d0a6ac5e5e2abd8eff7d504211443f06c8",
+        "check": {
+          "objectiveIds": [
+            "set_union_intersection_diagnosis"
+          ],
+          "role": "concept",
+          "rationale": "本题通过具体集合 A={1,2,3} 和 B={3,4} 的运算结果检查学生是否真正理解交集取共同元素、并集取至少属于一个集合的元素。干扰项分别考察了并集中重复书写共同元素、把交集扩大为整个 A 以及把并集误当作交集的典型混淆，覆盖该目标在 application 情境下正确写出交集与并集的要求，同时保持 role 为 concept。"
+        }
+      },
+      {
+        "questionKey": "d2e13fc69dbd5a2c91b65792fa368b32058f03d751ef722d6d1bf935c1c03469",
+        "check": {
+          "objectiveIds": [
+            "set_union_intersection_diagnosis"
+          ],
+          "role": "concept",
+          "rationale": "本题检查交集是并集子集这一概念关系，并利用共同元素同时属于两者、只属于一侧的元素只在并集而不在交集中的事实排除常见混淆。该题与前面两题区分成概念规则、具体运算结果与集合间关系三个互补考点，符合目标在 concept 角色下区分交集与并集的要求。"
+        }
+      }
+    ]
+  },
+  "saved": {
+    "title": "交集与并集概念辨析",
+    "reason": null,
+    "questions": [
+      {
+        "stem": "对于集合 A={1,2,3} 和 B={3,4}，关于交集与并集的构成规则，下列说法正确的是？",
+        "kind": "concept",
+        "options": [
+          {
+            "id": "D",
+            "text": "并集中的每个元素都必须同时属于 A 和 B。",
+            "reason": "错误。并集允许元素至少属于 A 或 B 中的一个，例如只属于 A 的元素 1 也属于并集。",
+            "evidenceIds": [
+              "ref_4d1858bd22a3363be7f0030c408d759e3bdbe9e20a28adacf1b7b7746f16d253",
+              "ref_9f763fada4f32d7e53c6288a2bc69dd2f895c7922ac96416ddaa9f88d504fd05"
+            ]
+          },
+          {
+            "id": "A",
+            "text": "交集要求元素同时属于 A 和 B，并集允许元素至少属于 A 或 B 中的一个。",
+            "reason": "正确。交集 A∩B 需要两个归属条件同时成立；并集 A∪B 包含属于 A 或属于 B 的元素，这里的“或”允许同时属于二者。",
+            "evidenceIds": [
+              "ref_b4a8a7a32cd4b0f8ad3ac69ba0b80976024e47e6adbdc23109f5b12c7cdffe5b",
+              "ref_4d1858bd22a3363be7f0030c408d759e3bdbe9e20a28adacf1b7b7746f16d253"
+            ]
+          },
+          {
+            "id": "B",
+            "text": "交集包含所有只属于 A 或只属于 B 的元素，并集只包含同时属于两者的元素。",
+            "reason": "错误。材料说明交集强调共同满足，并集允许满足至少一个归属条件；只属于 A 的元素 1 在并集中而不在交集中。",
+            "evidenceIds": [
+              "ref_b4a8a7a32cd4b0f8ad3ac69ba0b80976024e47e6adbdc23109f5b12c7cdffe5b",
+              "ref_4d1858bd22a3363be7f0030c408d759e3bdbe9e20a28adacf1b7b7746f16d253",
+              "ref_9f763fada4f32d7e53c6288a2bc69dd2f895c7922ac96416ddaa9f88d504fd05"
+            ]
+          },
+          {
+            "id": "C",
+            "text": "共同元素只属于交集，不属于并集。",
+            "reason": "错误。共同元素 3 同时属于上例的交集与并集，因此不能认为它只属于交集而不属于并集。",
+            "evidenceIds": [
+              "ref_9f763fada4f32d7e53c6288a2bc69dd2f895c7922ac96416ddaa9f88d504fd05"
+            ]
+          }
+        ],
+        "correctOptionId": "A",
+        "explanation": "正确。交集 A∩B 需要两个归属条件同时成立；并集 A∪B 包含属于 A 或属于 B 的元素，这里的“或”允许同时属于二者。",
+        "hint": "先找出题干所问的概念，再对照材料中的定义和适用范围，逐项比较差别。",
+        "stemEvidenceIds": [
+          "ref_b4a8a7a32cd4b0f8ad3ac69ba0b80976024e47e6adbdc23109f5b12c7cdffe5b",
+          "ref_4d1858bd22a3363be7f0030c408d759e3bdbe9e20a28adacf1b7b7746f16d253",
+          "ref_9f763fada4f32d7e53c6288a2bc69dd2f895c7922ac96416ddaa9f88d504fd05"
+        ],
+        "explanationEvidenceIds": [
+          "ref_b4a8a7a32cd4b0f8ad3ac69ba0b80976024e47e6adbdc23109f5b12c7cdffe5b",
+          "ref_4d1858bd22a3363be7f0030c408d759e3bdbe9e20a28adacf1b7b7746f16d253"
+        ],
+        "sources": [
+          {
+            "kind": "material",
+            "materialId": "d94349d6-1f4f-473a-aab1-25e8745c5c9f",
+            "paragraph": 3,
+            "start": 171,
+            "end": 264,
+            "originalSha256": "2ffac289182e253758814c73ea7b9c0e77a3075979feb0700f9b103eb6986649",
+            "paragraphSha256": "ad6371fc407cde1df5674090d56c186ee78c7b405212a979b76db665c9278f05"
+          },
+          {
+            "kind": "material",
+            "materialId": "d94349d6-1f4f-473a-aab1-25e8745c5c9f",
+            "paragraph": 4,
+            "start": 266,
+            "end": 368,
+            "originalSha256": "2ffac289182e253758814c73ea7b9c0e77a3075979feb0700f9b103eb6986649",
+            "paragraphSha256": "1a07aa6c11d316711dd23dcc2b48d65699491b774c239e151aaa0bb889f665eb"
+          },
+          {
+            "kind": "material",
+            "materialId": "d94349d6-1f4f-473a-aab1-25e8745c5c9f",
+            "paragraph": 5,
+            "start": 370,
+            "end": 460,
+            "originalSha256": "2ffac289182e253758814c73ea7b9c0e77a3075979feb0700f9b103eb6986649",
+            "paragraphSha256": "913907624e97e012ad7820ed0a1d875f6b012c5efb512a9743e353d3bf9763be"
+          }
+        ],
+        "evidence": [
+          {
+            "id": "ref_b4a8a7a32cd4b0f8ad3ac69ba0b80976024e47e6adbdc23109f5b12c7cdffe5b",
+            "referenceId": "ref_b4a8a7a32cd4b0f8ad3ac69ba0b80976024e47e6adbdc23109f5b12c7cdffe5b",
+            "source": {
+              "kind": "material",
+              "materialId": "d94349d6-1f4f-473a-aab1-25e8745c5c9f",
+              "paragraph": 3
+            },
+            "quote": "交集 A∩B 包含同时属于 A 和 B 的元素。判断一个元素是否在交集中，需要两个归属条件同时成立。若 A={1,2,3}，B={3,4}，则 A∩B={3}。没有共同元素时交集为空集。"
+          },
+          {
+            "id": "ref_4d1858bd22a3363be7f0030c408d759e3bdbe9e20a28adacf1b7b7746f16d253",
+            "referenceId": "ref_4d1858bd22a3363be7f0030c408d759e3bdbe9e20a28adacf1b7b7746f16d253",
+            "source": {
+              "kind": "material",
+              "materialId": "d94349d6-1f4f-473a-aab1-25e8745c5c9f",
+              "paragraph": 4
+            },
+            "quote": "并集 A∪B 包含属于 A 或属于 B 的元素，这里的或允许同时属于二者。一个元素只出现一次。若 A={1,2,3}，B={3,4}，则 A∪B={1,2,3,4}。把元素 3 写两次不构成两个不同元素。"
+          },
+          {
+            "id": "ref_9f763fada4f32d7e53c6288a2bc69dd2f895c7922ac96416ddaa9f88d504fd05",
+            "referenceId": "ref_9f763fada4f32d7e53c6288a2bc69dd2f895c7922ac96416ddaa9f88d504fd05",
+            "source": {
+              "kind": "material",
+              "materialId": "d94349d6-1f4f-473a-aab1-25e8745c5c9f",
+              "paragraph": 5
+            },
+            "quote": "比较交集和并集：共同元素 3 同时属于上例的交集与并集；只属于 A 的元素 1 在并集中而不在交集中。交集强调共同满足，并集允许满足至少一个归属条件。A∩B 总是 A∪B 的子集。"
+          }
+        ]
+      },
+      {
+        "stem": "设 A={1,2,3}，B={3,4}。下列集合运算结果正确的是？",
+        "kind": "application",
+        "options": [
+          {
+            "id": "B",
+            "text": "A∪B={1,2,3,3,4}。",
+            "reason": "错误。并集中一个元素只出现一次，把元素 3 写两次不构成两个不同元素。",
+            "evidenceIds": [
+              "ref_4d1858bd22a3363be7f0030c408d759e3bdbe9e20a28adacf1b7b7746f16d253"
+            ]
+          },
+          {
+            "id": "A",
+            "text": "A∩B={3}。",
+            "reason": "正确。判断元素是否在交集中需要两个归属条件同时成立，只有 3 同时属于 A 和 B，所以 A∩B={3}。",
+            "evidenceIds": [
+              "ref_b4a8a7a32cd4b0f8ad3ac69ba0b80976024e47e6adbdc23109f5b12c7cdffe5b"
+            ]
+          },
+          {
+            "id": "D",
+            "text": "A∪B={3}。",
+            "reason": "错误。并集包含属于 A 或属于 B 的元素，1、2、4 也属于并集，不能只保留共同元素 3。",
+            "evidenceIds": [
+              "ref_4d1858bd22a3363be7f0030c408d759e3bdbe9e20a28adacf1b7b7746f16d253",
+              "ref_9f763fada4f32d7e53c6288a2bc69dd2f895c7922ac96416ddaa9f88d504fd05"
+            ]
+          },
+          {
+            "id": "C",
+            "text": "A∩B={1,2,3}。",
+            "reason": "错误。交集要求同时属于 A 和 B，1 和 2 只属于 A，不属于 B，因此不在交集中。",
+            "evidenceIds": [
+              "ref_b4a8a7a32cd4b0f8ad3ac69ba0b80976024e47e6adbdc23109f5b12c7cdffe5b",
+              "ref_9f763fada4f32d7e53c6288a2bc69dd2f895c7922ac96416ddaa9f88d504fd05"
+            ]
+          }
+        ],
+        "correctOptionId": "A",
+        "explanation": "正确。判断元素是否在交集中需要两个归属条件同时成立，只有 3 同时属于 A 和 B，所以 A∩B={3}。",
+        "hint": "先区分题干对象、适用前提和实际结果，再逐项对照所选材料中的条件与反例。",
+        "stemEvidenceIds": [
+          "ref_b4a8a7a32cd4b0f8ad3ac69ba0b80976024e47e6adbdc23109f5b12c7cdffe5b",
+          "ref_4d1858bd22a3363be7f0030c408d759e3bdbe9e20a28adacf1b7b7746f16d253"
+        ],
+        "explanationEvidenceIds": [
+          "ref_b4a8a7a32cd4b0f8ad3ac69ba0b80976024e47e6adbdc23109f5b12c7cdffe5b"
+        ],
+        "sources": [
+          {
+            "kind": "material",
+            "materialId": "d94349d6-1f4f-473a-aab1-25e8745c5c9f",
+            "paragraph": 3,
+            "start": 171,
+            "end": 264,
+            "originalSha256": "2ffac289182e253758814c73ea7b9c0e77a3075979feb0700f9b103eb6986649",
+            "paragraphSha256": "ad6371fc407cde1df5674090d56c186ee78c7b405212a979b76db665c9278f05"
+          },
+          {
+            "kind": "material",
+            "materialId": "d94349d6-1f4f-473a-aab1-25e8745c5c9f",
+            "paragraph": 4,
+            "start": 266,
+            "end": 368,
+            "originalSha256": "2ffac289182e253758814c73ea7b9c0e77a3075979feb0700f9b103eb6986649",
+            "paragraphSha256": "1a07aa6c11d316711dd23dcc2b48d65699491b774c239e151aaa0bb889f665eb"
+          },
+          {
+            "kind": "material",
+            "materialId": "d94349d6-1f4f-473a-aab1-25e8745c5c9f",
+            "paragraph": 5,
+            "start": 370,
+            "end": 460,
+            "originalSha256": "2ffac289182e253758814c73ea7b9c0e77a3075979feb0700f9b103eb6986649",
+            "paragraphSha256": "913907624e97e012ad7820ed0a1d875f6b012c5efb512a9743e353d3bf9763be"
+          }
+        ],
+        "evidence": [
+          {
+            "id": "ref_b4a8a7a32cd4b0f8ad3ac69ba0b80976024e47e6adbdc23109f5b12c7cdffe5b",
+            "referenceId": "ref_b4a8a7a32cd4b0f8ad3ac69ba0b80976024e47e6adbdc23109f5b12c7cdffe5b",
+            "source": {
+              "kind": "material",
+              "materialId": "d94349d6-1f4f-473a-aab1-25e8745c5c9f",
+              "paragraph": 3
+            },
+            "quote": "交集 A∩B 包含同时属于 A 和 B 的元素。判断一个元素是否在交集中，需要两个归属条件同时成立。若 A={1,2,3}，B={3,4}，则 A∩B={3}。没有共同元素时交集为空集。"
+          },
+          {
+            "id": "ref_4d1858bd22a3363be7f0030c408d759e3bdbe9e20a28adacf1b7b7746f16d253",
+            "referenceId": "ref_4d1858bd22a3363be7f0030c408d759e3bdbe9e20a28adacf1b7b7746f16d253",
+            "source": {
+              "kind": "material",
+              "materialId": "d94349d6-1f4f-473a-aab1-25e8745c5c9f",
+              "paragraph": 4
+            },
+            "quote": "并集 A∪B 包含属于 A 或属于 B 的元素，这里的或允许同时属于二者。一个元素只出现一次。若 A={1,2,3}，B={3,4}，则 A∪B={1,2,3,4}。把元素 3 写两次不构成两个不同元素。"
+          },
+          {
+            "id": "ref_9f763fada4f32d7e53c6288a2bc69dd2f895c7922ac96416ddaa9f88d504fd05",
+            "referenceId": "ref_9f763fada4f32d7e53c6288a2bc69dd2f895c7922ac96416ddaa9f88d504fd05",
+            "source": {
+              "kind": "material",
+              "materialId": "d94349d6-1f4f-473a-aab1-25e8745c5c9f",
+              "paragraph": 5
+            },
+            "quote": "比较交集和并集：共同元素 3 同时属于上例的交集与并集；只属于 A 的元素 1 在并集中而不在交集中。交集强调共同满足，并集允许满足至少一个归属条件。A∩B 总是 A∪B 的子集。"
+          }
+        ]
+      },
+      {
+        "stem": "对于任意集合 A 和 B，关于交集 A∩B 与并集 A∪B 的关系，下列说法正确的是？",
+        "kind": "relationship",
+        "options": [
+          {
+            "id": "D",
+            "text": "只属于 A 的元素属于交集但不属于并集。",
+            "reason": "错误。只属于 A 的元素 1 在并集中而不在交集中，方向表述反了。",
+            "evidenceIds": [
+              "ref_9f763fada4f32d7e53c6288a2bc69dd2f895c7922ac96416ddaa9f88d504fd05"
+            ]
+          },
+          {
+            "id": "C",
+            "text": "共同元素属于交集时不必然属于并集。",
+            "reason": "错误。共同元素 3 同时属于上例的交集与并集，说明共同元素属于交集时也属于并集。",
+            "evidenceIds": [
+              "ref_9f763fada4f32d7e53c6288a2bc69dd2f895c7922ac96416ddaa9f88d504fd05"
+            ]
+          },
+          {
+            "id": "B",
+            "text": "A∪B 总是 A∩B 的子集。",
+            "reason": "错误。材料明确的包含关系是 A∩B 总是 A∪B 的子集，而不是反向关系。",
+            "evidenceIds": [
+              "ref_9f763fada4f32d7e53c6288a2bc69dd2f895c7922ac96416ddaa9f88d504fd05"
+            ]
+          },
+          {
+            "id": "A",
+            "text": "A∩B 总是 A∪B 的子集。",
+            "reason": "正确。材料比较交集和并集时说明，A∩B 总是 A∪B 的子集。",
+            "evidenceIds": [
+              "ref_9f763fada4f32d7e53c6288a2bc69dd2f895c7922ac96416ddaa9f88d504fd05"
+            ]
+          }
+        ],
+        "correctOptionId": "A",
+        "explanation": "正确。材料比较交集和并集时说明，A∩B 总是 A∪B 的子集。",
+        "hint": "分别找出关系两端的依据，检查它们的联系是否需要额外条件，以及是否存在例外。",
+        "stemEvidenceIds": [
+          "ref_9f763fada4f32d7e53c6288a2bc69dd2f895c7922ac96416ddaa9f88d504fd05"
+        ],
+        "explanationEvidenceIds": [
+          "ref_9f763fada4f32d7e53c6288a2bc69dd2f895c7922ac96416ddaa9f88d504fd05"
+        ],
+        "sources": [
+          {
+            "kind": "material",
+            "materialId": "d94349d6-1f4f-473a-aab1-25e8745c5c9f",
+            "paragraph": 5,
+            "start": 370,
+            "end": 460,
+            "originalSha256": "2ffac289182e253758814c73ea7b9c0e77a3075979feb0700f9b103eb6986649",
+            "paragraphSha256": "913907624e97e012ad7820ed0a1d875f6b012c5efb512a9743e353d3bf9763be"
+          }
+        ],
+        "evidence": [
+          {
+            "id": "ref_9f763fada4f32d7e53c6288a2bc69dd2f895c7922ac96416ddaa9f88d504fd05",
+            "referenceId": "ref_9f763fada4f32d7e53c6288a2bc69dd2f895c7922ac96416ddaa9f88d504fd05",
+            "source": {
+              "kind": "material",
+              "materialId": "d94349d6-1f4f-473a-aab1-25e8745c5c9f",
+              "paragraph": 5
+            },
+            "quote": "比较交集和并集：共同元素 3 同时属于上例的交集与并集；只属于 A 的元素 1 在并集中而不在交集中。交集强调共同满足，并集允许满足至少一个归属条件。A∩B 总是 A∪B 的子集。"
+          }
+        ]
+      }
+    ],
+    "optionOrderVersion": 1,
+    "review": {
+      "context": {
+        "planId": "9d0c5dfd-700e-458d-877a-d09a6520d8eb",
+        "taskVersion": 1,
+        "objectives": [
+          {
+            "id": "set_union_intersection_diagnosis",
+            "label": "诊断交集与并集混淆点",
+            "sources": [
+              {
+                "materialId": "d94349d6-1f4f-473a-aab1-25e8745c5c9f",
+                "paragraph": 3
+              },
+              {
+                "materialId": "d94349d6-1f4f-473a-aab1-25e8745c5c9f",
+                "paragraph": 4
+              },
+              {
+                "materialId": "d94349d6-1f4f-473a-aab1-25e8745c5c9f",
+                "paragraph": 5
+              }
+            ],
+            "requirements": [
+              {
+                "role": "concept",
+                "description": "能从具体集合例子中区分交集取共同元素、并集取至少属于一个集合的元素，并指出共同元素同时出现在两者中。",
+                "independent": false
+              },
+              {
+                "role": "application",
+                "description": "给定两个有限集合，能正确写出交集与并集，不把共同元素重复计数。",
+                "independent": false
+              },
+              {
+                "role": "boundary",
+                "description": "在无共同元素或空交集情境下，能判断交集为空集而并集含两侧元素。",
+                "independent": false
+              }
+            ]
+          }
+        ],
+        "purpose": {
+          "objectiveIds": [
+            "set_union_intersection_diagnosis"
+          ],
+          "role": "concept",
+          "method": "retrieval",
+          "purpose": "通过基础选择题诊断用户是否能区分交集取共同元素、并集取至少属于一个集合的元素。",
+          "priorEvidenceRefs": []
+        }
+      },
+      "checks": [
+        {
+          "objectiveIds": [
+            "set_union_intersection_diagnosis"
+          ],
+          "role": "concept",
+          "rationale": "本题直接考查交集与并集的基本概念区分：交集需要同时属于两个集合，并集允许至少属于一个集合。题干使用材料中的具体例子作为背景，要求学生识别构成规则而非仅重复计算结果，符合该目标在 concept 角色下从具体集合例子中区分两者规则的要求。选项覆盖了把交集理解为只属于一侧、把并集理解为交集、以及把共同元素排除出并集的常见混淆方向。",
+          "questionIndex": 0,
+          "semanticProvenance": "model_proposal"
+        },
+        {
+          "objectiveIds": [
+            "set_union_intersection_diagnosis"
+          ],
+          "role": "concept",
+          "rationale": "本题通过具体集合 A={1,2,3} 和 B={3,4} 的运算结果检查学生是否真正理解交集取共同元素、并集取至少属于一个集合的元素。干扰项分别考察了并集中重复书写共同元素、把交集扩大为整个 A 以及把并集误当作交集的典型混淆，覆盖该目标在 application 情境下正确写出交集与并集的要求，同时保持 role 为 concept。",
+          "questionIndex": 1,
+          "semanticProvenance": "model_proposal"
+        },
+        {
+          "objectiveIds": [
+            "set_union_intersection_diagnosis"
+          ],
+          "role": "concept",
+          "rationale": "本题检查交集是并集子集这一概念关系，并利用共同元素同时属于两者、只属于一侧的元素只在并集而不在交集中的事实排除常见混淆。该题与前面两题区分成概念规则、具体运算结果与集合间关系三个互补考点，符合目标在 concept 角色下区分交集与并集的要求。",
+          "questionIndex": 2,
+          "semanticProvenance": "model_proposal"
+        }
+      ]
+    }
+  },
+  "originalAttempt": {
+    "id": "a20a7b71-8e38-4e9b-8fb3-719795be9e98",
+    "page_id": "275663be-dff4-4fbe-9ccd-be0dc65b08c2",
+    "quiz_id": "a1c761dc-76bf-4e86-8309-a7f756a9d44b",
+    "mode": "test",
+    "revision": 0,
+    "progress_json": [
+      {
+        "optionId": null,
+        "submitted": false,
+        "skipped": false,
+        "hinted": false,
+        "revealed": false
+      },
+      {
+        "optionId": null,
+        "submitted": false,
+        "skipped": false,
+        "hinted": false,
+        "revealed": false
+      },
+      {
+        "optionId": null,
+        "submitted": false,
+        "skipped": false,
+        "hinted": false,
+        "revealed": false
+      }
+    ],
+    "events_json": [],
+    "evaluation_json": {
+      "correct": [
+        null,
+        null,
+        null
+      ],
+      "score": null
+    },
+    "created_at": "2026-10-22T07:29:24.542Z",
+    "completed_at": null
+  }
+}

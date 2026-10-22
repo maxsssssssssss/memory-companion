@@ -75,11 +75,11 @@ export function LearningAgentCompletion({ completion, taskVersion, ended, quizLi
         </details>
       </li>;
     })}</ol>
-    <section className={completionStyles.result} aria-label="本轮判断">
-      <h5>{ended ? completion.headline : completion.outcome === "check_passed" ? "当前作答已有支持" : completion.headline}</h5>
-      {ended && completion.stopReason ? <p>停止原因：{completion.stopReason}</p> : null}
+    {ended ? <section className={completionStyles.result} aria-label="本轮判断">
+      <h5>{completion.headline}</h5>
+      {completion.stopReason ? <p>停止原因：{completion.stopReason}</p> : null}
       {completion.limitations.length ? <ul className={completionStyles.requirements}>{completion.limitations.map((limitation, index) => <li key={index}>{limitation}</li>)}</ul> : null}
       <p className={styles.muted}>结论仅限本轮约定目标；题目与目标的关联包含模型判断，长期掌握尚未验证。</p>
-    </section>
+    </section> : null}
   </section>;
 }
