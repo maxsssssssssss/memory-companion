@@ -233,6 +233,48 @@ Do not use broad commands that restart or delete every PM2 application on a shar
 
 ## Deployment Verification
 
+### Learning Agent task limits
+
+Learning task limits are server-owned deployment settings. The authenticated
+start API snapshots them into the existing task budget; clients and model
+actions cannot supply or increase them. Configure the Web process before
+starting new tasks:
+
+```env
+LEARNING_AGENT_TASK_MAX_CALLS=64
+# Optional: defaults to twice MAX_CALLS, so raising calls does not retain 16 steps.
+LEARNING_AGENT_TASK_MAX_STEPS=128
+LEARNING_AGENT_TASK_MAX_COMPUTE_MS=1800000
+```
+
+All values must be positive decimal integers. An explicitly blank, zero,
+malformed or numerically unsafe value prevents new task creation with
+`agent_not_configured`; it never means unlimited. Execution time is cumulative
+active work, excluding waits for the user, and must fit Node's timer range
+(at most 2147483647 ms). Step counts must also permit a safe graph recursion
+limit. When only the call limit is configured, the step limit follows it;
+an explicitly configured step/time limit remains an independent stop condition.
+
+The defaults for new Learning tasks are 64 model calls, 128 actions and
+30 minutes of cumulative active execution. Calls include decisions and content
+generation, including failed and unknown attempts. No cumulative input/output
+token quota is imposed; token usage remains recorded. Per-request bounds
+(48000 input characters and 8000 output tokens), the existing no-progress
+threshold (3), source/authorization checks, bounded Quiz repair and unknown
+result recovery remain enforced. Task limits are safety ceilings, not criteria
+for a learning goal to count as completed.
+
+Changing the environment affects only newly created tasks. Existing tasks keep
+their saved budget and usage when reopened, retried, paused, resumed or adjusted;
+an exhausted task is not revived by changing deployment settings. The shared
+Agent store's fallback policy and historical tasks are unchanged. These settings
+do not alter `AGENT_TRIAL_*` caps or the Windows acceptance ledger.
+
+This policy is separate from the required `LEARNING_AGENT_DECISION_*` and
+`LEARNING_AGENT_GENERATION_*` model settings. Apply environment changes with
+the normal process-manager environment update; do not copy test credentials,
+mock accounts or Windows runtime data into production.
+
 Before accepting traffic:
 
 1. Confirm `127.0.0.1:6380` belongs to the Daily Brief Redis container.

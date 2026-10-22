@@ -131,6 +131,7 @@ function seedWaitingQuiz(taskId: string, mode: "practice" | "test" = "test") {
 
 beforeEach(async () => {
   vi.clearAllMocks(); deferred.length = 0;
+  for (const name of ["LEARNING_AGENT_TASK_MAX_CALLS", "LEARNING_AGENT_TASK_MAX_STEPS", "LEARNING_AGENT_TASK_MAX_COMPUTE_MS"]) vi.stubEnv(name, undefined);
   root = await mkdtemp(join(tmpdir(), "learning-agent-api-synthetic-")); pageId = randomUUID(); materialId = randomUUID();
   const learning = new LearningRepository(join(root, "owner"), "owner");
   try {
@@ -151,11 +152,46 @@ beforeEach(async () => {
 afterEach(async () => {
   // Default after() callbacks never run. Selected cases advance the real runtime
   // explicitly through runOffline with a fixture decision and generation only.
-  deferred.length = 0; vi.unstubAllGlobals(); vi.restoreAllMocks();
+  deferred.length = 0; vi.unstubAllGlobals(); vi.unstubAllEnvs(); vi.restoreAllMocks();
   await rm(root, { recursive: true, force: true });
 });
 
 describe("authenticated Learning Agent routes with real isolated SQLite state", () => {
+  it("freezes server-configured budgets for new tasks and preserves them across retries and adjustments", async () => {
+    vi.stubEnv("LEARNING_AGENT_TASK_MAX_CALLS", "50");
+    vi.stubEnv("LEARNING_AGENT_TASK_MAX_COMPUTE_MS", "2400000");
+    const body = start(), initial = await POST(request("POST", body), context());
+    expect(initial.status).toBe(202);
+    const saved = (await initial.json()).task;
+    expect(saved.budget).toMatchObject({ maxCalls: 50, maxSteps: 100, maxComputeMs: 2_400_000, maxNoProgress: 3 });
+    vi.stubEnv("LEARNING_AGENT_TASK_MAX_CALLS", "100");
+    const repeated = await POST(request("POST", body), context());
+    expect((await repeated.json()).task.budget).toEqual(saved.budget);
+    const adjusted = await PATCH(request("PATCH", { id: body.id, action: "adjust", eventId: randomUUID(), expectedVersion: 1,
+      goal: "[合成] 在相同材料中进一步检查前提", scope: selection() }), context());
+    expect(adjusted.status).toBe(202);
+    expect((await adjusted.json()).task).toMatchObject({ version: 2, budget: saved.budget, usage: saved.usage });
+    const reopened = stores((_learning, store) => store.getTask("owner", body.id));
+    expect(reopened.budget).toEqual(saved.budget);
+    const next = await POST(request("POST", start()), context());
+    expect((await next.json()).task.budget).toMatchObject({ maxCalls: 100, maxSteps: 200 });
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it("rejects invalid server budget configuration before task creation or scheduling", async () => {
+    vi.stubEnv("LEARNING_AGENT_TASK_MAX_CALLS", "0");
+    const response = await POST(request("POST", start()), context());
+    expect(response.status).toBe(503); expect(await response.json()).toEqual({ error: "agent_not_configured" });
+    expect(stores((_learning, store) => store.listTasks("owner", pageId))).toHaveLength(0);
+    expect(deferred).toHaveLength(0); expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it("does not let client input override server-owned task budgets", async () => {
+    const response = await POST(request("POST", { ...start(), budget: { maxCalls: 999 } }), context());
+    expect(response.status).toBe(400); expect(deferred).toHaveLength(0);
+    expect(stores((_learning, store) => store.listTasks("owner", pageId))).toHaveLength(0);
+  });
+
   it("requires authentication for GET, POST and PATCH without scheduling work", async () => {
     const control = { id: randomUUID(), action: "cancel", eventId: randomUUID() };
     for (const response of await Promise.all([GET(request("GET", undefined, ""), context()),

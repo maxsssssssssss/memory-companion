@@ -3,6 +3,7 @@ import { z } from "zod";
 import { LearningId } from "@/lib/domain/learning";
 import { LearningAgentSelection, type LearningAgentScope } from "@/lib/domain/learning-agent";
 import { agentModelConfig } from "@/lib/server/learning/agent-decision-config";
+import { learningAgentTaskBudget } from "@/lib/server/learning/agent-task-budget";
 import { AgentFailure } from "@/lib/server/agent/types";
 import { LearningError } from "@/lib/server/learning/repository";
 import { freezeLearningAgentScope } from "@/lib/server/learning/agent-scope";
@@ -46,7 +47,8 @@ export async function POST(request: Request, context: Context) {
     try {
       agentModelConfig(); learningAgentGenerationConfig();
       const scope = { ...freezeLearningAgentScope(learning, pageId, value.scope), completionVersion: 1 as const };
-      const task = store.createTask({ id: value.id, accountId: learning.accountId, resourceId: pageId, scenario: "learning.adaptive-review.v1", goal: value.goal, scope });
+      const task = store.createTask({ id: value.id, accountId: learning.accountId, resourceId: pageId, scenario: "learning.adaptive-review.v1", goal: value.goal, scope,
+        budget: learningAgentTaskBudget() });
       const root = learning.accountDataRoot, accountId = learning.accountId;
       if (task.status === "ready") after(() => advanceLearningAgent(root, accountId, task.id).then(() => undefined));
       return learningJson({ task: projectLearningAgentTask(learning, task, store) }, 202);
