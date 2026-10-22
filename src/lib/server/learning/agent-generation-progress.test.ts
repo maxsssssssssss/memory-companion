@@ -25,7 +25,8 @@ const purpose = (patch: Partial<LearningCheckPurpose> = {}): LearningCheckPurpos
 });
 const quiz = (p = purpose(), count = 1): AgentDecision => ({ tool: "learning.create_quiz", args: { count, difficulty: "standard", purpose: p } });
 const failureRecords = () => new LearningAgentRepository(learning).list(pageId, task.id)
-  .filter(row => row.kind === "check_purpose" && row.state === "completed").map(row => JSON.parse(row.body_json!));
+  .filter(row => row.kind === "check_purpose" && row.state === "completed").map(row => JSON.parse(row.body_json!))
+  .filter(row => row.recordType !== "quiz_repair");
 function decision(choose: (input: AgentDecisionInput) => AgentDecision): AgentDecisionProvider {
   return vi.fn(async (input, ctx) => ctx.call({ kind: "offline_decision", inputChars: 100, maxOutputTokens: 100 }, async () => ({
     value: choose(input), usage: { inputTokens: 10, outputTokens: 4 },

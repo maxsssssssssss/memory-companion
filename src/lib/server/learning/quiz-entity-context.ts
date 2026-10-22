@@ -2,7 +2,9 @@ import { findFiniteSetLiterals } from "./quiz-set-cardinality";
 
 type Range = [start: number, end: number];
 const symbol = /(?<![A-Za-z0-9_])[A-Za-z](?![A-Za-z0-9_])/g;
-const coordinated = /(?<![A-Za-z0-9_])[A-Za-z](?:\s*(?:和|与|及|、|或|and|or|&)\s*[A-Za-z])+(?![A-Za-z0-9_])/g;
+// Commas can join two clauses about declared sets just as conjunctions join
+// their names. Display ownership is checked at the complete occurrence below.
+const coordinated = /(?<![A-Za-z0-9_])[A-Za-z](?:\s*(?:和|与|及|、|或|and|or|&|[,，])\s*[A-Za-z])+(?![A-Za-z0-9_])/g;
 // Ownership of an occurrence, not a sentence-wide exemption. A choice introducer
 // owns the following names even if the same letters are defined as sets elsewhere.
 const choicePrefix = /(?:选项|答案|option|choice|正确项|错误项|选择|选|choose|select)\s*[:：]?\s*(?:(?:中(?:的)?|分别(?:是|为)|是|为|只(?:能|有)?|仅(?:有|能)?|应(?:当|该)?|必须|可能|可以|同时|从|在|属于|归入)\s*[:：]?\s*)*$/i;
@@ -54,6 +56,9 @@ export function quizEntityRanges(text: string, question = ""): Range[] {
     // predicate follows (containment, disjointness, conditions, etc.). Display
     // ownership still takes precedence at this exact occurrence.
     if (ids.every(id => context.sets.has(id))) { ranges.push([start, end]); continue; }
+    // A comma can cross a clause boundary: the preceding membership verb does
+    // not type the following clause's name. Require the question declarations.
+    if (/[,，]/.test(match[0])) continue;
     // Intrinsically typed local uses remain valid, including a quoted definition
     // with generic A/B inside a question whose concrete sets are X/Y.
     const membership = /(?:不)?属于\s*$/.test(before);

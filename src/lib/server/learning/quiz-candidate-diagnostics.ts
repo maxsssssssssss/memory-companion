@@ -5,8 +5,9 @@ import type { LearningRepository } from "./repository";
 /** Private, bounded final-answer diagnostics. Never an evidence/answer authority,
  * never included in learner or model observations. No request/source body is kept. */
 export type QuizCandidateIssue = {
-  index: number; stage: "composition" | "compact" | "review" | "publication" | "envelope";
+  index: number; stage: "composition" | "compact" | "review" | "publication" | "envelope" | "normalization";
   code: string; validationIssues?: Array<{ path: string; code: string }>;
+  originalKind?: "boundary"; normalizedKind?: "application";
   expectedRole?: string; actualRole?: unknown;
   expectedObjectiveIds?: string[]; actualObjectiveIds?: unknown;
 };
@@ -17,8 +18,8 @@ const pathFields = new Set([...fields, ..."referenceScope contractVersion materi
 const issueCodes = new Set(("structure_or_evidence option_identity position_dependency answer_contradiction repeated_focus " +
   "equivalent_options answer_not_unique source_binding goal_mismatch annotation_schema annotation_role annotation_objective " +
   "annotation_missing review_source_mismatch invalid_type invalid_string too_small too_big custom missing_field " +
-  "invalid_enum_value invalid_literal unrecognized_keys invalid_union not_multiple_of not_finite").split(" "));
-const stages = new Set(["composition", "compact", "review", "publication", "envelope"]);
+  "invalid_enum_value invalid_literal unrecognized_keys invalid_union not_multiple_of not_finite kind_alias").split(" "));
+const stages = new Set(["composition", "compact", "review", "publication", "envelope", "normalization"]);
 const record = (v: unknown): Record<string, unknown> | undefined => v !== null && typeof v === "object" && !Array.isArray(v) ? v as Record<string, unknown> : undefined;
 const scrub = (text: string) => text
   .replace(/(?:sk-[A-Za-z0-9_-]{10,}|(?:gh[pousr]_|github_pat_)[A-Za-z0-9_]{10,}|Bearer\s+[^\s"']+)/gi, "[redacted]")
@@ -39,6 +40,8 @@ export function quizCandidateDiagnostics(raw: unknown, issues: QuizCandidateIssu
     index: Number.isInteger(issue.index) && issue.index >= 0 && issue.index < 50 ? issue.index : -1,
     stage: stages.has(issue.stage) ? issue.stage : "envelope",
     code: issueCodes.has(issue.code) ? issue.code : "structure_or_evidence",
+    ...(issue.stage === "normalization" && issue.code === "kind_alias" && issue.originalKind === "boundary" && issue.normalizedKind === "application"
+      ? { originalKind: issue.originalKind, normalizedKind: issue.normalizedKind } : {}),
     ...(issue.validationIssues ? { validationIssues: issue.validationIssues.slice(0, 12).map(v => ({
       path: /^[A-Za-z.?$\[\]0-9]{1,180}$/.test(v.path) ? v.path.replace(/[A-Za-z]+/g, field => pathFields.has(field) ? field : "?") : "$",
       code: issueCodes.has(v.code) ? v.code : "custom"
@@ -67,7 +70,9 @@ export function quizCandidateDiagnostics(raw: unknown, issues: QuizCandidateIssu
   const selected = Array.isArray(items) ? items.map((value, index) => ({ value, index })).filter(({ index }) => indexes.has(index) || indexes.has(-1)) : [];
   const candidates = selected.slice(0, 12).map(({ value, index }) => ({ index, candidate: copy(value) }));
   return { version: 1, ...identity, recordedAt: Date.now(), expiresAt: Date.now() + 7 * 24 * 60 * 60 * 1000,
-    issues: safeIssues, candidates, truncated: truncated || selected.length > 12 || issues.length > 100,
+    issues: safeIssues.filter(issue => issue.stage !== "normalization"),
+    ...(safeIssues.some(issue => issue.stage === "normalization") ? { normalizations: safeIssues.filter(issue => issue.stage === "normalization") } : {}),
+    candidates, truncated: truncated || selected.length > 12 || issues.length > 100,
     omittedCandidates: Math.max(0, selected.length - candidates.length),
     // Hash refers to the sanitized retained projection, not an assertion of raw completeness.
     projectionHash: createHash("sha256").update(JSON.stringify(candidates)).digest("hex") };

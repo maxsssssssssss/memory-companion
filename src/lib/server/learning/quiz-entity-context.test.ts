@@ -45,3 +45,24 @@ it("retains an explicitly typed mathematical quotation without declaring its nam
   expect(hasQuizPositionDependency("按定义，交集是同时属于 A 和 B 的元素。X 和 Y 都包含6。", context)).toBe(false);
   expect(hasQuizPositionDependency("按定义，交集是同时属于 A 和 B 的元素。正确答案在 A 和 B 中。", context)).toBe(true);
 });
+
+it("keeps declared entities across clause commas without rewriting the retained G5 reason", () => {
+  // Exact reason supplied in the c6dd171 public candidate projection. Its
+  // identity wording is legitimate; equivalent answer choices still make the
+  // complete candidate invalid in the separate official evidence replay.
+  const context = "设 P={1,4,6}，Q={4,7}。P∪Q 等于哪个集合？";
+  const reason = "正确。并集 P∪Q 包含属于 P 或属于 Q 的元素，且每个元素只出现一次。P 中的 1、6 只属于 P，Q 中的 7 只属于 Q，4 同时属于 P 和 Q，合并后写一次即可，因此 P∪Q={1,4,6,7}。";
+  expect(hasQuizPositionDependency(reason, context)).toBe(false);
+  expect(bindQuizOptionExplanation(reason, options, "A", context)).toBe(reason);
+  for (const comma of [",", "，"]) {
+    const synthetic = `P 中的 1、6 只属于 P${comma} Q 中的 7 只属于 Q。`;
+    expect(bindQuizOptionExplanation(synthetic, options, "A", context)).toBe(synthetic);
+  }
+});
+
+it("does not let clause-comma entity context hide explicit choices or borrow other declarations", () => {
+  const context = "设 P={1,4,6}，Q={4,7}。P∪Q 等于哪个集合？";
+  for (const text of ["选项 P，Q 都正确。", "P，Q 两项正确。", "选项 A,B 都正确。", "P 中的 1 只属于 P，Q 中的 7 只属于 Q，所以第二项正确。", "P 和 Q 的并集如第2题所示。"])
+    expect(bindQuizOptionExplanation(text, options, "A", context), text).toBeNull();
+  expect(hasQuizPositionDependency("P 中的 1 只属于 P，Q 中的 7 只属于 Q。", "已知 A={1}，B={2}。")).toBe(true);
+});

@@ -20,7 +20,7 @@ import { createLearningAgentNoteTool } from "./agent-notes";
 import { saveLearningAgentReviewSummary } from "./agent-review-summary";
 import { assessLearningCompletion, establishLearningReviewPlan, guardLearningCompletionAction, persistLearningCompletion,
   readLearningReviewPlan, recordLearningEvidenceProposal, recordLearningExplanationContext, recordLearningPurpose,
-  recordLearningExplanationFeedback, validateLearningExplanationFeedback, acknowledgeLearningFeedback, pendingLearningExplanationClarification } from "./agent-completion";
+  recordLearningExplanationFeedback, validateLearningExplanationFeedback, acknowledgeLearningFeedback, pendingLearningExplanationClarification, claimLearningQuizRepair } from "./agent-completion";
 
 type Dependencies = { configure: () => LearningGenerationConfig; generate: typeof generateStudyJson };
 const empty = z.object({}).strict();
@@ -286,12 +286,22 @@ export function createLearningAgentScenario(learning: LearningRepository,
           // resume of this failed one; all of its calls still use the task budget.
           artifacts.retryKnownFailure(ctx.task.resourceId, ctx.task.id, id, version(ctx), current.fingerprint);
         }
-        let generationError: unknown;
+        let generationError: unknown, repairClaimed = false;
         const generated = generator(ctx);
-        const tracked: typeof generateStudyJson = async (...args) => { try { return await generated(...args); } catch (error) { generationError = error; throw error; } };
+        const tracked: typeof generateStudyJson = async (...args) => {
+          try {
+            if (guarded.repair && !repairClaimed) {
+              await check(ctx);
+              claimLearningQuizRepair(learning, ctx, guarded.repair);
+              repairClaimed = true;
+            }
+            return await generated(...args);
+          } catch (error) { generationError = error; throw error; }
+        };
         try {
           await generateLearningQuiz(learning, ctx.task.resourceId, { id, settings, ...(resume ? { resume: true } : {}) }, { configure: deps.configure, generate: tracked,
             diagnosticContext: { taskId: ctx.task.id, taskVersion: version(ctx), actionId: ctx.actionId },
+            ...(guarded.repair ? { repairContext: guarded.repair } : {}),
             ...(plan && guarded.purpose ? { reviewContext: { planId: plan.id, taskVersion: version(ctx), objectives: plan.objectives, purpose: guarded.purpose } } : {}) });
           await check(ctx);
           const run = quizzes.list(ctx.task.resourceId).find(r => r.id === id);
@@ -325,10 +335,16 @@ export function createLearningAgentScenario(learning: LearningRepository,
           artifacts.fail(ctx.task.resourceId, ctx.task.id, id, failure.code === "unknown");
           if (failure.code === "known_failure") {
             await check(ctx);
-            recordLearningPurpose(learning, ctx, "quiz", guarded.purpose, id, { code: failure.message });
-            const delivery = quizzes.list(ctx.task.resourceId).find(run => run.id === id)?.delivery;
+            const repair = recordLearningPurpose(learning, ctx, "quiz", guarded.purpose, id, { code: failure.message });
+            const failedRun = quizzes.list(ctx.task.resourceId).find(run => run.id === id), delivery = failedRun?.delivery;
+            if (failedRun?.status === "completed") throw new AgentFailure(failure.code, failure.message, failure.usage,
+              `题组已经通过发布并保存，后续关联未完成。请检查原结果并恢复，不能重新出题。原生成结果ID：${id}。`);
+            if (guarded.repair) return completionResult(ctx,
+              "已按原目标和具体拒绝原因修正过一次，但这次仍未能生成可靠的练习题。这不是你的作答错误；已有内容与作答会保留，本轮先交回，不再重复生成。");
             throw new AgentFailure(failure.code, failure.message, failure.usage,
-              `${delivery ? `${failure.message}：${delivery.message} ${delivery.nextStep}` : failure.publicSummary ?? "本次题组生成明确失败，未取得可用题组。"} 原生成结果ID：${id}。这不是学生作答反证；相同缺口没有新观察时不再重复同类生成，可读取相关原文、改为讲解、请求必要反馈或诚实交回。`);
+              `${delivery ? `${failure.message}：${delivery.message} ${delivery.nextStep}` : failure.publicSummary ?? "本次题组生成明确失败，未取得可用题组。"} 原生成结果ID：${id}。${repair
+                ? "本次没有可发布题目，这不是学生作答反证。可以按原检查目的和具体拒绝原因修正一次；自动继续与用户反馈后的继续共用这一次机会，照常计入本任务预算。也可以先讲解或请求必要反馈，不需要用户补写工程参数。"
+                : "这不是学生作答反证；相同缺口没有新观察时不再重复同类生成，可读取相关原文、改为讲解、请求必要反馈或诚实交回。"}`);
           }
           throw failure;
         }

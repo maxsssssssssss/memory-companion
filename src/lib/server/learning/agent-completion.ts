@@ -11,6 +11,7 @@ import { LearningQuizRepository } from "./quiz-repository";
 import { inspectLearningExplanationContent } from "./agent-explanation-content";
 import { projectPendingLearningHistory } from "./agent-completion-history";
 import { evidenceRefKey, loadLearningCompletionEvidence } from "./agent-completion-evidence";
+import type { QuizRepairContext } from "./quiz-review-purpose";
 
 const hash = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
 const version = (task: AgentTask) => task.version ?? 1;
@@ -129,7 +130,43 @@ export function recordLearningEvidenceProposal(learning: LearningRepository, ctx
   return proposal;
 }
 type PurposeRecord = { kind: "quiz" | "explanation"; resultId: string; purpose: LearningCheckPurpose; progressFingerprint: string; observationFingerprint?: string; actionId: string;
-  failure?: { code: string; objectiveProgressFingerprint?: string } };
+  failure?: { code: string; objectiveProgressFingerprint?: string; repair?: QuizRepairContext } };
+type QuizRepairClaim = { recordType: "quiz_repair"; actionId: string; repair: QuizRepairContext };
+const purposeRecord = (row: LearningAgentArtifact) => {
+  const value = parse<PurposeRecord | QuizRepairClaim>(row);
+  return value && !("recordType" in value) ? value : null;
+};
+// Method names, requested quantity, run IDs and feedback IDs cannot buy another
+// correction. A genuinely different frozen check role retains its own purpose.
+const quizRepairKey = (purpose: LearningCheckPurpose) => hash({ objectives: [...purpose.objectiveIds].sort(), role: purpose.role });
+function repairClaim(learning: LearningRepository, task: AgentTask, purpose: LearningCheckPurpose) {
+  const id = learningAgentOperationId(`${task.id}:${version(task)}:quiz-repair:${quizRepairKey(purpose)}`, "check_purpose");
+  const row = new LearningAgentRepository(learning).get(task.resourceId, task.id, id);
+  return row ? parse<QuizRepairClaim>(row) : null;
+}
+function repairableQuizFailure(learning: LearningRepository, ctx: AgentContext, purpose: LearningCheckPurpose, quizId: string, code: string): QuizRepairContext | undefined {
+  const run = new LearningQuizRepository(learning).list(ctx.task.resourceId).find(run => run.id === quizId);
+  if (!run || run.count !== 0 || run.progress?.uncertain || !["insufficient", "failed"].includes(run.status)) return;
+  const rejected = run.delivery?.rejected ?? [];
+  // Live-source/authorization failures and uncertain or budget outcomes are not
+  // candidate corrections. Re-reading an invalid scope cannot authorize one.
+  if (rejected.some(issue => ["unknown", "budget", "source_binding", "review_source_mismatch"].includes(issue.code))) return;
+  const safe = rejected.filter(issue => issue.code !== "known_failure");
+  if (!safe.length && code === "agent_generation_invalid_result") safe.push({ code: "format", count: 1 });
+  if (!safe.length) return; // Empty output alone is not proof of a format defect.
+  return { attempt: 1, previousQuizId: quizId, purpose, rejected: safe };
+}
+/** Called once immediately before the repair's first generation request. The
+ * immutable SQLite receipt is shared by automatic, feedback and explicit-retry
+ * paths. A consumed action cannot resend by reusing its operation identity. */
+export function claimLearningQuizRepair(learning: LearningRepository, ctx: AgentContext, repair: QuizRepairContext) {
+  return learning.database.transaction(() => {
+    scoped(learning, ctx.task);
+    if (repairClaim(learning, ctx.task, repair.purpose)) throw new AgentFailure("known_failure", "agent_quiz_repair_already_used");
+    save(learning, ctx.task, "check_purpose", `quiz-repair:${quizRepairKey(repair.purpose)}`,
+      { recordType: "quiz_repair", actionId: ctx.actionId, repair } satisfies QuizRepairClaim);
+  }).immediate();
+}
 // New usable feedback can justify one further purposeful action without being
 // labelled learning success. Only this purpose's goals participate: unrelated
 // feedback and repeated IDs with the same observation cannot unlock repetition.
@@ -144,17 +181,19 @@ export function recordLearningPurpose(learning: LearningRepository, ctx: AgentCo
   // receipts. This is an execution observation, never evidence of learning.
   const failed = failure ? { code: /^[a-z][a-z0-9_]{0,79}$/.test(failure.code) ? failure.code : "agent_generation_failed" } : undefined;
   const checkedPurpose = LearningCheckPurpose.parse(purpose);
-  const existing = rows(learning, ctx.task).filter(r => r.kind === "check_purpose").map(r => parse<PurposeRecord>(r))
+  const existing = rows(learning, ctx.task).filter(r => r.kind === "check_purpose").map(purposeRecord)
     .find(r => r?.actionId === ctx.actionId && Boolean(r.failure) === Boolean(failed));
   if (existing) {
     if (existing.kind !== kind || existing.resultId !== resultId || JSON.stringify(existing.purpose) !== JSON.stringify(checkedPurpose)) throw new LearningError(409, "agent_completion_conflict");
-    return;
+    return existing.failure?.repair;
   }
   const assessment = assessLearningCompletion(learning, ctx.task);
   const record: PurposeRecord = { kind, resultId, purpose: checkedPurpose, progressFingerprint: assessment.progressFingerprint,
     observationFingerprint: observationFingerprint(assessment, checkedPurpose.objectiveIds), actionId: ctx.actionId,
-    ...(failed ? { failure: { ...failed, objectiveProgressFingerprint: objectiveProgressFingerprint(assessment, checkedPurpose.objectiveIds) } } : {}) };
+    ...(failed ? { failure: { ...failed, objectiveProgressFingerprint: objectiveProgressFingerprint(assessment, checkedPurpose.objectiveIds),
+      ...(kind === "quiz" ? { repair: repairableQuizFailure(learning, ctx, checkedPurpose, resultId, failed.code) } : {}) } } : {}) };
   save(learning, ctx.task, "check_purpose", `${ctx.actionId}${failed ? ":failed" : ""}`, record);
+  return record.failure?.repair;
 }
 export function recordLearningExplanationContext(learning: LearningRepository, ctx: AgentContext, explanationId: string, purpose: LearningCheckPurpose | undefined) {
   recordLearningPurpose(learning, ctx, "explanation", purpose, explanationId);
@@ -170,7 +209,7 @@ function explanationAssociation(task: AgentTask, plan: LearningReviewPlan, scope
   // An explicit stale context must not fall back to a separate purpose record.
   if (saved.reviewContext && (saved.reviewContext.planId !== plan.id || saved.reviewContext.taskVersion !== version(task))) return null;
   const rawPurpose = saved.reviewContext?.purpose ?? currentRows.filter(r => r.kind === "check_purpose")
-    .map(r => parse<PurposeRecord>(r)).find(p => p?.kind === "explanation" && p.resultId === explanationId)?.purpose;
+    .map(purposeRecord).find(p => p?.kind === "explanation" && p.resultId === explanationId)?.purpose;
   const checked = LearningCheckPurpose.safeParse(rawPurpose);
   if (!checked.success || !saved.items?.length || !saved.items.every(ref => scope.materials.some(m => m.materialId === ref.materialId && m.paragraphs.some(p => p.number === ref.paragraph)))) return null;
   const purpose = checked.data;
@@ -329,7 +368,7 @@ export function guardLearningCompletionAction(learning: LearningRepository, ctx:
     if (objective.status === "supported" && purpose.method !== "evidence_review" && !(kind === "explanation" && purpose.method === "clarify" && hasPendingLearningFeedback(learning, ctx.task, ctx.event))) throw new AgentFailure("known_failure", "agent_objective_already_supported", undefined, "这一目标已有当前证据支持，请处理其他缺口或结束；有新疑问可先澄清，不能机械重复出题。");
   }
   for (const ref of purpose.priorEvidenceRefs) if (!assessment.objectives.some(o => purpose.objectiveIds.includes(o.id) && o.evidence.some(e => evidenceRefKey(e.ref) === evidenceRefKey(ref)))) throw new AgentFailure("known_failure", "agent_completion_prior_evidence_invalid", undefined, "前序引用不是当前目标下已记录的实际证据，请先读取并关联已有作答。");
-  const recorded = rows(learning, ctx.task).filter(r => r.kind === "check_purpose").map(r => parse<PurposeRecord>(r)).filter((r): r is PurposeRecord => Boolean(r));
+  const recorded = rows(learning, ctx.task).filter(r => r.kind === "check_purpose").map(purposeRecord).filter((r): r is PurposeRecord => Boolean(r));
   const recoveredActions = new Set(recorded.filter(record => !record.failure).map(record => record.actionId));
   const previous = recorded.filter(record => !record.failure || !recoveredActions.has(record.actionId));
   const currentObservations = observationFingerprint(assessment, purpose.objectiveIds);
@@ -337,6 +376,17 @@ export function guardLearningCompletionAction(learning: LearningRepository, ctx:
   const unchanged = (p: PurposeRecord) => (p.failure
     ? !p.failure.objectiveProgressFingerprint || p.failure.objectiveProgressFingerprint === currentProgress
     : p.progressFingerprint === assessment.progressFingerprint) && (!p.observationFingerprint || p.observationFingerprint === currentObservations);
+  const correction = kind === "quiz" ? [...previous].reverse().find(record => record.kind === "quiz" && record.failure?.repair
+    && quizRepairKey(record.purpose) === quizRepairKey(purpose) && unchanged(record)) : undefined;
+  if (correction?.failure?.repair) {
+    const claimed = repairClaim(learning, ctx.task, correction.purpose);
+    if (!claimed) return { assessment, purpose: correction.purpose, repair: correction.failure.repair };
+    // A saved success is read back by the normal artifact/recovery path. A spent
+    // repair with no new observation never enables another Provider request,
+    // including an explicit retry of that same failed operation.
+    const completed = recorded.some(record => !record.failure && record.actionId === ctx.actionId);
+    if (!completed) return { assessment, purpose, stop: "这次修正后仍未取得可靠的练习题，已经用过本轮这一检查目的的一次修复机会；这不是你的作答错误。已有内容与作答会保留，本轮先交回，不再重复生成。" };
+  }
   // Failed generation produced no learner observation. Relabeling its role or
   // improving an unrelated objective must not unlock another identical method.
   const same = [...previous].reverse().find(p => p.actionId !== ctx.actionId && p.kind === kind && (p.failure || p.purpose.role === purpose.role) && p.purpose.method === purpose.method

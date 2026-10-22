@@ -10,7 +10,8 @@ import { composedQuizRequest, composedQuizPrompt } from "./quiz-composition";
 import { agentGenerationFailure, GenerationParts } from "./generation-parts";
 import { planLargeQuiz } from "./quiz-planning";
 import { limitReferencedQuizCandidates, inspectQuizCandidateDelivery } from "./quiz-grounding";
-import { QuizReviewContext, decodeReviewQuiz, quizReviewQuestionKey, QUIZ_REVIEW_INSTRUCTION, scopeQuizReviewRequest, quizReviewGenerationInput, type ReviewedQuizResponse } from "./quiz-review-purpose";
+import { QuizReviewContext, decodeReviewQuiz, quizReviewQuestionKey, QUIZ_REVIEW_INSTRUCTION, scopeQuizReviewRequest, quizReviewGenerationInput, type ReviewedQuizResponse, type QuizRepairContext } from "./quiz-review-purpose";
+import { normalizeQuizGeneratedKinds } from "./quiz-kind";
 import { learningValidationError } from "./generation-diagnostics";
 import { quizCandidateDiagnostics, quizCandidateValidationIssues, type QuizCandidateIssue, type QuizDiagnosticContext } from "./quiz-candidate-diagnostics";
 
@@ -50,7 +51,7 @@ export async function generateLearningQuiz(learning: LearningRepository, pageId:
     /** Internal evaluation only; never read from a user request or global config. */
     referenceEncoding?: "stable" | "compact"; inputView?: "current" | "reduced";
     /** Trusted Learning scenario context, never accepted by StartQuiz/API input. */
-    reviewContext?: QuizReviewContext; diagnosticContext?: QuizDiagnosticContext } = { configure: learningGenerationConfig, generate: generateStudyJson },
+    reviewContext?: QuizReviewContext; diagnosticContext?: QuizDiagnosticContext; repairContext?: QuizRepairContext } = { configure: learningGenerationConfig, generate: generateStudyJson },
   reserved?: {config:ReturnType<typeof learningGenerationConfig>;request:NonNullable<ReturnType<LearningQuizRepository["begin"]>>}) {
   const v = StartQuiz.parse(input), repo = new LearningQuizRepository(learning), config = reserved?.config ?? deps.configure();
   const reviewContext = deps.reviewContext === undefined ? undefined : QuizReviewContext.parse(deps.reviewContext);
@@ -75,7 +76,7 @@ export async function generateLearningQuiz(learning: LearningRepository, pageId:
       const encoded=encode(part,{...baseScope,expiresAt:0},deps.inputView);
       const baseWire=stable?learningModelInput(part):encoded.input;
       const wire=reviewContext?quizReviewGenerationInput(baseWire,part,reviewContext):baseWire;
-      return learningRequestChars(prompt,quizQuestionInput(wire,reserve));
+      return learningRequestChars(prompt,quizQuestionInput(wire,reserve,deps.repairContext));
     };
     const large=planning.legacy?planning.legacyLarge:questionChars(request)>planning.inputChars;
     const requests=large ? await planLargeQuiz(request,planningConfig,parts,baseScope,deps.generate,perGroup,{questionChars,legacy:planning.legacy,transportConfig:config})
@@ -89,7 +90,7 @@ export async function generateLearningQuiz(learning: LearningRepository, pageId:
       const baseWire=stable?learningModelInput(part):encoded.input;
       const wire=reviewContext?quizReviewGenerationInput(baseWire,part,reviewContext):baseWire;
       const previous=results.flatMap(r=>r.items).map(q=>typeof q==="object"&&q!==null&&"stem" in q?quizDuplicatePreview(String(q.stem)):"").filter(Boolean);
-      const input=quizQuestionInput(wire,previous);
+      const input=quizQuestionInput(wire,previous,deps.repairContext);
       try { results.push(await parts.execute(`questions-${i}`,d=>deps.generate(config,"learning_quiz",prompt,input,stable?ReferencedQuizEnvelope:encoded.schema,
         AbortSignal.timeout(timeout),x=>{d(x);repo.diagnostics(pageId,v.id,x);}),raw=>{
           const catalog = [
@@ -102,7 +103,7 @@ export async function generateLearningQuiz(learning: LearningRepository, pageId:
               runId: v.id, partId: `questions-${i}`, requestId: scope.requestId, context: deps.diagnosticContext
             }));
           };
-          const decode=(value:unknown)=>stable?ReferencedQuizEnvelope.parse(value):encoded.decode(value,scope,onIssue);
+          const decode=(value:unknown)=>stable?ReferencedQuizEnvelope.parse(normalizeQuizGeneratedKinds(value,onIssue)):encoded.decode(value,scope,onIssue);
           let decoded:ReviewedQuizResponse;
           try { decoded=reviewContext?decodeReviewQuiz(raw,decode,reviewContext,catalog,onIssue):decode(raw); }
           catch (error) {
@@ -180,7 +181,8 @@ export function quizDuplicatePreview(stem:string) {
   while(JSON.stringify(chars.join("")).length>162)chars.pop();
   return chars.join("");
 }
-function quizQuestionInput<T extends {taskContext:object}>(wire:T,previous:string[]) {
+function quizQuestionInput<T extends {taskContext:object}>(wire:T,previous:string[],repairContext?:QuizRepairContext) {
   return {...wire,taskContext:{...wire.taskContext,alreadyAsked:previous,
-    alreadyAskedNotice:"这里只是已生成题目的开头，用于避免重复，不是本题事实依据；完整旧题保持原样保存。"}};
+    alreadyAskedNotice:"这里只是已生成题目的开头，用于避免重复，不是本题事实依据；完整旧题保持原样保存。",
+    ...(repairContext ? { repairContext, repairNotice: "此前这一检查目的未发布任何题目。这里只允许一次修复生成，按所列拒绝原因修正格式、选项或检查关联，继续使用原purpose与本次授权来源；不得改变目标/答案事实或猜测引用。所有候选仍须唯一答案和完整依据，不能保证时少出或返回空items；这不是学生作答错误，也不代表学习进展。" } : {})}};
 }

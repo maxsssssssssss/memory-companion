@@ -1,0 +1,898 @@
+{
+  "provenance": {
+    "sha": "c6dd17158df3d6ac57e90c23554089d0eecfac94",
+    "source": "Exact retained Windows public candidate projections and decoded records; original HTTP unavailable",
+    "inputFileSha256": {
+      "G3-latest.json": "a8e6f95f79af6212a2298bdc90c9b57c38c525f52f3d8518fc2c22c647cb545f",
+      "G5-latest.json": "5bc47cd7b0b3e0de289bb2ba16b6aed2044253284dd03c6ccc248a439e8393ec"
+    }
+  },
+  "accountId": "0fbb2e4b-e530-4943-a554-4dcea2d90e2d",
+  "pageId": "275663be-dff4-4fbe-9ccd-be0dc65b08c2",
+  "source": {
+    "id": "d94349d6-1f4f-473a-aab1-25e8745c5c9f",
+    "page_id": "275663be-dff4-4fbe-9ccd-be0dc65b08c2",
+    "title": "合成教材 · 集合、交集与并集",
+    "kind": "text",
+    "original": "合成教材：集合、交集与并集。本材料由验收脚本手工编写，仅用于隔离软件验证；不是教学效果研究或真实学生资料。以下定义与算例按通常的有限集合约定。\n\n集合由确定的元素组成，花括号表示一个集合。同一元素重复写出不会增加元素个数，元素的书写顺序不影响集合。例如 {1, 2, 2} 与 {2, 1} 都是含两个元素的集合。空集 ∅ 不含任何元素。\n\n交集 A∩B 包含同时属于 A 和 B 的元素。判断一个元素是否在交集中，需要两个归属条件同时成立。若 A={1,2,3}，B={3,4}，则 A∩B={3}。没有共同元素时交集为空集。\n\n并集 A∪B 包含属于 A 或属于 B 的元素，这里的或允许同时属于二者。一个元素只出现一次。若 A={1,2,3}，B={3,4}，则 A∪B={1,2,3,4}。把元素 3 写两次不构成两个不同元素。\n\n比较交集和并集：共同元素 3 同时属于上例的交集与并集；只属于 A 的元素 1 在并集中而不在交集中。交集强调共同满足，并集允许满足至少一个归属条件。A∩B 总是 A∪B 的子集。\n\n若 C={红,蓝}，D={蓝,绿}，则 C∩D={蓝}，C∪D={红,蓝,绿}。若 E={5}，F={6}，则 E∩F=∅，E∪F={5,6}。空交集不代表两个集合都为空。\n\n有限集合的并集元素个数满足 |A∪B|=|A|+|B|−|A∩B|。上例 |A|=3，|B|=2，|A∩B|=1，因此 |A∪B|=4。减去交集数量是为消除对共同元素的一次重复计数；不能把交集数量当作并集数量。",
+    "sha256": "2ffac289182e253758814c73ea7b9c0e77a3075979feb0700f9b103eb6986649"
+  },
+  "groups": [
+    {
+      "id": "G3-R1",
+      "taskId": "51ff194f-1fcd-4d88-a920-6f7688c23242",
+      "goal": "先出两道题看看。",
+      "runId": "89058975-9cad-4038-8e25-23ac0a848092",
+      "settings": {
+        "materialIds": [
+          "d94349d6-1f4f-473a-aab1-25e8745c5c9f"
+        ],
+        "chapterIds": [],
+        "nodeIds": [],
+        "includeNotes": false,
+        "includeSupplements": false,
+        "count": 2,
+        "difficulty": "standard"
+      },
+      "context": {
+        "planId": "11929f01-2bc8-44b5-8753-454c0fe1bb19",
+        "taskVersion": 1,
+        "objectives": [
+          {
+            "id": "set-basics",
+            "label": "集合基本表示与空集",
+            "sources": [
+              {
+                "materialId": "d94349d6-1f4f-473a-aab1-25e8745c5c9f",
+                "paragraph": 2
+              }
+            ],
+            "requirements": [
+              {
+                "role": "concept",
+                "description": "能判断元素重复或顺序变化不影响集合元素个数，并识别空集不含任何元素。",
+                "independent": false
+              }
+            ]
+          },
+          {
+            "id": "intersection-union",
+            "label": "交集与并集的判断",
+            "sources": [
+              {
+                "materialId": "d94349d6-1f4f-473a-aab1-25e8745c5c9f",
+                "paragraph": 3
+              },
+              {
+                "materialId": "d94349d6-1f4f-473a-aab1-25e8745c5c9f",
+                "paragraph": 4
+              },
+              {
+                "materialId": "d94349d6-1f4f-473a-aab1-25e8745c5c9f",
+                "paragraph": 6
+              }
+            ],
+            "requirements": [
+              {
+                "role": "application",
+                "description": "能根据给定集合正确写出或选择交集与并集，并处理没有共同元素时交集为空集的情况。",
+                "independent": false
+              }
+            ]
+          }
+        ],
+        "purpose": {
+          "objectiveIds": [
+            "set-basics",
+            "intersection-union"
+          ],
+          "role": "application",
+          "method": "application",
+          "purpose": "出两道题检查集会元素计算、空集识别及交集并集判断的基础应用能力。",
+          "priorEvidenceRefs": []
+        }
+      },
+      "decoded": {
+        "contractVersion": "references-v2",
+        "title": "集合基本表示与交集并集的应用",
+        "reason": null,
+        "items": [
+          {
+            "stem": "集合 {7, 7, 9} 与集合 {9, 7} 的元素个数分别是几个？",
+            "kind": "application",
+            "scenario": null,
+            "options": [
+              {
+                "id": "A",
+                "text": "第一个是 3 个，第二个是 2 个",
+                "reason": "错误。同一元素重复写出不会增加元素个数，所以 {7, 7, 9} 中去掉重复的 7 后只有 7 和 9 两个元素，不是 3 个。",
+                "evidenceIds": [
+                  "ref_7ae11492d538bba3d1ad1d705ee8c8ec07a054e04d947a4d48f5f6f52c187523"
+                ]
+              },
+              {
+                "id": "B",
+                "text": "第一个是 2 个，第二个是 2 个",
+                "reason": "正确。{7, 7, 9} 中 7 重复不增加元素，实际元素为 7 和 9，共 2 个；{9, 7} 中的元素 9 和 7 也是 2 个，书写顺序不影响计数，所以两个集合元素个数相同。",
+                "evidenceIds": [
+                  "ref_7ae11492d538bba3d1ad1d705ee8c8ec07a054e04d947a4d48f5f6f52c187523"
+                ]
+              },
+              {
+                "id": "C",
+                "text": "第一个是 3 个，第二个是 3 个",
+                "reason": "错误。把 {7, 7, 9} 的重复 7 当成两个不同元素得到 3 个，不符合重复元素不增加个数的规则；同时 {9, 7} 只有两个元素，不是 3 个。",
+                "evidenceIds": [
+                  "ref_7ae11492d538bba3d1ad1d705ee8c8ec07a054e04d947a4d48f5f6f52c187523"
+                ]
+              },
+              {
+                "id": "D",
+                "text": "第一个是 2 个，第二个是 1 个",
+                "reason": "错误。{9, 7} 中有 9 和 7 两个元素，不会因为书写顺序变成 1 个，因此第二个集合的元素个数应为 2。",
+                "evidenceIds": [
+                  "ref_7ae11492d538bba3d1ad1d705ee8c8ec07a054e04d947a4d48f5f6f52c187523"
+                ]
+              }
+            ],
+            "correctOptionId": "B",
+            "explanation": "正确。{7, 7, 9} 中 7 重复不增加元素，实际元素为 7 和 9，共 2 个；{9, 7} 中的元素 9 和 7 也是 2 个，书写顺序不影响计数，所以两个集合元素个数相同。",
+            "hint": "先区分题干对象、适用前提和实际结果，再逐项对照所选材料中的条件与反例。",
+            "stemEvidenceIds": [
+              "ref_7ae11492d538bba3d1ad1d705ee8c8ec07a054e04d947a4d48f5f6f52c187523"
+            ],
+            "explanationEvidenceIds": [
+              "ref_7ae11492d538bba3d1ad1d705ee8c8ec07a054e04d947a4d48f5f6f52c187523"
+            ]
+          },
+          {
+            "stem": "已知 X={2,4,6}，Y={4,6,8}，则 X∩Y 与 X∪Y 分别是什么？",
+            "kind": "application",
+            "scenario": null,
+            "options": [
+              {
+                "id": "A",
+                "text": "X∩Y={4,6}，X∪Y={2,4,6,8}",
+                "reason": "正确。4 和 6 同时属于 X 和 Y，所以 X∩Y={4,6}；X∪Y 包含属于 X 或属于 Y 的所有元素，且每个元素只出现一次，得到 {2,4,6,8}。",
+                "evidenceIds": [
+                  "ref_b4a8a7a32cd4b0f8ad3ac69ba0b80976024e47e6adbdc23109f5b12c7cdffe5b",
+                  "ref_4d1858bd22a3363be7f0030c408d759e3bdbe9e20a28adacf1b7b7746f16d253"
+                ]
+              },
+              {
+                "id": "B",
+                "text": "X∩Y={4,6,8}，X∪Y={2,4,6}",
+                "reason": "错误。8 只属于 Y，不属于 X，不能进入交集；并集应同时包含 X 和 Y 中的 2、4、6、8，而不是仅保留 X 的元素。",
+                "evidenceIds": [
+                  "ref_b4a8a7a32cd4b0f8ad3ac69ba0b80976024e47e6adbdc23109f5b12c7cdffe5b",
+                  "ref_4d1858bd22a3363be7f0030c408d759e3bdbe9e20a28adacf1b7b7746f16d253"
+                ]
+              },
+              {
+                "id": "C",
+                "text": "X∩Y=∅，X∪Y={2,4,6,8}",
+                "reason": "错误。X 和 Y 有共同元素 4、6，因此交集不是空集。两个集合都没有共同元素时交集才为 ∅；这里并集虽然正确，但交集判断不符合条件。",
+                "evidenceIds": [
+                  "ref_b4a8a7a32cd4b0f8ad3ac69ba0b80976024e47e6adbdc23109f5b12c7cdffe5b",
+                  "ref_4d1858bd22a3363be7f0030c408d759e3bdbe9e20a28adacf1b7b7746f16d253",
+                  "ref_fd775d0d59568237dcad06f79e899b8c6d546e65d402bbc27c0c05104faf4ea1"
+                ]
+              },
+              {
+                "id": "D",
+                "text": "X∩Y={4,6}，X∪Y={2,4,4,6,6,8}",
+                "reason": "错误。并集中每个元素只出现一次，不能把共同元素 4、6 写成两次；X∪Y 应写为 {2,4,6,8}。",
+                "evidenceIds": [
+                  "ref_4d1858bd22a3363be7f0030c408d759e3bdbe9e20a28adacf1b7b7746f16d253"
+                ]
+              }
+            ],
+            "correctOptionId": "A",
+            "explanation": "正确。4 和 6 同时属于 X 和 Y，所以 X∩Y={4,6}；X∪Y 包含属于 X 或属于 Y 的所有元素，且每个元素只出现一次，得到 {2,4,6,8}。",
+            "hint": "先区分题干对象、适用前提和实际结果，再逐项对照所选材料中的条件与反例。",
+            "stemEvidenceIds": [
+              "ref_b4a8a7a32cd4b0f8ad3ac69ba0b80976024e47e6adbdc23109f5b12c7cdffe5b",
+              "ref_4d1858bd22a3363be7f0030c408d759e3bdbe9e20a28adacf1b7b7746f16d253",
+              "ref_fd775d0d59568237dcad06f79e899b8c6d546e65d402bbc27c0c05104faf4ea1"
+            ],
+            "explanationEvidenceIds": [
+              "ref_b4a8a7a32cd4b0f8ad3ac69ba0b80976024e47e6adbdc23109f5b12c7cdffe5b",
+              "ref_4d1858bd22a3363be7f0030c408d759e3bdbe9e20a28adacf1b7b7746f16d253"
+            ]
+          }
+        ],
+        "reviewCandidates": [
+          {
+            "questionKey": "2058511b017d953d6a52aeee25dfaa67995e4d48797e9f19c833355b0a01ce62",
+            "check": {
+              "objectiveIds": [
+                "set-basics"
+              ],
+              "role": "application",
+              "rationale": "本题围绕 set-basics 中“元素重复或顺序变化不影响集合元素个数”的判断，给出一组包含重复元素的集合与改变书写顺序的集合，要求识别重复 7 不增加计数、{9,7} 与 {7,9} 等价，直接检验该目标的核心应用，不涉及交集并集计算。"
+            }
+          },
+          {
+            "questionKey": "b38f64dd20a89b9d3176dc92ce3c1d5fa4b8ea6d0c7323b9dd1aea4f11da4b28",
+            "check": {
+              "objectiveIds": [
+                "intersection-union"
+              ],
+              "role": "application",
+              "rationale": "本题围绕 intersection-union 中“根据给定集合正确写出或选择交集与并集”的要求，给出 X 和 Y 的明确元素，要求同时判断 X∩Y 和 X∪Y，并用没有共同元素时交集为 ∅ 的规则排除错误项，直接检验该目标的应用能力，不扩展集合基本表示计数。"
+            }
+          }
+        ]
+      },
+      "candidates": [
+        {
+          "index": 1,
+          "candidate": {
+            "focus": "根据给定集合分别判断交集与并集的正确结果，并处理没有共同元素时交集为空集的情况。",
+            "scenario": null,
+            "stem": "已知 X={2,4,6}，Y={4,6,8}，则 X∩Y 与 X∪Y 分别是什么？",
+            "kind": "application",
+            "stemEvidenceIds": [
+              "r2",
+              "r3",
+              "r4"
+            ],
+            "options": [
+              {
+                "id": "A",
+                "text": "X∩Y={4,6}，X∪Y={2,4,6,8}",
+                "reasonParts": [
+                  {
+                    "text": "正确。4 和 6 同时属于 X 和 Y，所以 X∩Y={4,6}；X∪Y 包含属于 X 或属于 Y 的所有元素，且每个元素只出现一次，得到 {2,4,6,8}。",
+                    "evidenceIds": [
+                      "r2",
+                      "r3"
+                    ]
+                  }
+                ]
+              },
+              {
+                "id": "B",
+                "text": "X∩Y={4,6,8}，X∪Y={2,4,6}",
+                "reasonParts": [
+                  {
+                    "text": "错误。8 只属于 Y，不属于 X，不能进入交集；并集应同时包含 X 和 Y 中的 2、4、6、8，而不是仅保留 X 的元素。",
+                    "evidenceIds": [
+                      "r2",
+                      "r3"
+                    ]
+                  }
+                ]
+              },
+              {
+                "id": "C",
+                "text": "X∩Y=∅，X∪Y={2,4,6,8}",
+                "reasonParts": [
+                  {
+                    "text": "错误。X 和 Y 有共同元素 4、6，因此交集不是空集。两个集合都没有共同元素时交集才为 ∅；这里并集虽然正确，但交集判断不符合条件。",
+                    "evidenceIds": [
+                      "r2",
+                      "r3",
+                      "r4"
+                    ]
+                  }
+                ]
+              },
+              {
+                "id": "D",
+                "text": "X∩Y={4,6}，X∪Y={2,4,4,6,6,8}",
+                "reasonParts": [
+                  {
+                    "text": "错误。并集中每个元素只出现一次，不能把共同元素 4、6 写成两次；X∪Y 应写为 {2,4,6,8}。",
+                    "evidenceIds": [
+                      "r3"
+                    ]
+                  }
+                ]
+              }
+            ],
+            "correctOptionId": "A",
+            "reviewCheck": {
+              "objectiveIds": [
+                "intersection-union"
+              ],
+              "role": "application",
+              "rationale": "本题围绕 intersection-union 中“根据给定集合正确写出或选择交集与并集”的要求，给出 X 和 Y 的明确元素，要求同时判断 X∩Y 和 X∪Y，并用没有共同元素时交集为 ∅ 的规则排除错误项，直接检验该目标的应用能力，不扩展集合基本表示计数。"
+            }
+          }
+        }
+      ],
+      "expected": [
+        null,
+        "equivalent_options"
+      ]
+    },
+    {
+      "id": "G3-R2",
+      "taskId": "51ff194f-1fcd-4d88-a920-6f7688c23242",
+      "goal": "先出两道题看看。",
+      "runId": "063a3d59-aaeb-409c-8a71-2894f09e6d5a",
+      "settings": {
+        "materialIds": [
+          "d94349d6-1f4f-473a-aab1-25e8745c5c9f"
+        ],
+        "chapterIds": [],
+        "nodeIds": [],
+        "includeNotes": false,
+        "includeSupplements": false,
+        "count": 2,
+        "difficulty": "basic"
+      },
+      "context": {
+        "planId": "11929f01-2bc8-44b5-8753-454c0fe1bb19",
+        "taskVersion": 1,
+        "objectives": [
+          {
+            "id": "set-basics",
+            "label": "集合基本表示与空集",
+            "sources": [
+              {
+                "materialId": "d94349d6-1f4f-473a-aab1-25e8745c5c9f",
+                "paragraph": 2
+              }
+            ],
+            "requirements": [
+              {
+                "role": "concept",
+                "description": "能判断元素重复或顺序变化不影响集合元素个数，并识别空集不含任何元素。",
+                "independent": false
+              }
+            ]
+          },
+          {
+            "id": "intersection-union",
+            "label": "交集与并集的判断",
+            "sources": [
+              {
+                "materialId": "d94349d6-1f4f-473a-aab1-25e8745c5c9f",
+                "paragraph": 3
+              },
+              {
+                "materialId": "d94349d6-1f4f-473a-aab1-25e8745c5c9f",
+                "paragraph": 4
+              },
+              {
+                "materialId": "d94349d6-1f4f-473a-aab1-25e8745c5c9f",
+                "paragraph": 6
+              }
+            ],
+            "requirements": [
+              {
+                "role": "application",
+                "description": "能根据给定集合正确写出或选择交集与并集，并处理没有共同元素时交集为空集的情况。",
+                "independent": false
+              }
+            ]
+          }
+        ],
+        "purpose": {
+          "objectiveIds": [
+            "set-basics",
+            "intersection-union"
+          ],
+          "role": "application",
+          "method": "application",
+          "purpose": "按已建立诊断计划检查集合基本表示与交集并集的应用，先出两道题看看。",
+          "priorEvidenceRefs": [
+            {
+              "quizId": "89058975-9cad-4038-8e25-23ac0a848092",
+              "attemptId": "8aecd92c-fdc4-4f0f-80ad-d9673251af37",
+              "questionIndex": 0
+            }
+          ]
+        }
+      },
+      "decoded": {
+        "contractVersion": "references-v2",
+        "title": "集合基本表示与交集并集的应用检查",
+        "reason": null,
+        "items": [
+          {
+            "stem": "在集合表示中，下列哪种写法与 {红, 蓝} 表示同一个集合？",
+            "kind": "application",
+            "scenario": null,
+            "options": [
+              {
+                "id": "A",
+                "text": "{蓝, 红}",
+                "reason": "正确。元素的书写顺序不影响集合，因此 {蓝, 红} 与 {红, 蓝} 表示同一个集合。",
+                "evidenceIds": [
+                  "ref_7ae11492d538bba3d1ad1d705ee8c8ec07a054e04d947a4d48f5f6f52c187523"
+                ]
+              },
+              {
+                "id": "B",
+                "text": "{红, 红, 蓝, 蓝}",
+                "reason": "错误。同一元素重复写出不会增加元素个数，{红, 红, 蓝, 蓝} 仍只含红、蓝两个元素，与 {红, 蓝} 相同；但该选项与题意不符，因它不是以最简单的元素列写形式表示。",
+                "evidenceIds": [
+                  "ref_7ae11492d538bba3d1ad1d705ee8c8ec07a054e04d947a4d48f5f6f52c187523"
+                ]
+              },
+              {
+                "id": "C",
+                "text": "{红, 蓝, 绿}",
+                "reason": "错误。该写法多出元素绿，元素数量与 {红, 蓝} 不同，不能表示同一个集合。",
+                "evidenceIds": [
+                  "ref_7ae11492d538bba3d1ad1d705ee8c8ec07a054e04d947a4d48f5f6f52c187523"
+                ]
+              },
+              {
+                "id": "D",
+                "text": "{红}",
+                "reason": "错误。该写法缺少元素蓝，元素数量与 {红, 蓝} 不同，不能表示同一个集合。",
+                "evidenceIds": [
+                  "ref_7ae11492d538bba3d1ad1d705ee8c8ec07a054e04d947a4d48f5f6f52c187523"
+                ]
+              }
+            ],
+            "correctOptionId": "A",
+            "explanation": "正确。元素的书写顺序不影响集合，因此 {蓝, 红} 与 {红, 蓝} 表示同一个集合。",
+            "hint": "先区分题干对象、适用前提和实际结果，再逐项对照所选材料中的条件与反例。",
+            "stemEvidenceIds": [
+              "ref_7ae11492d538bba3d1ad1d705ee8c8ec07a054e04d947a4d48f5f6f52c187523"
+            ],
+            "explanationEvidenceIds": [
+              "ref_7ae11492d538bba3d1ad1d705ee8c8ec07a054e04d947a4d48f5f6f52c187523"
+            ]
+          },
+          {
+            "stem": "根据这两个集合，下列判断正确的是哪一项？",
+            "kind": "application",
+            "scenario": "假设有两个集合：集合 C={红, 蓝}，集合 D={蓝, 绿}。",
+            "options": [
+              {
+                "id": "A",
+                "text": "C∪D={红, 蓝, 绿}",
+                "reason": "正确。并集包含属于 C 或属于 D 的元素，每个元素只出现一次；蓝同时属于二者也只写一次，所以 C∪D={红, 蓝, 绿}。",
+                "evidenceIds": [
+                  "ref_4d1858bd22a3363be7f0030c408d759e3bdbe9e20a28adacf1b7b7746f16d253",
+                  "ref_fd775d0d59568237dcad06f79e899b8c6d546e65d402bbc27c0c05104faf4ea1"
+                ]
+              },
+              {
+                "id": "B",
+                "text": "C∩D={红, 蓝, 绿}",
+                "reason": "错误。交集要求同时属于 C 和 D。红只属于 C，绿只属于 D，均不属于交集；只有蓝同时属于二者，所以 C∩D={蓝}。",
+                "evidenceIds": [
+                  "ref_b4a8a7a32cd4b0f8ad3ac69ba0b80976024e47e6adbdc23109f5b12c7cdffe5b",
+                  "ref_fd775d0d59568237dcad06f79e899b8c6d546e65d402bbc27c0c05104faf4ea1"
+                ]
+              },
+              {
+                "id": "C",
+                "text": "C∪D={蓝}",
+                "reason": "错误。{蓝} 是交集结果，不是并集结果。并集应包含红、蓝、绿三个元素。",
+                "evidenceIds": [
+                  "ref_b4a8a7a32cd4b0f8ad3ac69ba0b80976024e47e6adbdc23109f5b12c7cdffe5b",
+                  "ref_4d1858bd22a3363be7f0030c408d759e3bdbe9e20a28adacf1b7b7746f16d253",
+                  "ref_fd775d0d59568237dcad06f79e899b8c6d546e65d402bbc27c0c05104faf4ea1"
+                ]
+              },
+              {
+                "id": "D",
+                "text": "C∩D=∅",
+                "reason": "错误。C 和 D 有共同元素蓝，所以交集不是空集，而是 {蓝}。空交集只出现在没有共同元素时。",
+                "evidenceIds": [
+                  "ref_b4a8a7a32cd4b0f8ad3ac69ba0b80976024e47e6adbdc23109f5b12c7cdffe5b",
+                  "ref_fd775d0d59568237dcad06f79e899b8c6d546e65d402bbc27c0c05104faf4ea1"
+                ]
+              }
+            ],
+            "correctOptionId": "A",
+            "explanation": "正确。并集包含属于 C 或属于 D 的元素，每个元素只出现一次；蓝同时属于二者也只写一次，所以 C∪D={红, 蓝, 绿}。",
+            "hint": "先区分题干对象、适用前提和实际结果，再逐项对照所选材料中的条件与反例。",
+            "stemEvidenceIds": [
+              "ref_fd775d0d59568237dcad06f79e899b8c6d546e65d402bbc27c0c05104faf4ea1"
+            ],
+            "explanationEvidenceIds": [
+              "ref_4d1858bd22a3363be7f0030c408d759e3bdbe9e20a28adacf1b7b7746f16d253",
+              "ref_fd775d0d59568237dcad06f79e899b8c6d546e65d402bbc27c0c05104faf4ea1"
+            ]
+          }
+        ],
+        "reviewCandidates": [
+          {
+            "questionKey": "42bcb540bffc394878b2bbf3249a64e8b38d3f832998175cb3bd6297d4efc8db",
+            "check": {
+              "objectiveIds": [
+                "set-basics"
+              ],
+              "role": "application",
+              "rationale": "本题考查元素书写顺序变化是否仍表示同一集合，对应 set-basics 目标中“能判断元素重复或顺序变化不影响集合元素个数”的应用要求。选项安排覆盖顺序不同、重复元素、多元素和少元素的情况，能区分学生是否混淆元素内容变化与排列变化。"
+            }
+          },
+          {
+            "questionKey": "0ea01ef5e4acc632deb0fab0d96208cae37f62c0aa9c9f62831fad675d475f5e",
+            "check": {
+              "objectiveIds": [
+                "intersection-union"
+              ],
+              "role": "application",
+              "rationale": "本题考查根据给定集合正确判断交集与并集，并在有共同元素时识别交集不为空，对应 intersection-union 目标的应用要求。四个选项分别覆盖正确并集、错误把并集元素当成交集、错误把交集当成并集、错误认为交集为空集的情形，能检查学生对归属条件和空交集条件的区分。"
+            }
+          }
+        ]
+      },
+      "candidates": [],
+      "expected": [
+        "equivalent_options",
+        null
+      ]
+    },
+    {
+      "id": "G5-R1",
+      "taskId": "9466c276-3f7b-4391-aff1-40deba674f77",
+      "goal": "我总分不清交集和并集，帮我练练。",
+      "runId": "96054baf-6a61-4c2c-824e-6d314d737a10",
+      "settings": {
+        "materialIds": [
+          "d94349d6-1f4f-473a-aab1-25e8745c5c9f"
+        ],
+        "chapterIds": [],
+        "nodeIds": [],
+        "includeNotes": false,
+        "includeSupplements": false,
+        "count": 3,
+        "difficulty": "basic"
+      },
+      "context": {
+        "planId": "4d3b2e72-a9d1-4c1c-8e42-3da7c3926e00",
+        "taskVersion": 1,
+        "objectives": [
+          {
+            "id": "set_intersection_union_basic",
+            "label": "用小范围练习检查交集与并集的基础区分",
+            "sources": [
+              {
+                "materialId": "d94349d6-1f4f-473a-aab1-25e8745c5c9f",
+                "paragraph": 3
+              },
+              {
+                "materialId": "d94349d6-1f4f-473a-aab1-25e8745c5c9f",
+                "paragraph": 4
+              },
+              {
+                "materialId": "d94349d6-1f4f-473a-aab1-25e8745c5c9f",
+                "paragraph": 5
+              }
+            ],
+            "requirements": [
+              {
+                "role": "concept",
+                "description": "能从给定两个集合中选出同时属于二者的共同元素作为交集结果。",
+                "independent": true
+              },
+              {
+                "role": "application",
+                "description": "能从给定两个集合中合成所有至少属于其一的元素作为并集结果，且不重复写出共同元素。",
+                "independent": false
+              },
+              {
+                "role": "boundary",
+                "description": "能区分没有共同元素时交集为空集而并集仍含全部元素。",
+                "independent": false
+              }
+            ]
+          }
+        ],
+        "purpose": {
+          "objectiveIds": [
+            "set_intersection_union_basic"
+          ],
+          "role": "concept",
+          "method": "contrast",
+          "purpose": "用小范围基础题检查学生能否区分给定两集合的交集与并集，覆盖共同元素选取、合并去重和空交集情形。",
+          "priorEvidenceRefs": []
+        }
+      },
+      "decoded": {
+        "contractVersion": "references-v2",
+        "title": "交集与并集基础区分",
+        "reason": "第 3 题题目结构或解释与依据关联不完整，未发布。\n第 2 题解析选项引用不明确：存在组合引用或序数位置依赖，未发布。",
+        "items": [
+          {
+            "stem": "设 X={2,5,7}，Y={5,8,9}。X∩Y 等于哪个集合？",
+            "kind": "concept",
+            "scenario": null,
+            "options": [
+              {
+                "id": "A",
+                "text": "{5}",
+                "reason": "正确。交集 X∩Y 包含同时属于 X 和 Y 的元素。5 同时出现在 X={2,5,7} 和 Y={5,8,9} 中，而其他元素只属于其中一个集合，所以 X∩Y={5}。",
+                "evidenceIds": [
+                  "ref_b4a8a7a32cd4b0f8ad3ac69ba0b80976024e47e6adbdc23109f5b12c7cdffe5b"
+                ]
+              },
+              {
+                "id": "B",
+                "text": "{2,5,7,8,9}",
+                "reason": "错误。这是把所有至少属于 X 或 Y 的元素合在一起，属于并集的思路；2、7 只属于 X，8、9 只属于 Y，并不满足交集中必须同时属于两个集合的条件。",
+                "evidenceIds": [
+                  "ref_b4a8a7a32cd4b0f8ad3ac69ba0b80976024e47e6adbdc23109f5b12c7cdffe5b",
+                  "ref_4d1858bd22a3363be7f0030c408d759e3bdbe9e20a28adacf1b7b7746f16d253"
+                ]
+              },
+              {
+                "id": "C",
+                "text": "{2,7,8,9}",
+                "reason": "错误。这些元素都只属于其中一个集合，没有同时属于 X 和 Y 的共同元素，不能作为交集结果。",
+                "evidenceIds": [
+                  "ref_b4a8a7a32cd4b0f8ad3ac69ba0b80976024e47e6adbdc23109f5b12c7cdffe5b"
+                ]
+              },
+              {
+                "id": "D",
+                "text": "{5,5}",
+                "reason": "错误。集合中的元素只出现一次，交集结果 {5} 不应把同一个元素写两次；把 5 重复写出不是另一个不同元素。",
+                "evidenceIds": [
+                  "ref_b4a8a7a32cd4b0f8ad3ac69ba0b80976024e47e6adbdc23109f5b12c7cdffe5b",
+                  "ref_4d1858bd22a3363be7f0030c408d759e3bdbe9e20a28adacf1b7b7746f16d253"
+                ]
+              }
+            ],
+            "correctOptionId": "A",
+            "explanation": "正确。交集 X∩Y 包含同时属于 X 和 Y 的元素。5 同时出现在 X={2,5,7} 和 Y={5,8,9} 中，而其他元素只属于其中一个集合，所以 X∩Y={5}。",
+            "hint": "先找出题干所问的概念，再对照材料中的定义和适用范围，逐项比较差别。",
+            "stemEvidenceIds": [
+              "ref_b4a8a7a32cd4b0f8ad3ac69ba0b80976024e47e6adbdc23109f5b12c7cdffe5b"
+            ],
+            "explanationEvidenceIds": [
+              "ref_b4a8a7a32cd4b0f8ad3ac69ba0b80976024e47e6adbdc23109f5b12c7cdffe5b"
+            ]
+          },
+          {
+            "compositionRejected": true,
+            "rejectionReason": "position_dependency"
+          },
+          {
+            "compositionRejected": true,
+            "rejectionReason": "structure_or_evidence"
+          }
+        ],
+        "reviewCandidates": [
+          {
+            "questionKey": "ea49e4a584d6bf909d881cfafe19e6d92e634b76f130635faa469e67ecae84e2",
+            "check": {
+              "objectiveIds": [
+                "set_intersection_union_basic"
+              ],
+              "role": "concept",
+              "rationale": "本题只要求从 X={2,5,7} 与 Y={5,8,9} 中选出同时属于二者的共同元素 5，并排除只属于单边集合或重复写出同一元素的并集式写法，与目标中“选出同时属于二者的共同元素作为交集结果”的基础概念检查一致。"
+            }
+          }
+        ]
+      },
+      "candidates": [
+        {
+          "index": 0,
+          "candidate": {
+            "focus": "从两个给定集合中选出同时属于二者的共同元素作为交集结果。",
+            "scenario": null,
+            "stem": "设 X={2,5,7}，Y={5,8,9}。X∩Y 等于哪个集合？",
+            "kind": "concept",
+            "stemEvidenceIds": [
+              "r1"
+            ],
+            "options": [
+              {
+                "id": "A",
+                "text": "{5}",
+                "reasonParts": [
+                  {
+                    "text": "正确。交集 X∩Y 包含同时属于 X 和 Y 的元素。5 同时出现在 X={2,5,7} 和 Y={5,8,9} 中，而其他元素只属于其中一个集合，所以 X∩Y={5}。",
+                    "evidenceIds": [
+                      "r1"
+                    ]
+                  }
+                ]
+              },
+              {
+                "id": "B",
+                "text": "{2,5,7,8,9}",
+                "reasonParts": [
+                  {
+                    "text": "错误。这是把所有至少属于 X 或 Y 的元素合在一起，属于并集的思路；2、7 只属于 X，8、9 只属于 Y，并不满足交集中必须同时属于两个集合的条件。",
+                    "evidenceIds": [
+                      "r1",
+                      "r2"
+                    ]
+                  }
+                ]
+              },
+              {
+                "id": "C",
+                "text": "{2,7,8,9}",
+                "reasonParts": [
+                  {
+                    "text": "错误。这些元素都只属于其中一个集合，没有同时属于 X 和 Y 的共同元素，不能作为交集结果。",
+                    "evidenceIds": [
+                      "r1"
+                    ]
+                  }
+                ]
+              },
+              {
+                "id": "D",
+                "text": "{5,5}",
+                "reasonParts": [
+                  {
+                    "text": "错误。集合中的元素只出现一次，交集结果 {5} 不应把同一个元素写两次；把 5 重复写出不是另一个不同元素。",
+                    "evidenceIds": [
+                      "r1",
+                      "r2"
+                    ]
+                  }
+                ]
+              }
+            ],
+            "correctOptionId": "A",
+            "reviewCheck": {
+              "objectiveIds": [
+                "set_intersection_union_basic"
+              ],
+              "role": "concept",
+              "rationale": "本题只要求从 X={2,5,7} 与 Y={5,8,9} 中选出同时属于二者的共同元素 5，并排除只属于单边集合或重复写出同一元素的并集式写法，与目标中“选出同时属于二者的共同元素作为交集结果”的基础概念检查一致。"
+            }
+          }
+        },
+        {
+          "index": 1,
+          "candidate": {
+            "focus": "从两个给定集合中合成所有至少属于其一的元素作为并集结果，且不重复写出共同元素。",
+            "scenario": null,
+            "stem": "设 P={1,4,6}，Q={4,7}。P∪Q 等于哪个集合？",
+            "kind": "application",
+            "stemEvidenceIds": [
+              "r2"
+            ],
+            "options": [
+              {
+                "id": "A",
+                "text": "{1,4,6,7}",
+                "reasonParts": [
+                  {
+                    "text": "正确。并集 P∪Q 包含属于 P 或属于 Q 的元素，且每个元素只出现一次。P 中的 1、6 只属于 P，Q 中的 7 只属于 Q，4 同时属于 P 和 Q，合并后写一次即可，因此 P∪Q={1,4,6,7}。",
+                    "evidenceIds": [
+                      "r2"
+                    ]
+                  }
+                ]
+              },
+              {
+                "id": "B",
+                "text": "{4}",
+                "reasonParts": [
+                  {
+                    "text": "错误。{4} 是 P 与 Q 的共同元素构成的结果，属于交集，而不是包含至少属于一个集合的全部元素的并集。",
+                    "evidenceIds": [
+                      "r1",
+                      "r2"
+                    ]
+                  }
+                ]
+              },
+              {
+                "id": "C",
+                "text": "{1,4,4,6,7}",
+                "reasonParts": [
+                  {
+                    "text": "错误。共同元素 4 只应出现一次，重复写出两个 4 不构成两个不同元素，也不是并集的正确写法。",
+                    "evidenceIds": [
+                      "r2"
+                    ]
+                  }
+                ]
+              },
+              {
+                "id": "D",
+                "text": "{1,6,7}",
+                "reasonParts": [
+                  {
+                    "text": "错误。这个结果漏掉了同时属于 P 和 Q 的元素 4；并集允许满足至少一个归属条件，共同元素也应包含在内。",
+                    "evidenceIds": [
+                      "r2",
+                      "r3"
+                    ]
+                  }
+                ]
+              }
+            ],
+            "correctOptionId": "A",
+            "reviewCheck": {
+              "objectiveIds": [
+                "set_intersection_union_basic"
+              ],
+              "role": "concept",
+              "rationale": "本题仍围绕目标的基础概念要求设计：从 P={1,4,6} 与 Q={4,7} 中判断 P∪Q 应包含所有至少属于其一的元素并只写一次共同元素 4，干扰项把共同元素误作交集、重复写出或漏掉共同元素，均用于检查该概念是否稳固。"
+            }
+          }
+        },
+        {
+          "index": 2,
+          "candidate": {
+            "focus": "区分没有共同元素时的交集为空集与并集仍包含全部元素。",
+            "scenario": null,
+            "stem": "设 M={2,4,6}，N={1,3,5}。关于 M∩N 与 M∪N 的判断，哪一项正确？",
+            "kind": "boundary",
+            "stemEvidenceIds": [
+              "r1",
+              "r2",
+              "r3"
+            ],
+            "options": [
+              {
+                "id": "A",
+                "text": "M∩N=∅，M∪N={1,2,3,4,5,6}",
+                "reasonParts": [
+                  {
+                    "text": "正确。M={2,4,6} 与 N={1,3,5} 没有共同元素，根据交集定义，没有共同元素时交集为空集；并集仍包含属于 M 或属于 N 的所有元素，即 {1,2,3,4,5,6}。",
+                    "evidenceIds": [
+                      "r1",
+                      "r2"
+                    ]
+                  }
+                ]
+              },
+              {
+                "id": "B",
+                "text": "M∩N={2,4,6}，M∪N={1,3,5}",
+                "reasonParts": [
+                  {
+                    "text": "错误。M 与 N 没有共同元素，交集不可能等于 M 的全部元素；并集也不能只写 N，因为它还包含 M 中只属于 M 的元素。",
+                    "evidenceIds": [
+                      "r1",
+                      "r2"
+                    ]
+                  }
+                ]
+              },
+              {
+                "id": "C",
+                "text": "M∩N={1,2,3,4,5,6}，M∪N=∅",
+                "reasonParts": [
+                  {
+                    "text": "错误。把所有元素合在一起是并集的结果，而不是交集；两个集合没有共同元素时交集应为空集，且只要集合中有元素，并集就不会是空集。",
+                    "evidenceIds": [
+                      "r1",
+                      "r2"
+                    ]
+                  }
+                ]
+              },
+              {
+                "id": "D",
+                "text": "M∩N 不存在",
+                "reasonParts": [
+                  {
+                    "text": "错误。没有共同元素时交集仍然存在，结果为空集 ∅，而不是“不存在”。",
+                    "evidenceIds": [
+                      "r1"
+                    ]
+                  }
+                ]
+              }
+            ],
+            "correctOptionId": "A",
+            "reviewCheck": {
+              "objectiveIds": [
+                "set_intersection_union_basic"
+              ],
+              "role": "concept",
+              "rationale": "本题利用 M={2,4,6} 与 N={1,3,5} 检查基础概念中的边界理解：没有共同元素时交集应写为空集，同时并集仍包含全部元素。干扰项分别混淆交集与并集、把交集当作不存在或把并集当作空集，针对目标所要求的交集概念进行检查。"
+            }
+          }
+        }
+      ],
+      "expected": [
+        "equivalent_options",
+        "equivalent_options",
+        null
+      ]
+    }
+  ]
+}

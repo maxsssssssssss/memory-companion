@@ -9,6 +9,7 @@ import { LearningQuizRepository } from "./quiz-repository";
 import { compactQuizRequest, compactQuizPrompt } from "./quiz-compact";
 import { LEARNING_QUIZ_PROMPT, generateLearningQuiz } from "./quiz-service";
 import { learningModelInput } from "./model-input";
+import type { QuizCandidateIssue } from "./quiz-candidate-diagnostics";
 
 let root: string, learning: LearningRepository, quiz: LearningQuizRepository, page: string, material: string;
 const settings = () => ({ materialIds: [material], chapterIds: [], nodeIds: [], includeNotes: false, includeSupplements: false, count: 2, difficulty: "standard" });
@@ -45,6 +46,19 @@ it("round trips every evidence occurrence, leaves source text intact and saves s
   const attempt = quiz.startAttempt(page, { id: randomUUID(), quizId: id, mode: "test" });
   learning.close(); learning = new LearningRepository(root, "owner"); quiz = new LearningQuizRepository(learning);
   expect(quiz.attempt(page, attempt.id)).toEqual(attempt);
+});
+it("normalizes the explicit boundary kind at the compact entry before reference binding, without mutating the response", () => {
+  const { id, scope, codec } = begin(), raw = output(codec), issues: QuizCandidateIssue[] = [];
+  raw.items[0].kind = "boundary"; raw.items[1].kind = "unknown";
+  const before = JSON.stringify(raw), decoded = codec.decode(raw, scope, issue => issues.push(issue));
+  expect(JSON.stringify(raw)).toBe(before);
+  expect(issues).toEqual(expect.arrayContaining([
+    { index: 0, stage: "normalization", code: "kind_alias", originalKind: "boundary", normalizedKind: "application" },
+    expect.objectContaining({ index: 1, stage: "compact", code: "structure_or_evidence" })
+  ]));
+  quiz.complete(page, id, decoded);
+  expect(quiz.list(page)[0]).toMatchObject({ status: "completed", count: 1 });
+  expect(quiz.startAttempt(page, { id: randomUUID(), quizId: id, mode: "test" }).questions[0].kind).toBe("application");
 });
 it("resolves display references by field while preserving literal names from material", () => {
   const { input, scope } = begin(); input.materials[0].paragraphs[0].text += "变量 r1 表示半径。";

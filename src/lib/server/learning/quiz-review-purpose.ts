@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { LearningId } from "@/lib/domain/learning";
 import { LearningCheckPurpose, LearningCheckRole, LearningReviewPlanInput } from "@/lib/domain/learning-agent-completion";
-import { ReferencedGeneratedQuiz, type ReferencedQuizResponse } from "@/lib/domain/learning-quiz";
+import { ReferencedGeneratedQuiz, type ReferencedQuizResponse, type QuizDeliveryReason } from "@/lib/domain/learning-quiz";
 import { frameworkHash } from "./framework-repository";
 import { LearningError } from "./repository";
 import type { LearningQuizRepository } from "./quiz-repository";
@@ -20,6 +20,11 @@ export const QuizReviewContext = z.object({
   }
 });
 export type QuizReviewContext = z.infer<typeof QuizReviewContext>;
+
+/** Trusted, bounded correction of an unusable generation. This is not learner
+ * evidence and does not change the frozen purpose or grant additional budget. */
+export type QuizRepairContext = { attempt: 1; previousQuizId: string; purpose: LearningCheckPurpose;
+  rejected: Array<{ code: QuizDeliveryReason; count: number }> };
 
 export const QuizReviewCheck = z.object({
   objectiveIds: z.array(z.string().regex(/^[a-zA-Z0-9_-]{1,64}$/)).min(1).max(12)

@@ -15692,3 +15692,14 @@ Learning与UI：新增 `agent-scope.ts`、`agent-repository.ts`、`agent-scenari
 ## 2026-10-21：上传 N1/N2 返修证据供 GitHub 下载
 
 用户明确要求从 GitHub 下载已交付证据包。本次在 feat/learning-agent-natural-language-quiz 的 c6dd17158df3d6ac57e90c23554089d0eecfac94 基础上，将原 ZIP 按字节复制至 docs/agent-evidence/learning-agent-natural-quiz-repair2-c6dd171.zip，并追加同目录 README 的下载、业务 SHA、大小、哈希及证据边界说明；没有修改产品源码、依赖、协议、预算或 Windows 数据。ZIP 为 18,113,869 bytes，SHA-256 为 afb0f4bc9319617bba28836aa2c91c49b0b51fb66a3763d7e026154fb1ea9659；126 个文件中 125 个 manifest 条目及 CRC 全部核对，保留原失败日志与 Cloud/Windows 证据区分。本次只交付文件，未重跑业务测试、TypeScript 或构建，业务验收继续固定 c6dd171；真实 Provider 请求为 0，不集成、不部署。原有 95 行本地历史追加保留未纳入本次提交。
+
+
+### 2026-10-22 11:20（Asia/Shanghai）Learning Quiz A—D 集中修复与离线收口
+
+- 依据 Windows c6dd171 的完整公开证据，在原 feat/learning-agent-natural-language-quiz / d426251 继续；外层 ZIP SHA-256 e901bcc807e01007160c551ecaa02aa6f75f6d019c4bf8d3044aa9935b082240，46 项与内嵌 91 项核验。两份原脚本 exit 0 表示旧缺陷复现，不是修复通过。
+- quiz-grounding/quiz-entity-context 区分集合身份与真正字符比较，保留本题已声明实体的逗号跨分句语法；明确选项/序数/跨题保护不放宽。原 G3 错题与 G5 等价题按 equivalent_options 拒绝，不改原题、评分或历史成绩。quiz-kind/composition/compact/service 在身份与引用绑定前仅把 boundary 显式规范化为 application；保留原候选与独立 normalizations，未知标签仍拒绝，review role 与答案/来源不变。
+- agent-completion/scenario/review-purpose/service 实现本轮批准的一次已知零发布修复：复用 check_purpose 的 quiz_repair 收据，绑定任务/版本/目标集合/role；自动选择、反馈继续、原 operation 恢复共用，真实拒因与原 purpose 进入生成。部分发布不凑题，第二次零发布直接交回；unknown、来源、权限、取消、预算不获修复，全部请求仍计累计预算。无新表、迁移、依赖、Runtime 或协议改造。
+- 原 7 题正式 codec/发布/SQLite/作答回放为 5 发布、2 真等价拒绝；本轮 7 题为 3 发布、4 真等价拒绝，boundary 原合同拒绝与规范化后发布分别记录。新增正式业务与持久化回归覆盖收据消费后重开、重复/并发、回执丢失、已满足目标零额外调用；脚本复用 B/E/F 验证原短句两轮 UI 错答→讲解→再答、零发布→讲解反馈→重启→修复。
+- 最终 cloud:test 精确 46 文件 953/953、0 跳过、exit 0；cloud:check 环境/进程合同 9/9 与完整 Next typegen/TypeScript exit 0；最终一次 cloud:build exit 0（179 秒）。浏览器三个阶段各 6/6、40 次离线响应、真实网络 0，两次正常停止退出 0；重登/刷新零新增调用，重复 seed 后 19 个 SQLite/WAL 哈希保持，数据保留。
+- 如实保留中间失败：实体逗号第一次修后有 1 项未声明名字保护回归、stable kind 分支接线前 1 项失败、浏览器 fixture 测试一次性 codec 被重复使用 1 项失败；集中首轮 952/953，旧字符数表示法题回归 1 项。均保留原断言修正并完成上述最终复验；原日志在 output/natural-quiz-final-repair。
+- 限制：收据在真实预算门禁前保守占用，预算拒绝为已知零请求、不退回修复机会；有限数学与 S32、语义关联非 verified、历史缺失 HTTP/候选 UNKNOWN、模拟学生非真人效果、长期掌握未验证均保留。Cloud 真实 Provider 0；Windows 190/227 原账本与 Guard 不触碰，新 SHA 真实验证 PENDING。未运行无关全仓回归，不集成 dev/cloud-code/main、不部署。正式交接 docs/learning-agent-quiz-final-closure.md；原有 95 行本地历史保持未提交，仅本条随授权功能提交。

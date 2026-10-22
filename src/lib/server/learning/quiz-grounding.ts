@@ -94,8 +94,14 @@ export function bindQuizOptionExplanation(text: string, options: Array<{ id: str
 // A bounded equality fence for explicit finite literal sets. The same parser
 // owns literal identity for duplicate choices, equality and cardinality checks.
 function literalSetContext(stem: string) {
+  // "写法/表示" can still ask about the value of a set. Only an explicit
+  // textual comparison (or a different ordered/multiplicity-aware object)
+  // changes the equality rule; representation vocabulary alone does not.
+  const textualComparison = /逐字|逐字符|原样/.test(stem)
+    || /字面|文本|文字|写法|表示法/.test(stem)
+      && /(?:与|和)(?:原文|目标文本)(?:完全)?(?:相同|一致)|(?:[一二两三四五六七八九十百\d]+|几|多少)\s*个字符|字符(?:数量|个数|长度)/.test(stem);
   return /集合|交集|并集|补集|[∩∪⊆⊂⊇⊃∈∉]/.test(stem)
-    && !/多重集|重集|multiset|序列|元组|数组|列表|字符串|JSON|代码|写法|字面|表示法/i.test(stem);
+    && !/多重集|重集|multiset|序列|元组|数组|列表|字符串|JSON|代码/i.test(stem) && !textualComparison;
 }
 function replaceFiniteLiterals(text: string, key: (literal: string) => string) {
   let cursor = 0;

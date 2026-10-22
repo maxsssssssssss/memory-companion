@@ -12,8 +12,10 @@ const phase = process.argv[2];
 assert(['before-restart', 'after-restart', 'inspect'].includes(phase), 'natural_quiz_browser_phase_required');
 const caseFlag = process.argv.indexOf('--case');
 const onlyCase = caseFlag < 0 ? null : process.argv[caseFlag + 1];
-const phaseCases = { 'before-restart': ['A', 'D', 'B', 'C', 'E', 'F'], 'after-restart': ['A', 'C', 'G4', 'E', 'F', 'D'], 'inspect': ['A', 'B', 'C', 'D', 'E', 'F', 'G4'] };
-assert(onlyCase === null || phaseCases[phase].includes(onlyCase), 'natural_quiz_browser_case_invalid_or_not_exercised_in_phase');
+const selectedCases = onlyCase === null ? null : onlyCase?.split(',');
+const phaseCases = { 'before-restart': ['A', 'D', 'B', 'C', 'E', 'F'], 'after-restart': ['A', 'B', 'C', 'G4', 'E', 'F', 'D'], 'inspect': ['A', 'B', 'C', 'D', 'E', 'F', 'G4'] };
+assert(onlyCase === null || (selectedCases?.length && new Set(selectedCases).size === selectedCases.length
+  && selectedCases.every(key => phaseCases[phase].includes(key))), 'natural_quiz_browser_case_invalid_or_not_exercised_in_phase');
 const root = path.resolve(process.env.AGENT_TRIAL_DIR ?? 'output/natural-language-quiz/browser');
 const read = name => JSON.parse(fs.readFileSync(path.join(root, name), 'utf8'));
 const runtime = read('runtime.json'), accounts = read('synthetic-accounts.json');
@@ -35,7 +37,7 @@ const pass = (key, message, evidence = {}) => {
 };
 const caseDefinitions = [
   { key: 'A', mode: 'partial', goal: '练习交集与并集。' },
-  { key: 'B', mode: 'all_failed', goal: '考考我' },
+  { key: 'B', mode: 'zero_repair', goal: '我总分不清交集和并集，帮我练练。' },
   { key: 'C', mode: 'repeat_explanation', goal: '我不理解具体的定义，帮帮我。' },
   { key: 'D', mode: 'source_contract', goal: '先出两道题看看。' },
   { key: 'E', mode: 'multi_round', goal: '我总分不清交集和并集，帮我练练。' },
@@ -53,7 +55,7 @@ else {
 const browser = await chromium.launch(chromiumLaunchOptions());
 
 async function session(key, work) {
-  if (onlyCase && key !== onlyCase) return;
+  if (selectedCases && !selectedCases.includes(key)) return;
   const definition = key === 'G4' ? { key, accountKey: 'C', goal: '只解释，不要做题。' } : caseDefinitions.find(item => item.key === key);
   const account = accounts.find(account => account.key === (definition.accountKey ?? key));
   const context = await browser.newContext({ viewport: { width: 1440, height: 1050 }, serviceWorkers: 'block' });
@@ -169,10 +171,12 @@ try {
       assert.equal(task.actions.filter(action => action.tool === 'learning.create_quiz').length, 1);
       assert.notEqual(task.completion.outcome, 'check_passed');
       assert(task.quizDeliveries.some(item => item.delivery.published === 0));
+      state.B = { version: task.version, plan: task.completion.plan, callsBeforeRestart: task.usage.calls,
+        failedQuizId: task.quizDeliveries.find(item => item.delivery.published === 0).quizId }; persist();
       await h.open(task.id);
       await expect(h.panel()).toContainText('可靠题目');
       await h.snapshot('zero-publication-feedback'); await h.quiet(task.id, 'all candidates rejected without repeated generation');
-      pass('B', 'all invalid candidates remain unpublished; user sees failed practice delivery and can respond to the actual explanation');
+      pass('B', 'all invalid candidates remain unpublished; user sees failed practice delivery and explanation, with one bounded repair available after feedback');
     });
     await session('C', async h => {
       let task = await h.start(); task = await h.settle(task.id);
@@ -245,6 +249,45 @@ try {
     assert.notEqual(runtime.childPid, state.processBeforeRestart.childPid);
     assert.notEqual(runtime.startedAt, state.processBeforeRestart.startedAt);
     assert.equal(ledger().requests, state.processBeforeRestart.requests, 'restart_waiting_adds_zero_calls');
+    await session('B', async h => {
+      let task = await h.current(state.tasks.B);
+      assert.equal(task.status, 'waiting'); assert.equal(task.wait.kind, 'feedback');
+      assert.equal(task.version, state.B.version); assert.deepEqual(task.completion.plan, state.B.plan);
+      assert.equal(task.usage.calls, state.B.callsBeforeRestart); assert.equal(task.quizLinks.length, 0);
+      await h.quiet(task.id, 'zero-publication failure and feedback wait survive normal restart without new calls');
+      await h.panel().getByLabel('你的反馈', { exact: true }).fill('讲解明白了，想做题确认一下。');
+      const resumed = h.page.waitForResponse(response => response.url().endsWith('/agent') && response.request().method() === 'PATCH');
+      await h.panel().getByRole('button', { name: '提交反馈并继续', exact: true }).click();
+      const response = await resumed; assert.equal(response.status(), 202);
+      const feedbackEvent = response.request().postDataJSON();
+      task = await h.settle(task.id, value => value.status === 'waiting' && value.wait?.kind === 'quiz_submission');
+      assert.deepEqual(task.completion.plan, state.B.plan); assert.equal(task.quizLinks.length, 1);
+      assert.equal(task.actions.filter(action => action.tool === 'learning.create_quiz').length, 2);
+      const link = task.quizLinks[0], delivery = task.quizDeliveries.find(item => item.quizId === link.quizId).delivery;
+      assert.equal(delivery.published, 1); assert.equal(delivery.requested, 3);
+      assert(task.quizDeliveries.some(item => item.quizId === state.B.failedQuizId && item.delivery.published === 0));
+      const pending = (await h.api('/quiz?attempt=' + link.attemptId)).value.attempt;
+      assert.equal(pending.questions.length, 1); assert.equal(pending.completed, false);
+      assert(pending.questions.every(question => !question.feedback)); assert(!JSON.stringify(task).includes('correctOptionId'));
+      const beforeDuplicate = ledger();
+      assert.equal((await h.api('/agent', 'PATCH', feedbackEvent)).status, 202);
+      await h.page.waitForTimeout(600); assert.deepEqual(ledger(), beforeDuplicate);
+      await h.open(task.id); await h.snapshot('bounded-repair-one-valid-question');
+      const beforeAnswer = ledger(); const { attempt, event } = await h.submitOne(link, 'B');
+      assert.equal(attempt.score.correct, 1); assert.equal(attempt.score.total, 1);
+      task = await h.settle(task.id, value => value.status === 'ended');
+      assert.equal(task.completion.outcome, 'diagnosis_complete');
+      assert.equal(task.completion.longTermMastery, 'unverified'); assert.deepEqual(task.completion.plan, state.B.plan);
+      assert.equal(task.quizLinks.length, 1); assert.equal(task.actions.filter(action => action.tool === 'learning.create_quiz').length, 2);
+      assert.deepEqual(ledger(), beforeAnswer, 'saved diagnosis observation stops without another decision or generated question');
+      const beforeFinishDuplicate = ledger(); assert.equal((await h.api('/quiz', 'PATCH', event)).status, 200);
+      await h.page.waitForTimeout(600); assert.deepEqual(ledger(), beforeFinishDuplicate);
+      state.B = { ...state.B, ...link, callsAfterRepair: task.usage.calls, outcome: task.completion.outcome }; persist();
+      await h.open(task.id); await h.snapshot('bounded-repair-submitted');
+      pass('B', 'known zero publication → explanation → normal restart → actual user feedback → one bounded repair with original rejection/purpose → valid partial publication → UI answer; duplicate feedback/submission add no calls', {
+        failedQuizId: state.B.failedQuizId, repairedQuizId: link.quizId, score: attempt.score, taskCalls: task.usage.calls,
+      });
+    });
     await session('A', async h => {
       let task = await h.current(state.tasks.A);
       assert.equal(task.version, state.A.version); assert.equal(task.status, 'waiting');
@@ -382,6 +425,24 @@ try {
           attempts, completion: task.completion, usage: task.usage, actions: task.actions,
         }, null, 2));
         assert.deepEqual(ledger(), before);
+      }
+      if (key === 'B') {
+        const attempt = (await h.api('/quiz?attempt=' + state.B.attemptId)).value.attempt;
+        assert.equal(attempt.completed, true);
+        const purposes = readonly(path.join(runtime.dataRoot, 'users', h.account.userId, 'learning-organizer.sqlite'), db =>
+          db.prepare("SELECT kind,state,task_version,body_json FROM learning_agent_artifacts WHERE task_id=? AND kind='check_purpose'").all(task.id)
+            .map(row => ({ ...row, body_json: row.body_json ? JSON.parse(row.body_json) : null })));
+        const claims = purposes.filter(row => row.body_json?.recordType === 'quiz_repair');
+        assert.equal(claims.length, 1, 'restart_and_duplicate_events_share_one_persisted_repair_claim');
+        assert.equal(claims[0].task_version, state.B.version);
+        assert.equal(claims[0].body_json.repair.previousQuizId, state.B.failedQuizId);
+        assert.equal(claims[0].body_json.repair.attempt, 1);
+        assert(claims[0].body_json.repair.rejected.some(item => item.code === 'equivalent_options' && item.count > 0));
+        fs.writeFileSync(path.join(archive, 'B-bounded-repair-business-facts.json'), JSON.stringify({
+          evidence: 'synthetic_controlled_failure_and_repair_real_ui_api_sqlite_simulated_student',
+          taskId: task.id, taskVersion: task.version, plan: task.completion.plan, attempt, completion: task.completion,
+          usage: task.usage, actions: task.actions, deliveries: task.quizDeliveries, purposeRecords: purposes,
+        }, null, 2));
       }
       pass(key, 'saved synthetic task retained for later inspection', { status: task.status, outcome: task.completion?.outcome });
     });

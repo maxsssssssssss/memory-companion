@@ -6,7 +6,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { explanation } = require('./offline-fixtures.cjs');
 
-const modes = ['partial', 'all_failed', 'repeat_explanation', 'multi_round', 'source_contract', 'diagnostic_rounds'];
+const modes = ['partial', 'all_failed', 'zero_repair', 'repeat_explanation', 'multi_round', 'source_contract', 'diagnostic_rounds'];
 const action = (tool, args = {}) => ({ tool, args, reason: '离线验收受控选择，读取正式业务结果后推进；不代表真实模型质量。' });
 
 function readControl(root) {
@@ -58,11 +58,13 @@ function decision(payload, mode) {
     return action('learning.request_feedback', { question: '请告诉我是否已经讲清，或指出仍需说明的部分。' });
   }
   const failedQuiz = payload.results.findLast(result => result.tool === 'learning.create_quiz' && result.status === 'failed');
-  if (failedQuiz) {
+  const receipt = results.findLast(result => result.tool === 'learning.create_quiz')?.value;
+  if (failedQuiz && !(mode === 'zero_repair' && receipt?.quizId)) {
     if (!explained) return explain();
+    if (mode === 'zero_repair' && payload.feedback?.kind === 'feedback')
+      return action('learning.create_quiz', { count: 3, difficulty: 'basic', purpose });
     return action('learning.request_feedback', { question: '这次没有得到可靠题目。可以先看看交集讲解，再告诉我仍不清楚的地方。' });
   }
-  const receipt = results.findLast(result => result.tool === 'learning.create_quiz')?.value;
   if (!receipt) return action('learning.create_quiz', { count: mode === 'source_contract' ? 2 : 3, difficulty: 'basic', purpose });
   assert(receipt.quizId && receipt.attemptId, 'natural_quiz_actual_receipt_required');
   if (!receipt.submitted) return { wait: { kind: 'feedback', message: '请先完成已保存的练习。' } };
@@ -169,8 +171,18 @@ function quiz(payload, mode) {
       reviewCheck: annotation('具体判断只属于一个集合时交集条件不满足、并集条件满足的边界；不自动补记其他角色要求。'),
     }] };
   }
-  assert(['partial', 'all_failed', 'source_contract'].includes(mode), 'natural_quiz_generation_mode_required');
+  assert(['partial', 'all_failed', 'zero_repair', 'source_contract'].includes(mode), 'natural_quiz_generation_mode_required');
   assert(payload.taskContext.count === (mode === 'source_contract' ? 2 : 3), 'natural_quiz_candidate_count_required');
+  if (mode === 'zero_repair' && payload.taskContext.repairContext) {
+    const repair = payload.taskContext.repairContext;
+    assert(repair.attempt === 1 && repair.previousQuizId && Array.isArray(repair.rejected), 'zero_repair_actual_failed_operation_required');
+    assert.deepEqual(repair.purpose.objectiveIds, context.purpose.objectiveIds);
+    assert.equal(repair.purpose.role, context.purpose.role);
+    assert(repair.rejected.some(item => item.code === 'equivalent_options' && item.count > 0), 'zero_repair_actual_rejection_required');
+    // Return one valid candidate for the same fixed purpose. This is an explicit
+    // offline response to the service's repair contract, not a random retry.
+    return { ...base, items: [good] };
+  }
   const equivalent = structuredClone(good);
   equivalent.focus = '空交集示例';
   equivalent.scenario = '假设C={6,7}，D={8,9}。';

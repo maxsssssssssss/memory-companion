@@ -87,6 +87,9 @@ describe("synthetic finite literal identity through codec, publication, SQLite a
     return { id, raw, decoded, inspection, saved };
   }
   it.each([
+    // Exact reported stem/options; the full original candidate/neighbor is
+    // replayed separately without replacing any original reason or evidence.
+    ["在集合表示中，下列哪种写法与 {红, 蓝} 表示同一个集合？", ["{蓝, 红}", "{红, 红, 蓝, 蓝}", "{红, 蓝, 绿}", "{红}"]],
     ["集合 M={红,蓝}，N={蓝,绿}。M∪N 等于什么？", ["{红,蓝,绿}", "{红,蓝,蓝,绿}", "{红,绿}", "{}"]],
     ["集合 X={北京,上海}，Y={上海,广州}。X∪Y 等于什么？", ["{北京,上海,广州}", "{ 广州，北京、上海、北京 }", "{北京,广州}", "{}"]],
     ["集合 A={a,B}，C={B,1}。A∪C 等于什么？", ["{a,B,1}", "{+01,B,a,1}", "{a,1}", "{}"]],

@@ -8,7 +8,8 @@ import { LearningRepository } from "./repository";
 import { LearningQuizRepository } from "./quiz-repository";
 import { generateLearningQuiz } from "./quiz-service";
 import type { generateStudyJson } from "./framework-generator";
-import type { QuizReviewContext } from "./quiz-review-purpose";
+import { quizReviewQuestionKey, type QuizReviewContext } from "./quiz-review-purpose";
+import { ReferencedGeneratedQuiz, type SavedQuiz } from "@/lib/domain/learning-quiz";
 import { clearQuizCandidateDiagnostics, quizCandidateDiagnostics, type QuizDiagnosticContext } from "./quiz-candidate-diagnostics";
 
 let root: string, learning: LearningRepository, repo: LearningQuizRepository, page: string, material: string;
@@ -69,6 +70,63 @@ it("keeps precise primary/secondary rejection and the actual final candidate pri
   expect(JSON.stringify({ attempt, runs: repo.list(page) })).not.toMatch(/candidateDiagnostics|reasonParts|correctOptionId|选项 A\/B 都正确|actualRole/);
   learning.close(); learning = new LearningRepository(root, "owner"); repo = new LearningQuizRepository(learning);
   expect(detail(result.id)).toEqual(diagnostics);
+  expect(fetch).not.toHaveBeenCalled();
+});
+
+it.each(["composed", "stable"] as const)("normalizes only the explicit kind alias before identity binding in %s generation and retains its original projection", async encoding => {
+  expect(ReferencedGeneratedQuiz.shape.items.element.shape.kind.safeParse("boundary").success).toBe(false);
+  let raw: unknown, original: string | undefined;
+  const provider = generate(wire => {
+    const value = response(wire); value.items[0].kind = "boundary";
+    // The stable-reference path is an existing internal evaluation interface.
+    // Its raw response shape differs, but uses the same pre-binding kind policy.
+    const { materialPlan: _plan, ...body } = value;
+    raw = encoding === "composed" ? value : { ...body, items: value.items.map(({ focus: _focus, options, ...item }) => ({ ...item,
+      explanation: options[0].reasonParts.map(part => part.text).join("\n"), explanationEvidenceIds: options[0].reasonParts.flatMap(part => part.evidenceIds), hint: null,
+      options: options.map(({ reasonParts, ...option }) => ({ ...option, reason: reasonParts.map(part => part.text).join("\n"), evidenceIds: reasonParts.flatMap(part => part.evidenceIds) })) })) };
+    original = JSON.stringify(raw); return raw;
+  });
+  const id = randomUUID();
+  const rows = await generateLearningQuiz(learning, page, { id, settings: settings() }, { configure: () => config, generate: provider,
+    ...(encoding === "stable" ? { referenceEncoding: "stable" } : {}), reviewContext: context, diagnosticContext });
+  expect(rows.find(row => row.id === id)).toMatchObject({ status: "completed", count: 2 });
+  expect(JSON.stringify(raw)).toBe(original);
+  const diagnostics = detail(id);
+  expect(diagnostics).toMatchObject({ context: diagnosticContext, issues: [], normalizations: [{ index: 0, stage: "normalization", code: "kind_alias",
+    originalKind: "boundary", normalizedKind: "application" }], candidates: [{ index: 0, candidate: { kind: "boundary" } }] });
+  const saved = JSON.parse((learning.database.prepare("SELECT result_json FROM learning_quiz_runs WHERE id=?").get(id) as { result_json: string }).result_json) as SavedQuiz;
+  expect(saved.questions[0].kind).toBe("application");
+  expect(quizReviewQuestionKey(saved.questions[0])).not.toBe(quizReviewQuestionKey({ ...saved.questions[0], kind: "boundary" }));
+  expect(repo.review(page, id)!.checks).toEqual([0, 1].map(questionIndex => expect.objectContaining({ questionIndex,
+    objectiveIds: ["intersection"], role: "boundary", semanticProvenance: "model_proposal" })));
+  let attempt = repo.startAttempt(page, { id: randomUUID(), quizId: id, mode: "test" });
+  expect(JSON.stringify(attempt)).not.toMatch(/correctOptionId|normalizations|originalKind|reasonParts/);
+  for (let question = 0; question < attempt.questions.length; question++) attempt = repo.act(page, { id: randomUUID(), attemptId: attempt.id,
+    revision: attempt.revision, action: "choose", question, optionId: "A" });
+  attempt = repo.act(page, { id: randomUUID(), attemptId: attempt.id, revision: attempt.revision, action: "finish", question: 0, optionId: null });
+  expect(attempt.score).toMatchObject({ correct: 2, total: 2 });
+  learning.close(); learning = new LearningRepository(root, "owner"); repo = new LearningQuizRepository(learning);
+  expect(detail(id)).toEqual(diagnostics); expect(repo.attempt(page, attempt.id)).toEqual(attempt);
+  clearQuizCandidateDiagnostics(learning, page, { taskId: diagnosticContext.taskId, exceptVersion: 3 });
+  expect(detail(id)).toBeUndefined(); expect(fetch).not.toHaveBeenCalled();
+});
+
+it.each(["unrecognized", "missing-source", "wrong-role", "duplicate-option-id"])("kind normalization does not repair %s or weaken independent publication gates", async invalid => {
+  const result = await run(wire => {
+    const value = response(wire); value.items[0].kind = invalid === "unrecognized" ? "boundary_conditions" : "boundary";
+    if (invalid === "missing-source") value.items[0].options[0].reasonParts[0].evidenceIds = ["r999"];
+    if (invalid === "wrong-role") value.items[0].reviewCheck.role = "concept";
+    if (invalid === "duplicate-option-id") value.items[0].options[1].id = "A";
+    return value;
+  });
+  expect(result.run).toMatchObject({ status: "completed", count: 1 });
+  const diagnostics = detail(result.id);
+  if (invalid === "unrecognized") {
+    expect(diagnostics.normalizations).toBeUndefined();
+    expect(diagnostics.issues[0]).toMatchObject({ stage: "composition", code: "structure_or_evidence", validationIssues: [{ path: "kind", code: "invalid_enum_value" }] });
+  } else expect(diagnostics.normalizations).toHaveLength(1);
+  expect(diagnostics.issues.map((issue: { code: string }) => issue.code)).toContain(invalid === "missing-source" ? "source_binding"
+    : invalid === "wrong-role" ? "annotation_role" : invalid === "duplicate-option-id" ? "option_identity" : "structure_or_evidence");
   expect(fetch).not.toHaveBeenCalled();
 });
 

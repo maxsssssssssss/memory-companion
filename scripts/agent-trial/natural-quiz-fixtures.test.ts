@@ -29,7 +29,7 @@ it("selects synthetic fault cases only through an explicit matching page/materia
   expect(fixture.configuredCase(root, { materials: [{ materialId: "another" }] })).toBeNull();
 });
 
-it.each(["partial", "all_failed", "repeat_explanation", "multi_round", "diagnostic_rounds"])("%s fixture uses scope and current source results to create a strict plan", mode => {
+it.each(["partial", "all_failed", "zero_repair", "repeat_explanation", "multi_round", "diagnostic_rounds"])("%s fixture uses scope and current source results to create a strict plan", mode => {
   expect(fixture.decision(payload([]), mode).tool).toBe("learning.read_scope");
   expect(fixture.decision(payload([scope]), mode).tool).toBe("learning.read_source");
   const plan = planFor(mode);
@@ -77,6 +77,48 @@ it("known zero-publication failure changes to explanation then feedback, never b
   const plan = planFor("all_failed"), failed = { tool: "learning.create_quiz", status: "failed", value: null };
   expect(fixture.decision(payload([scope, ...sources, failed], plan), "all_failed").tool).toBe("learning.explain");
   expect(fixture.decision(payload([scope, ...sources, failed, { tool: "learning.explain", status: "succeeded", value: {} }], plan), "all_failed").tool).toBe("learning.request_feedback");
+});
+
+it("the bounded-repair fixture asks again only after actual failed generation, explanation and explicit feedback, preserving the fixed purpose", () => {
+  const plan = planFor("zero_repair");
+  const start = fixture.decision(payload([scope, ...sources], plan), "zero_repair");
+  const failed = { tool: "learning.create_quiz", status: "failed", value: null };
+  const explaining = payload([scope, ...sources, failed], plan);
+  expect(fixture.decision(explaining, "zero_repair").tool).toBe("learning.explain");
+  const explained = payload([...explaining.results, { tool: "learning.explain", status: "succeeded", value: {} }], plan);
+  expect(fixture.decision(explained, "zero_repair").tool).toBe("learning.request_feedback");
+  const retry = fixture.decision({ ...explained, feedback: { kind: "feedback", message: "讲解明白了，想做题确认一下。" } }, "zero_repair");
+  expect(retry.tool).toBe("learning.create_quiz");
+  expect(retry.args).toEqual(start.args);
+  const repaired = { tool: "learning.create_quiz", status: "succeeded", value: { quizId, attemptId, submitted: true } };
+  expect(fixture.decision(payload([...explained.results, repaired], plan), "zero_repair")).toMatchObject({ tool: "learning.read_answers", args: { attemptId } });
+});
+
+it("the bounded repair returns a valid candidate only when the service supplies its original rejection and purpose", () => {
+  const plan = planFor("zero_repair"), purpose = fixture.decision(payload([scope, ...sources], plan), "zero_repair").args.purpose;
+  const context = { planId: quizId, taskVersion: 1, objectives: plan.objectives, purpose };
+  const paragraphs = [{ number: 3, text: "交集 A∩B 包含同时属于 A 和 B 的元素。若 A={1,2,3}，B={3,4}，则 A∩B={3}。", referenceId: `ref_${"1".repeat(64)}` }];
+  const request = { count: 3, difficulty: "basic" as const, materials: [{ materialId, kind: "text" as const, title: "合成教材", paragraphs }], extras: [] };
+  const codecScope = { accountId: "synthetic", pageId, requestId: quizId, expiresAt: Date.now() + 10000 };
+  const codec = composedQuizRequest(request, codecScope);
+  const wire = { ...codec.input, taskContext: { ...codec.input.taskContext, reviewContext: context } };
+  const initial = fixture.quiz(wire, "zero_repair");
+  const catalog = paragraphs.map(paragraph => ({ referenceId: paragraph.referenceId, source: { kind: "material" as const, materialId, paragraph: paragraph.number }, text: paragraph.text }));
+  const initialDecoded = decodeReviewQuiz(initial, value => codec.decode(value, codecScope), context, catalog);
+  const rejected = inspectQuizCandidateDelivery(initialDecoded, catalog);
+  expect(rejected.candidates).toBe(3); expect(rejected.rejected).toHaveLength(3);
+  const repaired = { ...wire, taskContext: { ...wire.taskContext, repairContext: {
+    attempt: 1, previousQuizId: quizId, purpose, rejected: [{ code: "equivalent_options", count: 1 }, { code: "position_dependency", count: 1 }, { code: "repeated_focus", count: 1 }],
+  } } };
+  const raw = fixture.quiz(repaired, "zero_repair");
+  const repairScope = { ...codecScope, requestId: "00000000-0000-4000-8000-000000000005" };
+  const repairCodec = composedQuizRequest(request, repairScope);
+  const decoded = decodeReviewQuiz(raw, value => repairCodec.decode(value, repairScope), context, catalog);
+  expect(raw.items).toHaveLength(1);
+  expect(inspectQuizCandidateDelivery(decoded, catalog)).toMatchObject({ candidates: 1, rejected: [] });
+  expect(decoded.reviewCandidates?.[0].check).toMatchObject({ objectiveIds: purpose.objectiveIds, role: purpose.role });
+  expect(() => fixture.quiz({ ...repaired, taskContext: { ...repaired.taskContext, repairContext: { ...repaired.taskContext.repairContext, rejected: [] } } }, "zero_repair"))
+    .toThrow("zero_repair_actual_rejection_required");
 });
 
 it("repeat-explanation fault intentionally repeats before feedback but a generic thanks never claims resolution", () => {

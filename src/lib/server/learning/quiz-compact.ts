@@ -5,6 +5,7 @@ import type { LearningQuizRepository } from "./quiz-repository";
 import { LearningError } from "./repository";
 import { learningModelInput, quizModelInputView } from "./model-input";
 import { quizCandidateValidationIssues, type QuizCandidateIssue } from "./quiz-candidate-diagnostics";
+import { normalizeQuizGeneratedItemKind } from "./quiz-kind";
 
 type Input = NonNullable<ReturnType<LearningQuizRepository["begin"]>>;
 export type QuizReferenceScope = { accountId: string; pageId: string; requestId: string; expiresAt: number };
@@ -70,7 +71,7 @@ export function compactQuizRequest(input: Input, scope: QuizReferenceScope, view
       return { ...result, title: prose(result.title, new Set(originals.keys())),
         reason: result.reason === null ? null : prose(result.reason, new Set(originals.keys())), items: result.items.map((raw, index) => {
         if (raw && typeof raw === "object" && "compositionRejected" in raw && raw.compositionRejected === true) return raw;
-        const item = compactItem.safeParse(raw);
+        const item = compactItem.safeParse(normalizeQuizGeneratedItemKind(raw, index, onIssue));
         // Preserve independent valid questions. A bad item cannot pass through as
         // legacy full IDs, be guessed, or lose only the inconvenient reference.
         const rejected = { compactReferenceRejected: true, rejectionReason: "structure_or_evidence" };

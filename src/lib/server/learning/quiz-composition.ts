@@ -3,6 +3,7 @@ import { quizCandidateValidationIssues, type QuizCandidateIssue } from "./quiz-c
 import { ReferencedGeneratedQuiz } from "@/lib/domain/learning-quiz";
 import { compactQuizRequest, compactQuizPrompt, CompactQuizEnvelope } from "./quiz-compact";
 import { inspectQuizOptionExplanation, hasQuizPositionDependency, quizProceduralHint, QUIZ_REJECTION_DETAILS, type QuizRejectionReason } from "./quiz-grounding";
+import { normalizeQuizGeneratedItemKind } from "./quiz-kind";
 
 // A request/response view over the existing references-v2 codec. No new stored
 // reference authority, additional model request, or historical data conversion.
@@ -63,7 +64,7 @@ export function composedQuizRequest(...args: Parameters<typeof compactQuizReques
         return { compositionRejected: true, rejectionReason: reason };
       };
       const items = body.items.map((raw, index) => {
-        const result = itemSchema.safeParse(raw);
+        const result = itemSchema.safeParse(normalizeQuizGeneratedItemKind(raw, index, onIssue));
         if (!result.success) {
           return reject(index, "structure_or_evidence", quizCandidateValidationIssues(result.error));
         }
@@ -118,6 +119,7 @@ export function composedQuizPrompt(prompt: string) {
 本次按以下顺序组织同一份响应，不增加调用：先写materialPlan，逐份说明有何独有考点并选择相应referenceId；仅为背景、与其他内容重复、无法确定或受本组题量限制时写明原因，references可为空。不要凭文件名认定没有价值。再写items，每题focus用一句话明确实际考查的判断，先安排互补考点，避免两题反复考同一分类。
 每个选项的reasonParts把解释与依据就近放在一起；一句解释用到规则和案例时同时引用两处，涉及另一条件时另写一段并关联其依据。正确选项的reasonParts须完整说明推理和适用条件，程序复用它作为总解析，不再要求另一份重复结论。不要输出选项reason/evidenceIds、explanation/explanationEvidenceIds、explanationParts或hint；程序完整拼接解释、合并来源并提供不泄题的思考步骤，不猜补相邻段落。片段不需要按每个词或逐claim拆分，也不代表语义已核验。
 referenceScope是应用已绑定的请求元数据，无需输出或重新计算；它不是课程依据。各处evidenceIds仍必须逐项选择本次实际给出的r编号，不能猜测、借用别题或补造来源。
+kind只允许concept、relationship、application；检查边界或条件适用的题使用application，检查目的中的boundary不是题型枚举。
 仅输出JSON：{"contractVersion":"references-v2","title":"题组标题","reason":null,"materialPlan":[{"material":1,"contribution":"独有考点或本组未考查的原因","references":["r1"]}],"items":[{"focus":"本题考查的判断","scenario":null,"stem":"待判断的问题","kind":"concept|relationship|application","stemEvidenceIds":["r1"],"options":[{"id":"A","text":"选项","reasonParts":[{"text":"为何正确或错误及适用条件","evidenceIds":["r1"]}]},{"id":"B","text":"选项","reasonParts":[{"text":"为何正确或错误","evidenceIds":["r1","r2"]}]}],"correctOptionId":"A"}]}。
 解释的每个片段都应有实际依据；一个片段缺少依据时不能借用其他选项或整题的来源补齐。引用未知或不属于本次范围就不可发布该题。所有选项稳定ID与事实保持关联，不写显示位置字母。`;
 }
