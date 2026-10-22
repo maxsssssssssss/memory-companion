@@ -15703,3 +15703,8 @@ Learning与UI：新增 `agent-scope.ts`、`agent-repository.ts`、`agent-scenari
 - 最终 cloud:test 精确 46 文件 953/953、0 跳过、exit 0；cloud:check 环境/进程合同 9/9 与完整 Next typegen/TypeScript exit 0；最终一次 cloud:build exit 0（179 秒）。浏览器三个阶段各 6/6、40 次离线响应、真实网络 0，两次正常停止退出 0；重登/刷新零新增调用，重复 seed 后 19 个 SQLite/WAL 哈希保持，数据保留。
 - 如实保留中间失败：实体逗号第一次修后有 1 项未声明名字保护回归、stable kind 分支接线前 1 项失败、浏览器 fixture 测试一次性 codec 被重复使用 1 项失败；集中首轮 952/953，旧字符数表示法题回归 1 项。均保留原断言修正并完成上述最终复验；原日志在 output/natural-quiz-final-repair。
 - 限制：收据在真实预算门禁前保守占用，预算拒绝为已知零请求、不退回修复机会；有限数学与 S32、语义关联非 verified、历史缺失 HTTP/候选 UNKNOWN、模拟学生非真人效果、长期掌握未验证均保留。Cloud 真实 Provider 0；Windows 190/227 原账本与 Guard 不触碰，新 SHA 真实验证 PENDING。未运行无关全仓回归，不集成 dev/cloud-code/main、不部署。正式交接 docs/learning-agent-quiz-final-closure.md；原有 95 行本地历史保持未提交，仅本条随授权功能提交。
+
+
+### 2026-10-22 11:57（Asia/Shanghai）上传 A—D 集中修复可移植证据供 GitHub 下载
+
+按用户明确要求，将已交付的 LEARNING_AGENT_NATURAL_QUIZ_FINAL_REPAIR_3c34ced_EVIDENCE.zip 原样复制至 docs/agent-evidence/learning-agent-natural-quiz-final-repair-3c34ced.zip，并追加同目录 README 下载、业务SHA、大小、哈希及证据边界说明。文件12,145,670 bytes，SHA-256 4c28eebd7e13ec85a9b4e599fe9a1de3e57c4233a1dfcb7cf0da4e848bdc9fe0，161文件中的160项manifest及CRC已核验；原Windows公开证据、Cloud回放与离线UI层次保持区分。没有修改产品、依赖、模型协议、预算、Windows数据或既有证据；本轮不重跑业务测试/类型/构建，业务验收仍固定3c34ced00bbaa64fa179556bb96169f8529fe254。真实Provider请求0，不集成、不部署；原有95行本地历史追加保留未提交，仅本条随本次上传提交。

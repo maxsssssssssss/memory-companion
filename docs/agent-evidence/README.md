@@ -58,3 +58,17 @@ Cloud 真实 Provider 请求为 0；Windows 新代码真实验收 PENDING。账�
 - [实现与 Windows 接回说明](../learning-agent-quiz-validator-repair.md)
 
 Windows 业务验收仍固定上面的 c6dd171 完整 SHA；本次上传不会产生新的产品版本。Cloud 真实 Provider 请求 0，Windows 真实验收 PENDING。原数据、成绩、账本与 Guard 不改动，不集成、不部署。
+
+
+## 2026-10-22：A—D 集中修复证据下载
+
+按用户要求上传已交付的同一份可移植证据包；本次仅增加下载文件和说明，不修改产品代码。
+
+- [下载 ZIP](learning-agent-natural-quiz-final-repair-3c34ced.zip?raw=true)（12,145,670 bytes，约12.1 MB）。
+- 对应业务验收 SHA：`3c34ced00bbaa64fa179556bb96169f8529fe254`。
+- ZIP SHA-256：`4c28eebd7e13ec85a9b4e599fe9a1de3e57c4233a1dfcb7cf0da4e848bdc9fe0`。
+- 161个文件，160项manifest记录；大小、SHA-256与ZIP CRC均核对。解压后运行 `node verify-evidence.mjs` 只核验包完整性，不代表产品或真实DS通过。
+- 包含原Windows公开证据、Cloud完整报告、14题逐项正式回放、一次修复持久化与两轮UI证据、实际命令/日志及中间失败；不含Cloud数据库、会话、账号密码或私有配置。
+- [本轮实现与Windows最小集中验收说明](../learning-agent-quiz-final-closure.md)。
+
+本次上传提交只用于下载；Windows仍固定上述业务SHA验收。Cloud真实Provider请求0，Windows真实体验PENDING。Windows原账本190/227、历史unknown 1及Guard均未修改，不集成、不部署。
