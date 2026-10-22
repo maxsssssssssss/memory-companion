@@ -72,3 +72,17 @@ Windows 业务验收仍固定上面的 c6dd171 完整 SHA；本次上传不会�
 - [本轮实现与Windows最小集中验收说明](../learning-agent-quiz-final-closure.md)。
 
 本次上传提交只用于下载；Windows仍固定上述业务SHA验收。Cloud真实Provider请求0，Windows真实体验PENDING。Windows原账本190/227、历史unknown 1及Guard均未修改，不集成、不部署。
+
+
+## 2026-10-22：FINAL-G5-1 唯一答案返修证据下载
+
+按用户要求上传已交付的同一份证据包，本次只增加下载文件、说明与历史记录，不改产品代码。
+
+- [下载 ZIP](learning-agent-final-g5-repair-0b28c3e.zip?raw=true)（257,510 bytes，约258 KB）。
+- 对应业务验收 SHA：`0b28c3e0c18274271cabf6e93b3e46a950093b57`。
+- SHA-256：`520d2e83f85fe9c80167be706eade44a8a10e946bcce6f99368f89f6def15dd0`。
+- 41个ZIP条目；39个manifest payload逐项核对大小与哈希，CRC通过。包含原Windows公开证据ZIP、Cloud报告、18题逐项矩阵、实际命令/日志与中间失败、正式回放源码；不含私有数据库、登录会话或密钥文件。
+- 解压运行 `node verify-evidence.mjs` 只核验包完整性，不代表产品或真实DS验收。
+- [修复范围与Windows最小复验步骤](../learning-agent-quiz-final-closure.md)。
+
+本次上传不改变业务验收SHA。Cloud真实Provider请求0；Windows新SHA真实验收PENDING。Windows原账本200/220、历史unknown1及原题成绩不变，不集成、不部署。

@@ -15718,3 +15718,9 @@ Learning与UI：新增 `agent-scope.ts`、`agent-repository.ts`、`agent-scenari
 - 验证：新增原四题 fixture、正式服务回放 helper、quiz-final-g5.test.ts、可移植 final-g5-publication-evidence.mjs 与现有交接文档增补。原四题 0/1/2 发布，3 在 composition/publication 均 answer_not_unique；合法题原样保存，正式模拟 3/3/read_answers/associate；被拒索引提交零事件、关联零证据，concept 缺口保留 partial；争议、重复提交、重开及完整性通过。旧14题保持8发布/6 equivalent_options、boundary原值与入口规范化分层。最终 cloud:test 精确33文件737/737、0跳过，exit0（包括单次修复/unknown/预算/来源/版本/恢复/API/UI/完成保护）；cloud:check 9/9环境契约+Next typegen+完整TypeScript exit0；cloud:build exit0，191.45秒、180 trace/forbidden0；git diff --check exit0。
 - 实际中间失败：初次聚焦命令把 retained-validator 路径误写为复数（该文件未发现），且新增回放在严格 envelope 中误带 reviewCandidates，1套件加载失败；修正后又因 scope 测试输入误带 count/difficulty 导致 beforeAll 失败、19项未执行。仅修复新回放适配和路径，没有放宽断言/原题；最终完整相关集合全部执行通过。
 - 限制与交付：Cloud 真实Provider 0；未重复浏览器全流程或无关全仓回归，当前正式业务服务+API/UI测试不能冒充Windows真实验收。原始候选/来源/理由/正确ID/历史成绩不改写，已保存旧坏题仍需保持隔离。保留S32、语义提案非verified、来源存在非蕴含、模拟学生非真人效果、长期掌握未验证；Windows账本200/220及历史unknown1不变，本记录不授权调用或扩容。功能分支正常commit/push，未集成dev/cloud-code/main、未部署。
+
+
+## 2026-10-22 15:15（Asia/Shanghai）— FINAL-G5-1 可移植证据 GitHub 下载
+
+- 用户明确要求把已交付约258KB证据包放到GitHub；核对实际分支feat/learning-agent-natural-language-quiz与HEAD 0b28c3e0c18274271cabf6e93b3e46a950093b57，仅既存UPDATE_HISTORY的95行本地追加未提交。将同字节ZIP复制到docs/agent-evidence/learning-agent-final-g5-repair-0b28c3e.zip，README追加下载、业务SHA和边界；保护其他成果与本地历史。
+- ZIP为257510 bytes、SHA256 520d2e83f85fe9c80167be706eade44a8a10e946bcce6f99368f89f6def15dd0；39个payload逐项长度/哈希与CRC通过，外包和内嵌包没有私有数据库/会话/密钥文件。本次只上传产物，无产品代码或依赖变化，不重复运行测试/构建。完整性不是产品或真实DS通过；业务验收SHA仍为0b28c3e，Windows真实验收PENDING。正常提交推送同一功能分支，不改账本、不调用Provider、不集成/部署；提供固定提交下载链接并另行读回校验。
