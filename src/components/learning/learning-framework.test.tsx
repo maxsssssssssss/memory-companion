@@ -21,6 +21,29 @@ beforeEach(() => {
 });
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
 describe("framework reader and editor (explicit mock data)", () => {
+  it("omits retired coverage sentences from saved overviews even after expansion without rewriting notes or stored data", async () => {
+    const overview = "[合成] 三角形面积是底乘高除以二。本次未覆盖全文；内容未核实。其他关系保持原样。";
+    view.runs = [{ id: "run", status: "completed", materialIds: ["material"], createdAt: "", deadline: 0, failure: null, overview }];
+    const before = structuredClone(view);
+    mount(); await screen.findByRole("heading", { name: "合成章节" });
+    const details = screen.getByText("历次整理说明").closest("details")!;
+    details.parentElement!.closest("details")!.open = true;
+    details.open = true;
+    expect(details).not.toHaveTextContent("未覆盖全文");
+    expect(details).toHaveTextContent("[合成] 三角形面积是底乘高除以二。内容未核实。其他关系保持原样。");
+    expect(screen.getByText("旧笔记")).toBeVisible();
+    expect(view).toEqual(before);
+    expect(learningApi.editFramework).not.toHaveBeenCalled();
+    expect(learningApi.organize).not.toHaveBeenCalled();
+  });
+  it("does not leave an empty disclosure when the old overview contains only the retired claim", async () => {
+    view.runs = [{ id: "run", status: "completed", materialIds: ["material"], createdAt: "", deadline: 0, failure: null,
+      overview: "本次未覆盖全文。" }];
+    mount(); await screen.findByRole("heading", { name: "合成章节" });
+    expect(screen.queryByText("历次整理说明")).toBeNull();
+    expect(screen.getByText("原来的 AI 解释")).toBeVisible();
+    expect(screen.getByText("旧笔记")).toBeVisible();
+  });
   it("keeps draft and notes on conflict while loading new saved content", async () => {
     mount(); await screen.findByRole("heading", {name: "合成章节"});
 

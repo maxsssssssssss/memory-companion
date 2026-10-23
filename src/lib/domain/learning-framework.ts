@@ -11,14 +11,18 @@ export const StartLearningFramework = z.object({
   materialIds: z.array(LearningId).min(1).max(1000).refine((ids) => new Set(ids).size === ids.length)
 }).strict();
 const explanation = z.string().trim().min(1).max(20000);
+// Reject the retired, model-authored coverage claim; keep source text and user edits intact.
+const withoutRetiredCoverageClaim = (text: string | null) => !text?.includes("未覆盖全文");
+const generatedExplanation = explanation.refine(withoutRetiredCoverageClaim, "retired_coverage_claim");
+const generatedTitle = LearningTitle.refine(withoutRetiredCoverageClaim, "retired_coverage_claim");
 const modelSource = z.object({ materialId: LearningId, paragraph: z.number().int().positive() }).strict();
 export const GeneratedLearningFramework = z.object({
-  overview: explanation,
+  overview: generatedExplanation,
   chapters: z.array(z.object({
-    title: LearningTitle, explanation,
+    title: generatedTitle, explanation: generatedExplanation,
     nodes: z.array(z.object({
-      title: LearningTitle, explanation,
-      supplement: z.string().trim().max(10000).nullable(),
+      title: generatedTitle, explanation: generatedExplanation,
+      supplement: z.string().trim().max(10000).nullable().refine(withoutRetiredCoverageClaim, "retired_coverage_claim"),
       sources: z.array(modelSource).min(1).max(100)
     }).strict()).min(1).max(1000)
   }).strict()).min(1).max(200)

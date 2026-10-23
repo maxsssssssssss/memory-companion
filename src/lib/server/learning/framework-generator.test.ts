@@ -39,6 +39,38 @@ describe("adopted learning TokenHub Pro streaming boundary, memory-only mock", (
     const fetch = mock([complete(status)]);
     await expect(generateLearningFramework(config, [], AbortSignal.timeout(10000))).rejects.toThrow(); expect(fetch).toHaveBeenCalledTimes(1);
   });
+  it.each([{ excludedPhysicalPages: [] as number[] }, { excludedPhysicalPages: [2] }])("keeps PDF scope metadata without requesting coverage claims: $excludedPhysicalPages", async ({ excludedPhysicalPages }) => {
+    const materialId = value.chapters[0].nodes[0].sources[0].materialId;
+    const scopeNotice = { kind: "pdf" as const, documentId: randomUUID(), parseVersion: 1,
+      physicalPages: [1], excludedPhysicalPages, excludedBlockIds: [], contentVerified: false as const, warningCodes: ["table_structure_unverified"] };
+    const fetch = mock([complete("completed", JSON.stringify(wireValue(value)))]);
+    await generateLearningFramework({ ...config, maxInputChars: 8000 }, [{ materialId, title: "[合成] PDF", kind: "pdf", scopeNotice,
+      paragraphs: [{ number: 1, text: "[合成] 三角形面积等于底乘高除以二。" }] }], AbortSignal.timeout(10000));
+    const [, init] = fetch.mock.calls[0] as unknown as [string, RequestInit];
+    const body = JSON.parse(init.body as string);
+    const prompt = body.input.filter((item: { role: string }) => item.role === "system").map((item: { content: string }) => item.content).join("\n");
+    expect(prompt).not.toContain("未覆盖全文");
+    expect(prompt).toContain("内容未经核实不等于页面未处理");
+    expect(prompt).toContain("不生成文档覆盖程度的声明");
+    expect(JSON.parse(body.input.find((item: { role: string }) => item.role === "user").content).taskContext.materialCatalog[0].scopeNotice).toMatchObject({
+      physicalPages: [1], excludedPhysicalPages, contentVerified: false, warningCodes: ["table_structure_unverified"]
+    });
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
+  it.each(["overview", "chapterTitle", "chapterExplanation", "nodeTitle", "nodeExplanation", "supplement"])("rejects retired wording in %s without retry or invented replacement", async field => {
+    const output = structuredClone(value);
+    const text = "[合成] 本次未覆盖全文。";
+    if (field === "overview") output.overview = text;
+    else if (field === "chapterTitle") output.chapters[0].title = text;
+    else if (field === "chapterExplanation") output.chapters[0].explanation = text;
+    else if (field === "nodeTitle") output.chapters[0].nodes[0].title = text;
+    else if (field === "nodeExplanation") output.chapters[0].nodes[0].explanation = text;
+    else (output.chapters[0].nodes[0] as { supplement: string | null }).supplement = text;
+    const fetch = mock([complete("completed", JSON.stringify(wireValue(output)))]);
+    await expect(generateLearningFramework(config, [{ materialId: value.chapters[0].nodes[0].sources[0].materialId,
+      title: "[合成]", paragraphs: [{ number: 1, text: "[合成] 条件" }] }], AbortSignal.timeout(10000))).rejects.toThrow("retired_coverage_claim");
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
   it("preserves the selected paragraphs and multiple citations while keeping optional outside explanation separate (synthetic transport only)", async () => {
     const materialId = randomUUID();
     const inputs = [{ materialId, title: "[合成] 规则与限制", paragraphs: [

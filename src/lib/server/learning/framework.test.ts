@@ -67,6 +67,22 @@ it("holds the publication write lock while checking the coordinator fence",async
 });
 
 describe("text framework isolated persistence and generation (mock only)", () => {
+  it("does not publish or replay a retired coverage claim and preserves previous results and source text", async () => {
+    await generated();
+    const before = repo.view(pageId).chapters;
+    const id = randomUUID(), output = result();
+    output.overview = "[合成] 本次未覆盖全文。";
+    const generate = vi.fn().mockResolvedValue(output);
+    const dependencies = { configure: () => config, generate };
+    const input = { id, materialIds: [materialId] };
+    const first = await organizeLearningText(learning, pageId, input, dependencies);
+    expect(first.runs.find(run => run.id === id)).toMatchObject({ status: "failed", failure: "framework_invalid_result", overview: null });
+    expect(first.chapters).toEqual(before);
+    await organizeLearningText(learning, pageId, input, dependencies);
+    expect(generate).toHaveBeenCalledTimes(1);
+    expect(repo.view(pageId).chapters).toEqual(before);
+    expect(learning.source(pageId, materialId).text).toBe(text);
+  });
   it("persists schema failure paths in both the run and checkpoint without response content", async () => {
     const id = randomUUID();
     const output = { overview: "PRIVATE_SYNTHETIC_BODY", chapters: [{ title: "PRIVATE_TITLE", explanation: "PRIVATE_TEXT", nodes: [

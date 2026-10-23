@@ -11,6 +11,11 @@ import { useLearningReadingKey } from "./learning-reading-state";
 import { useLearningReadingPosition } from "./use-learning-reading-position";
 
 type Editor = { chapter: FrameworkChapter; node?: FrameworkNode; title: string; explanation: string; note: string };
+// Old model overviews remain stored verbatim. Omit only their retired coverage sentences in the reader.
+function overviewForDisplay(text: string | null) {
+  if (!text?.includes("未覆盖全文")) return text;
+  return text.split(/(?<=[。！？!?；;\n])/u).filter(sentence => !sentence.includes("未覆盖全文")).join("").trim();
+}
 export function LearningFramework({ pageId, materials, selected, disabled, saveSelection, onSource, refreshKey = 0, preparationActive = false, onPrepare, readingActive = true }: {
   pageId: string; materials: LearningMaterial[]; selected: string[]; disabled: boolean;
   refreshKey?: number; preparationActive?: boolean; onPrepare?: () => Promise<void>; readingActive?: boolean;
@@ -127,6 +132,10 @@ export function LearningFramework({ pageId, materials, selected, disabled, saveS
     } catch (reason) { if (alive.current) setError(learningErrorMessage(reason)); }
   };
   const activeChapter = view?.chapters.find(c => c.id === chapterId)?.id ?? view?.chapters[0]?.id;
+  const runOverviews = (view?.runs ?? []).filter(run => run.overview).flatMap((run, index) => {
+    const text = overviewForDisplay(run.overview);
+    return text ? [{ id: run.id, number: index + 1, text }] : [];
+  });
   const editForm = editor ? <form className={styles.frameworkEditor} aria-label="编辑框架" onSubmit={event => { event.preventDefault(); void saveEditor(); }}>
     <h3>{editor.node ? "编辑知识点与个人笔记" : "编辑章节"}</h3>
     <label>标题<input ref={editorTitle} required maxLength={160} value={editor.title} disabled={saving} onChange={e => setEditor({ ...editor, title: e.target.value })} /></label>
@@ -165,7 +174,7 @@ export function LearningFramework({ pageId, materials, selected, disabled, saveS
         <details ref={map} className={styles.relations} open={mapOpen} onToggle={event => { if (event.target === event.currentTarget) toggleMap(event.currentTarget.open); }}><summary>思维导图 · {view.chapters.length} 章</summary>
           <LearningRelations pageId={pageId} readingKey={readingKey} materials={materials} onSource={onSource} chapters={view.chapters} onChapter={id => readInMap(id)} onNode={readInMap}
             refreshKey={String(starting) + view.chapters.map(c => c.id + ':' + c.revision).join(',') + materials.map(m => m.id).join(',')} />
-          <details><summary>历次整理说明</summary>{view.runs.filter(r => r.overview).map((r, i) => <div key={r.id}><h3>第 {i + 1} 次整理</h3><p className={styles.original}>{r.overview}</p></div>)}</details>
+          {runOverviews.length > 0 ? <details><summary>历次整理说明</summary>{runOverviews.map(run => <div key={run.id}><h3>第 {run.number} 次整理</h3><p className={styles.original}>{run.text}</p></div>)}</details> : null}
         </details>
         <p className={styles.muted}>AI 整理可能有误，请结合来源阅读；框架不等同于原材料目录。</p>
         {view.chapters.map(chapter => <section hidden={activeChapter !== chapter.id} key={chapter.id} id={"chapter-" + chapter.id} tabIndex={-1} className={styles.frameworkChapter}>
