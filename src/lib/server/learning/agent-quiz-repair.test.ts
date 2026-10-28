@@ -14,10 +14,11 @@ import { LearningRepository } from "./repository";
 import { LearningQuizRepository } from "./quiz-repository";
 import { LearningAgentRepository } from "./agent-repository";
 import { freezeLearningAgentScope } from "./agent-scope";
-import { establishLearningReviewPlan, assessLearningCompletion } from "./agent-completion";
+import { establishLearningReviewPlan, assessLearningCompletion, guardLearningCompletionAction, claimLearningDisputedReplacement } from "./agent-completion";
 import { createLearningAgentScenario } from "./agent-scenario";
 import { withLearningCompletionDecision } from "./agent-context";
 import type { generateStudyJson } from "./framework-generator";
+import { offlineQuizSemanticResponse } from "./testing/quiz-semantic-fixture";
 
 let directory: string, learning: LearningRepository, store: AgentStore, task: AgentTask, pageId: string, materialId: string;
 const config = { baseURL: "https://offline.invalid/v1", apiKey: "SYNTHETIC", model: "offline", maxInputChars: 24000, maxOutputTokens: 8000 };
@@ -51,6 +52,7 @@ function generator(choose: (wire: Wire, invocation: number) => "valid" | "equiva
   return vi.fn(async (_config, name, _prompt, input, _schema, _signal, diagnostic) => {
     diagnostic?.({ responseStatus: "completed", responseTextLength: 100, parseResult: "success", validationResult: "success", inputTokens: 31, outputTokens: 17 });
     if (name === "learning_agent_explanation") return { materialAnswer: "[离线] 必要前提未满足，不能直接应用规则。先检查前提。", supplements: [], items: [{ materialId, paragraph: 1 }] };
+    if (name === "learning_quiz_semantic_review") return offlineQuizSemanticResponse(input);
     const mode = choose(input as Wire, ++invocation); if (mode instanceof AgentFailure) throw mode;
     // Synthetic malformed envelope: emulate the real transport's schema.parse
     // before returning to the Quiz service. This is NOT the missing DS payload.
@@ -66,6 +68,33 @@ beforeEach(async () => {
 });
 afterEach(async () => { store.close(); learning.close(); vi.unstubAllGlobals(); await rm(directory, {recursive:true,force:true}); });
 
+it("disputed replacement requires a current affirmative feedback and one atomic task-wide allowance", async () => {
+  const generate = generator(() => "valid"), scene = createLearningAgentScenario(learning, { configure: () => config, generate }), ctx = context();
+  const action = quiz(); if (!("args" in action)) throw Error("fixture_action");
+  const created = await scene.tools["learning.create_quiz"].execute(action.args, ctx);
+  const attemptId = created.wait!.refId!; ctx.actionId = randomUUID();
+  ctx.event = { id: randomUUID(), kind: "feedback", version: 1, message: "换一组继续吧。" };
+  expect(guardLearningCompletionAction(learning, ctx, "quiz", purpose)).toMatchObject({ stop: expect.any(String) });
+  expect(guardLearningCompletionAction(learning, ctx, "quiz", purpose).replacement).toBeUndefined();
+  new LearningAgentRepository(learning).dispute(pageId, task.id, attemptId, randomUUID());
+  for (const message of ["谢谢", "不要换题", "如果换题呢？", "要不要换一组题？", "他说‘换一组题’"]) {
+    ctx.event = { id: randomUUID(), kind: "feedback", version: 1, message };
+    expect(guardLearningCompletionAction(learning, ctx, "quiz", purpose).replacement).toBeUndefined();
+  }
+  ctx.event = { id: randomUUID(), kind: "feedback", version: 2, message: "换一组继续吧。" };
+  expect(guardLearningCompletionAction(learning, ctx, "quiz", purpose).replacement).toBeUndefined();
+  ctx.event = { ...ctx.event, id: randomUUID(), version: 1 };
+  const replacement = guardLearningCompletionAction(learning, ctx, "quiz", purpose).replacement!;
+  expect(replacement).toMatchObject({ attemptId, purpose });
+  claimLearningDisputedReplacement(learning, ctx, replacement);
+  expect(() => claimLearningDisputedReplacement(learning, ctx, replacement)).toThrow("agent_disputed_replacement_unavailable");
+  learning.close(); learning = new LearningRepository(directory, "owner");
+  expect(guardLearningCompletionAction(learning, ctx, "quiz", purpose).replacement).toBeUndefined();
+  const receipt = learning.database.prepare("SELECT body_json,material_ids FROM learning_agent_artifacts WHERE action_id='disputed-quiz-replacement'").get() as { body_json: string; material_ids: string };
+  expect(receipt.body_json).not.toContain(purpose.purpose); expect(receipt.material_ids).toBe("[]");
+  expect(generate).toHaveBeenCalledTimes(2); expect(assessLearningCompletion(learning, task).canAutoFinish).toBe(false);
+});
+
 it("carries the actual rejection and original purpose into one automatic repair, with both requests charged", async () => {
   const generate = generator((wire, invocation) => {
     if (invocation === 1) { expect(wire.taskContext.repairContext).toBeUndefined(); return "equivalent"; }
@@ -76,12 +105,12 @@ it("carries the actual rejection and original purpose into one automatic repair,
   const runtime = engine(generate, choose);
   try {
     const result = await runtime.advance("owner", task.id);
-    expect(result).toMatchObject({ status: "waiting", wait: { kind: "quiz_submission" }, usage: { calls: 4, unknownUsageCalls: 0 } });
-    expect(generate).toHaveBeenCalledTimes(2); expect(claims()).toHaveLength(1);
+    expect(result).toMatchObject({ status: "waiting", wait: { kind: "quiz_submission" }, usage: { calls: 5, unknownUsageCalls: 0 } });
+    expect(generate).toHaveBeenCalledTimes(3); expect(claims()).toHaveLength(1);
     expect(claims()[0]).toMatchObject({ repair: { purpose, previousQuizId: expect.any(String) } });
     expect(new LearningQuizRepository(learning).list(pageId).map(run => run.status).sort()).toEqual(["completed", "insufficient"]);
     expect(assessLearningCompletion(learning, result).outcome).not.toBe("check_passed");
-    await runtime.advance("owner", task.id); expect(generate).toHaveBeenCalledTimes(2);
+    await runtime.advance("owner", task.id); expect(generate).toHaveBeenCalledTimes(3);
     expect(globalThis.fetch).not.toHaveBeenCalled();
   } finally { runtime.close(); }
 });
@@ -96,18 +125,18 @@ it.each([false, true])("a transport envelope rejection has precise private diagn
   const choose = decide(() => quiz()), runtime = engine(generate, choose);
   try {
     const result = await runtime.advance("owner", task.id);
-    expect(result).toMatchObject({ status: exhausted ? "budget_exhausted" : "waiting", usage: { calls: exhausted ? 2 : 4, unknownUsageCalls: 0 } });
+    expect(result).toMatchObject({ status: exhausted ? "budget_exhausted" : "waiting", usage: { calls: exhausted ? 2 : 5, unknownUsageCalls: 0 } });
     const failed = learning.database.prepare("SELECT diagnostics_json FROM learning_generation_parts WHERE state='failed'").get() as { diagnostics_json: string };
     expect(JSON.parse(failed.diagnostics_json)).toMatchObject({ responseStatus: "completed", validationResult: "failed",
       validationIssues: [{ path: "$", code: "unrecognized_keys", unrecognizedFields: ["reviewCheck"], unrecognizedFieldCount: 1 }] });
     expect(failed.diagnostics_json).not.toContain("PRIVATE_VALUE");
     const runs = new LearningQuizRepository(learning).list(pageId);
     expect(JSON.stringify(runs)).not.toMatch(/unrecognizedFields|reviewCheck|PRIVATE_VALUE/);
-    expect(generate).toHaveBeenCalledTimes(exhausted ? 1 : 2);
+    expect(generate).toHaveBeenCalledTimes(exhausted ? 1 : 3);
     expect(claims()).toHaveLength(exhausted ? 0 : 1);
     expect(learning.database.prepare("SELECT COUNT(*) n FROM learning_generation_parts WHERE state='unknown'").get()).toEqual({ n: 0 });
     await runtime.advance("owner", task.id);
-    expect(generate).toHaveBeenCalledTimes(exhausted ? 1 : 2);
+    expect(generate).toHaveBeenCalledTimes(exhausted ? 1 : 3);
     expect(assessLearningCompletion(learning, result).outcome).not.toBe("check_passed");
   } finally { runtime.close(); }
 });
@@ -137,7 +166,7 @@ it("shares the same repair with feedback after a real explanation and checkpoint
     const event = { id: randomUUID(), kind: "feedback", version: waiting.version, refId: waiting.wait!.refId, message: "讲解明白了，想做题确认一下。" };
     const results = await Promise.allSettled([runtime.advance("owner", task.id, event), runtime.advance("owner", task.id, event)]);
     expect(results.some(result => result.status === "fulfilled" && result.value.wait?.kind === "quiz_submission")).toBe(true);
-    const calls = generate.mock.calls.length; expect(calls).toBe(3); expect(claims()).toHaveLength(1);
+    const calls = generate.mock.calls.length; expect(calls).toBe(4); expect(claims()).toHaveLength(1);
     await runtime.advance("owner", task.id, event).catch(() => undefined);
     await runtime.advance("owner", task.id);
     expect(generate).toHaveBeenCalledTimes(calls); expect(claims()).toHaveLength(1);
@@ -148,7 +177,7 @@ it("delivers partial publication immediately without claiming a repair or toppin
   const generate = generator(() => "partial"), runtime = engine(generate, decide(() => quiz({}, 2)));
   try {
     const result = await runtime.advance("owner", task.id);
-    expect(result).toMatchObject({ status: "waiting", usage: { calls: 2 } }); expect(generate).toHaveBeenCalledTimes(1); expect(claims()).toHaveLength(0);
+    expect(result).toMatchObject({ status: "waiting", usage: { calls: 3 } }); expect(generate).toHaveBeenCalledTimes(2); expect(claims()).toHaveLength(0);
     expect(new LearningQuizRepository(learning).list(pageId)).toMatchObject([{ status: "completed", count: 1, delivery: { requested: 2, published: 1 } }]);
   } finally { runtime.close(); }
 });
@@ -211,11 +240,11 @@ it("recovers an already published repair after its local receipt is lost without
     await expect(scene.tools["learning.create_quiz"].execute(action.args, ctx)).rejects.toMatchObject({ code: "known_failure", publicSummary: expect.stringContaining("已经通过发布并保存") });
   } finally { complete.mockRestore(); }
   const run = new LearningQuizRepository(learning).list(pageId).find(run => run.status === "completed")!;
-  expect(run.count).toBe(1); expect(generate).toHaveBeenCalledTimes(2);
+  expect(run.count).toBe(1); expect(generate).toHaveBeenCalledTimes(3);
   const receipt = await scene.tools["learning.create_quiz"].recover!(ctx.actionId, ctx);
   expect(receipt).toMatchObject({ ref: { kind: "learning.quiz", id: run.id }, wait: { kind: "quiz_submission" } });
   const repeated = await scene.tools["learning.create_quiz"].recover!(ctx.actionId, ctx);
-  expect(repeated).toEqual(receipt); expect(generate).toHaveBeenCalledTimes(2); expect(claims()).toHaveLength(1);
+  expect(repeated).toEqual(receipt); expect(generate).toHaveBeenCalledTimes(3); expect(claims()).toHaveLength(1);
   expect(new LearningQuizRepository(learning).list(pageId)).toHaveLength(2);
 });
 

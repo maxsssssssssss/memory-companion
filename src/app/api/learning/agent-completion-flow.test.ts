@@ -29,6 +29,7 @@ import { createLearningAgentScenario } from "@/lib/server/learning/agent-scenari
 import { withLearningCompletionDecision } from "@/lib/server/learning/agent-context";
 import { assessLearningCompletion } from "@/lib/server/learning/agent-completion";
 import type { generateStudyJson } from "@/lib/server/learning/framework-generator";
+import { offlineQuizSemanticResponse } from "@/lib/server/learning/testing/quiz-semantic-fixture";
 import { GET, POST, PATCH } from "./pages/[pageId]/agent/route";
 import { GET as quizGet, PATCH as quizPatch } from "./pages/[pageId]/quiz/route";
 
@@ -119,6 +120,7 @@ beforeEach(async () => {
     const next = candidates.shift() ?? waitAction; return { value: typeof next === "function" ? next(input) : next, usage: { inputTokens: 20, outputTokens: 10 } };
   }));
   generation = vi.fn(async (_config, name, _prompt, raw) => {
+    if (name === "learning_quiz_semantic_review") return offlineQuizSemanticResponse(raw);
     if (name === "learning_agent_explanation") return { materialAnswer: "[离线解释] 应先核对前提，再判断能否应用规则。", supplements: [], items: [{ materialId, paragraph: 1 }] };
     const input = raw as { taskContext: { referenceScope: string; reviewContext?: { purpose: LearningCheckPurpose } }; materials: Array<{ paragraphs: Array<{ referenceId: string }> }> };
     const refs = input.materials[0].paragraphs.map(p => p.referenceId);
@@ -137,17 +139,120 @@ beforeEach(async () => {
 afterEach(async () => { deferred.length = 0; expect(fetch).not.toHaveBeenCalled(); vi.unstubAllGlobals(); vi.restoreAllMocks(); await rm(directory, { recursive: true, force: true }); });
 
 describe("Learning completion: frozen offline scenarios through formal API and SQLite", () => {
+  it("one explicit disputed replacement survives checkpoint restart, preserves grades, and is never learning progress", async () => {
+    const waiting = await firstQuiz(plan("practice")), id = waiting.id;
+    const original = await answer(waiting, false);
+    candidates.push({ tool: "learning.read_answers", args: { attemptId: original.id } }, association(reference(original)), waitAction);
+    await run(id);
+    await control(id, { action: "dispute_quiz", attemptId: original.id, feedback: "这道题有两个合理答案。" });
+    await control(id, { action: "resume" }); candidates.push(waitAction); await run(id);
+    expect(assessment(id).objectives[0].evidence[0]).toMatchObject({ eligible: false, quality: "disputed" });
+    const feedback = { action: "feedback", eventId: randomUUID(), feedback: "换一组继续吧。" };
+    await control(id, feedback); generatedStems.push("[离线替换题] 未满足前提的另一个对象，能否直接使用规则？");
+    candidates.push(quizAction()); const replaced = await run(id);
+    expect(replaced.wait?.kind, JSON.stringify(replaced)).toBe("quiz_submission");
+    expect(replaced.wait?.refId).not.toBe(original.id);
+    expect(attempt(original.id)).toEqual(original);
+    expect(assessment(id).canAutoFinish).toBe(false);
+    const claims = () => stores(learning => learning.database.prepare("SELECT body_json FROM learning_agent_artifacts WHERE task_id=? AND action_id='disputed-quiz-replacement'").all(id)) as Array<{ body_json: string }>;
+    expect(claims()).toHaveLength(1); expect(JSON.parse(claims()[0].body_json)).toMatchObject({ recordType: "disputed_quiz_replacement", replacement: { quizId: original.quizId, eventId: feedback.eventId } });
+    const before = generation.mock.calls.length;
+    await control(id, feedback); await GET(request(), routeContext()); await run(id); await run(id);
+    expect(generation).toHaveBeenCalledTimes(before); expect(claims()).toHaveLength(1);
+    const second = await answer(task(id), false);
+    candidates.push({ tool: "learning.read_answers", args: { attemptId: second.id } }, association(reference(second)), waitAction); await run(id);
+    await control(id, { action: "dispute_quiz", attemptId: second.id, feedback: "这组也有疑问，先停一下。" });
+    await control(id, { action: "resume" }); candidates.push(waitAction); await run(id);
+    await control(id, { action: "feedback", feedback: "换一组继续吧。" }); candidates.push(quizAction());
+    const stopped = await run(id);
+    expect(stopped.status).toBe("ended"); expect(generation).toHaveBeenCalledTimes(before);
+    expect(assessment(id).outcome).not.toBe("check_passed"); expect(attempt(original.id)).toEqual(original);
+  // This whole persisted multi-restart flow takes over the default 5 seconds
+  // on Windows. Keep a finite integration-test bound; product budgets are unchanged.
+  }, 15_000);
+  it("replacement words without a real dispute do not bypass the same-method gate", async () => {
+    const waiting = await firstQuiz(plan("practice")), a = await answer(waiting, false);
+    candidates.push({ tool: "learning.read_answers", args: { attemptId: a.id } }, association(reference(a)), waitAction); await run(waiting.id);
+    // First use of the actual new wrong observation is allowed. After that,
+    // repeating the same method without another observation remains blocked.
+    await control(waiting.id, { action: "feedback", feedback: "换一组继续吧。" }); candidates.push(quizAction());
+    const next = await run(waiting.id);
+    if (next.wait?.kind === "quiz_submission") {
+      await control(waiting.id, { action: "pause" }); await control(waiting.id, { action: "resume" });
+      await run(waiting.id);
+    }
+    expect(stores(learning => learning.database.prepare("SELECT id FROM learning_agent_artifacts WHERE task_id=? AND action_id='disputed-quiz-replacement'").all(waiting.id))).toEqual([]);
+  });
+  it("practice: wrong answer, explanation and a related new check finish from evidence without rewriting the old score", async () => {
+    candidates.push(planAction(plan("practice")), quizAction());
+    const id = await create("我想练练这部分。"); const firstWait = await run(id);
+    expect(firstWait.wait?.kind).toBe("quiz_submission");
+    const first = await answer(firstWait, false);
+    expect(assessment(id)).toMatchObject({ plan: { kind: "practice" }, outcome: "partial", canAutoFinish: false });
+    candidates.push({ tool: "learning.read_answers", args: { attemptId: first.id } }, input => {
+      expect(input.results.find(r => r.tool === "learning.read_answers")?.value).toMatchObject({ score: { correct: 0, total: 1 } });
+      return association(reference(first));
+    }, explainAction(), waitAction);
+    const explained = await run(id);
+    expect(explained).toMatchObject({ status: "waiting", wait: { kind: "feedback" } });
+    expect(explained.actions.find(a => a.tool === "learning.explain")?.status).toBe("succeeded");
+    expect(assessment(id).objectives[0].unresolvedErrors).toEqual([reference(first)]);
+    await control(id, { action: "feedback", feedback: "明白一些了，再试试。" });
+    generatedStems.push("[离线题目] 新案例中必要前提不成立，还能直接使用该规则得出结论吗？");
+    candidates.push(quizAction(purpose("concept", { method: "application", priorEvidenceRefs: [reference(first)] })));
+    const secondWait = await run(id); expect(secondWait.wait?.kind).toBe("quiz_submission");
+    const chosen = await act(attempt(secondWait.wait!.refId!), "choose", "A");
+    const finalAction = { id: randomUUID(), attemptId: chosen.id, revision: chosen.revision, action: "finish", question: 0, optionId: null };
+    const submitted = await quizPatch(request("PATCH", { kind: "act", value: finalAction }, "quiz"), routeContext());
+    expect(submitted.status).toBe(200); const second = (await submitted.json()).attempt as QuizAttemptView;
+    // A correct new question ID alone does not resolve the old counterevidence.
+    expect(assessment(id).canAutoFinish).toBe(false);
+    const beforeAssociation = decision.mock.calls.length;
+    candidates.push({ tool: "learning.read_answers", args: { attemptId: second.id } },
+      association(reference(second), { relation: "new_context", priorEvidenceRefs: [reference(first)] }), quizAction());
+    const ended = await run(id);
+    expect(ended.status).toBe("ended");
+    expect(assessment(id)).toMatchObject({ outcome: "check_passed", canAutoFinish: true, objectives: [{ unresolvedErrors: [] }] });
+    expect(decision).toHaveBeenCalledTimes(beforeAssociation + 2); // actual answer read + explicit association, no finish decision
+    expect(generation).toHaveBeenCalledTimes(5); // two Quizzes + two reviews + one explanation, no model summary
+    expect(candidates).toHaveLength(1); // extra Quiz was never requested
+    expect(attempt(first.id).score?.correct).toBe(0); expect(attempt(second.id).score?.correct).toBe(1);
+    const before = { calls: ended.usage.calls, decisions: decision.mock.calls.length, generations: generation.mock.calls.length };
+    const refreshed = await GET(request(), routeContext()); expect(refreshed.status).toBe(200);
+    const repeated = await quizPatch(request("PATCH", { kind: "act", value: finalAction }, "quiz"), routeContext());
+    expect(repeated.status).toBe(200); expect((await repeated.json()).attempt).toEqual(second);
+    expect((await run(id)).status).toBe("ended"); // reopens business SQLite + checkpoint
+    expect(task(id).usage.calls).toBe(before.calls); expect(decision).toHaveBeenCalledTimes(before.decisions); expect(generation).toHaveBeenCalledTimes(before.generations);
+  });
+
+  it("practice can honestly hand back partial instead of requiring every historical mistake to be answered again", async () => {
+    candidates.push(planAction(plan("practice", ["concept", "boundary"])), quizAction());
+    const id = await create("帮我练练规则的前提和适用边界。");
+    const firstWait = await run(id), first = await answer(firstWait, false);
+    candidates.push({ tool: "learning.read_answers", args: { attemptId: first.id } }, association(reference(first)),
+      quizAction(purpose("boundary", { method: "boundary" })));
+    generatedStems.push("[离线题目] 当适用前提不满足时，可以直接采用规则吗？");
+    const secondWait = await run(id); await answer(secondWait, true);
+    candidates.push({ finish: "本轮先到这里，不再反复出题。" });
+    const ended = await run(id), result = assessment(id);
+    expect(ended.status).toBe("ended"); expect(result.outcome).toBe("partial");
+    expect(result.objectives.find(o => o.id === "concept")?.unresolvedErrors).toEqual([reference(first)]);
+    expect(result.objectives.find(o => o.id === "boundary")?.status).toBe("supported");
+    expect(ended.endReason).not.toContain("检查通过"); expect(ended.endReason).not.toContain("诊断已完成");
+    expect(attempt(first.id).score?.correct).toBe(0); expect(generation).toHaveBeenCalledTimes(4);
+  });
+
   it("C01/C10 stops after sufficient saved first-answer evidence without another decision or generation", async () => {
     const waiting = await firstQuiz(); const before = decision.mock.calls.length;
     const hidden = await quizGet(new Request(`${origin}/api/learning/pages/${pageId}/quiz?attempt=${waiting.wait!.refId}`, { headers: { "x-synthetic-user": "owner" } }), routeContext());
     expect(JSON.stringify(await hidden.json())).not.toMatch(/correctOptionId|explanation|score":\{/);
     const hiddenTask = await GET(request(), routeContext()); expect(JSON.stringify(await hiddenTask.json())).not.toContain("SECRET_MAPPING_ANSWER");
-    expect(waiting.usage.calls).toBe(3); // two controlled decisions + one real-service generation adapter call
+    expect(waiting.usage.calls).toBe(4); // two controlled decisions + one generation + one independent review
     const a = await answer(waiting); expect(a.score).toMatchObject({ correct: 1, total: 1 });
     candidates.push(quizAction());
     const ended = await run(waiting.id);
     expect(ended.status).toBe("ended"); expect(assessment(waiting.id).outcome).toBe("check_passed");
-    expect(generation).toHaveBeenCalledTimes(1); expect(decision).toHaveBeenCalledTimes(before);
+    expect(generation).toHaveBeenCalledTimes(2); expect(decision).toHaveBeenCalledTimes(before);
     expect(candidates).toHaveLength(1); expect(assessment(waiting.id).longTermMastery).toBe("unverified");
     // History was not authorized; current first response is unassisted in-app, while uninspected past answer exposure remains unknown.
     expect(assessment(waiting.id).objectives[0].evidence[0]).toMatchObject({ answerAvailability: "unknown", independentInApp: true, quality: "tentative" });
@@ -363,13 +468,13 @@ describe("Learning completion: frozen offline scenarios through formal API and S
     }
     const stopped = secondWait.status === "ended" ? secondWait : await run(waiting.id);
     expect(stopped.status, JSON.stringify(stopped)).toBe("ended"); expect(stopped.endReason).toContain("同类方法");
-    expect(generation.mock.calls.length).toBeLessThanOrEqual(2); expect(assessment(waiting.id).outcome).not.toBe("check_passed");
+    expect(generation.mock.calls.length).toBeLessThanOrEqual(4); expect(assessment(waiting.id).outcome).not.toBe("check_passed");
   });
 
   it("completes diagnosis from actual wrong observations without forcing remediation to all-correct", async () => {
     const waiting = await firstQuiz(plan("diagnosis")); const a = await answer(waiting, false); const calls = decision.mock.calls.length;
     expect((await run(waiting.id)).status).toBe("ended"); expect(assessment(waiting.id).outcome).toBe("diagnosis_complete");
-    expect(attempt(a.id).score?.correct).toBe(0); expect(generation).toHaveBeenCalledTimes(1); expect(decision).toHaveBeenCalledTimes(calls);
+    expect(attempt(a.id).score?.correct).toBe(0); expect(generation).toHaveBeenCalledTimes(2); expect(decision).toHaveBeenCalledTimes(calls);
     expect(assessment(waiting.id).longTermMastery).toBe("unverified");
   });
 
@@ -377,7 +482,7 @@ describe("Learning completion: frozen offline scenarios through formal API and S
     const waiting = await firstQuiz(); const a = await answer(waiting); const count = decision.mock.calls.length;
     await Promise.all([control(waiting.id, { action: "sync_quiz", attemptId: a.id }), control(waiting.id, { action: "sync_quiz", attemptId: a.id })]);
     await Promise.all([run(waiting.id), run(waiting.id)]);
-    expect(task(waiting.id).status).toBe("ended"); expect(generation).toHaveBeenCalledTimes(1); expect(decision).toHaveBeenCalledTimes(count);
+    expect(task(waiting.id).status).toBe("ended"); expect(generation).toHaveBeenCalledTimes(2); expect(decision).toHaveBeenCalledTimes(count);
     expect(stores(learning => new LearningQuizRepository(learning).list(pageId))).toHaveLength(1);
     expect(attempt(a.id).score?.correct).toBe(1);
   });
@@ -390,7 +495,7 @@ describe("Learning completion: frozen offline scenarios through formal API and S
     expect(paused.status).toBe("paused");
     const prepared = paused.actions.at(-1)!;
     expect(prepared).toMatchObject({ tool: "learning.create_quiz", status: "prepared", version: 1 });
-    expect(generation).toHaveBeenCalledTimes(1);
+    expect(generation).toHaveBeenCalledTimes(2);
     // run() has closed all databases. Resume must use the saved action identity;
     // it must not ask the fixture for another action before checking this one.
     await control(waiting.id, { action: "resume" });
@@ -400,7 +505,7 @@ describe("Learning completion: frozen offline scenarios through formal API and S
     });
     const ended = await run(waiting.id);
     expect(ended.status).toBe("ended"); expect(ended.actions.find(action => action.id === prepared.id)?.status).toBe("failed");
-    expect(assessment(waiting.id).outcome).toBe("partial"); expect(generation).toHaveBeenCalledTimes(1);
+    expect(assessment(waiting.id).outcome).toBe("partial"); expect(generation).toHaveBeenCalledTimes(2);
     expect(stores(learning => new LearningQuizRepository(learning).list(pageId))).toHaveLength(1);
     expect(attempt(a.id).score?.correct).toBe(1); expect(candidates).toHaveLength(0);
   });
@@ -412,7 +517,7 @@ describe("Learning completion: frozen offline scenarios through formal API and S
     await control(waiting.id, { action: "pause" }); await run(waiting.id); await control(waiting.id, { action: "resume" }); await run(waiting.id);
     expect(task(waiting.id).status).toBe("waiting"); expect(task(waiting.id).usage.calls).toBe(usage); expect(decision).toHaveBeenCalledTimes(calls);
     await control(waiting.id, { action: "cancel" }); await run(waiting.id); expect(task(waiting.id).status).toBe("cancelled");
-    expect(assessment(waiting.id).outcome).not.toBe("check_passed"); expect(generation).toHaveBeenCalledTimes(1);
+    expect(assessment(waiting.id).outcome).not.toBe("check_passed"); expect(generation).toHaveBeenCalledTimes(2);
   });
 
   it("rejects missing-plan, stale-version and model-supplied objective feedback without writes", async () => {
@@ -451,7 +556,7 @@ describe("Learning completion: frozen offline scenarios through formal API and S
     expect(ended.status).toBe("ended"); expect(assessment(waiting.id).outcome).toBe("check_passed");
     const response = await GET(request(), routeContext()), body = await response.json();
     expect(body.tasks.find((t: { id: string }) => t.id === waiting.id).quizLinks).toContainEqual({ quizId: a.quizId, attemptId: a.id, completed: true, disputed: false, historical: true });
-    expect(attempt(a.id).score).toEqual(a.score); expect(generation).toHaveBeenCalledTimes(1);
+    expect(attempt(a.id).score).toEqual(a.score); expect(generation).toHaveBeenCalledTimes(2);
   });
 
   it("C09 permits early finish without manufacturing a passed learning result", async () => {

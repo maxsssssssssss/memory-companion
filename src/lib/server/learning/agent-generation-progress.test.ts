@@ -1,3 +1,4 @@
+import { offlineQuizSemanticResponse } from "./testing/quiz-semantic-fixture";
 // @vitest-environment node
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { randomUUID } from "node:crypto";
@@ -161,6 +162,7 @@ it("retains true unknown as unknown and never records it as a known failure or a
 it("allows an explicitly authorized original-operation retry after a known failed generation, preserving its failure record and stable identity", async () => {
   let generated = 0, calls = 0;
   const generate = vi.fn(async (_config, _name, _prompt, input) => {
+    if (_name === "learning_quiz_semantic_review") return offlineQuizSemanticResponse(input);
     if (++generated === 1) throw new AgentFailure("known_failure", "agent_generation_invalid_result");
     const wire = input as { taskContext: { referenceScope: string }; materials: Array<{ paragraphs: Array<{ referenceId: string }> }> };
     const refs = wire.materials[0].paragraphs.map(p => p.referenceId);
@@ -190,7 +192,7 @@ it("allows an explicitly authorized original-operation retry after a known faile
   expect(result).toMatchObject({ ref: { kind: "learning.quiz", id: original.id }, wait: { kind: "quiz_submission" } });
   expect(new LearningQuizRepository(learning).list(pageId)).toHaveLength(1);
   expect(new LearningQuizRepository(learning).list(pageId)[0]).toMatchObject({ id: original.id, status: "completed", count: 1 });
-  expect(calls).toBe(2); expect(generate).toHaveBeenCalledTimes(2);
+  expect(calls).toBe(3); expect(generate).toHaveBeenCalledTimes(3);
   expect(failureRecords()).toHaveLength(2);
   expect(failureRecords().filter(record => record.failure)).toHaveLength(1);
 });
@@ -228,6 +230,7 @@ it("does not let another objective's actual support or a role relabel unlock a f
   await expect(scene.tools["learning.create_quiz"].execute(initial.args, ctx)).rejects.toMatchObject({ code: "known_failure" });
   const before = assessLearningCompletion(learning, task), failureId = learningAgentOperationId(ctx.actionId, "quiz");
   const generate = vi.fn(async (_config, _name, _prompt, input) => {
+    if (_name === "learning_quiz_semantic_review") return offlineQuizSemanticResponse(input);
     const wire = input as { taskContext: { referenceScope: string; reviewContext: { purpose: LearningCheckPurpose } }; materials: Array<{ paragraphs: Array<{ referenceId: string }> }> };
     const refs = wire.materials[0].paragraphs.map(p => p.referenceId);
     return { contractVersion: "references-v2", referenceScope: wire.taskContext.referenceScope, title: "[离线] 必要条件", reason: null,

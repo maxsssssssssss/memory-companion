@@ -15724,3 +15724,11 @@ Learning与UI：新增 `agent-scope.ts`、`agent-repository.ts`、`agent-scenari
 
 - 用户明确要求把已交付约258KB证据包放到GitHub；核对实际分支feat/learning-agent-natural-language-quiz与HEAD 0b28c3e0c18274271cabf6e93b3e46a950093b57，仅既存UPDATE_HISTORY的95行本地追加未提交。将同字节ZIP复制到docs/agent-evidence/learning-agent-final-g5-repair-0b28c3e.zip，README追加下载、业务SHA和边界；保护其他成果与本地历史。
 - ZIP为257510 bytes、SHA256 520d2e83f85fe9c80167be706eade44a8a10e946bcce6f99368f89f6def15dd0；39个payload逐项长度/哈希与CRC通过，外包和内嵌包没有私有数据库/会话/密钥文件。本次只上传产物，无产品代码或依赖变化，不重复运行测试/构建。完整性不是产品或真实DS通过；业务验收SHA仍为0b28c3e，Windows真实验收PENDING。正常提交推送同一功能分支，不改账本、不调用Provider、不集成/部署；提供固定提交下载链接并另行读回校验。
+
+## 2026-10-28（Asia/Shanghai）— 最新 Learning Agent 集成与 main 发布准备
+
+- 背景与判断：用户要求汇总最新改动并明确选择最新 Agent 已验收版本；以 main 的 500fdc2ef4d9b280d52a66ef33e8203f8c695d95 为集成基线，保留原开发工作区和较早 practice 方案，不将旧的强制逐题分析完成策略覆盖到新版本。提交前逐项核对 60 个候选文件哈希与暂存清单一致，远端 main 仍为上述基线。按当前共用历史规则在本文件追加记录，未导入其他工作区的整份历史、运行数据或秘密。
+- 实现：普通练习沿用 practice 目标，证据不足时诚实交回 partial；决策输入默认 200000 字符并按任务冻结，只携带一份完整完成评估。独立 Quiz 语义审阅在发布前绑定候选与来源；任务内一次显式争议题替换保留旧成绩、unknown、取消和来源保护。主要涉及 agent-scenario/completion/context/input-budget/task-budget/repository、quiz-semantic-review/service/repository/grounding/delivery、结果组件、对应测试、试验工具及配置示例/部署文档；未新增生产依赖、全局开关、另一份持久化 authority 或跨产品访问路径。
+- 集成修正：保留的 C6 回放补上新审题阶段的受控离线响应，分别统计生成与审阅，保留原候选诊断索引；修改 testing/natural-quiz-c6dd171-replay.ts 与 quiz-final-c6dd171.test.ts。agent-completion-flow.test.ts 中单条多次 SQLite/checkpoint 重启用例在默认 5 秒下重复超时，15 秒诊断完成全部原断言后，仅为此测试设置显式 15000ms 时限，未改变产品超时、预算或断言。
+- 实际验证（2026-10-27）：48 文件 917 项定向测试通过。首次全量 594 文件结果为 7228 通过、3 失败、18 跳过，另有 C6 的 beforeAll 因旧回放缺少新语义审阅阶段失败；三项失败为测试超时。初次四文件修正复验 74 通过、1 超时，单条隔离仍超时；有界诊断 6609ms 完成原断言，最终四文件 75/75 通过。合并首次全量与最终四文件结果为 7240 通过、0 失败、9 跳过，不是一轮全量全绿；9 项仍依赖缺失的历史 PDF/OCR 原始资料。Next typegen、最终 TypeScript、production build 及构建 trace 清理通过。离线生产构建页面解释流程验证来源、保存、刷新、显式解决和结束后零新增调用；6 次 fixture 响应，真实 Provider 网络调用 0。提交前 diff check 通过。
+- 失败与限制：准备时出现 Git Schannel/缓存 CLI 探测失败及 LF/CRLF 合并冲突，分别使用保留 TLS 校验的 Git OpenSSL、已有 CLI 和规范化合并输入处理，原工作区未覆盖。模型语义审阅仍可能漏掉歧义与引用问题；partial 不代表掌握，接近 200000 字符的真实网关边界未验证。此次未新增真实 Provider/ASR/OCR 调用，未执行服务器验收或部署；历史资料缺失不以合成证据替代。用户本轮明确授权 commit 与正常 push 到 main，远端最终提交号由发布回执另行核对。

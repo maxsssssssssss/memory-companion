@@ -4,20 +4,20 @@ import { findUnobservableLearningRequirements } from "./learning-review-requirem
 
 const short = z.string().trim().min(1).max(600);
 const objectiveId = z.string().regex(/^[a-zA-Z0-9_-]{1,64}$/);
-export const LearningGoalKind = z.enum(["explanation", "diagnosis", "targeted_review", "chapter_check"]);
+export const LearningGoalKind = z.enum(["explanation", "diagnosis", "practice", "targeted_review", "chapter_check"]);
 export const LearningCheckRole = z.enum(["concept", "application", "boundary", "followup"]);
 export const LearningCompletionSource = z.object({ materialId: LearningId, paragraph: z.number().int().positive() }).strict();
 export const LearningEvidenceRef = z.object({ quizId: LearningId, attemptId: LearningId, questionIndex: z.number().int().nonnegative().max(49) }).strict();
 export type LearningEvidenceRef = z.infer<typeof LearningEvidenceRef>;
 const reviewPlanShape = z.object({
-  kind: LearningGoalKind.describe("explanation允许requirements为空；diagnosis、targeted_review、chapter_check的每个目标至少有一个requirement。targeted_review每个目标必须包含role=followup；targeted_review和chapter_check的所有requirement必须independent=true。"),
+  kind: LearningGoalKind.describe("普通练习、练练、复习或出题用practice：可以先观察薄弱点，但不能以诊断观察完成代替练习目标获得支持。diagnosis仅用于用户要了解薄弱点或摸底而非继续练习。explanation允许requirements为空；其他kind每个目标至少有一个requirement。practice、targeted_review和chapter_check的所有requirement必须independent=true；只有targeted_review每个目标必须包含role=followup，practice不预设followup或轮数。"),
   objectives: z.array(z.object({ id: objectiveId.describe("本计划内唯一的目标ID；不能与另一个objective.id重复。"), label: short,
     sources: z.array(LearningCompletionSource).min(1).max(20),
     requirements: z.array(z.object({
       role: LearningCheckRole.describe("同一目标内role必须唯一，不能重复；targeted_review的每个目标必须包含followup。"),
       description: short.describe("描述学生可观察的具体知识表现，并与用户目标和所引原文有关；不能只写检查是否充分、先答题再检查等执行流程。followup须说明要复查哪一种知识表现或区别，不仅安排前序/后序步骤。选择正确解释只是选择作答，不能写成学生用自己的话解释。"),
-      independent: z.boolean().describe("targeted_review和chapter_check必须为true；explanation和diagnosis按约定检查要求明确填写。")
-    }).strict()).max(4).describe("同目标内role唯一。仅explanation可以为空；其他kind至少一个。targeted_review必须含followup，且与chapter_check一样全部independent=true。")
+      independent: z.boolean().describe("practice、targeted_review和chapter_check必须为true；提示后正确可用于后续行动，不能代替独立作答支持。explanation和diagnosis按约定检查要求明确填写。")
+    }).strict()).max(4).describe("同目标内role唯一。仅explanation可以为空；其他kind至少一个。practice不预设followup；targeted_review必须含followup。practice、targeted_review和chapter_check全部independent=true。")
   }).strict()).min(1).max(12).describe("1至12个目标，所有objective.id在本计划内唯一。")
 }).strict();
 function validatePlanContract(value: z.infer<typeof reviewPlanShape>, ctx: z.RefinementCtx) {
@@ -30,7 +30,7 @@ function validatePlanContract(value: z.infer<typeof reviewPlanShape>, ctx: z.Ref
     if (duplicateRole !== -1) ctx.addIssue({ code: "custom", message: "duplicate_requirement", path: [...requirementsPath, duplicateRole, "role"] });
     if (value.kind === "targeted_review" && !item.requirements.some(r => r.role === "followup")) ctx.addIssue({ code: "custom", message: "targeted_followup_required", path: requirementsPath });
     const assisted = item.requirements.findIndex(r => !r.independent);
-    if ((value.kind === "targeted_review" || value.kind === "chapter_check") && assisted !== -1) ctx.addIssue({ code: "custom", message: "independent_check_required", path: [...requirementsPath, assisted, "independent"] });
+    if ((value.kind === "practice" || value.kind === "targeted_review" || value.kind === "chapter_check") && assisted !== -1) ctx.addIssue({ code: "custom", message: "independent_check_required", path: [...requirementsPath, assisted, "independent"] });
   }
 }
 /** Frozen plans keep their original strict structural/cross-field contract.
@@ -47,7 +47,7 @@ export const LearningReviewPlanInput = reviewPlanShape.superRefine((value, ctx) 
 // The locked toJsonSchema converter cannot encode superRefine. Keep the exact
 // validator and expose these cross-field requirements in the parameter schema
 // itself, so every formal caller receives the contract without a prompt fork.
-}).describe("计划参数的强制约束：1. objectives中的id全部唯一；2. kind不是explanation时，每个目标的requirements至少一项；3. 同一目标的requirements中role唯一；4. kind=targeted_review时，每个目标必须包含role=followup；5. kind=targeted_review或chapter_check时，所有requirements的independent必须为true；6. 每项description必须描述学生可观察的具体知识表现，不能用“根据前序作答表现，检查该小点是否已经充分验证”或“先完成两道了解性题目，再针对实际困难继续检查”这类流程代替知识要求；followup也要说明具体复查内容。违反任一项均拒绝整个行动，不会自动修正或重试。选择正确解释不等于学生用自己的话解释。来源必须由当前授权原文支持，参数通过不等于来源语义或学习结论已核实。");
+}).describe("计划参数的强制约束：1. objectives中的id全部唯一；2. kind不是explanation时，每个目标的requirements至少一项；3. 同一目标的requirements中role唯一；4. kind=targeted_review时，每个目标必须包含role=followup；practice不要求预设followup；5. kind=practice、targeted_review或chapter_check时，所有requirements的independent必须为true；6. 每项description必须描述学生可观察的具体知识表现，不能用“根据前序作答表现，检查该小点是否已经充分验证”或“先完成两道了解性题目，再针对实际困难继续检查”这类流程代替知识要求；followup也要说明具体复查内容。违反任一项均拒绝整个行动，不会自动修正或重试。选择正确解释不等于学生用自己的话解释。来源必须由当前授权原文支持，参数通过不等于来源语义或学习结论已核实。practice的检查通过依赖约定目标的有效独立作答与相关反证处理；可以证据不足时partial交回，不要求每道旧题重答正确或固定练习轮数。");
 export type LearningReviewPlanInput = z.infer<typeof LearningReviewPlanInput>;
 export type LearningReviewPlan = LearningReviewPlanInput & { schemaVersion: 1; taskVersion: number; sourceFingerprint: string; goal: string; proposedBy: "model"; id: string };
 export const LearningCheckPurpose = z.object({

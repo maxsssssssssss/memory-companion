@@ -1,3 +1,4 @@
+import { offlineQuizSemanticResponse } from "./testing/quiz-semantic-fixture";
 // @vitest-environment node
 import { randomUUID } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
@@ -35,7 +36,7 @@ function response(wire: Wire, ids = ["definition", "condition", "boundary"]) {
 }
 const stored = (id: string): SavedQuiz => JSON.parse((learning.database.prepare("SELECT result_json FROM learning_quiz_runs WHERE id=?").get(id) as { result_json: string }).result_json);
 function provider(make: (wire: Wire) => unknown) {
-  return vi.fn(async (_config, _label, _prompt, input) => make(input as Wire)) as unknown as ReturnType<typeof vi.fn> & typeof generateStudyJson;
+  return vi.fn(async (_config, _label, _prompt, input) => _label === "learning_quiz_semantic_review" ? offlineQuizSemanticResponse(input, "F") : make(input as Wire)) as unknown as ReturnType<typeof vi.fn> & typeof generateStudyJson;
 }
 beforeEach(async () => {
   root = await mkdtemp(join(tmpdir(), "learning-review-purpose-synthetic-")); learning = new LearningRepository(root, "owner"); quiz = new LearningQuizRepository(learning);
@@ -72,7 +73,7 @@ it.each([2, 3])("binds accepted real question indices after a middle rejection a
   learning.close(); learning = new LearningRepository(root, "owner"); quiz = new LearningQuizRepository(learning);
   expect(quiz.review(page, id)).toEqual(review);
   expect(quiz.attempt(page, attempt.id)).toEqual(attempt);
-  expect(generate).toHaveBeenCalledTimes(1); expect(fetch).not.toHaveBeenCalled();
+  expect(generate).toHaveBeenCalledTimes(2); expect(fetch).not.toHaveBeenCalled();
 });
 
 it("rejects a missing association in new Agent generation instead of publishing unusable goal evidence", async () => {
@@ -119,7 +120,7 @@ it.each([false, true])("retains the purpose in checkpoint identity and recovers 
     reviewContext: change ? { ...reviewContext, purpose: { ...reviewContext.purpose, purpose: "[合成] 已变化的目的不能重放旧生成" } } : reviewContext });
   expect(second[0]).toMatchObject(change ? { status: "failed", failure: "source_changed" } : { status: "completed", count: 1 });
   if (!change) expect(quiz.review(page, id)?.checks[0]).toMatchObject({ questionIndex: 0, objectiveIds: ["definition"] });
-  expect(generate).toHaveBeenCalledTimes(1);
+  expect(generate).toHaveBeenCalledTimes(2);
 });
 
 it("rechecks source deletion and account isolation before reading saved check provenance", async () => {
@@ -129,7 +130,7 @@ it("rechecks source deletion and account isolation before reading saved check pr
   try { expect(() => new LearningQuizRepository(other).review(page, id)).toThrow(); } finally { other.close(); }
   expect(quiz.review(page, id)?.checks).toHaveLength(1);
   learning.deleteMaterial(page, material);
-  expect(() => quiz.review(page, id)).toThrow(); expect(generate).toHaveBeenCalledTimes(1);
+  expect(() => quiz.review(page, id)).toThrow(); expect(generate).toHaveBeenCalledTimes(2);
 });
 
 it("also preserves associations through the stable reference codec without widening its question schema", async () => {
@@ -152,6 +153,7 @@ it("carries the same purpose into real reading, source selection and question re
   const reviewContext = context(), stages: string[] = [];
   reviewContext.objectives.forEach(objective => { objective.sources = Array.from({ length: 20 }, (_, i) => ({ materialId: material, paragraph: i + 1 })); });
   const generate = vi.fn(async (_config, label, _prompt, input: unknown) => {
+    if (label === "learning_quiz_semantic_review") return offlineQuizSemanticResponse(input, "F");
     stages.push(label);
     const wire = input as Wire & { windows: Array<{ id: string }> };
     expect(wire.taskContext.reviewContext).toEqual(reviewContext);

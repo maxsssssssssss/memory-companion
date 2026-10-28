@@ -1,3 +1,4 @@
+import { offlineQuizSemanticResponse } from "./testing/quiz-semantic-fixture";
 // @vitest-environment node
 import { randomUUID } from "node:crypto";
 import { mkdtemp,rm } from "node:fs/promises";
@@ -20,6 +21,7 @@ it.each([false,true])("keeps completed checkpoints when the request allowance in
   const planning=legacy?vi.spyOn(LearningQuizRepository.prototype,"planning").mockReturnValue({inputChars:48000,perGroup:12,legacy:true,legacyLarge:true}):undefined;
   const generate=vi.fn(async(c,name,prompt,input:any)=>{
     checkInputBudget(c,prompt,input,"items");
+    if(name==="learning_quiz_semantic_review")return offlineQuizSemanticResponse(input);
     if(name==="learning_quiz_reading")return {items:[{title:"[模拟] 条件",context:"[模拟] 保留完整条件与例外"}],limitation:null};
     if(name==="learning_quiz_selection")return {items:[{windows:["w1"],count:2},{windows:["w2"],count:1},{windows:["w1","w2"],count:1},{windows:["w1","w3"],count:1}]};
     if(++questions===3)throw new LearningError(503,"generation_request_does_not_fit");
@@ -35,8 +37,8 @@ it.each([false,true])("keeps completed checkpoints when the request allowance in
   repo.close();repo=new LearningRepository(root,"owner");
   rows=await generateLearningQuiz(repo,page,{id:run,settings,resume:true},{configure:()=>({...config,maxInputChars:120000}),generate});
   expect(rows[0]).toMatchObject({status:"completed",count:5});
-  expect(generate.mock.calls.slice(before).map(call=>call[1])).toEqual(["learning_quiz","learning_quiz"]);
-  expect(repo.database.prepare("SELECT part_id,input_hash,attempts,result_json FROM learning_generation_parts WHERE run_id=? AND state='completed' AND part_id NOT IN ('questions-2','questions-3') ORDER BY part_id").all(run)).toEqual(saved);
+  expect(generate.mock.calls.slice(before).map(call=>call[1])).toEqual(["learning_quiz","learning_quiz_semantic_review","learning_quiz","learning_quiz_semantic_review"]);
+  expect(repo.database.prepare("SELECT part_id,input_hash,attempts,result_json FROM learning_generation_parts WHERE run_id=? AND state='completed' AND part_id NOT IN ('questions-2','questions-3','semantic-2-0','semantic-3-0') ORDER BY part_id").all(run)).toEqual(saved);
   const recovered=repo.database.prepare("SELECT attempts,diagnostics_json FROM learning_generation_parts WHERE run_id=? AND part_id='questions-2'").get(run) as {attempts:number;diagnostics_json:string};
   expect(recovered.attempts).toBe(1);expect(JSON.parse(recovered.diagnostics_json).localPreflightRecovery).toEqual({attempts:2,failure:"generation_request_does_not_fit"});
   expect(fetch).not.toHaveBeenCalled();
@@ -49,6 +51,7 @@ it.each(["reading","selection"] as const)("uses the increased sending allowance 
   const settings=create(),run=randomUUID();let fail=true,index=0;
   const generate=vi.fn(async(c,name,prompt,input:any)=>{
     checkInputBudget(c,prompt,input,"items");
+    if(name==="learning_quiz_semantic_review")return offlineQuizSemanticResponse(input);
     if(name===`learning_quiz_${stage}`&&fail){fail=false;throw new LearningError(503,"generation_request_does_not_fit");}
     if(name==="learning_quiz_reading")return {items:[{title:"[模拟] 条件",context:"[模拟] 保留例外"}],limitation:null};
     if(name==="learning_quiz_selection")return {items:[{windows:["w1"],count:5}]};

@@ -31,7 +31,7 @@ it("keeps three actual questions, stable-ID grades and objectives; rejected ques
   expect(fetch).not.toHaveBeenCalled();
 });
 it("retains exact failed candidate diagnostics and partial delivery from one offline generation", () => {
-  expect(result.generation).toEqual({ published: 3, offlineResponses: 1, issues: [{ index: 3, stage: "composition", code: "answer_not_unique" }] });
+  expect(result.generation).toEqual({ published: 3, offlineResponses: 1, semanticReviewResponses: 1, issues: [{ index: 3, stage: "composition", code: "answer_not_unique" }] });
 });
 
 const question = fixture.decoded.items[3], fullStem = `${question.scenario}\n${question.stem}`;

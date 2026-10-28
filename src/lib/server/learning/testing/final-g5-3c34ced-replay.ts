@@ -17,6 +17,7 @@ import { LearningAgentRepository } from "../agent-repository";
 import { createLearningAgentScenario } from "../agent-scenario";
 import { assessLearningCompletion, establishLearningReviewPlan } from "../agent-completion";
 import fixture from "./final-g5-3c34ced.fixture.json";
+import { offlineQuizSemanticResponse } from "./quiz-semantic-fixture";
 
 const hash = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
 const { reviewCandidates, ...originalEnvelope } = fixture.decoded;
@@ -30,7 +31,7 @@ const context = QuizReviewContext.parse(fixture.reviewContext);
 export async function replayFinalG5Publication(directory: string) {
   const inputHash = hash(fixture), accountId = randomUUID(), page = fixture.source.page_id;
   let learning = new LearningRepository(directory, accountId), quizzes = new LearningQuizRepository(learning);
-  let offlineResponses = 0;
+  let offlineResponses = 0, semanticReviewResponses = 0;
   const matrix: Array<{ index: number; candidateHash: string; composition: string; publication: string; savedIndex: number | null }> = [];
   try {
     learning.create({ id: page, title: "[离线原题投影] FINAL-G5-1" });
@@ -128,12 +129,15 @@ export async function replayFinalG5Publication(directory: string) {
     // Exercise the real generation entry as well, using one explicitly offline
     // response derived from the exact saved candidates and annotation mapping.
     const generatedId = randomUUID();
-    const generate = (async () => { offlineResponses++; return { ...wire, items: wire.items.map((q, i) => ({ ...q, reviewCheck: checks[i].check })) }; }) as typeof generateStudyJson;
+    const generate = (async (_config, schema, _instruction, input) => {
+      if (schema === "learning_quiz_semantic_review") { semanticReviewResponses++; return offlineQuizSemanticResponse(input); }
+      offlineResponses++; return { ...wire, items: wire.items.map((q, i) => ({ ...q, reviewCheck: checks[i].check })) };
+    }) as typeof generateStudyJson;
     const runs = await generateLearningQuiz(learning, page, { id: generatedId, settings: fixture.settings }, {
       configure: () => ({ baseURL: "https://unused.invalid/v1", apiKey: "synthetic-only", model: "offline", maxInputChars: 48000, maxOutputTokens: 8000 }), generate,
       reviewContext: currentContext, diagnosticContext: { taskId: task.id, taskVersion: 1, actionId: randomUUID() } });
     const generated = runs.find(run => run.id === generatedId)!;
-    assert.equal(generated.status, "completed"); assert.equal(generated.count, 3); assert.equal(offlineResponses, 1);
+    assert.equal(generated.status, "completed"); assert.equal(generated.count, 3); assert.equal(offlineResponses, 1); assert.equal(semanticReviewResponses, 1);
     const part = learning.database.prepare("SELECT diagnostics_json FROM learning_generation_parts WHERE run_id=?").get(generatedId) as { diagnostics_json: string };
     const diagnostics = JSON.parse(part.diagnostics_json).candidateDiagnostics;
     assert.deepEqual(diagnostics.issues, [{ index: 3, stage: "composition", code: "answer_not_unique" }]);
@@ -148,7 +152,7 @@ export async function replayFinalG5Publication(directory: string) {
       membership: inspectLiteralSetMembership(`${original.items[3].scenario}\n${original.items[3].stem}`, original.items[3].options, original.items[3].correctOptionId),
       score: attempt.score, readAnswerIndexes: answers.questions.map(q => q.index), objectiveAssessment: assessment,
       rejectedQuestionSubmission: "invalid_input; zero events", rejectedQuestionEvidence: "agent_completion_evidence_invalid; zero proposals",
-      generation: { published: generated.count, offlineResponses, issues: diagnostics.issues },
+      generation: { published: generated.count, offlineResponses, semanticReviewResponses, issues: diagnostics.issues },
       originalWindowsAttempt: "Unanswered, unchanged", originalInputUnchanged: true, duplicateSubmit: "PASS", restart: "PASS", dispute: "PASS", sqliteIntegrity: "ok", realProviderCalls: 0 };
   } finally { if (learning.database.open) learning.close(); }
 }

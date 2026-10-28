@@ -1,3 +1,4 @@
+import { offlineQuizSemanticResponse } from "./testing/quiz-semantic-fixture";
 // @vitest-environment node
 import { randomUUID } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
@@ -31,7 +32,7 @@ function detail(id: string) {
   const row = learning.database.prepare("SELECT diagnostics_json FROM learning_generation_parts WHERE run_id=? AND part_id='questions-0'").get(id) as { diagnostics_json: string | null };
   return JSON.parse(row.diagnostics_json ?? "{}").candidateDiagnostics;
 }
-const generate = (make: (wire: Wire) => unknown) => vi.fn(async (_config, _name, _prompt, input) => make(input as Wire)) as unknown as typeof generateStudyJson;
+const generate = (make: (wire: Wire) => unknown) => vi.fn(async (_config, _name, _prompt, input) => _name === "learning_quiz_semantic_review" ? offlineQuizSemanticResponse(input) : make(input as Wire)) as unknown as typeof generateStudyJson;
 async function run(make: (wire: Wire) => unknown) {
   const id = randomUUID();
   const rows = await generateLearningQuiz(learning, page, { id, settings: settings() }, { configure: () => config,

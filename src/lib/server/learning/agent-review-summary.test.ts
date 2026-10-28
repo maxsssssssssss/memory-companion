@@ -13,8 +13,8 @@ import { LearningRepository } from "./repository";
 import { LearningQuizRepository } from "./quiz-repository";
 import { LearningFrameworkRepository } from "./framework-repository";
 import { LearningAgentRepository } from "./agent-repository";
-import { freezeLearningAgentScope } from "./agent-scope";
-import { projectLearningAgentReviewSummary, saveLearningAgentReviewSummary } from "./agent-review-summary";
+import { freezeLearningAgentScope, readLearningAgentScope } from "./agent-scope";
+import { buildLearningAgentReviewSummary, projectLearningAgentReviewSummary, saveLearningAgentReviewSummary } from "./agent-review-summary";
 import { createLearningAgentScenario } from "./agent-scenario";
 import { projectLearningAgentTask } from "./agent-api-service";
 import type { generateStudyJson } from "./framework-generator";
@@ -69,6 +69,24 @@ it("aggregates earlier wrong and later correct groups, groups shared sources and
 it("independent all-correct produces short praise without generation", async () => {
   group("correct"); group("correct"); const generate = enrich(), summary = await saveLearningAgentReviewSummary(learning, ctx, generate);
   expect(summary.headline).toBe("本轮 2 题均答对，应用内未记录提示或提前查看答案。"); expect(summary.topics).toEqual([]); expect(summary.reminders).toEqual([]); expect(generate).not.toHaveBeenCalled();
+});
+
+it.each(["错误", "错误。先检查前提，再判断结论。", "答案错误："])("does not turn a verdict label into the reminder %s", reason => {
+  const attempt = group("wrong"), original = JSON.stringify(attempt);
+  const fixture = structuredClone(attempt);
+  fixture.questions[0].feedback!.reasons.find(r => r.id === "B")!.reason = reason;
+  const summary = buildLearningAgentReviewSummary({ status: "ended" }, [{ quizId: attempt.quizId, attempt: fixture }], readLearningAgentScope(learning, pageId, ctx.task.scope), [], 0).summary;
+  expect(summary.reminders).toHaveLength(1);
+  expect(summary.reminders[0]).toBe(reason.includes("先检查") ? "先检查前提，再判断结论" : "只有前提满足时才可应用规则");
+  expect(JSON.stringify(quizzes.attempt(pageId, attempt.id))).toBe(original);
+});
+
+it("filters verdict-only enrichment without changing scores or generating on refresh", async () => {
+  group("wrong"); const generate = vi.fn(async (topics: Array<{ id: string }>) => ({ items: topics.map(t => ({ id: t.id, explanation: "先核对实际前提。", reminder: "错误" })) }));
+  const saved = await saveLearningAgentReviewSummary(learning, ctx, generate);
+  expect(saved.reminders).not.toContain("错误"); expect(saved.stats.wrong).toBe(1);
+  expect(projectLearningAgentReviewSummary(learning, { ...ctx.task, status: "ended" })?.reminders).toEqual(saved.reminders);
+  await saveLearningAgentReviewSummary(learning, ctx, generate); expect(generate).toHaveBeenCalledTimes(1); expect(globalThis.fetch).not.toHaveBeenCalled();
 });
 it("separates hints, skipped and revealed questions from actual wrong submissions", async () => {
   group("hint"); group("skip"); group("reveal"); const generate = enrich(), summary = await saveLearningAgentReviewSummary(learning, ctx, generate);

@@ -1,3 +1,4 @@
+import { offlineQuizSemanticResponse } from "./testing/quiz-semantic-fixture";
 // @vitest-environment node
 import { randomUUID } from "node:crypto";
 import { mkdtemp,rm } from "node:fs/promises";
@@ -85,6 +86,7 @@ it("rejects changed source versions on resume and preserves the prior failure ev
 it("direct large Quiz reads all selected text, uses original bundles rather than summaries, and saves answer mapping",async()=>{
   const id=material(body),run=randomUUID();let readingText="",writing=0;
   const generate=vi.fn(async(_c,name,_prompt,input)=>{
+    if(name==="learning_quiz_semantic_review")return offlineQuizSemanticResponse(input);
     if(name==="learning_quiz_reading"){
       readingText+=input.materials.flatMap((m:any)=>m.paragraphs.map((p:any)=>p.text)).join("");
       return {items:[{title:"[模拟索引] 条件与例外",context:"INDEX_NOT_EVIDENCE"}],limitation:null};
@@ -116,7 +118,8 @@ it("runs large Quiz reading and selection through the actual JSON transport root
     expect(request).toMatchObject({model:config.model,reasoning:{effort:"none"},stream:true});
     const refs=(input.materials??[]).flatMap((m:any)=>m.paragraphs.map((p:any)=>p.referenceId));
     let output:unknown;
-    if(input.windows){stages.push("selection");output={items:[{windows:[input.windows[0].id],count:input.taskContext.count}]};}
+    if(input.candidates){stages.push("review");output=offlineQuizSemanticResponse(input);}
+    else if(input.windows){stages.push("selection");output={items:[{windows:[input.windows[0].id],count:input.taskContext.count}]};}
     else if(prompt.includes("定位索引，不生成题目")){stages.push("reading");output={items:[{title:"[模拟] 条件",context:"[模拟] 适用条件及例外"}],limitation:null};}
     else {stages.push("questions");output={contractVersion:"references-v2",referenceScope:input.taskContext.referenceScope,title:"[模拟] 传输验收",reason:null,
       materialPlan:[{material:1,contribution:"[模拟] 条件",references:[refs[0]]}],
@@ -135,7 +138,8 @@ it("runs large Quiz reading and selection through the actual JSON transport root
 });
 
 const largeQuizSettings=(id:string)=>({materialIds:[id],chapterIds:[],nodeIds:[],includeNotes:false,includeSupplements:false,count:1,difficulty:"standard" as const});
-function quizPlanningResponse(name:string,input:any,invalidReference=false) {
+function quizPlanningResponse(name:string,input:any,invalidReference=false): any {
+  if(name==="learning_quiz_semantic_review")return offlineQuizSemanticResponse(input);
   if(name==="learning_quiz_reading")return {items:[{title:"[模拟索引] 前提",context:"INDEX_NOT_QUESTION_EVIDENCE"}],limitation:null};
   if(name==="learning_quiz_selection")return {items:[{windows:[input.windows[0].id],count:input.taskContext.count}]};
   expect(name).toBe("learning_quiz");
@@ -151,6 +155,7 @@ function quizPlanningResponse(name:string,input:any,invalidReference=false) {
 it("resumes a new Quiz reading contract without repeating completed windows or rewriting their checkpoints",async()=>{
   const id=material(body),run=randomUUID(),settings=largeQuizSettings(id);let readings=0;
   const generate=vi.fn(async(_c,name,_prompt,input)=>{
+    if(name==="learning_quiz_semantic_review")return offlineQuizSemanticResponse(input);
     if(name==="learning_quiz_reading"&&++readings===2)return {items:[{title:"[模拟] 缺少上下文"}],limitation:null};
     return quizPlanningResponse(name,input);
   });
@@ -171,6 +176,7 @@ it("resumes a new Quiz reading contract without repeating completed windows or r
 it("requires a new Quiz for an old reading plan without calls or checkpoint changes",async()=>{
   const id=material(body),run=randomUUID(),settings=largeQuizSettings(id);let readings=0;
   const generate=vi.fn(async(_c,name,_prompt,input)=>{
+    if(name==="learning_quiz_semantic_review")return offlineQuizSemanticResponse(input);
     if(name==="learning_quiz_reading"&&++readings===2)return {items:[{title:"[模拟] 缺少上下文"}],limitation:null};
     return quizPlanningResponse(name,input);
   });
@@ -221,6 +227,7 @@ it("preserves source_changed when a material changes between the reading source 
 it("publishes and reopens five questions directly from large materials after reading every source batch",async()=>{
   const id=material(body),run=randomUUID(),settings={...largeQuizSettings(id),count:5};let readingGroups=0;
   const generate=vi.fn(async(_c,name,_prompt,input)=>{
+    if(name==="learning_quiz_semantic_review")return offlineQuizSemanticResponse(input);
     if(name==="learning_quiz_reading")readingGroups++;
     const response=quizPlanningResponse(name,input);
     if(name!=="learning_quiz")return response;
@@ -247,6 +254,7 @@ it.each([
 ] as const)("reports a %s %s failure before starting later Quiz stages",async(stage,failure)=>{
   const id=material(body),run=randomUUID();
   const generate=vi.fn(async(_c,name,_prompt,input)=>{
+    if(name==="learning_quiz_semantic_review")return offlineQuizSemanticResponse(input);
     if(name===`learning_quiz_${stage}`){
       if(failure==="json")throw new StructuredJsonResponseError("incomplete_json","[模拟] incomplete JSON");
       return stage==="reading"?{items:[{title:"[模拟] 缺上下文"}],limitation:null}:{items:[{count:1}]};

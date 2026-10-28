@@ -8,7 +8,7 @@ export const QuizCandidateReport = z.object({
   rejected: z.array(z.object({ index: z.number().int().min(0).max(49),
     code: z.enum(["structure_or_evidence", "option_identity", "position_dependency", "answer_contradiction",
       "repeated_focus", "equivalent_options", "answer_not_unique", "source_binding", "goal_mismatch",
-      "annotation_schema", "annotation_role", "annotation_objective", "annotation_missing", "review_source_mismatch"])
+      "annotation_schema", "annotation_role", "annotation_objective", "annotation_missing", "review_source_mismatch", "semantic_uncertain"])
   }).strict()).max(50)
 }).strict();
 export type QuizCandidateReport = z.infer<typeof QuizCandidateReport>;
@@ -21,6 +21,7 @@ const labels: Record<QuizDeliveryReason, string> = {
   annotation_schema: "题目的检查说明格式不完整", annotation_role: "题目的检查角度与本次安排不符",
   annotation_objective: "题目未关联本次约定的目标", annotation_missing: "题目缺少本次检查说明",
   review_source_mismatch: "题目依据与本次目标来源不一致",
+  semantic_uncertain: "独立审题未能确定唯一答案",
   format: "生成结果格式不完整", unknown: "生成结果尚未确认", budget: "本轮可用资源已用完",
   known_failure: "这次生成未能完成"
 };

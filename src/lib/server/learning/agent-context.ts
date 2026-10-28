@@ -3,6 +3,8 @@ import { agentDecisionRequest, createAgentDecisionProvider, type AgentModelConfi
 import { agentModelConfig } from "./agent-decision-config";
 import type { LearningRepository } from "./repository";
 import { acknowledgeLearningFeedback, assessLearningCompletion, hasPendingLearningFeedback } from "./agent-completion";
+import { AgentFailure } from "@/lib/server/agent/types";
+import { LEARNING_AGENT_CONTEXT_RESERVE, LEARNING_AGENT_CONTEXT_WINDOW } from "./agent-input-budget";
 
 type Result = AgentDecisionInput["results"][number];
 function record(value: unknown): Record<string, unknown> | undefined {
@@ -72,7 +74,11 @@ export function createLearningAgentDecisionProvider(configure: () => AgentModelC
   return async (input, ctx) => {
     const config = configure();
     const bounded = { ...config, maxInputChars: Math.min(config.maxInputChars, input.task.budget.maxInputChars) };
-    return createAgentDecisionProvider(() => bounded)(fitLearningAgentDecisionInput(input, bounded.maxInputChars), ctx);
+    const fitted = fitLearningAgentDecisionInput(input, bounded.maxInputChars);
+    const request = agentDecisionRequest(fitted);
+    if (Buffer.byteLength(JSON.stringify(request.messages), "utf8") + 512 + config.maxOutputTokens + LEARNING_AGENT_CONTEXT_RESERVE > LEARNING_AGENT_CONTEXT_WINDOW)
+      throw new AgentFailure("budget", "agent_decision_context_limit");
+    return createAgentDecisionProvider(() => bounded)(fitted, ctx);
   };
 }
 

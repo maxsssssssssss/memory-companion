@@ -1,3 +1,4 @@
+import { offlineQuizSemanticResponse } from "./testing/quiz-semantic-fixture";
 // @vitest-environment node
 import { randomUUID } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
@@ -97,6 +98,7 @@ it("persists a known pre-request call-limit refusal through Runtime → Scenario
 it("keeps a formally published prefix answerable when a later complete response fails schema inside the Agent generator", async () => {
   let generations = 0;
   const generate = vi.fn(async (_config, _name, _prompt, input, schema, _signal, diagnostics) => {
+    if (_name === "learning_quiz_semantic_review") return offlineQuizSemanticResponse(input, "F");
     const wire = input as { materials: Array<{ paragraphs: Array<{ referenceId: string }> }> };
     const refs = [wire.materials[0].paragraphs[0].referenceId];
     if (++generations === 2) {
@@ -122,7 +124,7 @@ it("keeps a formally published prefix answerable when a later complete response 
   const f = await runtimeFixture(generate, 16, 100000, 3, { ...config, maxOutputTokens: 1000 });
   try {
     const waiting = await f.runtime.advance("owner", f.task.id);
-    expect(waiting).toMatchObject({ status: "waiting", wait: { kind: "quiz_submission" }, usage: { calls: 4 } });
+    expect(waiting).toMatchObject({ status: "waiting", wait: { kind: "quiz_submission" }, usage: { calls: 5 } });
     expect(waiting.actions.at(-1)?.status).toBe("succeeded");
     expect(generations).toBe(2); expect(f.decisions()).toBe(2);
     expect(quiz.list(page)[0]).toMatchObject({ status: "completed", count: 1, delivery: {
@@ -130,11 +132,11 @@ it("keeps a formally published prefix answerable when a later complete response 
     } });
     const attempt = quiz.attempt(page, waiting.wait!.refId!);
     expect(attempt.questions).toHaveLength(1); expect(JSON.stringify(attempt)).not.toContain("correctOptionId");
-    expect(savedParts()).toMatchObject([{ state: "completed" }, { state: "failed" }, { state: "pending" }]);
+    expect(savedParts()).toMatchObject([{ state: "completed" }, { state: "failed" }, { state: "pending" }, { state: "completed" }]);
     await f.runtime.advance("owner", f.task.id);
     expect(generations).toBe(2); expect(fetch).not.toHaveBeenCalled();
     const calls = f.store.database.prepare("SELECT kind,status FROM agent_calls WHERE task_id=? ORDER BY rowid").all(f.task.id);
-    expect(calls).toMatchObject([{ status: "succeeded" }, { status: "succeeded" }, { status: "succeeded" }, { status: "failed" }]);
+    expect(calls).toMatchObject([{ status: "succeeded" }, { status: "succeeded" }, { status: "succeeded" }, { status: "succeeded" }, { status: "failed" }]);
   } finally { f.runtime.close(); f.store.close(); }
 });
 

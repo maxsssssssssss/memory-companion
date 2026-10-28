@@ -1,6 +1,7 @@
 import type { AgentBudget } from "@/lib/domain/agent";
 import { DEFAULT_AGENT_BUDGET } from "@/lib/server/agent/store";
 import { LearningError } from "./repository";
+import { learningAgentInputChars } from "./agent-input-budget";
 
 /** Deployment policy is frozen into a new Learning task's existing budget_json.
  * Resuming, adjusting or reopening a task continues using that saved budget. */
@@ -19,5 +20,8 @@ export function learningAgentTaskBudget(env: Readonly<Record<string, string | un
   // Runtime derives a graph recursion limit and uses a Node timer. Reject
   // overflow rather than silently disabling either finite execution bound.
   if (!Number.isSafeInteger(maxSteps * 4 + 5) || maxComputeMs > 2_147_483_647) throw new LearningError(503, "agent_not_configured");
-  return { ...DEFAULT_AGENT_BUDGET, maxCalls, maxSteps, maxComputeMs };
+  let maxInputChars: number;
+  try { maxInputChars = learningAgentInputChars(env); }
+  catch { throw new LearningError(503, "agent_not_configured"); }
+  return { ...DEFAULT_AGENT_BUDGET, maxCalls, maxSteps, maxComputeMs, maxInputChars };
 }

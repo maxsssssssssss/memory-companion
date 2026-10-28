@@ -1,3 +1,4 @@
+import { offlineQuizSemanticResponse } from "./testing/quiz-semantic-fixture";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { randomUUID } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
@@ -16,6 +17,7 @@ const model = (count = 2) => ({ title: "[合成] 条件判断", reason: count < 
 // Service mocks implement the current provider wire contract; legacy repository
 // fixtures above remain unchanged to cover historical stored objects.
 const compactModel = async (_config: unknown, _name: unknown, _prompt: unknown, input: unknown) => {
+  if (_name === "learning_quiz_semantic_review") return offlineQuizSemanticResponse(input);
   const wire = input as { taskContext: { referenceScope: string }; materials: Array<{ paragraphs: Array<{ referenceId: string }> }> };
   const refs = wire.materials[0].paragraphs.map(p => p.referenceId);
   return { contractVersion: "references-v2", referenceScope: wire.taskContext.referenceScope, title: model().title, reason: null,
@@ -47,7 +49,7 @@ it("generates directly without framework, saves/reopens, no extra Provider reque
   expect(runs[0].status).toBe("completed"); expect(new LearningFrameworkRepository(learning).view(page).chapters).toEqual([]);
   let a = start("practice", id); a = act(a, "choose", 0, "A"); a = act(a, "submit");
   expect(a.questions[0].feedback?.correct).toBe(true); learning.close(); learning = new LearningRepository(root, "owner"); quiz = new LearningQuizRepository(learning);
-  expect(quiz.attempt(page, a.id)).toEqual(a); expect(generate).toHaveBeenCalledTimes(1); expect(globalThis.fetch).not.toHaveBeenCalled();
+  expect(quiz.attempt(page, a.id)).toEqual(a); expect(generate).toHaveBeenCalledTimes(2); expect(globalThis.fetch).not.toHaveBeenCalled();
 });
 it("keeps all answer fields and sources off the wire before allowed feedback; test reveal is forbidden", () => {
   let a = start("test"); const hidden = (v: unknown) => { const text = JSON.stringify(v); for (const s of ["correctOptionId", "SECRET_REASON", "SECRET_EXPLANATION", "paragraphSha256", "feedback"]) expect(text).not.toContain(s); };
@@ -67,7 +69,7 @@ it("saves each selection and safely finalizes unanswered questions", () => {
 });
 it("duplicate generation/attempt/action receipts do not replay, and concurrent edits are fenced", async () => {
   const id = randomUUID(), generate = vi.fn(compactModel), v = { id, settings: settings() };
-  await generateLearningQuiz(learning, page, v, { configure: () => config, generate }); await generateLearningQuiz(learning, page, v, { configure: () => config, generate }); expect(generate).toHaveBeenCalledTimes(1);
+  await generateLearningQuiz(learning, page, v, { configure: () => config, generate }); await generateLearningQuiz(learning, page, v, { configure: () => config, generate }); expect(generate).toHaveBeenCalledTimes(2);
   expect(() => quiz.begin(page, { ...v, settings: settings({ count: 3 }) }, 24000)).toThrow("submission_conflict");
   const begin = { id: randomUUID(), quizId: id, mode: "practice" }; const a = quiz.startAttempt(page, begin); expect(quiz.startAttempt(page, begin)).toEqual(a);
   const event = { id: randomUUID(), attemptId: a.id, revision: a.revision, action: "choose", question: 0, optionId: "A" };

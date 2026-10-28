@@ -74,6 +74,18 @@ export function inspectQuizAnswerContract(question: {
   options: Array<{ id: string; text: string; reason: string }>; correctOptionId: string;
 }): QuizRejectionReason | null {
   if ([question.explanation, ...question.options.map(option => option.reason)].some(declaresNonUniqueAnswer)) return "answer_not_unique";
+  // Inspect the reason owned by this stable option, not arbitrary mentions of
+  // 'correct'. Quoted, conditional and negative-question facts are deliberately
+  // left to the independent reviewer rather than keyword-based rejection.
+  const positiveQuestion = /(?:哪(?:一)?项|何者|哪个)(?:的)?(?:说法|表述|描述|判断|结论)?(?:是|最)?(?:正确|准确|符合)/u.test(question.stem)
+    && !/不正确|不准确|不符合|错误|不成立|不满足|不能|不应|哪.*不/u.test(question.stem);
+  for (const option of question.options) if (option.id !== question.correctOptionId) {
+    const reason = option.reason.trim();
+    const explicitAnswer = /^(?:该|此|本)(?:选项|项)(?:是正确答案|满足题干(?:的)?要求)[。！:：，,\s]/u.test(reason);
+    const affirmsWholeStatement = /^(?:该|此|本)(?:表述|说法|陈述)与(?:〔[^〕\r\n]+〕|(?:所给)?(?:教材|课程|材料|原文)(?:的(?:定义|表述|说明))?)(?:完全)?一致[。:：，,\s]/u.test(reason);
+    const limitsAffirmation = /(?:但|然而|不过|仅|只是|并非)[^。；\n]{0,20}(?:不满足|不符合|不是|不代表|未满足|缺少|片面|局部)/u.test(reason);
+    if (explicitAnswer || (positiveQuestion && affirmsWholeStatement && !limitsAffirmation)) return "answer_contradiction";
+  }
   const stem = `${question.scenario ?? ""}\n${question.stem}`;
   for (const check of [inspectLiteralSetMembership, inspectLiteralSetOperationResults]) {
     const result = check(stem, question.options, question.correctOptionId);

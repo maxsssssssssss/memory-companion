@@ -1,3 +1,4 @@
+import { offlineQuizSemanticResponse } from "./testing/quiz-semantic-fixture";
 // @vitest-environment node
 import { randomUUID } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
@@ -95,13 +96,13 @@ it("publishes only the two good originals through one formal generation and cann
   quizzes.complete(page, id, { ...decoded, items: [bad] }, { ...review, candidates: [review.candidates[1]] });
   expect(quizzes.list(page).find(q => q.id === id)).toMatchObject({ status: "insufficient", count: 0 });
   expect(() => quizzes.startAttempt(page, { id: randomUUID(), quizId: id, mode: "test" })).toThrow();
-  const generate = vi.fn(async () => ({ ...wire, items: wire.items.map((q, i) => ({ ...q, reviewCheck: reviewCandidates[i].check })) })) as unknown as ReturnType<typeof vi.fn<typeof generateStudyJson>>;
+  const generate = vi.fn(async (_config, name, _prompt, input) => name === "learning_quiz_semantic_review" ? offlineQuizSemanticResponse(input) : ({ ...wire, items: wire.items.map((q, i) => ({ ...q, reviewCheck: reviewCandidates[i].check })) })) as unknown as ReturnType<typeof vi.fn<typeof generateStudyJson>>;
   const runId = randomUUID();
   const runs = await generateLearningQuiz(learning, page, { id: runId, settings: fixture.settings }, {
     configure: () => ({ baseURL: "https://unused.invalid/v1", apiKey: "synthetic-only", model: "offline", maxInputChars: 48000, maxOutputTokens: 8000 }),
     generate, reviewContext: review.context });
   expect(runs.find(q => q.id === runId)).toMatchObject({ status: "completed", count: 2, delivery: { rejected: [{ code: "answer_not_unique", count: 1 }] } });
-  expect(generate).toHaveBeenCalledTimes(1);
+  expect(generate).toHaveBeenCalledTimes(2);
 });
 
 it.each([

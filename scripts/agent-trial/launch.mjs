@@ -50,7 +50,8 @@ else if(mode==='start'){
     ...(requestBudget?{AGENT_TRIAL_MAX_REQUESTS:String(requestBudget.total),AGENT_TRIAL_PROTOCOL_MAX_REQUESTS:String(requestBudget.protocol)}:{}),
     LANGSMITH_TRACING:'false',LANGSMITH_TRACING_V2:'false',LANGCHAIN_TRACING:'false',LANGCHAIN_TRACING_V2:'false'});
   for(const prefix of ['LEARNING_AGENT_DECISION','LEARNING_AGENT_GENERATION'])Object.assign(env,{
-    [`${prefix}_PROVIDER`]:'tokenhub',[`${prefix}_MODEL`]:'deepseek-v4-pro',[`${prefix}_MAX_INPUT_CHARS`]:'47000',
+    [`${prefix}_PROVIDER`]:'tokenhub',[`${prefix}_MODEL`]:'deepseek-v4-pro',
+    [`${prefix}_MAX_INPUT_CHARS`]:prefix.endsWith('DECISION')?(process.env.LEARNING_AGENT_DECISION_MAX_INPUT_CHARS??'200000'):'47000',
     [`${prefix}_MAX_OUTPUT_TOKENS`]:prefix.endsWith('DECISION')?'2000':'8000',[`${prefix}_REQUEST_TIMEOUT_MS`]:'120000'});
   const command=process.argv.includes('--production')?'start':'dev';
   fs.mkdirSync(root,{recursive:true});

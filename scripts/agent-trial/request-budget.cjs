@@ -7,7 +7,7 @@ function realTrialBudget(input) {
       throw Error(`agent_trial_explicit_budget_required:${name}:1..${maximum}`);
     return Number(value);
   };
-  const total = parse('AGENT_TRIAL_MAX_REQUESTS', 36);
+  const total = parse('AGENT_TRIAL_MAX_REQUESTS', 319);
   const protocol = parse('AGENT_TRIAL_PROTOCOL_MAX_REQUESTS', total);
   return { total, protocol };
 }

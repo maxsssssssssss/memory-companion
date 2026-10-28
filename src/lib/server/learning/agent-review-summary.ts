@@ -24,7 +24,9 @@ type ReviewEvidence = { summary: LearningAgentReviewSummary; key: string; input:
 type SavedReview = { evidenceKey: string; summary: LearningAgentReviewSummary };
 type Exclusions = { generationIncomplete: number; generationUnknown: number; disputed: number; unavailable: number };
 const sourceKey = (sources: Source[]) => sources.map(s => `${s.materialId}:${s.paragraph}`).sort().join("|");
-const firstSentence = (text: string) => text.trim().split(/[。！？\n]/u).find(Boolean)?.slice(0, 160) ?? "";
+const usefulReminder = (text: string) => text.split(/[。！？\n]/u).map(t => t.trim()).find(t => t
+  && !/^(?:(?:答案|判断|选项)(?:为|是)?[：:]?\s*)?(?:正确|错误|不正确|不对|对|错|correct|incorrect|wrong)[.：:!！?？\s]*$/iu.test(t))?.slice(0, 160) ?? "";
+const cleanReminders = (items: string[]) => [...new Set(items.map(t => usefulReminder(t) ? t.trim() : "").filter(Boolean))].slice(0, 3);
 const emptyStats = (): LearningAgentReviewSummary["stats"] => ({ groups: 0, total: 0, answered: 0, correct: 0, wrong: 0, unassistedCorrect: 0, hinted: 0, revealed: 0, skipped: 0, unanswered: 0, excludedGroups: 0 });
 
 /** Pure aggregation of saved attempts. Skipping/revealing is never a wrong answer. */
@@ -75,7 +77,7 @@ export function buildLearningAgentReviewSummary(task: Pick<AgentTask, "status">,
       const lines = [...new Set(group.input.questions.flatMap(q => [q.selectedReason, q.explanation]).map(t => t.trim()).filter(Boolean))];
       group.topic.explanation = lines.join("\n\n");
     }
-    const reminder = firstSentence(group.input.questions[0]?.selectedReason || group.topic.explanation);
+    const reminder = usefulReminder(group.input.questions[0]?.selectedReason ?? "") || usefulReminder(group.topic.explanation);
     if (reminder && !reminders.includes(reminder) && reminders.length < 3) reminders.push(reminder);
   }
   const complete = task.status === "ended" && snapshots.length > 0 && snapshots.every(s => s.attempt.completed) && excludedGroups === 0;
@@ -192,6 +194,7 @@ export function projectLearningAgentReviewSummary(learning: LearningRepository, 
   if (saved?.state === "completed" && saved.body_json) {
     const value = JSON.parse(saved.body_json) as SavedReview;
     if (value.evidenceKey === evidence.key) return { ...value.summary, kind: evidence.summary.kind, headline: evidence.summary.headline, stats: evidence.summary.stats,
+      reminders: cleanReminders([...value.summary.reminders, ...evidence.summary.reminders]),
       notices: [...new Set([...evidence.summary.notices, ...value.summary.notices.filter(n => n.startsWith("专项归纳暂未完成")),
         ...summaryUnconfirmed])] };
   }
@@ -217,7 +220,7 @@ export async function saveLearningAgentReviewSummary(learning: LearningRepositor
   if (previous) {
     if (previous.state === "completed" && previous.body_json) {
       const saved = JSON.parse(previous.body_json) as SavedReview;
-      return saved.evidenceKey === evidence.key ? saved.summary : evidence.summary;
+      return saved.evidenceKey === evidence.key ? { ...saved.summary, reminders: cleanReminders([...saved.summary.reminders, ...evidence.summary.reminders]) } : evidence.summary;
     }
     if (["unknown", "reserved"].includes(previous.state)) throw new AgentFailure("unknown", "agent_review_summary_unknown");
     return evidence.summary;
@@ -230,7 +233,7 @@ export async function saveLearningAgentReviewSummary(learning: LearningRepositor
         const ids = new Set(result.items.map(item => item.id));
         if (ids.size !== evidence.input.length || result.items.length !== evidence.input.length || result.items.some(item => !evidence.input.some(topic => topic.id === item.id)
           || /(?:已经|完全|彻底).{0,6}掌握|掌握率|通过核验/u.test(item.explanation + item.reminder))) throw new AgentFailure("known_failure", "agent_review_summary_invalid");
-        summary = { ...summary, topics: summary.topics.map(topic => ({ ...topic, explanation: result.items.find(item => item.id === topic.id)?.explanation ?? topic.explanation })), reminders: [...new Set([...result.items.map(item => item.reminder), ...summary.reminders])].slice(0, 3) };
+        summary = { ...summary, topics: summary.topics.map(topic => ({ ...topic, explanation: result.items.find(item => item.id === topic.id)?.explanation ?? topic.explanation })), reminders: cleanReminders([...result.items.map(item => item.reminder), ...summary.reminders]) };
       } catch (error) {
         if (error instanceof AgentFailure && ["unknown", "inactive", "forbidden", "source_changed"].includes(error.code)) throw error;
         if (error instanceof LearningError && ["source_changed", "material_deleted", "page_deleted", "agent_scope_forbidden", "agent_account_forbidden"].includes(error.code)) throw error;

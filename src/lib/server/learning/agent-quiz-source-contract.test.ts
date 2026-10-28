@@ -1,3 +1,4 @@
+import { offlineQuizSemanticResponse } from "./testing/quiz-semantic-fixture";
 // @vitest-environment node
 // Synthetic neighbour of Windows G3: original public records are separately
 // replayed by natural-quiz-original-evidence.mjs, never relabelled as this fixture.
@@ -31,12 +32,13 @@ beforeEach(async () => {
 });
 afterEach(async () => { runtime?.close(); runtime = undefined; store.close(); learning.close(); vi.restoreAllMocks(); vi.unstubAllGlobals(); await rm(directory, { recursive: true, force: true }); });
 
-it("G3 synthetic: a small natural request gets only its frozen sources, a valid partial Quiz, saved answer and diagnosis without post-submit source repair", async () => {
+it("G3 synthetic: ordinary practice gets only its frozen sources, a valid partial Quiz and evidence-based completion", async () => {
   const objective = { id: "set_basics", label: "集合的基础归属判断", sources: [2, 3, 4].map(paragraph => ({ materialId: material, paragraph })),
-    requirements: [{ role: "concept", description: "选择交集与并集所需的归属条件", independent: false }] };
+    requirements: [{ role: "concept", description: "选择交集与并集所需的归属条件", independent: true }] };
   const purpose = { objectiveIds: ["set_basics"], role: "concept", method: "retrieval", purpose: "先观察基础归属条件", priorEvidenceRefs: [] };
   let calls = 0;
   const generate = vi.fn(async (_config, _name, _prompt, raw) => {
+    if (_name === "learning_quiz_semantic_review") return offlineQuizSemanticResponse(raw, "F");
     const wire = raw as { materials: Array<{ paragraphs: Array<{ referenceId: string; text: string }> }>; taskContext: { reviewContract: { requiredRole: string; allowedObjectiveIds: string[] } } };
     expect(wire.materials[0].paragraphs.map(p => p.text)).toEqual([
       "集合中相同元素重复写出不会增加元素个数。", "交集包含同时属于两个集合的元素。", "并集包含至少属于一个集合的元素。"
@@ -55,9 +57,9 @@ it("G3 synthetic: a small natural request gets only its frozen sources, a valid 
   const decision: AgentDecisionProvider = async (_input, ctx) => ctx.call({ kind: "decision", inputChars: 10, maxOutputTokens: 200 }, async () => {
     calls++;
     let value: AgentDecision;
-    if (calls === 1) value = { tool: "learning.establish_review_plan", args: { kind: "diagnosis", objectives: [objective] } };
+    if (calls === 1) value = { tool: "learning.establish_review_plan", args: { kind: "practice", objectives: [objective] } };
     else if (calls === 2) value = { tool: "learning.create_quiz", args: { count: 2, difficulty: "basic", purpose } };
-    else throw Error("Unexpected extra model call after sufficient diagnosis observations");
+    else throw Error("Unexpected extra model call after sufficient practice evidence");
     return { value, usage: { inputTokens: 1, outputTokens: 1 } };
   });
   const scenario = createLearningAgentScenario(learning, { configure: () => config, generate });
@@ -76,10 +78,10 @@ it("G3 synthetic: a small natural request gets only its frozen sources, a valid 
   const ended = await runtime.submitEvent("owner", task.id, event, { expectedVersion: 1 });
   expect(ended.status).toBe("ended");
   const assessment = assessLearningCompletion(learning, ended);
-  expect(assessment).toMatchObject({ outcome: "diagnosis_complete", canAutoFinish: true, longTermMastery: "unverified" });
+  expect(assessment).toMatchObject({ outcome: "check_passed", plan: { kind: "practice" }, canAutoFinish: true, longTermMastery: "unverified" });
   expect(assessment.technicalBlocker).toBeUndefined();
   expect(readLearningReviewPlan(learning, ended)).toEqual(originalPlan);
-  expect(calls).toBe(2); expect(generate).toHaveBeenCalledTimes(1); expect(fetch).not.toHaveBeenCalled();
+  expect(calls).toBe(2); expect(generate).toHaveBeenCalledTimes(2); expect(fetch).not.toHaveBeenCalled();
   await runtime.submitEvent("owner", task.id, event, { expectedVersion: 1 });
   expect(calls).toBe(2); expect(quiz.list(page)).toHaveLength(1);
 });

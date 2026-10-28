@@ -1,3 +1,4 @@
+import { offlineQuizSemanticResponse } from "./testing/quiz-semantic-fixture";
 // @vitest-environment node
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { randomUUID } from "node:crypto";
@@ -51,6 +52,7 @@ function framework() {
 function quizGenerator() {
   let sequence = 0;
   return vi.fn(async (_config, _name, _prompt, input) => {
+    if (_name === "learning_quiz_semantic_review") return offlineQuizSemanticResponse(input);
     const wire = input as { taskContext: { referenceScope: string }; materials: Array<{ paragraphs: Array<{ referenceId: string }> }> };
     const refs = wire.materials[0].paragraphs.map(p => p.referenceId); sequence++;
     return { contractVersion: "references-v2", referenceScope: wire.taskContext.referenceScope, title: "[模拟生成] 条件判断", reason: null,
@@ -101,13 +103,13 @@ it("checks accounts and source deletion on every read and invalidates saved expl
 it("uses real Quiz business services, counts each generation part, hides answers and reads only actual submitted grades", async () => {
   const generate = quizGenerator(), scene = createLearningAgentScenario(learning, { configure: () => config, generate }), ctx = context();
   const created = await run(scene, "learning.create_quiz", { count: 2, difficulty: "basic" }, ctx);
-  expect(generate).toHaveBeenCalledTimes(2); expect(ctx.task.usage.calls).toBe(2);
+  expect(generate).toHaveBeenCalledTimes(4); expect(ctx.task.usage.calls).toBe(4);
   expect(JSON.stringify(created.value)).not.toMatch(/SECRET_|correctOptionId|score/);
   expect(created.result.wait?.kind).toBe("quiz_submission");
   const attemptId = created.result.wait!.refId!;
   await expect(run(scene, "learning.read_answers", { attemptId }, ctx)).rejects.toThrow("agent_answers_not_submitted");
   const duplicate = await run(scene, "learning.create_quiz", { count: 2, difficulty: "basic" }, ctx);
-  expect(duplicate.result.ref).toEqual(created.result.ref); expect(generate).toHaveBeenCalledTimes(2);
+  expect(duplicate.result.ref).toEqual(created.result.ref); expect(generate).toHaveBeenCalledTimes(4);
   const quiz = new LearningQuizRepository(learning); let attempt = quiz.attempt(pageId, attemptId);
   attempt = quiz.act(pageId, { id: randomUUID(), attemptId, revision: attempt.revision, action: "choose", question: 0, optionId: "A" });
   attempt = quiz.act(pageId, { id: randomUUID(), attemptId, revision: attempt.revision, action: "finish", question: 0, optionId: null });
@@ -141,7 +143,7 @@ it("keeps navigation and quiz receipts compact while reading complete saved answ
   expect(JSON.stringify(navigation.value).length).toBeLessThan(JSON.stringify(details.value).length);
   expect(scene.tools["learning.read_navigation"].description).toContain("learning.read_answers");
   expect(scene.tools["learning.create_quiz"].description).toContain("learning.read_answers");
-  expect(generate).toHaveBeenCalledTimes(2);
+  expect(generate).toHaveBeenCalledTimes(4);
   expect(globalThis.fetch).not.toHaveBeenCalled();
 });
 
@@ -277,7 +279,7 @@ it("recovers a published Quiz whose Agent receipt was lost without another gener
   const reopened = createLearningAgentScenario(learning, { configure: () => config, generate });
   const recovered = await reopened.tools["learning.create_quiz"].recover!(ctx.actionId, ctx);
   expect(recovered?.ref).toEqual(created.result.ref); expect(recovered?.wait).toEqual(created.result.wait);
-  expect(generate).toHaveBeenCalledTimes(1); expect(new LearningQuizRepository(learning).list(pageId)).toHaveLength(1);
+  expect(generate).toHaveBeenCalledTimes(2); expect(new LearningQuizRepository(learning).list(pageId)).toHaveLength(1);
 });
 
 it("revalidates opted-in note hashes without treating unselected notes as authorization", async () => {
@@ -303,7 +305,7 @@ it("rejects stale, unsubmitted and cross-task feedback events without generating
   await expect(scene.validateEvent!({ id: randomUUID(), kind: "quiz_submission", refId: created.result.wait!.refId }, ctx)).rejects.toThrow("agent_answers_not_submitted");
   await expect(scene.validateEvent!({ id: randomUUID(), kind: "quiz_submission", refId: randomUUID() }, ctx)).rejects.toMatchObject({ code: "forbidden" });
   await expect(scene.validateEvent!({ id: randomUUID(), kind: "feedback", message: "已经提交" }, ctx)).rejects.toMatchObject({ code: "forbidden" });
-  expect(generate).toHaveBeenCalledTimes(1);
+  expect(generate).toHaveBeenCalledTimes(2);
 });
 
 it("classifies current Learning source deletion as source invalidation in the shared runtime", async () => {
@@ -347,7 +349,7 @@ it("accepts an authenticated quiz dispute before submission, persists exclusion 
   expect(JSON.stringify(result.value)).not.toMatch(/SECRET_|correctOptionId|score/);
   expect(new LearningQuizRepository(learning).attempt(pageId, attemptId).score?.correct).toBe(1);
   expect(await reopened.finish!("已掌握", ctx)).toContain("未完成学习检查");
-  expect(generate).toHaveBeenCalledTimes(1);
+  expect(generate).toHaveBeenCalledTimes(2);
 });
 
 it.each(["quiz", "explanation"] as const)("explicitly retries a known failed %s through the same real business operation", async (kind) => {
@@ -384,8 +386,8 @@ it.each(["quiz", "explanation"] as const)("explicitly retries a known failed %s 
     const retried = await runtime.recover("owner", task.id, { expectedVersion: 1, mode: "retry", eventId: randomUUID() });
     expect(retried.status).toBe("waiting");
     expect(retried.actions[0]).toMatchObject({ id: originalAction.id, status: "succeeded" });
-    expect(retried.actions).toHaveLength(1); expect(calls).toBe(2); expect(retried.usage.calls).toBe(2);
-    expect(retried.usage).toMatchObject({ inputTokens: 62, outputTokens: 34, unknownUsageCalls: 0 });
+    expect(retried.actions).toHaveLength(1); expect(calls).toBe(kind === "quiz" ? 3 : 2); expect(retried.usage.calls).toBe(kind === "quiz" ? 3 : 2);
+    expect(retried.usage).toMatchObject({ inputTokens: kind === "quiz" ? 93 : 62, outputTokens: kind === "quiz" ? 51 : 34, unknownUsageCalls: 0 });
     expect(decision).toHaveBeenCalledTimes(kind === "quiz" ? 2 : 3);
     const records = new LearningAgentRepository(learning).list(pageId, task.id);
     expect(records).toHaveLength(1); expect(records[0]).toMatchObject({ id: originalArtifact.id, state: "completed" });
@@ -394,11 +396,12 @@ it.each(["quiz", "explanation"] as const)("explicitly retries a known failed %s 
   } finally { runtime.close(); store.close(); }
 });
 
-it.each([4, 3])("treats a new model Quiz choice after insufficient as a new charged operation within the same %i-call budget", async (maxCalls) => {
+it.each([5, 4, 3])("treats a new model Quiz choice after insufficient as a new charged operation within the same %i-call budget", async (maxCalls) => {
   const candidate = quizGenerator();
   const generate = vi.fn(async (...args: Parameters<typeof generateStudyJson>) => {
     args[6]?.({ responseStatus: "completed", responseTextLength: 100, parseResult: "success", validationResult: "success", inputTokens: 31, outputTokens: 17 });
     const output = await candidate(...args) as { items: unknown[]; [key: string]: unknown };
+    if (args[1] === "learning_quiz_semantic_review") return output;
     // A valid, complete response can contain no publishable questions. This is
     // synthetic generation, not a transport exception or unknown outcome.
     return candidate.mock.calls.length === 1
@@ -444,21 +447,22 @@ it.each([4, 3])("treats a new model Quiz choice after insufficient as a new char
       { action_id: "decision:1", kind: "decision", status: "succeeded" },
       { action_id: first.id, kind: "learning_quiz", status: "succeeded" },
       { action_id: "decision:2", kind: "decision", status: "succeeded" },
-      ...(maxCalls === 4 ? [{ action_id: second.id, kind: "learning_quiz", status: "succeeded" }] : [])
+      ...(maxCalls >= 4 ? [{ action_id: second.id, kind: "learning_quiz", status: "succeeded" }] : []),
+      ...(maxCalls === 5 ? [{ action_id: second.id, kind: "learning_quiz_semantic_review", status: "succeeded" }] : [])
     ]);
     expect(result.usage.calls).toBe(maxCalls);
     expect(result.usage.steps).toBe(2);
-    if (maxCalls === 4) {
-      expect(generate).toHaveBeenCalledTimes(2);
-      expect(result).toMatchObject({ status: "waiting", wait: { kind: "quiz_submission" }, usage: { inputTokens: 82, outputTokens: 42, unknownUsageCalls: 0 } });
+    if (maxCalls === 5) {
+      expect(generate).toHaveBeenCalledTimes(3);
+      expect(result).toMatchObject({ status: "waiting", wait: { kind: "quiz_submission" }, usage: { inputTokens: 113, outputTokens: 59, unknownUsageCalls: 0 } });
       expect(second.status).toBe("succeeded");
       expect(quizzes.find(row => row.id === secondId)).toMatchObject({ status: "completed", count: 1, settings: { count: 5 } });
       expect(artifacts[1]).toMatchObject({ id: secondId, state: "completed" });
       await runtime.advance("owner", task.id);
-      expect(decision).toHaveBeenCalledTimes(2); expect(generate).toHaveBeenCalledTimes(2);
+      expect(decision).toHaveBeenCalledTimes(2); expect(generate).toHaveBeenCalledTimes(3);
     } else {
-      expect(generate).toHaveBeenCalledTimes(1);
-      expect(result).toMatchObject({ status: "budget_exhausted", usage: { inputTokens: 51, outputTokens: 25, unknownUsageCalls: 0 } });
+      expect(generate).toHaveBeenCalledTimes(maxCalls === 4 ? 2 : 1);
+      expect(result).toMatchObject({ status: "budget_exhausted", usage: { inputTokens: maxCalls === 4 ? 82 : 51, outputTokens: maxCalls === 4 ? 42 : 25, unknownUsageCalls: 0 } });
       expect(second.status).toBe("failed");
     }
   } finally { runtime.close(); store.close(); }

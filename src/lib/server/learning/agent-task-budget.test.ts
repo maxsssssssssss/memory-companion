@@ -12,7 +12,7 @@ afterEach(() => { for (const close of cleanup.splice(0).reverse()) close(); });
 describe("Learning server-owned task budgets", () => {
   it("defaults to a longer finite task while retaining per-request and no-progress guards", () => {
     expect(learningAgentTaskBudget({})).toEqual({ maxCalls: 64, maxSteps: 128, maxComputeMs: 1_800_000,
-      maxInputChars: 48_000, maxOutputTokens: 8_000, maxNoProgress: 3 });
+      maxInputChars: 200_000, maxOutputTokens: 8_000, maxNoProgress: 3 });
   });
 
   it("uses server settings and derives enough steps when only calls are changed", () => {
@@ -67,8 +67,10 @@ describe("Learning server-owned task budgets", () => {
     const task = store.createTask({ accountId: "synthetic", scenario: "learning.adaptive-review.v1", resourceId: "synthetic-page",
       goal: "Synthetic request limits", scope: {}, budget: learningAgentTaskBudget({ LEARNING_AGENT_TASK_MAX_CALLS: "100" }) });
     const lease = store.claim("synthetic", task.id)!;
-    expect(() => store.reserveCall("synthetic", task.id, lease.token, "input", { kind: "synthetic", inputChars: 48_001, maxOutputTokens: 1 }, 0)).toThrow("agent_request_input_limit");
+    const accepted = store.reserveCall("synthetic", task.id, lease.token, "large", { kind: "synthetic", inputChars: 200_000, maxOutputTokens: 8000 }, 0);
+    store.finishCall(accepted, "succeeded", { inputTokens: 90_000, outputTokens: 10 });
+    expect(() => store.reserveCall("synthetic", task.id, lease.token, "input", { kind: "synthetic", inputChars: 200_001, maxOutputTokens: 1 }, 0)).toThrow("agent_request_input_limit");
     expect(() => store.reserveCall("synthetic", task.id, lease.token, "output", { kind: "synthetic", inputChars: 1, maxOutputTokens: 8_001 }, 0)).toThrow("agent_request_output_limit");
-    expect(store.getTask("synthetic", task.id).usage.calls).toBe(0);
+    expect(store.getTask("synthetic", task.id).usage.calls).toBe(1);
   });
 });

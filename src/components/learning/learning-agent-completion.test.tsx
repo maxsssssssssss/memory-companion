@@ -4,6 +4,12 @@ import type { LearningCompletionAssessment, LearningCompletionEvidence } from "@
 import { LearningAgentCompletion } from "./learning-agent-completion";
 
 afterEach(cleanup);
+it("labels ordinary practice separately from diagnosis without implying that it has passed", () => {
+  mount({ ...assessment, plan: { ...assessment.plan!, kind: "practice" } });
+  expect(screen.getByText("自适应练习")).toBeVisible();
+  expect(screen.queryByText("诊断薄弱点")).not.toBeInTheDocument();
+  expect(screen.queryByText("本轮约定目标检查通过")).not.toBeInTheDocument();
+});
 const source = { materialId: "material-one", paragraph: 3 };
 const evidence: LearningCompletionEvidence = {
   ref: { quizId: "quiz-one", attemptId: "attempt-one", questionIndex: 2 }, objectiveId: "boundary", role: "boundary",

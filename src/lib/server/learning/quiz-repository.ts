@@ -3,6 +3,7 @@ import { FRAMEWORK_DEADLINE_MS, FRAMEWORK_MAX_RESULT_BYTES } from "@/lib/domain/
 import { LearningFrameworkRepository, frameworkHash } from "./framework-repository";
 import { LearningError, type LearningRepository } from "./repository";
 import { quizReferenceId, resolveReferencedQuiz, quizProceduralHint, inspectQuizCandidateDelivery } from "./quiz-grounding";
+import { assertQuizSemanticPublication } from "./quiz-semantic-review";
 import { quizCoverageNotice } from "./quiz-composition";
 import { learningValidationDiagnostics } from "./generation-diagnostics";
 import { generationProgress } from "./generation-parts";
@@ -208,6 +209,13 @@ export class LearningQuizRepository {
         ...current.input.materials.flatMap(m => m.paragraphs.map(p => ({ referenceId: p.referenceId, text: p.text, source: { kind: "material" as const, materialId: m.materialId, paragraph: p.number } }))),
         ...current.input.extras.map(e => ({ referenceId: e.referenceId, text: e.text, source: { kind: e.kind, id: e.id } }))
       ];
+      // Service-generated runs opt into this mandatory contract before any
+      // external call. Historical saved/imported records remain readable.
+      if (parse<Record<string, unknown>>(r.diagnostics_json ?? "{}").semanticReviewRequired === true) {
+        const receipts = this.db.prepare("SELECT state,result_json FROM learning_generation_parts WHERE page_id=? AND kind='quiz' AND run_id=? AND part_id LIKE 'semantic-%'")
+          .all(pageId, id) as Array<{ state: string; result_json: string | null }>;
+        assertQuizSemanticPublication(value, catalog, receipts);
+      }
       const publicationIssues: QuizCandidateIssue[] = [];
       const publishable = referenced ? review ? filterQuizReviewPublication(ReferencedQuizEnvelope.parse(value), review, catalog,
         issue => publicationIssues.push({ ...issue, stage: "publication" })) : ReferencedQuizEnvelope.parse(value) : null;
@@ -255,6 +263,24 @@ export class LearningQuizRepository {
   fail(pageId: string, id: string, code: string) {
     this.learning.get(pageId);
     this.db.prepare("UPDATE learning_quiz_runs SET status='failed',failure=? WHERE id=? AND page_id=? AND status='generating'").run(code, id, pageId);
+  }
+  requireSemanticReview(pageId: string, id: string) {
+    this.assertSources(pageId, id);
+    this.db.prepare("UPDATE learning_quiz_runs SET diagnostics_json=json_patch(coalesce(diagnostics_json,'{}'),'{\"semanticReviewRequired\":true}') WHERE id=? AND page_id=? AND status='generating'").run(id, pageId);
+  }
+  semanticDiagnostics(pageId: string, id: string, partId: string, value: QuizCandidateReport) {
+    if (!/^questions-\d+$/.test(partId)) throw new LearningError(422, "quiz_invalid_result");
+    const report = QuizCandidateReport.parse(value);
+    this.assertSources(pageId, id);
+    const row = this.run(pageId, id), diagnostics = parse<{ candidateReports?: Record<string, QuizCandidateReport> }>(row.diagnostics_json ?? "{}");
+    const prior = diagnostics.candidateReports?.[partId];
+    if (!prior) throw new LearningError(409, "quiz_semantic_review_invalid");
+    // Keep original candidate indexes after codec filtering. Model judgments
+    // are never exposed here, only safe rejection categories and counts.
+    const indexes = prior.forwardedIndexes ?? Array.from({ length: prior.candidates }, (_, i) => i);
+    this.candidateDiagnostics(pageId, id, partId, { ...prior,
+      rejected: [...prior.rejected, ...report.rejected.map(issue => ({ ...issue, index: indexes[issue.index] }))],
+      forwardedIndexes: (report.forwardedIndexes ?? []).map(index => indexes[index]) });
   }
   /** Local per-part diagnostic, saved before surplus filtering. Bound to this
    * run's existing source snapshot; deleted with the run and never raw content. */

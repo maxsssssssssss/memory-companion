@@ -1,3 +1,4 @@
+import { offlineQuizSemanticResponse } from "@/lib/server/learning/testing/quiz-semantic-fixture";
 // @vitest-environment node
 import { randomUUID } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
@@ -702,6 +703,7 @@ it("rejects disputes after version change, source deletion, account changes or c
 it("continues the real saved Quiz/Agent checkpoint after completion and reads persisted answers before deciding", async () => {
   const task = seedTask();
   const generate = vi.fn(async (_config: unknown, _purpose: unknown, _system: unknown, wire: unknown) => {
+    if (_purpose === "learning_quiz_semantic_review") return offlineQuizSemanticResponse(wire);
     const input = wire as { materials: Array<{ paragraphs: Array<{ referenceId: string }> }>; taskContext: { referenceScope: string } };
     const refs = input.materials[0].paragraphs.map(paragraph => paragraph.referenceId);
     return { contractVersion: "references-v2", referenceScope: input.taskContext.referenceScope, title: "[合成] 自动衔接", reason: null,
@@ -722,7 +724,7 @@ it("continues the real saved Quiz/Agent checkpoint after completion and reads pe
   expect(next.mock.calls[0][0].event).toMatchObject({ kind: "quiz_submission", refId: attemptId });
   expect(next.mock.calls[1][0].results.find(result => result.tool === "learning.read_answers")?.value).toMatchObject({ attemptId, score: { correct: 1 } });
   for (let i = 0; i < 2; i++) { await PATCH(request("PATCH", syncBody(task.id, attemptId)), context()); await runOffline(task.id, next); }
-  expect(next).toHaveBeenCalledTimes(2); expect(generate).toHaveBeenCalledTimes(1); expect(fetch).not.toHaveBeenCalled();
+  expect(next).toHaveBeenCalledTimes(2); expect(generate).toHaveBeenCalledTimes(2); expect(fetch).not.toHaveBeenCalled();
 });
 
 it.each([0, 1, 3])("projects a safe %i/3 Quiz delivery from the real generation service, independently of an attempt", async published => {
@@ -731,6 +733,7 @@ it.each([0, 1, 3])("projects a safe %i/3 Quiz delivery from the real generation 
   // per part; this batch test must use the product's three-question envelope.
   generationConfig.mockReturnValue({ ...generationConfig(), maxOutputTokens: 8000 });
   const generate = vi.fn(async (_config: unknown, _name: unknown, _prompt: unknown, wire: unknown) => {
+    if (_name === "learning_quiz_semantic_review") return offlineQuizSemanticResponse(wire);
     const input = wire as { materials: Array<{ paragraphs: Array<{ referenceId: string }> }>; taskContext: { referenceScope?: string } };
     const refs = input.materials[0].paragraphs.map(paragraph => paragraph.referenceId);
     return { contractVersion: "references-v2", title: "[合成] 发布反馈", reason: null,
@@ -760,7 +763,7 @@ it.each([0, 1, 3])("projects a safe %i/3 Quiz delivery from the real generation 
     expect(JSON.stringify(view)).not.toMatch(/SECRET_|correctOptionId|reasonParts|referenceScope|args_json/);
     expect(view.completion.outcome).not.toBe("check_passed");
   }
-  expect(generate).toHaveBeenCalledOnce();
+  expect(generate).toHaveBeenCalledTimes(published ? 2 : 1);
   expect(decision).toHaveBeenCalledTimes(published ? 1 : 2);
   expect(advance).not.toHaveBeenCalled(); expect(fetch).not.toHaveBeenCalled();
   expect((await GET(request("GET", undefined, "other"), context())).status).toBe(404);

@@ -5,11 +5,13 @@ const fs = require('node:fs');
 const Database = require('better-sqlite3');
 const { assertEvidenceDirectory } = require('./evidence-directory.cjs');
 const { realTrialBudget } = require('./request-budget.cjs');
+const { trialInputBudget, withinTrialInputBudget } = require('./request-input-budget.cjs');
 const root = process.env.AGENT_TRIAL_DIR;
 if (!root || !path.isAbsolute(root)) throw Error('agent_trial_directory_required');
 if (process.env.AGENT_TRIAL_MODE === 'offline') throw Error('agent_trial_evidence_mode_conflict');
 assertEvidenceDirectory(root, 'real');
 const requestBudget = realTrialBudget(process.env);
+trialInputBudget(process.env);
 globalThis.__DAILY_BRIEF_AGENT_TRIAL_GUARD__ = true;
 fs.mkdirSync(root, { recursive: true });
 const db = new Database(path.join(root, 'network-ledger.sqlite'));
@@ -37,7 +39,7 @@ globalThis.fetch = async (input, init) => {
   if (url.origin !== 'https://tokenhub.vision-intelligence.tech' || url.pathname !== '/v1/responses'
       || url.search || req.method !== 'POST') throw Error('agent_trial_external_destination_denied');
   const text = await req.clone().text(), body = JSON.parse(text);
-  if (body.model !== 'deepseek-v4-pro' || text.length > 48000 || !Number.isInteger(body.max_output_tokens)
+  if (body.model !== 'deepseek-v4-pro' || !withinTrialInputBudget(text, body.max_output_tokens, process.env) || !Number.isInteger(body.max_output_tokens)
       || body.max_output_tokens < 1 || body.max_output_tokens > 8000 || body.store !== false || body.stream !== true)
     throw Error('agent_trial_request_contract_rejected');
   const requestId = req.headers.get('x-client-request-id');

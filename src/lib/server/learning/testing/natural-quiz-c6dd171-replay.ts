@@ -9,6 +9,7 @@ import { generateLearningQuiz } from "../quiz-service";
 import type { generateStudyJson } from "../framework-generator";
 import { quizReviewQuestionKey } from "../quiz-review-purpose";
 import { replayRetainedQuizValidators, type RetainedValidatorFixture } from "./natural-quiz-validator-replay";
+import { offlineQuizSemanticResponse } from "./quiz-semantic-fixture";
 
 const hash = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
 
@@ -35,8 +36,18 @@ export async function replayC6RetainedQuizValidators(fixture: RetainedValidatorF
   const raw = { contractVersion: "references-v2", title: group.decoded.title, reason: null,
     items: group.candidates.map(candidate => structuredClone(candidate.candidate)) };
   const rawHash = hash(raw);
-  let offlineResponses = 0;
-  const generate = (async () => { offlineResponses += 1; return structuredClone(raw); }) as unknown as typeof generateStudyJson;
+  let offlineResponses = 0, semanticReviewResponses = 0;
+  const generate = (async (_config, schema, _instruction, input) => {
+    // The retained disjoint-sets candidate has been checked offline: A is the
+    // sole correct option. This fixture is not real model-review evidence.
+    if (schema === "learning_quiz_semantic_review") {
+      semanticReviewResponses++;
+      return offlineQuizSemanticResponse(input, "A");
+    }
+    assert.equal(schema, "learning_quiz");
+    offlineResponses++;
+    return structuredClone(raw);
+  }) as typeof generateStudyJson;
   try {
     learning.create({ id: page, title: "[离线原投影] 已知题型别名生成回放" });
     learning.saveMaterials(page, [{ id: fixture.source.id, title: fixture.source.title, kind: "text", filename: null,
@@ -47,7 +58,7 @@ export async function replayC6RetainedQuizValidators(fixture: RetainedValidatorF
       diagnosticContext: { taskId: "retained-c6-G5", taskVersion: group.context.taskVersion, actionId: "retained-c6-G5:quiz" }
     });
     const run = runs.find(row => row.id === runId)!;
-    assert.equal(run.status, "completed"); assert.equal(run.count, 1); assert.equal(offlineResponses, 1);
+    assert.equal(run.status, "completed"); assert.equal(run.count, 1); assert.equal(offlineResponses, 1); assert.equal(semanticReviewResponses, 1);
     const part = learning.database.prepare("SELECT diagnostics_json,result_json FROM learning_generation_parts WHERE run_id=? AND part_id='questions-0'")
       .get(runId) as { diagnostics_json: string; result_json: string };
     const details = JSON.parse(part.diagnostics_json).candidateDiagnostics;
@@ -58,7 +69,10 @@ export async function replayC6RetainedQuizValidators(fixture: RetainedValidatorF
     assert.deepEqual(details.candidates.find((entry: { index: number }) => entry.index === 2).candidate, retained.candidate,
       "Keep the exact original final candidate, including its boundary value");
     const body = JSON.parse(part.result_json);
-    const normalized = body.items[2];
+    // Deterministic rejection now happens before independent review. Original
+    // index 2 remains in diagnostics; only that one candidate is forwarded.
+    assert.equal(body.items.length, 1);
+    const normalized = body.items[0];
     assert.equal(normalized.kind, "application");
     assert.equal(normalized.stem, retained.candidate.stem);
     assert.equal(normalized.scenario, retained.candidate.scenario);
@@ -92,7 +106,7 @@ export async function replayC6RetainedQuizValidators(fixture: RetainedValidatorF
       rawKindContract: { value: "boundary", accepted: false, issues: strictKind.error.issues.map(issue => ({ code: issue.code, path: "kind" })) },
       normalization: { ...normalization, originalCandidateUnchanged: true, retainedCandidateHash: hash(retained.candidate),
         normalizedKind: normalized.kind, reviewRoleUnchanged: true, normalizedQuestionKey: quizReviewQuestionKey(normalized) },
-      generationService: { status: run.status, published: run.count, offlineResponses, realProviderCalls: 0, score: attempt.score,
+      generationService: { status: run.status, published: run.count, offlineResponses, semanticReviewResponses, realProviderCalls: 0, score: attempt.score,
         filteredOriginalIndex: 2, publishedIndex: 0, duplicateSubmit: "PASS", restart: "PASS", sqliteIntegrity: "ok" },
       limits: ["Exact public final candidate projections and saved decoded questions; not original HTTP or private Windows DB replay.",
         "Four raw composed candidates and three saved decoded candidates use the existing official codecs and unchanged source bindings.",

@@ -1,3 +1,4 @@
+import { offlineQuizSemanticResponse } from "./testing/quiz-semantic-fixture";
 // @vitest-environment node
 import { randomUUID } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
@@ -269,6 +270,7 @@ it.each(["exact", "surplus", "surplus-invalid-first"] as const)("executes one ac
   const config = { baseURL: "https://synthetic.invalid/v1", apiKey: "SYNTHETIC", model: "synthetic-model", maxInputChars: 48000, maxOutputTokens: 16000 };
   const fetch = vi.fn(async (_url, init) => {
     const request = JSON.parse(init.body), wire = JSON.parse(request.input.find((m: { role: string }) => m.role === "user").content);
+    if (wire.candidates) return new Response(`data: ${JSON.stringify({ type: "response.completed", response: { status: "completed", output: [{ type: "message", role: "assistant", content: [{ type: "output_text", text: JSON.stringify(offlineQuizSemanticResponse(wire)) }] }] } })}\n\n`, { headers: { "content-type": "text/event-stream" } });
     expect(request.input.filter((m: { role: string }) => m.role === "system").map((m: { content: string }) => m.content).join("\n")).toContain("reasonParts");
     const prior = response(wire, variant === "exact" ? 5 : 6), compact = { ...prior, items: prior.items.map(({ explanationParts: _summary, hint: _hint, ...item }) => item) };
     if (variant === "surplus-invalid-first") compact.items[0].options[0].reasonParts[0].evidenceIds = ["r999"];
@@ -278,7 +280,7 @@ it.each(["exact", "surplus", "surplus-invalid-first"] as const)("executes one ac
   });
   vi.stubGlobal("fetch", fetch);
   const id = randomUUID(), result = await generateLearningQuiz(learning, page, { id, settings: { ...settings(), count: 5 } }, { configure: () => config, generate: generateStudyJson });
-  expect(result[0]).toMatchObject({ status: "completed", count: 5 }); expect(fetch).toHaveBeenCalledTimes(1);
+  expect(result[0]).toMatchObject({ status: "completed", count: 5 }); expect(fetch).toHaveBeenCalledTimes(3);
   if (variant !== "exact") expect(result[0].reason).toContain("候选题，本组按设置保留 5 题");
   if (variant === "surplus-invalid-first") expect(saved(id).questions.map(q => q.stem)).not.toContain("[合成] 问题1");
   expect(JSON.stringify(saved(id))).not.toContain("PRIVATE_REASONING");

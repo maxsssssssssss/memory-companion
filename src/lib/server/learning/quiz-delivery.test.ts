@@ -1,3 +1,4 @@
+import { offlineQuizSemanticResponse } from "./testing/quiz-semantic-fixture";
 // @vitest-environment node
 import { randomUUID } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
@@ -43,7 +44,7 @@ function context(): QuizReviewContext {
     purpose: { objectiveIds: ["goal0", "goal1", "goal2"], role: "application", method: "retrieval",
       purpose: "检查三个集合运算判断", priorEvidenceRefs: [] } };
 }
-const provider = (build: (wire: Wire) => unknown) => vi.fn(async (_config, _name, _prompt, input) => build(input as Wire)) as unknown as typeof generateStudyJson;
+const provider = (build: (wire: Wire) => unknown) => vi.fn(async (_config, _name, _prompt, input) => _name === "learning_quiz_semantic_review" ? offlineQuizSemanticResponse(input, "F") : build(input as Wire)) as unknown as typeof generateStudyJson;
 const saved = (id: string): SavedQuiz => JSON.parse((learning.database.prepare("SELECT result_json FROM learning_quiz_runs WHERE id=?").get(id) as { result_json: string }).result_json);
 beforeEach(async () => {
   root = await mkdtemp(join(tmpdir(), "quiz-delivery-synthetic-")); learning = new LearningRepository(root, "owner"); quizzes = new LearningQuizRepository(learning);
@@ -70,7 +71,7 @@ it.each([3, 2, 1, 0])("publishes only the %i reliable candidates with actual sou
     delivery: { requested: 3, candidates: 3, published: retained } });
   expect(run.delivery!.rejected.reduce((sum, issue) => sum + issue.count, 0)).toBe(3 - retained);
   expect(JSON.stringify(run.delivery)).not.toMatch(/correctOptionId|reasonParts|goal\d|元素3|∩|F\/A/);
-  expect(generate).toHaveBeenCalledTimes(1); expect(fetch).not.toHaveBeenCalled();
+  expect(generate).toHaveBeenCalledTimes(retained ? 2 : 1); expect(fetch).not.toHaveBeenCalled();
   if (!retained) {
     expect(() => quizzes.startAttempt(page, { id: randomUUID(), quizId: id, mode: "test" })).toThrow("quiz_not_ready");
     expect(run.delivery!.message).toContain("未能生成可靠"); expect(run.delivery!.message).not.toContain("依据不足");
@@ -170,7 +171,7 @@ it.each(["format", "budget", "unknown"])("handles a later %s part without losing
   expect(calls).toBe(2);
   expect(run).toMatchObject(failure === "format" ? { status: "completed", count: 2,
     delivery: { requested: 3, published: 2, candidates: null, rejected: [{ code: "format", count: 1 }] },
-    progress: { completed: 1, total: 2, canResume: false, uncertain: false } }
+    progress: { completed: 3, total: 4, canResume: false, uncertain: false } }
     : { status: "failed", count: 0, progress: { canResume: false, uncertain: failure === "unknown" } });
   if (failure === "format") {
     expect(run.delivery!.message).toContain("已保留可用题目");
@@ -199,7 +200,7 @@ it.each([1, 0])("uses actual counts when a short response has %i candidates and 
   expect(rows[0]).toMatchObject({ status: count ? "completed" : "insufficient", count,
     delivery: { requested: 3, candidates: count, published: count, rejected: [] } });
   expect(rows[0].reason).toContain("未提供减少原因");
-  expect(generate).toHaveBeenCalledTimes(1);
+  expect(generate).toHaveBeenCalledTimes(count ? 2 : 1);
   if (count) expect(quizzes.startAttempt(page, { id: randomUUID(), quizId: id, mode: "test" }).questions).toHaveLength(1);
 });
 
@@ -222,7 +223,7 @@ it.each(["all-invalid", "partial"])("rejects equivalent empty-set choices throug
     expect(quizzes.startAttempt(page, { id: randomUUID(), quizId: id, mode: "test" }).questions).toHaveLength(2);
   }
   learning.close(); learning = new LearningRepository(root, "owner"); quizzes = new LearningQuizRepository(learning);
-  expect(saved(id)).toEqual(original); expect(generate).toHaveBeenCalledTimes(1); expect(fetch).not.toHaveBeenCalled();
+  expect(saved(id)).toEqual(original); expect(generate).toHaveBeenCalledTimes(mode === "partial" ? 2 : 1); expect(fetch).not.toHaveBeenCalled();
 });
 
 it.each(["字符串", "表示法"])("does not collapse distinct empty-set spellings when the question concerns %s", async topic => {

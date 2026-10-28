@@ -7,7 +7,7 @@ import { join } from "node:path";
 import type { AgentTask } from "@/lib/domain/agent";
 import { LearningReviewPlanInput, type LearningCheckPurpose, type LearningEvidenceProposal, type LearningReviewPlanInput as PlanInput } from "@/lib/domain/learning-agent-completion";
 import type { QuizAttemptView, QuizActionInput } from "@/lib/domain/learning-quiz";
-import type { AgentContext } from "@/lib/server/agent/types";
+import type { AgentContext, AgentDecisionInput } from "@/lib/server/agent/types";
 import { LearningRepository } from "./repository";
 import { LearningQuizRepository } from "./quiz-repository";
 import { LearningFrameworkRepository } from "./framework-repository";
@@ -118,6 +118,37 @@ it("only accepts later nonrepeat same-purpose checking against recorded countere
 it("diagnosis can complete with wrong observations without remediating to all correct", () => {
   plan("diagnosis"); associate(group("wrong")); const result = assessLearningCompletion(learning, ctx.task);
   expect(result.outcome).toBe("diagnosis_complete"); expect(result.headline).toContain("不代表");
+});
+it("practice retains a wrong concept after a correct application instead of finishing a diagnosis", () => {
+  plan("practice", ["concept", "application"]);
+  const wrong = group("wrong", "[合成] 规则定义中的必要前提是什么？"); const prior = associate(wrong);
+  associate(group("correct", "[合成] 另一个应用场景是否满足规则？"), { role: "application" });
+  const result = assessLearningCompletion(learning, ctx.task);
+  expect(result).toMatchObject({ outcome: "partial", canAutoFinish: false, plan: { kind: "practice" } });
+  expect(result.objectives[0].requirements).toMatchObject([{ role: "concept", supported: false }, { role: "application", supported: true }]);
+  expect(result.objectives[0].unresolvedErrors).toEqual([prior.ref]);
+  expect(quizzes.attempt(pageId, wrong.id).score?.correct).toBe(0);
+});
+it("practice can finish from sufficient first-round evidence without forcing more rounds", () => {
+  plan("practice"); associate(group());
+  expect(assessLearningCompletion(learning, ctx.task)).toMatchObject({ outcome: "check_passed", canAutoFinish: true });
+});
+it("practice accepts a related new check without requiring old wrong answers to be rewritten", () => {
+  plan("practice"); const old = group("wrong"), prior = associate(old);
+  associate(group("correct", "[合成] 在另一场景中缺少规则前提时可否推导结论？"), { relation: "new_context", priorEvidenceRefs: [prior.ref] });
+  const result = assessLearningCompletion(learning, ctx.task);
+  expect(result).toMatchObject({ outcome: "check_passed", canAutoFinish: true });
+  expect(result.objectives[0].unresolvedErrors).toEqual([]);
+  expect(result.objectives[0].evidence.some(e => e.correct === false)).toBe(true);
+  expect(quizzes.attempt(pageId, old.id).score?.correct).toBe(0);
+});
+it("practice does not finish from hints or a correct unrelated observation without the required relation", () => {
+  plan("practice"); const prior = associate(group("wrong"));
+  associate(group("hint", "[合成] 提示说明了前提之后，能否直接应用？"), { relation: "followup", priorEvidenceRefs: [prior.ref] });
+  associate(group("correct", "[合成] 正确选择规则的另一表述。"));
+  const result = assessLearningCompletion(learning, ctx.task);
+  expect(result.canAutoFinish).toBe(false); expect(result.outcome).not.toBe("check_passed");
+  expect(result.objectives[0].unresolvedErrors).toEqual([prior.ref]);
 });
 it("cannot erase a known content problem with a later model no-known-issue claim", () => {
   plan(); const attempt = group(); associate(attempt, { contentStatus: "known_issue" }); associate(attempt);
@@ -476,8 +507,37 @@ it("requires an actual current read receipt before the model can associate a sav
   const read = await scenario.tools["learning.read_answers"].execute({ attemptId: attempt.id }, ctx);
   ctx.task.actions.push({ id: randomUUID(), version: 1, tool: "learning.read_answers", status: "succeeded", summary: read.summary, resultRef: read.ref, createdAt: "offline" });
   await expect(tool.execute(value, ctx)).resolves.toMatchObject({ ref: { kind: "learning.completion_evidence" } });
+  const receipt = { id: ctx.actionId, tool: "learning.associate_evidence", status: "succeeded" as const, summary: "已关联", createdAt: "offline",
+    resultRef: { kind: "learning.completion_evidence", id: attempt.id } };
+  const view = await tool.readResult!(receipt, ctx);
+  expect(view).toMatchObject({ actionId: ctx.actionId, recorded: true, proposal: value, currentEvidence: { quality: "tentative" }, assessmentPath: "observation.completion" });
+  expect(view).not.toHaveProperty("objectives"); expect(view).not.toHaveProperty("canAutoFinish");
+  await expect(tool.readResult!({ ...receipt, id: randomUUID() }, ctx)).rejects.toThrow("agent_result_forbidden");
+  await expect(tool.readResult!(receipt, { ...ctx, task: { ...ctx.task, accountId: "another-account" } })).rejects.toThrow();
+  await expect(tool.readResult!(receipt, { ...ctx, task: { ...ctx.task, version: 2 } })).rejects.toThrow();
   ctx.task.actions[0].version = 0;
   await expect(tool.execute(value, ctx)).rejects.toThrow("answers_read_required");
+  expect(globalThis.fetch).not.toHaveBeenCalled();
+});
+
+it("keeps exactly one current assessment and all counterevidence when rereading earlier associations", async () => {
+  plan(); const wrong = group("wrong"), first = associate(wrong);
+  const firstId = ctx.actionId, correct = group("correct", "[合成] 另一个规则前提检查"), second = associate(correct);
+  const scenario = createLearningAgentScenario(learning), tool = scenario.tools["learning.associate_evidence"];
+  const results = await Promise.all([[firstId, first], [ctx.actionId, second]].map(async ([id, proposal]) => {
+    const p = proposal as LearningEvidenceProposal, actionId = id as string;
+    const receipt = { id: actionId, version: 1, tool: "learning.associate_evidence", status: "succeeded" as const, summary: "已关联", createdAt: "offline", resultRef: { kind: "learning.completion_evidence", id: p.ref.attemptId } };
+    return { actionId, tool: receipt.tool, status: receipt.status, value: await tool.readResult!(receipt, ctx) };
+  }));
+  const before = assessLearningCompletion(learning, ctx.task);
+  const decide = vi.fn(async (_input: AgentDecisionInput) => ({ wait: { kind: "feedback" as const, message: "还有实际缺口，请确认下一步。" } }));
+  await withLearningCompletionDecision(learning, decide)({ task: ctx.task, observation: await scenario.observe(ctx), results, tools: [] }, ctx);
+  const input = decide.mock.calls[0]?.[0] as unknown as { observation: { completion: typeof before }; results: unknown[] };
+  expect(input.observation.completion).toEqual(before);
+  expect(JSON.stringify(input).match(/"canAutoFinish":/g)).toHaveLength(1);
+  expect(input.observation.completion.canAutoFinish).toBe(false);
+  expect(JSON.stringify(input.observation.completion)).toContain(wrong.id);
+  expect(JSON.stringify(input.observation.completion)).toContain(correct.id);
   expect(globalThis.fetch).not.toHaveBeenCalled();
 });
 

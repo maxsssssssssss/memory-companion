@@ -1,3 +1,4 @@
+import { offlineQuizSemanticResponse } from "./testing/quiz-semantic-fixture";
 // @vitest-environment node
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { randomUUID } from "node:crypto";
@@ -147,6 +148,7 @@ it("uses the real service and transport with a synthetic final reply, never leak
   const config = { baseURL: "https://tokenhub.vision-intelligence.tech/v1", apiKey: "SYNTHETIC", model: "deepseek-v4-pro", maxInputChars: 48000, maxOutputTokens: 16000 };
   const fetch = vi.fn(async (_url, init) => {
     const b = JSON.parse(init.body); const wire = JSON.parse(b.input.find((i: { role: string }) => i.role === "user").content);
+    if (wire.candidates) return new Response(`data: ${JSON.stringify({ type: "response.completed", response: { status: "completed", output: [{ type: "message", role: "assistant", content: [{ type: "output_text", text: JSON.stringify(offlineQuizSemanticResponse(wire)) }] }] } })}\n\n`, { headers: { "content-type": "text/event-stream" } });
     const legacy = output({ input: wire } as ReturnType<typeof compactQuizRequest>);
     const v = { ...legacy, materialPlan: [{ material: 1, contribution: "[模拟] 规则与条件", references: wire.materials[0].paragraphs.map((p: { referenceId: string }) => p.referenceId) }],
       items: legacy.items.map(({ explanation, explanationEvidenceIds, ...q }, i) => ({ ...q, focus: `[模拟] 考点${i}`,
@@ -156,5 +158,5 @@ it("uses the real service and transport with a synthetic final reply, never leak
   });
   vi.stubGlobal("fetch", fetch);
   const id = randomUUID(), result = await generateLearningQuiz(learning, page, { id, settings: settings() }, { configure: () => config, generate: (await import("./framework-generator")).generateStudyJson });
-  expect(result[0]).toMatchObject({ status: "completed", count: 2 }); expect(fetch).toHaveBeenCalledTimes(1);
+  expect(result[0]).toMatchObject({ status: "completed", count: 2 }); expect(fetch).toHaveBeenCalledTimes(2);
 });

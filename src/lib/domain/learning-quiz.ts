@@ -73,7 +73,7 @@ export type QuizProgress = { optionId: string | null; submitted: boolean; skippe
 export type QuizDeliveryReason = "structure_or_evidence" | "option_identity" | "position_dependency" | "answer_contradiction"
   | "repeated_focus" | "equivalent_options" | "answer_not_unique" | "source_binding" | "goal_mismatch"
   | "annotation_schema" | "annotation_role" | "annotation_objective" | "annotation_missing" | "review_source_mismatch"
-  | "format" | "unknown" | "budget" | "known_failure";
+  | "semantic_uncertain" | "format" | "unknown" | "budget" | "known_failure";
 export type QuizDeliverySummary = { requested: number; candidates: number | null; published: number;
   rejected: Array<{ code: QuizDeliveryReason; count: number }>; message: string; nextStep: string };
 export type QuizRunSummary = { id: string; createdAt: string; status: "generating" | "completed" | "insufficient" | "failed"; failure: string | null; settings: QuizConfig; title: string | null; count: number; reason: string | null; attemptId: string | null;

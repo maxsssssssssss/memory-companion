@@ -26,7 +26,7 @@ it.each([
 it("separates raw invalid kind, explicit normalization, official publication and private original projection", () => {
   expect(result.rawKindContract).toMatchObject({ value: "boundary", accepted: false, issues: [{ code: "invalid_enum_value", path: "kind" }] });
   expect(result.normalization).toMatchObject({ originalKind: "boundary", normalizedKind: "application", originalCandidateUnchanged: true, reviewRoleUnchanged: true });
-  expect(result.generationService).toMatchObject({ published: 1, offlineResponses: 1, realProviderCalls: 0, filteredOriginalIndex: 2, publishedIndex: 0,
+  expect(result.generationService).toMatchObject({ published: 1, offlineResponses: 1, semanticReviewResponses: 1, realProviderCalls: 0, filteredOriginalIndex: 2, publishedIndex: 0,
     score: { correct: 1, total: 1 }, duplicateSubmit: "PASS", restart: "PASS", sqliteIntegrity: "ok" });
 });
 it("keeps source, stable IDs, review mapping, answer hiding, duplicate submit and reopening through the formal chain", () => {

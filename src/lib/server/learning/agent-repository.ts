@@ -88,10 +88,10 @@ export class LearningAgentRepository {
       .run(id, taskId, pageId, this.learning.accountId, version, binding);
     if (!result.changes) throw new LearningError(409, "agent_retry_conflict");
   }
-  dispute(pageId: string, taskId: string, attemptId: string) {
+  dispute(pageId: string, taskId: string, attemptId: string, eventId?: string) {
     this.learning.get(pageId);
-    this.learning.database.prepare("UPDATE learning_agent_artifacts SET body_json=json_set(body_json,'$.disputed',json('true')) WHERE task_id=? AND page_id=? AND account_id=? AND kind='quiz' AND state='completed' AND json_extract(body_json,'$.attemptId')=?")
-      .run(taskId, pageId, this.learning.accountId, attemptId);
+    this.learning.database.prepare("UPDATE learning_agent_artifacts SET body_json=json_set(body_json,'$.disputed',json('true'),'$.disputeEventId',coalesce(json_extract(body_json,'$.disputeEventId'),?)) WHERE task_id=? AND page_id=? AND account_id=? AND kind='quiz' AND state='completed' AND json_extract(body_json,'$.attemptId')=?")
+      .run(eventId ?? null, taskId, pageId, this.learning.accountId, attemptId);
     this.learning.database.prepare("UPDATE learning_agent_artifacts SET state='invalidated',body_json=NULL WHERE task_id=? AND page_id=? AND account_id=? AND kind IN ('review_summary','completion_assessment') AND state IN ('reserved','completed')")
       .run(taskId, pageId, this.learning.accountId);
   }

@@ -1,3 +1,4 @@
+import { offlineQuizSemanticResponse } from "@/lib/server/learning/testing/quiz-semantic-fixture";
 // @vitest-environment node
 import { existsSync } from "node:fs";
 import { randomUUID } from "node:crypto";
@@ -30,7 +31,7 @@ beforeEach(async () => {
   root = await mkdtemp(join(tmpdir(), "learning-quiz-api-")); pageId = randomUUID(); materialId = randomUUID(); const repo = new LearningRepository(join(root, "owner"), "owner");
   repo.create({ id: pageId, title: "[合成]" }); repo.saveMaterials(pageId, [{ id: materialId, title: "[合成]", kind: "txt", filename: "synthetic.txt", bytes: Buffer.from("[合成测试] 规则及其前提。") }]); repo.close();
   auth.mockImplementation(async (r: Request) => { const id = r.headers.get("x-user"); if (!id) throw Error("unauthenticated"); return { user: { id }, dataRootDir: join(root, id) }; });
-  configure.mockReturnValue({ baseURL: "https://synthetic.invalid", apiKey: "SYNTHETIC", model: "mock", maxInputChars: 24000, maxOutputTokens: 6000 }); generate.mockImplementation(async () => model());
+  configure.mockReturnValue({ baseURL: "https://synthetic.invalid", apiKey: "SYNTHETIC", model: "mock", maxInputChars: 24000, maxOutputTokens: 6000 }); generate.mockImplementation(async (_config, name, _prompt, input) => name === "learning_quiz_semantic_review" ? offlineQuizSemanticResponse(input) : model());
   vi.stubGlobal("fetch", vi.fn(() => { throw Error("Network forbidden"); }));
 });
 afterEach(async () => { for(const work of deferred.splice(0))await work(); vi.clearAllMocks(); vi.unstubAllGlobals(); await rm(root, { recursive: true, force: true }); });
@@ -67,7 +68,7 @@ it("deletes a group and its progress through the authenticated API, preserving o
   expect((await GET(req("GET", undefined, "owner", `?attempt=${attempt.id}`), ctx())).status).toBe(404);
   expect((await PATCH(req("PATCH", { kind: "act", value: { id: randomUUID(), attemptId: attempt.id, revision: 0, action: "hint", question: 0, optionId: null } }), ctx())).status).toBe(404);
   expect((await POST(req("POST", g), ctx())).status).toBe(410);
-  expect(generate).toHaveBeenCalledTimes(2);
+  expect(generate).toHaveBeenCalledTimes(4);
   const repo = new LearningRepository(join(root, "owner"), "owner");
   try { expect(repo.source(pageId, materialId).paragraphs).toHaveLength(1); } finally { repo.close(); }
 });
@@ -80,18 +81,18 @@ it("deleting a pending group fences its late API response without stopping anoth
   done(lateResponse);
   expect((await pending).status).toBe(200);
   const result = await (await GET(req(), ctx())).json(); expect(result.quizzes.map((q: { id: string }) => q.id)).toEqual([other.id]);
-  expect((await POST(req("POST", g), ctx())).status).toBe(410); expect(generate).toHaveBeenCalledTimes(2);
+  expect((await POST(req("POST", g), ctx())).status).toBe(410); expect(generate).toHaveBeenCalledTimes(3);
 });
 it("uses actual API save/reopen, reveals server-side only and consumes zero calls while answering", async () => {
   const g = gen(); const published = await POST(req("POST", g), ctx()); expect(published.status).toBe(200); expect(published.headers.get("cache-control")).toContain("no-store"); expect(JSON.stringify(await published.json())).not.toContain("SECRET");
-  await POST(req("POST", g), ctx()); expect(generate).toHaveBeenCalledTimes(1);
+  await POST(req("POST", g), ctx()); expect(generate).toHaveBeenCalledTimes(2);
   let a = (await (await PATCH(req("PATCH", { kind: "start", value: { id: randomUUID(), quizId: g.id, mode: "test" } }), ctx())).json()).attempt;
   async function act(action: string, question = 0, optionId: string | null = null) { const response = await PATCH(req("PATCH", { kind: "act", value: { id: randomUUID(), attemptId: a.id, revision: a.revision, action, question, optionId } }), ctx()); expect(response.status).toBe(200); a = (await response.json()).attempt; }
   await act("choose", 0, "A"); await act("submit"); expect(JSON.stringify(a)).not.toContain("SECRET"); expect(a.questions[0]).not.toHaveProperty("feedback");
   expect((await GET(req("GET", undefined, "owner", `?attempt=${a.id}&question=0&source=0`), ctx())).status).toBe(403);
   expect((await (await GET(req("GET", undefined, "owner", `?attempt=${a.id}`), ctx())).json()).attempt).toEqual(a);
   await act("finish"); expect(a.score.correct).toBe(1); expect(a.questions[0].feedback.explanation).toBe("SECRET_EXPLANATION");
-  expect((await GET(req("GET", undefined, "owner", `?attempt=${a.id}&question=0&source=0`), ctx())).status).toBe(200); expect(generate).toHaveBeenCalledTimes(1);
+  expect((await GET(req("GET", undefined, "owner", `?attempt=${a.id}&question=0&source=0`), ctx())).status).toBe(200); expect(generate).toHaveBeenCalledTimes(2);
   expect(existsSync(join(root, "owner", "agent-tasks.sqlite"))).toBe(false);
 });
 it("delete during a real API pending mock fences the late result and retains no question rows", async () => {

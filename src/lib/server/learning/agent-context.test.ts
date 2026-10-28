@@ -72,3 +72,33 @@ it("fails before any call if required current context cannot fit, respecting the
   await expect(decision(input, ctx)).rejects.toMatchObject({ code: "budget", message: "agent_decision_input_limit" });
   expect(call).not.toHaveBeenCalled(); expect(network).not.toHaveBeenCalled();
 });
+
+it("sends an actual offline SDK request above 47000 characters within the new limit, retaining both rounds", async () => {
+  const input = fixture(); input.task = { ...task, budget: { ...task.budget, maxInputChars: 200000 } };
+  const original = JSON.stringify(input), requests: string[] = [];
+  vi.stubGlobal("fetch", vi.fn(async (url: RequestInfo | URL, init?: RequestInit) => {
+    requests.push(await new Request(url, init).text());
+    const response = { type: "response.completed", response: { status: "completed", error: null, incomplete_details: null,
+      usage: { input_tokens: 25000, output_tokens: 20 }, output: [{ type: "message", role: "assistant", content: [{ type: "output_text", text: JSON.stringify({ wait: { kind: "feedback", message: "还有未完成的检查，请确认下一步。" } }) }] }] } };
+    return new Response(`data: ${JSON.stringify(response)}\n\n`, { headers: { "content-type": "text/event-stream" } });
+  }));
+  let measured = 0;
+  const ctx: AgentContext = { task: input.task, actionId: "offline", signal: new AbortController().signal, assertActive: async () => {},
+    call: async (request, invoke) => { measured = request.inputChars; return (await invoke()).value; } };
+  const decide = createLearningAgentDecisionProvider(() => ({ apiKey: "synthetic", baseURL: "https://synthetic.invalid/v1", model: "deepseek-v4-pro", maxInputChars: 200000, maxOutputTokens: 2000, requestTimeoutMs: 1000 }));
+  await expect(decide(input, ctx)).resolves.toHaveProperty("wait");
+  expect(requests).toHaveLength(1); expect(requests[0].length).toBeGreaterThan(47000); expect(requests[0].length).toBeLessThanOrEqual(measured);
+  expect(measured).toBeLessThanOrEqual(200000);
+  const payload = JSON.parse(JSON.parse(requests[0]).input.find((m: { role: string }) => m.role === "user").content);
+  expect(payload.results).toEqual(input.results); expect(payload.feedback).toEqual(input.event);
+  expect(JSON.stringify(input)).toBe(original);
+});
+
+it("rejects an oversized Unicode context before reserving or sending a request even with a high character setting", async () => {
+  const input = fixture(); input.task = { ...task, budget: { ...task.budget, maxInputChars: 1000000 } };
+  input.results = [answers(1, 400000)];
+  const call = vi.fn(), fetch = vi.fn(); vi.stubGlobal("fetch", fetch);
+  const decide = createLearningAgentDecisionProvider(() => ({ apiKey: "synthetic", baseURL: "https://synthetic.invalid/v1", model: "deepseek-v4-pro", maxInputChars: 1000000, maxOutputTokens: 8000, requestTimeoutMs: 1000 }));
+  await expect(decide(input, { task: input.task, actionId: "offline", signal: new AbortController().signal, assertActive: async () => {}, call })).rejects.toThrow("agent_decision_context_limit");
+  expect(call).not.toHaveBeenCalled(); expect(fetch).not.toHaveBeenCalled();
+});

@@ -1,3 +1,4 @@
+import { offlineQuizSemanticResponse } from "@/lib/server/learning/testing/quiz-semantic-fixture";
 // @vitest-environment node
 /** Controlled offline candidate actions, real API/business writes and checkpoints.
  * These tests are not evidence of autonomous model quality or human learning. */
@@ -113,6 +114,7 @@ beforeEach(async () => {
     const next = candidates.shift() ?? waitAction; return { value: typeof next === "function" ? next(input) : next, usage: { inputTokens: 20, outputTokens: 10 } };
   }));
   generation = vi.fn(async (_config, name, _prompt, raw) => {
+    if (name === "learning_quiz_semantic_review") return offlineQuizSemanticResponse(raw);
     if (name === "learning_agent_explanation") return { materialAnswer: "[离线解释] 应先核对前提，再判断能否应用规则。", supplements: [], items: [{ materialId, paragraph: 1 }] };
     const input = raw as { taskContext: { referenceScope: string; reviewContext?: { purpose: LearningCheckPurpose } }; materials: Array<{ paragraphs: Array<{ referenceId: string }> }> };
     const refs = [input.materials[0].paragraphs[0].referenceId];
@@ -276,7 +278,7 @@ describe("R1/R2 explicit source recovery through formal API and SQLite", () => {
     if (problem === "wrong") expect(objective.unresolvedErrors).toContainEqual(reference(a));
     else expect(objective.evidence[0]).toMatchObject({ correct: true, hintedBeforeSubmission: true, independentInApp: false });
     expect(artifacts(waiting.id).filter(row => row.kind === "explanation" && row.task_version === 2)).toHaveLength(1);
-    expect(generation).toHaveBeenCalledTimes(2); // one original Quiz + one gap-directed explanation
+    expect(generation).toHaveBeenCalledTimes(3); // one original Quiz + one gap-directed explanation
     expect(stores(learning => new LearningQuizRepository(learning).list(pageId))).toHaveLength(1);
     expect(artifacts(waiting.id).find(row => row.id === oldPlan.id)).toEqual(oldPlan);
     expect(attempt(a.id).score).toEqual(a.score);
@@ -314,7 +316,7 @@ describe("F3 synthetic repair: actual API, business SQLite and checkpoint", () =
     expect(result.objectives[0].evidence[0]).toMatchObject({ quality: "invalid", eligible: false, diagnosticCode: "plan_source_mismatch" });
     expect(result.objectives[0].unresolvedErrors).toEqual([]);
     expect(result.canAutoFinish).toBe(false); expect(result.outcome).not.toBe("check_passed");
-    expect(generation).toHaveBeenCalledTimes(1); expect(decision).toHaveBeenCalledTimes(calls); expect(candidates).toHaveLength(1);
+    expect(generation).toHaveBeenCalledTimes(2); expect(decision).toHaveBeenCalledTimes(calls); expect(candidates).toHaveLength(1);
     expect(task(waiting.id).usage.calls).toBe(usage);
 
     // run() closes all three database/checkpoint handles. Refresh/reopen and an
@@ -328,7 +330,7 @@ describe("F3 synthetic repair: actual API, business SQLite and checkpoint", () =
     await control(waiting.id, feedback); await run(waiting.id);
     expect(task(waiting.id).status).toBe("waiting");
     expect(assessment(waiting.id).technicalBlocker?.kind).toBe("plan_source_mismatch");
-    expect(task(waiting.id).usage.calls).toBe(usage); expect(decision).toHaveBeenCalledTimes(calls); expect(generation).toHaveBeenCalledTimes(1);
+    expect(task(waiting.id).usage.calls).toBe(usage); expect(decision).toHaveBeenCalledTimes(calls); expect(generation).toHaveBeenCalledTimes(2);
     expect(stores(learning => new LearningQuizRepository(learning).list(pageId))).toHaveLength(1);
     expect(attempt(a.id).score).toEqual(a.score);
   });
@@ -354,7 +356,7 @@ describe("F3 synthetic repair: actual API, business SQLite and checkpoint", () =
     expect(corrected.plan?.objectives[0].requirements).toEqual(JSON.parse(oldPlan.body_json!).objectives[0].requirements);
     const savedPlans = artifacts(waiting.id).filter(row => row.kind === "review_plan");
     expect(savedPlans).toHaveLength(2); expect(savedPlans.find(row => row.id === oldPlan.id)).toEqual(oldPlan);
-    expect(generation).toHaveBeenCalledTimes(1); expect(attempt(a.id).score).toEqual(a.score);
+    expect(generation).toHaveBeenCalledTimes(2); expect(attempt(a.id).score).toEqual(a.score);
     expect(task(waiting.id).usage.calls).toBe(before.usage.calls + 4);
     const historical = await GET(request(), routeContext());
     expect((await historical.json()).tasks.find((t: AgentTask) => t.id === waiting.id).quizLinks).toContainEqual({ quizId: a.quizId, attemptId: a.id, completed: true, disputed: false, historical: true });
@@ -376,7 +378,7 @@ describe("F3 synthetic repair: actual API, business SQLite and checkpoint", () =
     if (problem === "hinted") expect(objective.evidence[0]).toMatchObject({ hintedBeforeSubmission: true, independentInApp: false });
     if (problem === "disputed") expect(objective.evidence[0]).toMatchObject({ quality: "disputed", eligible: false });
     expect(artifacts(waiting.id).find(row => row.id === oldPlan.id)).toEqual(oldPlan);
-    expect(attempt(a.id).score).toEqual(a.score); expect(generation).toHaveBeenCalledTimes(1);
+    expect(attempt(a.id).score).toEqual(a.score); expect(generation).toHaveBeenCalledTimes(2);
   });
 
   it.each(["learning.create_quiz", "learning.explain"] as const)("rechecks %s at its real tool boundary before reserving or generating after reopen", async toolName => {
@@ -395,7 +397,7 @@ describe("F3 synthetic repair: actual API, business SQLite and checkpoint", () =
       expect(result.wait?.message).toContain("调整本轮复习"); expect(result.handoff).toBeUndefined();
       expect(result.ref?.kind).toBe("learning.completion_assessment"); expect(invoke).not.toHaveBeenCalled();
     } finally { learning.close(); }
-    expect(generation).toHaveBeenCalledTimes(1); expect(task(waiting.id).usage.calls).toBe(beforeCalls);
+    expect(generation).toHaveBeenCalledTimes(2); expect(task(waiting.id).usage.calls).toBe(beforeCalls);
     expect(artifacts(waiting.id).filter(row => ["quiz", "explanation"].includes(row.kind))).toEqual(beforeArtifacts.filter(row => ["quiz", "explanation"].includes(row.kind)));
     expect(attempt(a.id).score).toEqual(a.score);
   });

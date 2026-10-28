@@ -245,6 +245,7 @@ LEARNING_AGENT_TASK_MAX_CALLS=64
 # Optional: defaults to twice MAX_CALLS, so raising calls does not retain 16 steps.
 LEARNING_AGENT_TASK_MAX_STEPS=128
 LEARNING_AGENT_TASK_MAX_COMPUTE_MS=1800000
+LEARNING_AGENT_DECISION_MAX_INPUT_CHARS=200000
 ```
 
 All values must be positive decimal integers. An explicitly blank, zero,
@@ -259,7 +260,7 @@ The defaults for new Learning tasks are 64 model calls, 128 actions and
 30 minutes of cumulative active execution. Calls include decisions and content
 generation, including failed and unknown attempts. No cumulative input/output
 token quota is imposed; token usage remains recorded. Per-request bounds
-(48000 input characters and 8000 output tokens), the existing no-progress
+(200000 input characters by default and at most 8000 output tokens), the existing no-progress
 threshold (3), source/authorization checks, bounded Quiz repair and unknown
 result recovery remain enforced. Task limits are safety ceilings, not criteria
 for a learning goal to count as completed.
@@ -270,7 +271,24 @@ an exhausted task is not revived by changing deployment settings. The shared
 Agent store's fallback policy and historical tasks are unchanged. These settings
 do not alter `AGENT_TRIAL_*` caps or the Windows acceptance ledger.
 
-This policy is separate from the required `LEARNING_AGENT_DECISION_*` and
+The Learning-only `LEARNING_AGENT_DECISION_MAX_INPUT_CHARS` accepts 1000..1000000
+characters, defaults to 200000, and sets both decision configuration and the new
+task's saved request budget. The actual decision uses the smaller of the current
+server setting and the saved task budget. Explicit older settings such as 47000
+still apply; update the process environment to opt into the new capacity. Other
+Agent scenarios and Learning generation-role limits are unchanged.
+
+DeepSeek's published V4 Pro context is 1048576 tokens
+([official model metadata](https://api-docs.deepseek.com/zh-cn/api/list-models/)).
+Characters are not tokens: decisions also enforce a conservative UTF-8 byte
+allowance plus the requested output and a 32768-token reserve before dispatch.
+This is a protective estimate, not an exact tokenizer. The adopted TokenHub
+gateway may expose a smaller window; lower the setting to its confirmed limit.
+No real gateway capacity probe was performed for this change. The optional
+Windows trial guard follows this input setting for trajectories while retaining
+the protocol smoke's 48000-character ceiling and all existing ledger counts.
+
+This policy otherwise retains the required `LEARNING_AGENT_DECISION_*` and
 `LEARNING_AGENT_GENERATION_*` model settings. Apply environment changes with
 the normal process-manager environment update; do not copy test credentials,
 mock accounts or Windows runtime data into production.

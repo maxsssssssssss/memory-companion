@@ -217,7 +217,7 @@ export async function disputeLearningAgentQuiz(learning: LearningRepository, sto
   try {
     const task = await runtime.pauseForFeedback(learning.accountId, taskId, event, input.expectedVersion);
     const artifacts = new LearningAgentRepository(learning);
-    artifacts.dispute(task.resourceId, task.id, input.attemptId);
+    artifacts.dispute(task.resourceId, task.id, input.attemptId, input.eventId);
     if (!accepted) artifacts.invalidateNotePreviews(task.resourceId, task.id);
     return task;
   } finally { runtime.close(); }

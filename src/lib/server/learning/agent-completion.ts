@@ -129,16 +129,77 @@ export function recordLearningEvidenceProposal(learning: LearningRepository, ctx
   save(learning, ctx.task, "evidence_proposal", ctx.actionId, proposal);
   return proposal;
 }
+
+/** Re-read this operation's authorized evidence, not another copy of the whole
+ * current assessment. The decision observation owns that single current view. */
+export function readLearningEvidenceReceipt(learning: LearningRepository, task: AgentTask, actionId: string) {
+  const scope = scoped(learning, task), plan = readLearningReviewPlan(learning, task);
+  const id = learningAgentOperationId(`${task.id}:${version(task)}:${actionId}`, "evidence_proposal");
+  const row = new LearningAgentRepository(learning).get(task.resourceId, task.id, id);
+  const proposal = row && parse<LearningEvidenceProposal>(row);
+  if (!plan || !row || !proposal || row.task_version !== version(task) || row.binding_hash !== scope.fingerprint)
+    throw new AgentFailure("forbidden", "agent_result_forbidden");
+  const proof = loadLearningCompletionEvidence(learning, task, plan, [LearningEvidenceProposal.parse(proposal)], scope)[0];
+  return { actionId, recorded: true, proposal,
+    currentEvidence: { quality: proof.quality, eligible: proof.eligible, diagnosticCode: proof.diagnosticCode, reasons: proof.reasons },
+    assessmentPath: "observation.completion" };
+}
 type PurposeRecord = { kind: "quiz" | "explanation"; resultId: string; purpose: LearningCheckPurpose; progressFingerprint: string; observationFingerprint?: string; actionId: string;
   failure?: { code: string; objectiveProgressFingerprint?: string; repair?: QuizRepairContext } };
 type QuizRepairClaim = { recordType: "quiz_repair"; actionId: string; repair: QuizRepairContext };
+export type DisputedQuizReplacement = { quizId: string; attemptId: string; eventId: string; purpose: LearningCheckPurpose };
+type DisputedQuizReplacementClaim = { recordType: "disputed_quiz_replacement"; actionId: string;
+  replacement: Omit<DisputedQuizReplacement, "purpose"> & { purposeKey: string } };
 const purposeRecord = (row: LearningAgentArtifact) => {
-  const value = parse<PurposeRecord | QuizRepairClaim>(row);
+  const value = parse<PurposeRecord | QuizRepairClaim | DisputedQuizReplacementClaim>(row);
   return value && !("recordType" in value) ? value : null;
 };
 // Method names, requested quantity, run IDs and feedback IDs cannot buy another
 // correction. A genuinely different frozen check role retains its own purpose.
 const quizRepairKey = (purpose: LearningCheckPurpose) => hash({ objectives: [...purpose.objectiveIds].sort(), role: purpose.role });
+const replacementId = (task: AgentTask) => learningAgentOperationId(`${task.id}:disputed-quiz-replacement`, "check_purpose");
+function replacementClaim(learning: LearningRepository, task: AgentTask) {
+  return new LearningAgentRepository(learning).get(task.resourceId, task.id, replacementId(task));
+}
+/** A conservative explicit request, not an inference from dissatisfaction.
+ * Negated/conditional/quoted requests do not authorize paid replacement. */
+export function explicitlyRequestsQuizReplacement(message: string) {
+  if (/不要|不用|不想|别|不需要|如果|假如|是否|要不要|[“”‘’「」"']/u.test(message)) return false;
+  return /(?:换|更换|替换|重新出)(?:一|这|另|套|组|些|几|道|新的|新|个|题|目|练习|测试|\s){0,12}(?:题|练习)|换(?:一|另)组(?:继续|吧|题|练习|[。！!]|$)/u.test(message.trim());
+}
+function pendingDisputedReplacement(learning: LearningRepository, ctx: AgentContext, purpose: LearningCheckPurpose) {
+  const event = ctx.event;
+  if (!event || !["feedback", "quiz_dispute"].includes(event.kind) || (event.version ?? 1) !== version(ctx.task)
+    || !explicitlyRequestsQuizReplacement(event.message ?? "") || replacementClaim(learning, ctx.task)) return;
+  const scope = scoped(learning, ctx.task), artifacts = rows(learning, ctx.task);
+  const purposes = artifacts.filter(row => row.kind === "check_purpose").map(purposeRecord);
+  for (const row of [...artifacts].reverse()) {
+    const body = row.kind === "quiz" && row.binding_hash === scope.fingerprint ? parse<{ attemptId: string; disputed?: boolean; disputeEventId?: string }>(row) : null;
+    if (!body?.disputed || (event.kind === "quiz_dispute" && event.id !== body.disputeEventId)) continue;
+    const record = purposes.find(p => p?.kind === "quiz" && !p.failure && p.resultId === row.id && quizRepairKey(p.purpose) === quizRepairKey(purpose));
+    if (!record) continue;
+    const quizzes = new LearningQuizRepository(learning);
+    quizzes.assertSources(ctx.task.resourceId, row.id);
+    const run = quizzes.list(ctx.task.resourceId).find(run => run.id === row.id), attempt = quizzes.attempt(ctx.task.resourceId, body.attemptId);
+    if (run?.status !== "completed" || run.progress?.uncertain || attempt.quizId !== row.id) continue;
+    return { quizId: row.id, attemptId: body.attemptId, eventId: event.id, purpose: record.purpose } satisfies DisputedQuizReplacement;
+  }
+}
+/** Atomic task-wide allowance; no new version, event, or method name resets it.
+ * This receipt contains only operation IDs, so source deletion cannot erase the
+ * consumed allowance. Original disputed artifacts/grades remain untouched. */
+export function claimLearningDisputedReplacement(learning: LearningRepository, ctx: AgentContext, replacement: DisputedQuizReplacement) {
+  learning.database.transaction(() => {
+    const current = pendingDisputedReplacement(learning, ctx, replacement.purpose);
+    if (!current || JSON.stringify(current) !== JSON.stringify(replacement)) throw new AgentFailure("known_failure", "agent_disputed_replacement_unavailable");
+    const repository = new LearningAgentRepository(learning), scope = scoped(learning, ctx.task), id = replacementId(ctx.task);
+    repository.reserve({ id, taskId: ctx.task.id, taskVersion: version(ctx.task), pageId: ctx.task.resourceId, kind: "check_purpose",
+      actionId: "disputed-quiz-replacement", binding: scope.fingerprint, materialIds: [] });
+    const { purpose, ...identity } = replacement;
+    repository.complete(ctx.task.resourceId, ctx.task.id, id, { recordType: "disputed_quiz_replacement", actionId: ctx.actionId,
+      replacement: { ...identity, purposeKey: quizRepairKey(purpose) } } satisfies DisputedQuizReplacementClaim);
+  }).immediate();
+}
 function repairClaim(learning: LearningRepository, task: AgentTask, purpose: LearningCheckPurpose) {
   const id = learningAgentOperationId(`${task.id}:${version(task)}:quiz-repair:${quizRepairKey(purpose)}`, "check_purpose");
   const row = new LearningAgentRepository(learning).get(task.resourceId, task.id, id);
@@ -154,6 +215,10 @@ function repairableQuizFailure(learning: LearningRepository, ctx: AgentContext, 
   const safe = rejected.filter(issue => issue.code !== "known_failure");
   if (!safe.length && code === "agent_generation_invalid_result") safe.push({ code: "format", count: 1 });
   if (!safe.length) return; // Empty output alone is not proof of a format defect.
+  // A disputed replacement is itself the one recovery opportunity. Failure
+  // cannot buy another automatic candidate-repair generation.
+  const replacement = replacementClaim(learning, ctx.task);
+  if (replacement && parse<DisputedQuizReplacementClaim>(replacement)?.actionId === ctx.actionId) return;
   return { attempt: 1, previousQuizId: quizId, purpose, rejected: safe };
 }
 /** Called once immediately before the repair's first generation request. The
@@ -267,6 +332,10 @@ export function assessLearningCompletion(learning: LearningRepository, task: Age
       && later.priorEvidenceRefs.some(ref => evidenceRefKey(ref) === evidenceRefKey(error.ref)) && later.firstSubmittedAt && error.firstSubmittedAt && later.firstSubmittedAt >= error.firstSubmittedAt
       && evidenceRefKey(later.ref) !== evidenceRefKey(error.ref))).map(e => e.ref);
     const unobservable = unobservableRequirements.filter(requirement => requirement.objectiveId === objective.id);
+    // Only an explicit diagnosis can finish from observations regardless of
+    // correctness. Practice uses the same evidence gate as other learning checks:
+    // related independent support, not scores or a fixed number of rounds. A new
+    // related check can resolve counterevidence without rewriting the old answer.
     const requirements = objective.requirements.map((requirement, index) => ({ role: requirement.role, description: requirement.description,
       supported: !unobservable.some(item => item.requirementIndex === index) && valid.some(e => e.role === requirement.role && (plan.kind === "diagnosis" || e.correct === true)
         && (!requirement.independent || e.independentInApp)
@@ -371,6 +440,8 @@ export function guardLearningCompletionAction(learning: LearningRepository, ctx:
   const recorded = rows(learning, ctx.task).filter(r => r.kind === "check_purpose").map(purposeRecord).filter((r): r is PurposeRecord => Boolean(r));
   const recoveredActions = new Set(recorded.filter(record => !record.failure).map(record => record.actionId));
   const previous = recorded.filter(record => !record.failure || !recoveredActions.has(record.actionId));
+  const replacement = kind === "quiz" ? pendingDisputedReplacement(learning, ctx, purpose) : undefined;
+  if (replacement) return { assessment, purpose: replacement.purpose, replacement };
   const currentObservations = observationFingerprint(assessment, purpose.objectiveIds);
   const currentProgress = objectiveProgressFingerprint(assessment, purpose.objectiveIds);
   const unchanged = (p: PurposeRecord) => (p.failure

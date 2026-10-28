@@ -5,7 +5,7 @@ import type { ParsedTextBinding } from "@/lib/domain/learning-pdf-study";
 import styles from "./learning.module.css";
 import completionStyles from "./learning-agent-completion.module.css";
 
-const goalLabels = { explanation: "解释疑问", diagnosis: "诊断薄弱点", targeted_review: "针对性复习", chapter_check: "章节学习检查" };
+const goalLabels = { explanation: "解释疑问", diagnosis: "诊断薄弱点", practice: "自适应练习", targeted_review: "针对性复习", chapter_check: "章节学习检查" };
 const supportLabels = { supported: "已有表现支持", partial: "仍需巩固", unobserved: "尚未检查", uncertain: "暂时无法判断" };
 
 function evidenceDescription(evidence: LearningCompletionEvidence, completed: boolean) {

@@ -1,3 +1,4 @@
+import { offlineQuizSemanticResponse } from "./testing/quiz-semantic-fixture";
 // @vitest-environment node
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { randomUUID } from "node:crypto";
@@ -24,9 +25,10 @@ const purpose = (explanation: boolean): LearningCheckPurpose => ({ objectiveIds:
   method: explanation ? "explain" : "retrieval", purpose: explanation ? "说明交集与并集的归属条件" : "初步观察交集与并集的元素归属判断", priorEvidenceRefs: [] });
 function plan(kind: LearningReviewPlanInput["kind"]): LearningReviewPlanInput {
   return { kind, objectives: [{ id: "membership", label: "交集与并集的元素归属", sources: [{ materialId, paragraph: 1 }],
-    requirements: kind === "explanation" ? [] : [{ role: "application", description: "判断同时或仅属于一个集合的元素是否属于交集和并集", independent: kind === "chapter_check" }] }] };
+    requirements: kind === "explanation" ? [] : [{ role: "application", description: "判断同时或仅属于一个集合的元素是否属于交集和并集", independent: kind === "practice" || kind === "chapter_check" }] }] };
 }
 const generate = vi.fn(async (_config, name, _prompt, raw) => {
+  if (name === "learning_quiz_semantic_review") return offlineQuizSemanticResponse(raw);
   if (name === "learning_agent_explanation") return { materialAnswer: "交集要求元素同时属于两个集合；并集只需属于其中至少一个集合。", supplements: [],
     items: [{ materialId, paragraph: 1 }] };
   const input = raw as { taskContext: { referenceScope: string; reviewContext: { purpose: LearningCheckPurpose } }; materials: Array<{ paragraphs: Array<{ referenceId: string }> }> };
@@ -63,13 +65,14 @@ afterEach(async () => {
 // The action choices below are deliberately controlled. This verifies execution
 // of product defaults/explicit preferences, not a real DS intent success rate.
 it.each([
-  { goal: "练习交集与并集", kind: "diagnosis" },
-  { goal: "考考我", kind: "diagnosis" },
-  { goal: "帮我复习一下", kind: "diagnosis" },
-  { goal: "我想练练这部分", kind: "diagnosis" },
+  { goal: "练习交集与并集", kind: "practice" },
+  { goal: "考考我", kind: "practice" },
+  { goal: "帮我复习一下", kind: "practice" },
+  { goal: "我想练练这部分", kind: "practice" },
+  { goal: "只摸底看看哪里不会，先不要接着练", kind: "diagnosis" },
   { goal: "交集是什么意思？我不懂", kind: "explanation" },
   { goal: "我不理解具体的定义，帮帮我", kind: "explanation" },
-  { goal: "先出两道题看看", kind: "diagnosis" },
+  { goal: "先出两道题看看", kind: "practice" },
   { goal: "只解释，不要做题", kind: "explanation" },
   { goal: "复习一下这一章", kind: "chapter_check" },
 ] as const)("runs a legal default from the unchanged ordinary goal: $goal", async ({ goal, kind }) => {
@@ -78,6 +81,9 @@ it.each([
   const scene = createLearningAgentScenario(learning, { configure: () => config, generate });
   expect(scene.instructions).toContain("不要要求用户填写目标类型");
   expect(scene.instructions).toContain("不把普通练习机械设为targeted_review");
+  expect(scene.instructions).toContain("建立practice计划");
+  expect(scene.instructions).toContain("不能以diagnosis_complete结束普通练习");
+  expect(scene.instructions).not.toContain("优先从小范围diagnosis开始");
   const decision = vi.fn<AgentDecisionProvider>(async (input, ctx) => ctx.call({ kind: "offline_decision", inputChars: 100, maxOutputTokens: 200 }, async () => {
     expect(input.task.goal).toBe(goal);
     expect(input.observation).toMatchObject({ goal, preferences: learningAgentActionPreferences(goal), scope: selection() });
@@ -111,7 +117,7 @@ it.each([
     }
     const calls = result.usage.calls;
     expect((await runtime.advance("owner", task.id)).usage.calls).toBe(calls);
-    expect(generate).toHaveBeenCalledTimes(1);
+    expect(generate).toHaveBeenCalledTimes(kind === "explanation" ? 1 : 2);
   } finally { runtime.close(); }
 });
 

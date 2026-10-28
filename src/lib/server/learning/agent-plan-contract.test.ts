@@ -34,7 +34,7 @@ corrected = structuredClone(invalid); corrected.objectives[0].requirements[1].ro
 cases.push({ rule: "duplicate_requirement", invalid, corrected, path: ["objectives", 0, "requirements", 1, "role"] });
 invalid = make("targeted_review"); corrected = structuredClone(invalid); corrected.objectives[0].requirements[0].role = "followup";
 cases.push({ rule: "targeted_followup_required", invalid, corrected, path: ["objectives", 0, "requirements"] });
-for (const kind of ["chapter_check", "targeted_review"]) {
+for (const kind of ["practice", "chapter_check", "targeted_review"]) {
   invalid = make(kind);
   if (kind === "targeted_review") invalid.objectives[0].requirements[0].role = "followup";
   invalid.objectives[0].requirements[0].independent = false;
@@ -86,7 +86,7 @@ describe("formal Learning review-plan parameter contract", () => {
       const plan = payload.tools.find(tool => tool.name === "learning.establish_review_plan")!.parameters;
       for (const clause of ["objectives中的id全部唯一", "kind不是explanation时，每个目标的requirements至少一项",
         "同一目标的requirements中role唯一", "kind=targeted_review时，每个目标必须包含role=followup",
-        "kind=targeted_review或chapter_check时，所有requirements的independent必须为true"]) {
+        "kind=practice、targeted_review或chapter_check时，所有requirements的independent必须为true"]) {
         expect(plan.description).toContain(clause);
       }
       expect(plan.description).toContain("来源语义或学习结论");
@@ -111,6 +111,16 @@ describe("formal Learning review-plan parameter contract", () => {
     const diagnosis = make("diagnosis"); diagnosis.objectives[0].requirements[0].independent = false;
     expect(LearningReviewPlanInput.safeParse(explanation).success).toBe(true);
     expect(LearningReviewPlanInput.safeParse(diagnosis).success).toBe(true);
+  });
+
+  it("accepts ordinary practice without a predeclared followup but requires an observable independent check", () => {
+    const practice = make("practice");
+    expect(scene.tools["learning.establish_review_plan"].parameters.safeParse(practice).success).toBe(true);
+    expect(StoredLearningReviewPlanInput.safeParse(practice).success).toBe(true);
+    practice.objectives[0].requirements = [];
+    expect(LearningReviewPlanInput.safeParse(practice).success).toBe(false);
+    practice.objectives[0].requirements = [{ role: "concept", description: "根据前序作答表现，检查该小点是否已经充分验证", independent: true }];
+    expect(LearningReviewPlanInput.safeParse(practice).success).toBe(false);
   });
 
   it.each([
