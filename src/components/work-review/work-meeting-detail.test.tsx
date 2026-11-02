@@ -518,6 +518,23 @@ describe("WorkMeetingDetailView", () => {
     ));
   });
 
+  it("opens post-review comparison only after review and requires an explicit project choice", async () => {
+    const current = detail({reviewStatus:"completed",pendingCandidateCount:0,projects:[
+      {id:"wrp_alpha",name:"Alpha 发布",status:"active",version:1},
+      {id:"wrp_beta",name:"Beta 研究",status:"active",version:1}
+    ]});
+    const client=api(current);
+    const props={...handlers,api:client,featureFlags:{...flags,todoEnabled:true,followUpEnabled:false},projectsEnabled:true};
+    const rendered=render(<WorkMeetingDetailView {...props} detail={current}/>);
+    expect(screen.getByRole("link",{name:"与「Alpha 发布」历史对比"})).toHaveAttribute("href","/work-review/projects/wrp_alpha?meeting=wrm_1");
+    expect(screen.getByRole("link",{name:"与「Beta 研究」历史对比"})).toHaveAttribute("href","/work-review/projects/wrp_beta?meeting=wrm_1");
+    rendered.rerender(<WorkMeetingDetailView {...props} detail={{...current,meeting:{...current.meeting,projects:[]}}}/>);
+    expect(screen.getByText("先关联项目，再进行项目内会后比较。")).toBeVisible();
+    expect(screen.queryByRole("link",{name:/历史对比/})).not.toBeInTheDocument();
+    await act(async()=>{rendered.rerender(<WorkMeetingDetailView {...props} detail={detail({reviewStatus:"in_progress"})}/>);});
+    expect(screen.queryByRole("heading",{name:"与项目历史对比"})).not.toBeInTheDocument();
+  });
+
   it("saves Meeting projects with the latest resource version returned by Core", async () => {
     const alpha = project("wrp_alpha", "Alpha 发布");
     const beta = project("wrp_beta", "Beta 研究");

@@ -48,6 +48,8 @@ export class StructuredJsonResponseError extends Error {
 }
 
 export type StructuredJsonDiagnostics = {
+  /** Counts and fixed labels only. Never event names, bodies, IDs or transport errors. */
+  stream?: StructuredJsonStreamDiagnostics;
   responseStatus?: string;
   incompleteReason?: string;
   responseTextLength: number;
@@ -69,6 +71,26 @@ export type StructuredJsonDiagnostics = {
   reasoningTokens?: number;
   reasoningEffort?: "none" | "minimal" | "low" | "medium" | "high" | "xhigh";
   providerErrorCode?: ResponseError["code"] | "other";
+};
+
+export type StructuredJsonStreamDiagnostics = {
+  phase: "request" | "events" | "cleanup" | "complete";
+  eventCount: number;
+  totalEventBytes: number;
+  largestEventBytes: number;
+  deltaBytes: number;
+  completionReceived: boolean;
+  failureReason?: "byte_limit" | "unsupported_event" | "invalid_event" | "provider_terminal"
+    | "missing_completion" | "timeout" | "aborted" | "transport_error" | "cleanup_error";
+  limitKind?: "legacy_total" | "event" | "delta" | "total";
+};
+
+/** SSE data bytes include protocol metadata and repeated done/completed snapshots.
+ * Keep these distinct from generated text; none of the limits authorizes partial output. */
+export type StructuredJsonStreamLimits = {
+  maxEventBytes: number;
+  maxDeltaBytes: number;
+  maxTotalBytes: number;
 };
 
 export type StructuredJsonValidationFailureRawResponse = {
@@ -414,7 +436,10 @@ export async function parseStructuredJsonResponse<TSchema extends z.ZodTypeAny>(
   /** Omitted means legacy items. Explicit null leaves root fields to the caller's schema and instructions. */
   jsonRootField?: "items" | "results" | "chapters" | null;
   store?: boolean;
+  /** Legacy cumulative SSE data limit; unchanged for callers that already use it. */
   maxResponseBytes?: number;
+  /** Explicit independent limits for streamed JSON. If both are supplied, both apply. */
+  streamLimits?: StructuredJsonStreamLimits;
   mode?: StructuredJsonResponseMode;
   /** JSON mode only; accept the terminal completed response, never accumulated deltas. */
   stream?: boolean;
@@ -430,6 +455,9 @@ export async function parseStructuredJsonResponse<TSchema extends z.ZodTypeAny>(
 }): Promise<z.infer<TSchema>> {
   if (input.stream && input.mode !== "json") {
     throw new Error("Streaming structured JSON requires explicit json mode");
+  }
+  if (input.streamLimits && Object.values(input.streamLimits).some(value => !Number.isSafeInteger(value) || value < 1)) {
+    throw new Error("Invalid structured JSON stream limits");
   }
   const outputLimit =
     input.maxOutputTokens === undefined ? {} : { max_output_tokens: input.maxOutputTokens };
@@ -472,9 +500,17 @@ export async function parseStructuredJsonResponse<TSchema extends z.ZodTypeAny>(
     };
     const streamCompletedResponse = async () => {
       let partialText = "";
-      let streamBytes = 0;
+      const flow: StructuredJsonStreamDiagnostics = {
+        phase: "request", eventCount: 0, totalEventBytes: 0, largestEventBytes: 0, deltaBytes: 0, completionReceived: false
+      };
+      diagnostics.stream = flow;
+      const exceed = (kind: StructuredJsonStreamDiagnostics["limitKind"]) => {
+        flow.failureReason = "byte_limit"; flow.limitKind = kind;
+        throw new StructuredJsonResponseError("incomplete_response", "Structured response exceeded byte limit");
+      };
       const assertNotAborted = () => {
         if (input.requestOptions?.signal?.aborted) {
+          flow.failureReason = input.requestOptions.signal.reason?.name === "TimeoutError" ? "timeout" : "aborted";
           throw new DOMException("Structured response request was aborted", "AbortError");
         }
       };
@@ -492,27 +528,38 @@ export async function parseStructuredJsonResponse<TSchema extends z.ZodTypeAny>(
               ? AbortSignal.any([input.requestOptions.signal, controller.signal]) : controller.signal
           }).asResponse();
           // Reuse SDK SSE framing once; event JSON is decoded here without logging raw data.
+          flow.phase = "events";
           for await (const message of _iterSSEMessages(response, controller)) {
             assertNotAborted();
-            streamBytes += Buffer.byteLength(message.data, "utf8");
-            if (input.maxResponseBytes !== undefined && streamBytes > input.maxResponseBytes) {
-              throw new StructuredJsonResponseError("incomplete_response", "Structured response exceeded byte limit");
+            const bytes = Buffer.byteLength(message.data, "utf8");
+            flow.eventCount++; flow.totalEventBytes += bytes; flow.largestEventBytes = Math.max(flow.largestEventBytes, bytes);
+            if (input.maxResponseBytes !== undefined && flow.totalEventBytes > input.maxResponseBytes) exceed("legacy_total");
+            if (input.streamLimits) {
+              if (bytes > input.streamLimits.maxEventBytes) exceed("event");
+              if (flow.totalEventBytes > input.streamLimits.maxTotalBytes) exceed("total");
             }
             diagnostics.firstEventMs ??= Date.now() - requestStartedAt;
             if (message.data.trim() === "[DONE]") break;
             if (message.event && message.event !== "error" && !message.event.startsWith("response.")) {
+              flow.failureReason = "unsupported_event";
               throw new StructuredJsonResponseError("incomplete_response", "Structured response stream event was unsupported");
             }
             const event = JSON.parse(message.data) as ResponseStreamEvent;
             if (!event || typeof event !== "object" || typeof event.type !== "string"
               || (message.event && message.event !== event.type)) {
+              flow.failureReason = "invalid_event";
               throw new StructuredJsonResponseError("incomplete_response", "Structured response stream event was invalid");
+            }
+            if ("delta" in event && typeof event.delta === "string") {
+              flow.deltaBytes += Buffer.byteLength(event.delta, "utf8");
+              if (input.streamLimits && flow.deltaBytes > input.streamLimits.maxDeltaBytes) exceed("delta");
             }
             if (event.type === "response.output_text.delta" && typeof event.delta === "string" && event.delta.length > 0) {
               diagnostics.firstTextDeltaMs ??= Date.now() - requestStartedAt;
               if (input.onResponseText) partialText += event.delta;
             }
             if (event.type === "error" || event.type === "response.failed" || event.type === "response.incomplete") {
+              flow.failureReason = "provider_terminal";
               if (event.type !== "error" && event.response && typeof event.response === "object") {
                 if (input.onResponseText) {
                   const answer = textFromResponse(assistantAnswerCandidate(event.response), true);
@@ -534,14 +581,22 @@ export async function parseStructuredJsonResponse<TSchema extends z.ZodTypeAny>(
               const response = event.response;
               if (!response || typeof response !== "object" || response.status !== "completed"
                 || response.error != null || response.incomplete_details != null) {
+                flow.failureReason = "invalid_event";
                 throw new StructuredJsonResponseError("incomplete_response", "Structured response stream completion was invalid");
               }
+              flow.completionReceived = true;
+              // Usage is a reported billing fact even if cleanup/cancellation later prevents
+              // publication. parseResult remains not_started, so this is still unknown then.
+              Object.assign(diagnostics, responseMetadata(response, true), {
+                responseCompleteDurationMs: Date.now() - requestStartedAt
+              });
               // Raw streamed responses have not received the SDK's output_text projection.
               // Reasoning may itself contain valid JSON; only final assistant output is answer text.
               completed = assistantAnswerCandidate(response);
               // Returning the iterator cancels the body without waiting for EOF.
               // Abort only after iterator cleanup: aborting first errors the body
               // and can turn a valid completion into an AbortError on return().
+              flow.phase = "cleanup";
               break;
             }
           }
@@ -550,10 +605,18 @@ export async function parseStructuredJsonResponse<TSchema extends z.ZodTypeAny>(
         }
         assertNotAborted();
         if (!completed) {
+          flow.failureReason = "missing_completion";
           throw new StructuredJsonResponseError("incomplete_response", "Structured response stream ended without completion");
         }
+        flow.phase = "complete";
         return completed;
       } catch (error) {
+        flow.failureReason ??= input.requestOptions?.signal?.aborted
+          ? input.requestOptions.signal.reason?.name === "TimeoutError" ? "timeout" : "aborted"
+          : error instanceof SyntaxError ? "invalid_event"
+          : error instanceof Error && ["TimeoutError", "APIConnectionTimeoutError"].includes(error.name) ? "timeout"
+          : isAbortError(error) ? "aborted"
+          : flow.phase === "cleanup" ? "cleanup_error" : "transport_error";
         if (input.onResponseText) observeText(partialText, "partial");
         diagnostics.totalDurationMs = Date.now() - requestStartedAt;
         input.onDiagnostics?.(diagnostics);

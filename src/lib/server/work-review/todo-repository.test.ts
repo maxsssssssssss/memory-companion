@@ -202,9 +202,9 @@ function projectFinding(
 }
 
 describe("WorkTodoRepository", () => {
-  it("migrates the Work database to v7 with scoped Todo and Project indexes", () => {
+  it("migrates the Work database to v11 while preserving scoped Todo and Project indexes", () => {
     expect(database.pragma("user_version", { simple: true })).toBe(WORK_REVIEW_SCHEMA_VERSION);
-    expect(WORK_REVIEW_SCHEMA_VERSION).toBe(9);
+    expect(WORK_REVIEW_SCHEMA_VERSION).toBe(11);
     const tables = database.prepare(`
       SELECT name FROM sqlite_master WHERE type = 'table' AND name LIKE 'wr_todo%'
       ORDER BY name

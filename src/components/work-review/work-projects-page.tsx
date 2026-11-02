@@ -235,6 +235,8 @@ export function WorkProjectsPage({ api: apiOverride }: Readonly<{
         {project.description ? <p>{project.description}</p> : <small>没有补充说明</small>}
       </div>
       <div className={styles.projectActions}>
+        {context?.featureFlags.todoEnabled !== false ? <Link className={workStyles.secondaryButton} href={`/work-review/projects/${encodeURIComponent(project.id)}`}>会后比较与工作脉络</Link> : null}
+        {context?.featureFlags.todoEnabled !== false ? <Link className={workStyles.secondaryButton} href={`/work-review/projects/${encodeURIComponent(project.id)}#work-preparation`}>准备下次会议</Link> : null}
         {project.status === "active" ? (
           <button
             className={workStyles.secondaryButton}

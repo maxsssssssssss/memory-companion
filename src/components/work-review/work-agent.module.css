@@ -1,0 +1,31 @@
+.page { max-width: 1000px; margin: 0 auto; padding: 24px 20px 80px; color: var(--db-text); }
+.page h1 { margin: 8px 0 12px; }
+.page h2 { margin: 24px 0 12px; }
+.page h3 { margin: 16px 0 8px; }
+.page p, .page li { line-height: 1.65; overflow-wrap: anywhere; }
+.form, .result { margin: 24px 0; padding: 20px; border: 1px solid var(--db-border); border-radius: 12px; background: var(--db-surface); }
+.form { display: grid; gap: 12px; }
+.page textarea { width: 100%; min-height: 88px; padding: 12px; border: 1px solid var(--db-border); border-radius: 8px; font: inherit; background: var(--db-surface); color: inherit; box-sizing: border-box; }
+.actions, .history { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin: 12px 0; }
+.notice { color: var(--db-text-secondary); }
+.preview { padding: 0; list-style: none; }
+.preview li { padding: 16px 0; border-bottom: 1px solid var(--db-border); }
+.preview label { display: flex; align-items: baseline; gap: 10px; }
+.preview input { width: 18px; height: 18px; accent-color: var(--db-accent); }
+.preview dl { margin: 12px 0; }
+.preview dl div { display: grid; grid-template-columns: 5em minmax(0,1fr); gap: 8px; margin: 8px 0; }
+.preview dd { margin: 0; white-space: pre-wrap; }
+.thread { padding: 0 0 16px; border-bottom: 1px solid var(--db-border); }
+.page section { scroll-margin-top: 24px; }
+.historyDetails { margin: 16px 0 24px; }
+.page summary { cursor: pointer; line-height: 1.65; overflow-wrap: anywhere; padding: 10px 0; }
+.page summary:focus-visible { outline: 2px solid var(--db-accent); outline-offset: 4px; }
+.timeline { padding-left: 24px; border-left: 2px solid var(--db-border); }
+.timeline > li, .radar > li { padding: 4px 0 12px; border-bottom: 1px solid var(--db-border); }
+.timeline time { color: var(--db-text-secondary); font-variant-numeric: tabular-nums; }
+.radar { padding: 0; list-style: none; }
+.radar small { color: var(--db-text-secondary); }
+.agendaItem { margin: 16px 0; padding: 16px; border: 1px solid var(--db-border); border-radius: 8px; min-width: 0; }
+.agendaItem label { display: grid; gap: 6px; margin: 10px 0; }
+.page input:not([type="checkbox"]), .page select { max-width: 100%; min-height: 44px; padding: 8px 10px; box-sizing: border-box; border: 1px solid var(--db-border); border-radius: 6px; font: inherit; color: inherit; background: var(--db-surface); }
+@media (max-width: 640px) { .page { padding: 16px 12px 80px; } .result, .form { padding: 14px; } .preview dl div { grid-template-columns: 1fr; gap: 4px; } }

@@ -1,6 +1,8 @@
 import type Database from "better-sqlite3";
+import { WORK_AGENT_SCHEMA_V10 } from "./agent-schema";
+import { WORK_PREPARATION_SCHEMA_V11 } from "./preparation-schema";
 
-export const WORK_REVIEW_SCHEMA_VERSION = 9;
+export const WORK_REVIEW_SCHEMA_VERSION = 11;
 
 const WORK_REVIEW_SCHEMA_V1 = `
   CREATE TABLE wr_meetings (
@@ -1264,7 +1266,9 @@ const MIGRATIONS = [
   { version: 6, sql: WORK_REVIEW_SCHEMA_V6 },
   { version: 7, sql: WORK_REVIEW_SCHEMA_V7 },
   { version: 8, sql: WORK_REVIEW_SCHEMA_V8 },
-  { version: 9, sql: WORK_REVIEW_SCHEMA_V9 }
+  { version: 9, sql: WORK_REVIEW_SCHEMA_V9 },
+  { version: 10, sql: WORK_AGENT_SCHEMA_V10 },
+  { version: 11, sql: WORK_PREPARATION_SCHEMA_V11 }
 ] as const;
 
 export function migrateWorkReviewSchema(database: Database.Database) {

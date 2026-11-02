@@ -118,10 +118,14 @@ describe("archived project deletion", () => {
   it("preserves an existing v8 database when applying the idempotent migration", () => {
     const project = archivedProject();
     const todo = createTodo([project.id]);
-    db.exec("ALTER TABLE wr_projects DROP COLUMN deleted_at; DELETE FROM wr_schema_migrations WHERE version = 9; PRAGMA user_version = 8;");
+    // Reconstruct V8, removing later dependencies before dropping its column.
+    const triggers=db.prepare("SELECT name FROM sqlite_master WHERE type='trigger' AND (name LIKE 'wr_work_agent_%' OR name LIKE 'wr_preparation_%')").all() as {name:string}[];
+    for(const {name} of triggers)db.exec(`DROP TRIGGER ${name}`);
+    for(const table of ["wr_meeting_preparation_operations","wr_meeting_preparations","wr_work_agent_artifact_sources","wr_work_agent_artifacts","wr_work_thread_event_sources","wr_work_thread_events","wr_work_threads"])db.exec(`DROP TABLE ${table}`);
+    db.exec("ALTER TABLE wr_projects DROP COLUMN deleted_at; DELETE FROM wr_schema_migrations WHERE version >= 9; PRAGMA user_version = 8;");
     migrateWorkReviewSchema(db);
     migrateWorkReviewSchema(db);
-    expect(db.pragma("user_version", { simple: true })).toBe(9);
+    expect(db.pragma("user_version", { simple: true })).toBe(11);
     expect(projects.getProject(accountId, project.id)).toEqual(project);
     expect(projects.listTodoProjects(accountId, todo.id)).toHaveLength(1);
     expect(db.prepare("SELECT count(*) AS n FROM wr_schema_migrations WHERE version = 9").get()).toEqual({ n: 1 });

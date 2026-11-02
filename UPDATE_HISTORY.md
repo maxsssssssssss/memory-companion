@@ -15732,3 +15732,120 @@ Learning与UI：新增 `agent-scope.ts`、`agent-repository.ts`、`agent-scenari
 - 集成修正：保留的 C6 回放补上新审题阶段的受控离线响应，分别统计生成与审阅，保留原候选诊断索引；修改 testing/natural-quiz-c6dd171-replay.ts 与 quiz-final-c6dd171.test.ts。agent-completion-flow.test.ts 中单条多次 SQLite/checkpoint 重启用例在默认 5 秒下重复超时，15 秒诊断完成全部原断言后，仅为此测试设置显式 15000ms 时限，未改变产品超时、预算或断言。
 - 实际验证（2026-10-27）：48 文件 917 项定向测试通过。首次全量 594 文件结果为 7228 通过、3 失败、18 跳过，另有 C6 的 beforeAll 因旧回放缺少新语义审阅阶段失败；三项失败为测试超时。初次四文件修正复验 74 通过、1 超时，单条隔离仍超时；有界诊断 6609ms 完成原断言，最终四文件 75/75 通过。合并首次全量与最终四文件结果为 7240 通过、0 失败、9 跳过，不是一轮全量全绿；9 项仍依赖缺失的历史 PDF/OCR 原始资料。Next typegen、最终 TypeScript、production build 及构建 trace 清理通过。离线生产构建页面解释流程验证来源、保存、刷新、显式解决和结束后零新增调用；6 次 fixture 响应，真实 Provider 网络调用 0。提交前 diff check 通过。
 - 失败与限制：准备时出现 Git Schannel/缓存 CLI 探测失败及 LF/CRLF 合并冲突，分别使用保留 TLS 校验的 Git OpenSSL、已有 CLI 和规范化合并输入处理，原工作区未覆盖。模型语义审阅仍可能漏掉歧义与引用问题；partial 不代表掌握，接近 200000 字符的真实网关边界未验证。此次未新增真实 Provider/ASR/OCR 调用，未执行服务器验收或部署；历史资料缺失不以合成证据替代。用户本轮明确授权 commit 与正常 push 到 main，远端最终提交号由发布回执另行核对。
+
+## 2026-10-28（Asia/Shanghai）— Work Review Agent P1 项目内会后连续复盘（本地未提交）
+
+- 背景与基线：用户授权完整实现“会议核对完成→同项目比较→固定修改预览→逐项/批量确认→事务保存→重新打开与恢复”，并明确以 GitHub main 新增开发。读取根 AGENTS、PRODUCT、DESIGN、验证说明和研究报告后，核对共享 AgentRuntime 已包含于 main 的 0653b3f18d56c121935f50502a0dedef06ba5bcd；在已授权隔离工作区 work-review-agent-p1、分支 codex/work-review-agent-p1 开发。保留原 Windows main 的 dirty 内容，未提交、推送、合并或部署。
+- 判断与结构：原 Findings 是单会议确认事实，现有项目关联和 Todo 无法表达持续议题、替代/暂停/问题关闭及用户确认历史，因此办公 schema V10 最小新增 wr_work_threads、wr_work_thread_events、关系来源、Agent artifacts 和 artifact 来源五表。关系追加并按有效事件推导当前决定/问题状态；Todo 当前状态仍以原 wr_todos 为准，不新增第二状态权威，不自动回填旧会议关系。没有新生产依赖、全局 feature flag、跨产品访问路径或通用 Agent 平台。
+- 实现：新增 domain/work-agent.ts 与 work-review/agent-schema/context/repository/model/scenario/service，直接复用共享 AgentRuntime/AgentStore 的预算、租约、checkpoint、确认指纹、操作日志及 unknown 恢复；使用现有办公 Provider profile 和传输，比较成果持久化后由固定预览驱动确认。审批之后不再调用模型改变操作；关系和原 TodoRepository 修改在同一办公事务内提交，按稳定 artifact/change/action 身份恢复已提交回执。有效关系去重；撤回后再次明确确认新增事件，保留旧历史。未修改 Learning 业务或共享 Runtime。
+- 页面与范围：已核对会议按明确关联项目显示比较入口，项目列表可回看；新增 projects/[projectId]/agent API、项目结果页、work-agent-page 及样式。支持自然语言目标、五类比较结果、重新校验的直接原文、旧新状态预览、选中后最终批准、暂停/继续/取消/检查原结果、最小时间线及未闭环提示。账号/项目严格校验；pending/ignored 候选正文不进入比较；无项目会议不自动归类。仅比较可结束并稍后从保存成果继续，未强迫修改 Todo。
+- 来源与恢复：会议删除/移出项目、Finding 或 canonical 失效、Todo 删除/解除关联、项目删除通过触发器及读取指纹检查清除失效正文和引用；保留无正文的不确定状态屏障，B 依据失效不会恢复 A。事务提交后 Agent 回执丢失可核对原业务结果而不重复写入。最终收尾发现通用 ID 的 512 字符上限会与 Runtime 2,000 字符反馈契约冲突，在办公 key schema 限制为 64 位 ASCII，反馈长度校验前置于固定选择；补测批准后执行前取消零写入，不改共享契约。
+- 实际验证：全量离线命令 node output/work-agent-p1/offline-run.mjs test --reporter=default --reporter=json --outputFile=output/work-agent-p1/full.json，退出 0，598 文件（596 PASS、2 SKIP），7264 PASS、9 SKIP、0 FAIL，558.83 秒。全量后仅对上述办公边界及合成测试负责人/期限对齐，运行 agent-p1/model、work-agent-routes、work-agent-page 四文件最终定向复验，退出 0，24/24 PASS（含真实 repository/Runtime、实际 Next API、受影响组件）。新增会议入口测试和相邻 Todo/项目删除迁移回归被全量覆盖；未重复全量。npm run lint 包装执行退出 0，含 typegen 和完整 TS；最终小修后 production build 再次完整类型检查、44/44 页面生成，退出 0，trace manifests=182、removed=42、forbidden=0。
+- 浏览器与三会结果：Playwright 的 work-agent-p1.spec.ts 在最终生产构建上 1/1 PASS、退出 0、9.4 秒；真实页面配合合成 SQLite/Runtime，HTTP/auth 为 fixture，Next route 另有实际 API 测试。确认 M2 仅暂停 A、B 仍为候选；M3 用户批准五项后保留原部署 Todo ID 并改 B、完成测试、关闭回滚问题、新建监控；拒绝的供应商完成建议不写入。刷新恢复、打开原文、重复批准、事务回滚/提交后回执丢失、来源失效、账号项目隔离均有断言。检查桌面与 390px 手机截图，无横向溢出；本轮自有 loopback 服务已停止。
+- 真实失败与修正：首次 sandbox Vitest 因 spawn EPERM 配置加载失败、零测试；早期 fixture 缺 markAnalysisVerifying 导致 4 项失败，修复真实候选发布流程后 4/4 通过；扩展阶段一次 17 PASS/1 FAIL 为拒绝确认预期仍是 paused，改为当前办公场景的 ended 并继续验证零写入。另一轮 21 PASS/2 FAIL 为多轮 SQLite/checkpoint 用例默认 5 秒超时，保持原断言并只给该 suite 20 秒时限，复验 16/16 通过。相邻第一次 63 PASS/1 FAIL 为硬编码 V9，第二次 52 PASS/1 FAIL 为 V8 fixture 降级前未移除 V10 触发器；修正 fixture/版本断言后项目删除 7/7 通过，后续全量通过。未把这些失败隐藏为成功。
+- 限制与升级触发：真实 DeepSeek/ASR/OCR、付费 Provider、服务器和生产验证均 NOT RUN；9 项既有 Learning 跳过依赖未提供的历史 PDF/OCR 资料，未改跳过规则。模型上下文有会议/Findings/字符/Todo/议题上限并展示实际覆盖，超出输入预算即停止；来源版本变化采用保守失效。只实现最小提示和时间线，不含 P2 完整雷达、P3 会前准备或完整项目管理。真实模型关联准确性待指定 Provider/预算的另行授权验收；大量历史确实超过最近 50 任务或当前容量时，再设计分页/检索。实际办公用户数据库未访问，V8/V9→V10 仅在合成库验证。完整命令、计数、源码定位、数据关系和后续 Windows 步骤见 WORK_REVIEW_AGENT_P1_IMPLEMENTATION_REPORT.md；output/work-agent-p1 与 output/playwright 保留本轮本地证据。
+## 2026-10-28（Asia/Shanghai）— Work Review Agent P1 流式 unknown 阻塞调查与离线修复（未提交）
+
+- 背景与范围：用户授权处理真实验收 #287 Provider completed 但产品 unknown，先复现再最小修复；本轮真实 Provider 请求上限 0。沿用 codex/work-review-agent-p1、HEAD 0653b3f18d56c121935f50502a0dedef06ba5bcd，记录 1,840 个既有源码/文档哈希、52 个上轮验收证据哈希与实际账本 287 行，保留已有 P1 dirty 修改和旧失败，不提交、推送、部署或访问生产。
+- 调查与证据：#287 完整 response 紧凑序列化 8,527 字节、assistant 正文 3,581 字节，4 结论/5 建议 schema 有效；产品 call 仍 unknown、usage NULL。原实现把所有 SSE data 元数据、delta 和 done/completed 快照累计到 200,000 字节。用实际 SDK/SSE/JSON/Zod 路径合成每 delta 2 字符时，#284 累计 184,137 字节通过，#287 累计 289,507 字节、旧策略在事件 1,174/200,170 字节处拒绝，parseResult=not_started。相同 #287 粗分帧仅 25,100 字节可通过。原始 SSE 帧和失败阶段未保存，因此已证明计量缺陷及相符失败特征，但未证明历史 #287 的唯一根因；不能把假说改写为历史事实。
+- 实现与必要性：仅调整产品 openai/structured-json.ts 与 work-review/agent-model.ts。共享解析器增加可选独立单事件/累计 delta/累计 SSE data 限制，原 maxResponseBytes 语义不改；办公调用保持 200 KB 单事件/增量正文额度，累计协议额度为四份有界快照加每个请求输出 token 256 字节，本次 6,000 token 对应 2,336,000 字节。原因是原单一累计额度与合法分帧输出冲突；不是提高输出 token、取消大小限制或接受部分结果。所有上限仍有拒绝测试；若以后触顶，先按阶段诊断核实需求，不自动扩额。没有新依赖、持久化 authority、feature flag、模型路由或跨产品访问。
+- 诊断与恢复：增加固定阶段/原因/事件数/字节数/是否收到有效 completed 的无正文诊断，办公日志以现有 requestId 关联调用；不记录密钥、URL、正文或 Provider 错误。有效 completed 的 reported usage 在 iterator cleanup 前收集；清理失败或取消后仍 unknown，保留账单事实且禁止成果发布。核对 Runtime 先写调用状态和用量、再检查活动状态、最后业务保存的顺序正确，未改 Runtime/Store/Learning。旧 #287 没有追认、补写或执行 recover。
+- 测试文件：新增 structured-json-limits.test.ts、structured-json-socket.test.ts、structured-json-stream.test-fixture.ts、work-review/agent-stream.test.ts；调整 agent-model.test.ts 与 work-agent-routes.test.ts。正式 SDK/业务适配器/Runtime/API handlers/真实隔离 SQLite 验证 M2 暂停 A 且 B 待定，M3 固定预览、选择五项、批准后复用原部署 Todo、完成测试、关闭回滚问题、创建监控、拒绝错误供应商完成、重开和重复批准无重复写入；该比较响应与认证为明确离线 fixture。原文、最小时间线、日志和供应商未闭环断言通过。实际 loopback socket 的断流、超时、取消及 completed 后不关闭连接四项通过；unknown 不重试、晚到零发布、大小限制、schema/JSON 已知失败用量及安全日志均有真实解析路径验证。
+- 实际门禁：隔离包装器 output/work-agent-p1-stream-fix-20261028/run.mjs 执行最终 regression，退出 0，20 个实际测试文件、507 PASS、0 FAIL、0 SKIP，50.97 秒；包含办公 P1、API/组件、共享 Runtime、相关办公/学习/日常复盘/约会陪伴 Provider 回归，未修改相邻产品业务。npm run lint 最终退出 0（Next typegen + 完整 TypeScript）；npm run build 退出 0，44/44 页面生成，trace manifests=182、removed=42、forbidden=0。未重复无关全仓测试或 Browser E2E；页面组件卸载重开与 API 重开分别验证。
+- 中间失败如实保留：修复前新增诊断测试 1 PASS/1 FAIL；首次扩展流测试 18 PASS/2 FAIL 是测试错误假设已知失败也不会返回决策循环，修正为明确后续 wait，未修改 Runtime；API 闭环首次 13 PASS/1 FAIL 是批准 keys 规范排序预期错误，修正测试；初次 lint 报新增测试 TS7006，补上 MockInstance 类型后通过。原旧策略对 #287 合成细分帧的拒绝保留在复现文件中，不标成业务成功。
+- 交付与限制：WORK_REVIEW_AGENT_P1_STREAM_FIX_REPORT.md 记录源码定位、真实命令/退出码/用例数、修复前后证据和后续真实复验建议。所有命令隔离业务环境并使用离线网络保护；本轮真实 Provider 新增 0，账本仍 287/293，上轮 52 证据文件不变，#287 call 原始 unknown 不变。真实 Provider 修复后复验、人工页面模型语义验收和生产验收 NOT RUN；历史确切归因仍缺原始帧。后续需另行授权并重新核对实际预算，保存安全阶段日志，遇 unknown 停止，不重放旧任务制造成功。
+
+
+## 2026-10-29：Work Review Agent P1 真实验收问题集中修复（本地离线）
+
+背景：真实 M3 出现“尚未回复却建议完成”和“label 调整为新方案但实际 title 未变”；tracks 工作在 Todo 完成后仍被混同为未关闭问题。沿原文、建议、预览、批准、事务、Todo 和议题投影追踪，确认前者原校验仅验证来源身份/类型，后者缺少工作与独立问题类别。
+
+新增办公专属 agent-consistency.ts 有限检查函数，按有效 Canonical 分句核对目标、操作、明确反证和实际修改字段；在 agent-repository.ts 的预览、旧待处理预览重读、选择/确认及事务应用共用。blocked/needs_review 不可批准，固定预览保留原因与原建议；正常操作仍需人工确认。原服务不足在于有效引用不代表支持操作，因此需要这一个当前业务 helper；不是新共享抽象、模型调用或通用语义引擎。preview_json 追加 review，thread DTO 派生 kind/linkedTodos，不加表或持久状态 authority。agent-context.ts/agent-service.ts 保持 Todo 为状态权威、问题只由确认关系解决；work-agent-page.tsx 显示真实状态并阻止无效选择。domain、相关 API/组件测试和现有 e2e fixture 同步，Learning/AgentRuntime/SSE/Prompt/路由/预算未改。
+
+验证：修复前 1 文件2失败；首轮定向回归4失败（中文术语分词误拦正常关闭），补测1超时（默认5秒不足，沿既有P1改20秒且不删断言），首次类型检查1处string/never错误，均保留日志并修复。辅助审计脚本曾误用request_id列退出1，仅涉及副本，改用实际id后退出0。最终受影响完整回归75文件1641用例通过；问句/假设句补充后6文件67通过；保存后文案复验1文件4通过；浏览器最终1文件1通过。npm run lint退出0；最终npm run build退出0、44/44页面，BUILD_ID V96M1PjYFTLmra2SZiYKc；首轮通过的构建/浏览器截图因显示已保存项仍待确认而追加局部修复及最终构建/浏览器验证。既有React act警告保留。命令/起止/退出码见 output/work-agent-p1-final-repair-20261029，完整交付见 WORK_REVIEW_AGENT_P1_FINAL_REPAIR_REPORT.md。
+
+保护：真实Provider新增0；账本仍290/293且文件摘要不变；原#287 unknown和NULL用量不改，161个历史证据/账本文件均保持字节一致。SQLite只在审计副本检查，integrity_check=ok；原UPDATE_HISTORY前缀保留，自有服务停止、端口3210释放。未提交/推送/合并/部署。限制：检查限中文显式词句与可直接核对字段，复杂指代/多重否定/混合事项仍需人工核实，未声称语义已验证；无就地编辑冻结预览或自动修复/重试。若后续真实错误显示这些有限规则不足，再按具体反例决定扩大覆盖，不提前建设语义平台。真实Provider、ASR和生产验收NOT RUN，未进入P2。
+
+
+## 2026-10-29｜办公 Agent 未闭环列表补齐未建关系的确认问题
+
+- 背景与根因：真实 M3 比较已保留日志期限未解决，但项目列表仅读取 open Todo 与持续议题；没有 records 关系的已确认 open_question 被遗漏。沿用当前 codex/work-review-agent-p1、HEAD 0653b3f18d56c121935f50502a0dedef06ba5bcd 及既有 dirty 修复，未新建 Worktree。
+- 最小修复：仅在 src/lib/server/work-review/agent-service.ts 的现有项目投影补读账号/项目内已确认、尚未归入关系的 open_question，复用 readWorkAgentSource 检查当前有效原文；已进入议题或关系的 Finding 仍完全按原议题状态处理，避免重复、已解决或撤回后重新变成未解决。Todo 完成与独立问题解决的原逻辑保持不变，不新增表、模型调用、抽象层或状态 authority。
+- 测试修改：src/lib/server/work-review/agent-p1.test.ts 新增未建议题、项目/账号范围、解除关联/删除、已建关系去重和撤回保护；src/app/api/work-reviews/work-agent-routes.test.ts 补上未生成日志 records 的真实 API 场景，覆盖日志期限、供应商等待、已完成测试及已解决回滚。
+- 验证：先用 before-fix 定向复现，2 文件中实际运行 2 用例均失败（21 个无关用例因 -t 未选中，保留日志）；修复后 affected-tests 为 4 文件、55/55 PASS、0 跳过，退出 0；npm run lint（typegen + 完整 TypeScript）退出 0；npm run build 退出 0，BUILD_ID=37YmblvEvmGAc2eKl_AsY。本轮只做相关集合，不重跑全仓测试。完整命令和退出码位于 output/work-agent-p1-open-loops-20261029/*.command.json。
+- 原数据复验：把上一轮最终真实验收的合成 SQLite 复制到隔离输出目录，以只读连接调用当前正式项目服务；日志期限已出现，供应商仍 open，测试不再作为未完成事项，回滚问题仍 resolved，integrity_check=ok。这是已保存数据的离线投影核对，不是新真实 Provider 验收；本轮真实调用 0。
+- 保护与限制：原 1729 个历史证据/账本文件摘要不变，账本仍 293，旧 #287 unknown 和原数据未改。既有未提交 P1/SSE 修复保留，未提交、推送或部署。无明确持续关系的多场会议问题按各自确认记录展示，不凭文本相似自动归并；已撤回关系继续标为待核实，不恢复成未解决事实。本轮不扩展语义关联或雷达功能。
+
+
+## 2026-10-29｜Work Review Agent P2：项目决策时间线与未闭环事项雷达
+
+- 背景与判断：沿用现有 dirty P1/SSE/日志期限修复，在同一个项目页面提供可追溯历史与未闭环依据。确认现有 V10 议题、关系事件、来源、Todo 和 Agent 成果足够表达需求，不新增数据库表、迁移、持久状态、工具或通用抽象。现有最近 50 条任务列表不足以作为长期后续记录判断，因此办公项目查询按账号/项目/scenario 读取完整历史，未改共享 Runtime。
+- 实现：agent-context.ts 展示原已保存的撤回事件及日期；agent-service.ts 统一投影已确认会议事实、关系时间线和雷达，复用原 Canonical 校验/议题状态/Todo 权威及批准成果；缺关系的事实不回填确认关系，来源失效不恢复旧决定，问题与完成 Todo 分开判断，显式关联去重并保留等待状态，已拒绝建议不再当待确认。work-agent.ts 仅加响应字段；work-agent-page.tsx / work-agent.module.css 沿用办公主题、原文对话框和确认流程，提供展开/筛选/空加载错误状态及项目切换晚到响应保护。
+- 测试文件：新增 agent-p2.test.ts，调整 agent-p1.test.ts、agent-test-fixture.ts、work-agent-routes.test.ts、work-agent-page.test.tsx 和既有 e2e/fixtures/work-agent-p1.spec.ts。M1 当前 A→M2 暂停且 B 候选→M3 B 替代 A，经正式服务/API/SQLite/组件覆盖 14 项断言；旧数据零关系、独立问题、撤回/重开、失效、账号/项目边界、原 Todo 身份、重复操作/恢复也通过。原 Finding id/body/version 前后相同。
+- 实际验证：受影响完整回归 76 文件/1656 PASS（退出0）；后续定向 5 文件/68 PASS；最终 P2 1文件/11 PASS、UI 1文件/7 PASS、API 1文件/4 PASS；长历史专项最初1 PASS/10未选中，最终已在11用例集合全覆盖。npm run lint 与 npm run build 均退出0，BUILD_ID=qTGsO0v_iBGJhnGUeRgWy、44/44页面。Chromium production 页面1文件/1 PASS，实际确认、刷新、逐场原文、雷达筛选及移出项目失效通过，移动宽度无横向溢出。浏览器 HTTP/auth 为 fixture，正式 API 路由另测，不是正式 Provider/登录验收。
+- 失败记录：focused-1 为60 PASS/1 FAIL，旧事件总数断言未计入新增展示的撤回历史，保留两次确认断言并补撤回断言；focused-2 为36 PASS/1 FAIL，日期在 time 子节点导致测试匹配器定位失败，修正真实元素定位；首次 lint 退出1（Testing Library getByRole 错用了 exact 参数），修复后通过。没有删除失败日志或降低业务断言；既有周回顾 React act 警告保留。全部命令/退出码/日志在 output/work-agent-p2-20261029。
+- 保护与限制：1755个历史证据/账本文件摘要不变，账本仍293，真实请求新增0，#287 unknown及旧成绩未改。原UPDATE_HISTORY前缀保留；Learning、共享Runtime、SSE和其余原dirty修改不变。合成SQLite及账本副本integrity_check=ok；自有Next进程停止、3210释放，未提交/推送/合并/部署。无明确关系时不按文本相似去重；后续单独手改Todo不自动被证明符合新决定；无大规模项目性能验收，出现可观测读取延迟再优化现有查询，不能截掉历史制造缺少记录。真实Provider/服务器NOT RUN，不进入P3。完整交付见 WORK_REVIEW_AGENT_P2_IMPLEMENTATION_REPORT.md。
+
+## 2026-10-29｜Work Review Agent P2：关系端点引用定向修复（离线）
+
+- 背景与根因：真实 #296 已明确提出 M1→M3 的替代和解决关系，但 sourceFindingIds 遗漏 M1 anchor。模型 schema 分别约束端点字段和来源数组，原 saveComparison 又要求数组重复两端，导致整个比较拒绝；Prompt 已有两端要求，问题不在 SSE。沿用当前 dirty P1/P2 工作区，HEAD 0653b3f18d56c121935f50502a0dedef06ba5bcd 未变。
+- 最小实现：仅修改 src/lib/server/work-review/agent-repository.ts 的保存前校验，先拒绝原无效/重复引用，从本次已校验账号/项目上下文确认两个明确端点后，取引用并集并排序；再按原 WorkAgentChange schema、最多8引用、原类型/时间/权限/来源规则检查，超限按 invalid_action 明确拒绝。比较副本在固定预览和批准前规范化，不改原响应及旧预览。无新增表、迁移、抽象、Prompt、路由、预算、SSE、Learning 或共享Runtime改动。
+- 对部分有效操作的判断：端点缺失/越权/失效仍拒绝整批结构，不静默剔除关系改变已保存比较契约。端点合法但语义依据不足继续用既有 needs_review/blocked 逐项处理，测试证明三项独立Todo仍可批准且不受支持的问题关闭零写入。没有将结构通过等同于语义正确。
+- 验证：新增 agent-endpoint-sources.test.ts（16用例）和 work-agent-routes.test.ts 的正式API回归。未修改 #294–296 原始响应，在复制了WAL的隔离SQLite经实际SDK解析、API、Runtime和业务事务回放：修复前1文件1失败（needs_attention），修复后1文件1通过，5项固定预览批准后保存2关系和3Todo；部署原ID改B、测试完成、回滚明确解决、监控创建一次，日志和供应商仍未解决，两次重复批准及关库重开无重复。实际合成原文逐项核对支持这5项操作。
+- 检查结果：相关回归10文件117用例退出0；追加引用容量失败分类后最终端点1文件16通过、原响应回放1文件1通过；完整 npm run lint 和最终 npm run build 均退出0，44/44页面，BUILD_ID=w7CMK7Hx3zfm-4mWAqS7S。git diff --check退出0。命令、退出码和日志保存在 output/work-agent-p2-endpoint-fix-20261029。
+- 保留的失败：首次回放脚本漏复制WAL报缺表，补齐后才取得有效修复前证据；初轮端点15通过1失败是rejectedKeys顺序断言错误，改为实际固定预览顺序；容量负向补测1失败（15未选中）发现规范化后ZodError会进入unknown，改用safeParse并显式invalid_action后16项全部通过。原失败日志未删，没有放宽来源、schema或业务断言。首轮通过的lint/build因后续容量修正而追加最终验证，不作为最终构建。
+- 保护与限制：真实Provider新增0，原账本仍296且摘要不变；#287仍unknown、NULL用量未改，#296原任务仍needs_attention。3702个历史证据文件摘要不变，原UPDATE_HISTORY字节前缀保留；原库仅复制后检查，账本/业务/回放SQLite完整性均ok；未启动HTTP服务，构建与测试已退出，3210/37952无监听。真实Provider及现场浏览器NOT RUN，离线usage不是新增真实消耗。结构无效关系仍整批拒绝，复杂语义需人工核实；“仍待处理的事项”与具体问题可能重叠，未扩展雷达合并。无提交、推送、合并、部署或P3。完整报告为 WORK_REVIEW_AGENT_P2_ENDPOINT_REFERENCE_FIX_REPORT.md。
+
+- 文档收尾：首次最终审计的diff检查因PowerShell追加末尾CRLF告警而退出2（审计退出1）；仅规范本轮追加部分换行并保留失败审计，原历史字节前缀未变，随后重新核验。
+
+
+## 2026-10-30：Work Review Agent P3 项目会议准备与会前会后衔接（本地离线）
+
+- 背景与范围：沿用 codex/work-review-agent-p1、HEAD 0653b3f18d56c121935f50502a0dedef06ba5bcd 及既有未提交 P1/SSE/P2。目标是项目会前简报、可编辑议程、明确关联实际会议、会后对照并接入原 P1 批准和 P2 状态；不开发预约、邀请、通知或其他 Agent。开始记录42条既有Git状态记录，保存1856个既有文件快照与5714个历史证据摘要，没有新建worktree或覆盖已有成果。
+- 分析与实现：原 P1 固定比较 artifact 强绑定实际会议，无法表达会议尚不存在、用户可多次编辑的准备材料；因此新增办公 V11 的 wr_meeting_preparations 与 wr_meeting_preparation_operations，仅保存文档、来源快照、当前用户版本、明确关联和幂等回执，不增加项目事实权威。preparation-context/model/repository/service/schema、domain/work-preparation 复用统一项目上下文和现有办公 JSON/SSE 传输，新增办公 Scenario，直接沿用 AgentRuntime 的预算、Checkpoint、操作记录、取消及恢复。用户确认对照后稳定地建立原 P1 任务，后续关系和 Todo 仍由原 P1 固定预览、批准事务和业务规则落地，P2 不另算状态。
+- 用户流程与文件：新增 preparations 正式 API、work-preparation-panel 编辑/排序/删除/新增/保存/过期提示/会后对照界面；项目页、会议详情、项目列表和既有 work-agent-page 接入口与交接，沿原视觉组件。agent-context 增加无当前会议的项目读取；agent-model 仅导出既有请求函数，不改模型路由。schema 接 V11；相关迁移测试同步。来源失效清除生成派生内容并保留用户计划提示，不自动复活旧决定；不修改 Learning、共享 Runtime、P1 仓库写入或 SSE 处理。
+- 测试与失败：新用例首次配置加载因 spawn EPERM 未运行；首轮11例8失败/3通过，原因新工具 handoff 缺 validateResult，补产品结果校验；随后16例1失败/15通过，修正手工新增议题不存在原生成项时的 undefined hash；定向1失败/10未选中暴露稳定任务ID下划线不符共享契约，仅修 P3 ID。所有失败日志保留，没有放松断言或共享门槛。最终新测试3文件18例通过；受影响完整回归77文件1603例通过，均退出0；npm run lint（typegen +完整TS）退出0；隔离环境 production build 退出0、44页面，BUILD_ID=w7R3X2O0EI0OsCazfCBKo，trace清理退出0。辅助 CLI/审计类型/Windows glob 错误保留，修正工具调用后继续，不属于业务通过证据。
+- 实际离线浏览器：以正式服务建立 M1/M2/M3，页面生成准备、删除客户清单/移动日志/修改重点/新增临时项并保存；正式创建核对M4，页面明确关联、查看5处原文、确认对照，再逐项批准原部署完成、监控完成、日志问题关闭。原Todo ID不变、总Todo仍4条；供应商等待、未讨论临时事项及新增问题不被完成。同一批准两次202；刷新、关页重开、production服务重启后完整API结果一致，离线SSE调用始终9次。来源M4/M3移出后的UI和API正确失效、不恢复A。真实Provider/ASR/OCR调用0；fixture token不是真实用量。完整命令、断言及证据见 WORK_REVIEW_AGENT_P3_IMPLEMENTATION_REPORT.md 和 output/work-agent-p3-20261030。
+- 保护与限制：原5714历史证据和真实账本摘要不变，#287 unknown未重试/追认，历史UPDATE_HISTORY原字节前缀保留。本任务4个合成SQLite integrity_check=ok、外键检查空；自有服务和浏览器停止、37953端口释放，Windows受控停止退出1单列说明。V10升级及空新表回退仅在独立测试库验证，原库未迁移。旧复合Finding“仍待处理的事项”含多个主题，独立日志关系解决后其旧文字仍保留；不凭相似内容自动拆分或关闭，应明确关联后处理。无历史议程版本回滚UI、无多会议拆分，语义校验仅现有有限规则，真实模型议程质量/复杂指代/优先级遵循NOT RUN，后续需单独有界授权。未提交、推送、合并、部署，完成本轮后停止。
+
+
+## 2026-10-30：Work Review Agent P3 真实验收启动前核对（预算阻断，未发请求）
+
+- 按补充验收要求核对现有工作区、HEAD 0653b3f18d56c121935f50502a0dedef06ba5bcd、dirty状态及构建w7R3X2O0EI0OsCazfCBKo；正式配置解析确认办公TokenHub/DeepSeek V4 Pro、无自动重试，未更改配置。原账本只读审计副本确认299条，累计停止线302，剩余3次，原始摘要与P3开发结束一致；历史unknown和不完整用量保留。
+- 当前正式流程与既有离线浏览器证据表明，会前准备、会后对照、P1比较各约3次，共约9次，实际模型可能增加决策调用。用户本次明确要求预计超额时先报告并等新授权，因此未使用剩余3次，也未创建真实验收任务、启动服务或修改业务库。建议单次完整流程最多12次、累计311仅为待批准方案，Guard仍未变更，真实Provider新增0。
+- 新增output/work-agent-p3-real-20261030的只读预检脚本和证据，以及WORK_REVIEW_AGENT_P3_REAL_ACCEPTANCE_REPORT.md；不修改产品代码。preflight退出0，ledger副本integrity=ok；首次配置解析启动spawn EPERM退出1并保留日志，随后相同解析器本地执行退出0，fetch禁止且请求0。没有无故重跑开发测试或构建，不将之前77文件1603例/离线浏览器通过算作真实模型通过。
+- 真实议程三项限制、优先级、引用、用户编辑、M4关联、会后对照和P1/P2落地均标为未验证；当前真实验收结论BLOCKED（预算）。本轮未提交、推送、合并、部署、访问生产或真实用户数据；旧P1/P2/SSE/P3源码、Guard、账本及历史证据保持，UPDATE_HISTORY只追加。等待明确预算后才继续，并需再次核对现场限制，不重试旧unknown。
+
+
+## 2026-10-30：Work Review Agent P3 授权后真实验收（PARTIAL，语义错误停止）
+
+- 用户新增授权50次后重新核对原账本299、HEAD 0653b3f18d56c121935f50502a0dedef06ba5bcd及构建w7R3X2O0EI0OsCazfCBKo。既有Guard代码最大319，因此本次取严格上限20次、累计319，没有改共享Guard代码。复制P2最终真实合成库到独立输出目录，正式启动迁移V11，保留原数据和旧unknown。
+- 正式TokenHub/DeepSeek V4 Pro通过production页面执行一个新准备任务，原话要求三项以内。新增真实#300—302共3次，账本299→302；输入20729、输出1051 Token，新unknown0；网络、requestId、Provider usage、产品calls完全一致。SSE/JSON正常，不能用传输成功替代语义通过。
+- 实际议程为部署、日志期限、供应商等待，恰好3项；当前B与M2候选区分正确，已完成测试没有列入未完成议题。但#302在供应商议题理由中断言“B已上线”，实际输入只有采用B和部署安排，Todo仍open，模型自己的部署项也写没有完成记录；另把生成asOf日期当会议日期。错误原样保存到draft并显示，系统未拦截；本轮人工判为关键业务状态错误后写halt并立即停止后续调用，未编辑修饰响应或另建任务刷成功率。
+- 未执行用户编辑保存、创建关联M4、会后对照、P1批准或P2后续更新，均标NOT RUN。仅新增1准备草稿/1任务/2action/3call及副本迁移；原Todo、关系、Findings、P1成果、旧任务与调用逐行不变。草稿不是P1操作预览，不能宣称P1拦截通过或失败；当前缺口在准备理由/背景/状态文字之间缺乏事实一致性核对，本轮没有代码修复。
+- 证据在output/work-agent-p3-real-authorized-20261030与对应playwright目录；原请求/响应、UI/API、原文、原始停止前预检报告和失败记录保留。辅助原文脚本open空属性误判断只输出4处，供应商第1原文另有手动快照，未虚报全部UI点击。prepare/profile/inspect/closeout退出0；自有服务受控Windows停止退出1并确认退出/37954释放；SQLite完整性ok、外键空。没有重跑离线测试冒充真实验收。
+- 1428源码、Guard、7642原历史证据摘要保持；真实账本前299行不变，#287不重试/追认。产品代码、Prompt、模型路由未改，未提交/推送/合并/部署，未访问生产或真实用户数据。WORK_REVIEW_AGENT_P3_REAL_ACCEPTANCE_REPORT.md更新为PARTIAL并保留原预算阻断版本；剩余额度不自动继续消耗。下一步需用户决定是否针对已保存#302反例做小范围修复及后续复验。
+
+
+## 2026-10-30：P3 会前议程事实与会议日期定向修复（离线验收）
+
+在 codex/work-review-agent-p1、HEAD 0653b3f18d56c121935f50502a0dedef06ba5bcd 的既有 P1/P2/P3/SSE dirty 基础上，针对真实 #302 将“正式采用B”推成“B已上线”、将 asOf 推成会议日期的问题做最小产品修复。先用未修改的原响应及含 WAL 的合成库副本，经实际 SSE、AgentRuntime 和仓库复现：旧引用身份校验成功但模型自由填写的 reason/background/currentStatus 原样入库，属于事实职责缺口，不是 SSE 或 unknown。初始保护快照覆盖1431源码/配置/历史文件和7819原证据文件；未创建 Worktree、reset、stash、覆盖其他成果或访问生产。
+
+修改 work-preparation.ts、preparation-context.ts、preparation-model.ts、preparation-repository.ts、work-preparation-panel.tsx：模型只组织议题标题、问题、预期结果、优先级与有效引用；服务端在保存和读取时复用同一 P1/P2 项目上下文生成事实状态及历史标签。Todo open 仅表述为该待办尚无完成确认、现实进展需核实，不断言没做；独立问题继续按已确认关系判断。编辑接口不接受客户端事实覆盖，用户讨论版本保持。严格兼容旧模型响应但剔除其事实自由文本，旧草稿安全投影不改写原始历史；来源失效仍遵循既有清理规则。asOf 明确为状态读取时间，未关联会议时 meetingDate=null，关联后取实际会议日期；Todo 截止日期独立显示。未新增数据库/表/字段、依赖、全局开关、共享抽象或事实 authority；未改 Learning、P1/P2 核心、SSE、Runtime 和模型路由。
+
+测试修改 preparation.test.ts、work-preparation-routes.test.ts、work-preparation-panel.test.tsx，新增与原件哈希相同的 preparation-302.test-fixture.json。最终12文件162用例全过（P3三文件23例），npm run lint 完整类型检查0，隔离 production build0，postbuild清理0，git diff --check0。构建 lWqMqGIEMas13yHSwgN5m 实际浏览器使用原 #302 离线流：三项议程、正确事实/空会议日期、打开M3部署原文、删除/排序/编辑/新增议题、保存、刷新、新标签重开及原样重复 PATCH 均通过；1条准备/1条保存回执/版本2，原Todo及关系零改动。M1—M4到P1/P2的正式服务、API、持久化及组件回归通过。原响应修复前错误可复现、修复后两句不再入新草稿；旧草稿读取返回安全事实且数据库行不变。
+
+中间失败保留：快照脚本 spawnSync git EPERM；回放辅助目录 EEXIST；初次复制漏 WAL 导致来源不完整/needs_attention（后以完整副本复现，未放松校验）；首次类型检查2错（测试日期字段、错误 cancelled 状态）；初轮18例1败（旧快照断言与实时状态职责冲突，保留用户内容不变并增加完成状态断言）；23例1败（尚未/仍未解决文案，统一产品投影后单例及完整集合通过）。浏览器登录前预期401和CSS preload警告保留。Windows受控停服返回1，进程退出、37955端口释放已证实；不是构建失败。未删除失败日志或降低来源、权限、事务断言。
+
+真实 Provider 请求0，原账本仍302且摘要不变，网络历史unknown1条、旧#287及所有旧调用保持。7819历史证据哈希不变；独立副本原会议/Findings/Todo/事件/关系/P1成果逐行不变，3个自有SQLite完整性ok、外键为空。完整增量、命令、次数和证据见 WORK_REVIEW_AGENT_P3_FACTUAL_STATUS_FIX_REPORT.md 与 output/work-agent-p3-facts-20261030/。限制：讨论建议仍可能有复杂语义错误，明确待核实且不作为事实或业务写入依据；不是通用语义验证器。覆盖范围/复合Finding粒度沿用P1/P2，未增加自然语言日程推断。真实Provider复验NOT RUN，不以离线通过替代；本轮停止，不提交、推送、合并或部署。
+
+
+## 2026-11-02：办公复盘 Agent V1 集中提交前验证与发布边界
+
+- 背景与范围：用户在完整只读盘点后明确授权 commit、push，并要求提供给 Server deploy 的简短部署信息。沿用 codex/work-review-agent-p1、基线 0653b3f18d56c121935f50502a0dedef06ba5bcd；远端 main 仍为同一基线，目标开发分支尚不存在。按精确清单纳入此前 P1、SSE、P2、端点引用修复、P3 及事实/日期修复共59个文件，不重新归因既有修改，不修改业务源码，不合并 main、不访问服务器或部署。
+- 提交前验证：node output/work-agent-v1-commit-20261102/run.mjs test test-elevated 退出0，85个实际测试文件、1824用例全部通过，0失败/0跳过；覆盖办公 repository/API/组件、共享 AgentRuntime、SSE 和相邻 Provider 适配器。通过同一离线环境顺序执行 Next typegen 与 tsc --noEmit --incremental false（等价于项目 npm run lint）均退出0。首轮默认沙箱在加载配置时 spawn EPERM、零测试，保留原失败日志后在获准的本地进程环境运行同一测试选择；没有删除失败记录、改断言或更改业务超时。Git Schannel 的 SEC_E_NO_CREDENTIALS 使用单次命令的 OpenSSL backend 成功核对，未改全局配置。
+- 数据与构建保护：真实 Provider 新增0；原账本仍与305次快照字节一致，旧unknown不重试、不追认。9375个既有历史证据文件、1058个生产构建文件及本地手动验收库/WAL/SHM摘要保持，所有业务源码与盘点时一致。复用已核对的 lWqMqGIEMas13yHSwgN5m 构建，没有重复构建或停止用户手动验收服务；本轮仅在忽略的独立输出目录生成测试日志、回执和临时数据。UPDATE_HISTORY只追加，本条记录之前的完整字节前缀保留。
+- 已知发布风险：当前Windows构建的108份trace清单仍引用output下457个独立验收文件（1649次引用，包括SQLite和合成账号/会话资料）；现有清理器仅检查.data与test-data，旧forbidden=0不覆盖output，不能直接复制该构建部署。后续须在干净发布环境重建并核验发布清单无数据库、会话、验收目录和凭据；若仍残留，交回本地开发修复，不把本地源码修复派给Server deploy。本轮仅保留和说明该阻塞，没有擅自修改打包逻辑。
+- 证据边界与交接：P3事实修复后的真实会前准备/编辑保存已有单独PASS，真实M4会后对照到P1/P2完整闭环仍NOT RUN；复杂语义、复合Finding历史粒度和V11含数据后的回退限制保留，最早调研报告当前工作树未找到。V11相关测试和5套合成库只读完整性核对已有证据，不据此推定生产迁移或服务器验收通过。源码、测试、迁移、阶段报告和历史一并形成获授权的V1提交，实际SHA与推送结果以Git回执为准；部署需用户在对应任务另行明确授权。
+
+- 暂存检查补记：首次 git diff --cached --check 退出1，发现既有 P1 流式真实复验报告末尾多余空行（未跟踪文件在暂存前不参与普通 diff 检查）。先将原始完整字节保存在本轮忽略输出目录，再仅规范该报告的最终换行，正文、结论和原始验收输出不变；该项文档整理不改变已测试业务源码。失败日志与原件保留，不通过屏蔽 whitespace 检查取得通过。

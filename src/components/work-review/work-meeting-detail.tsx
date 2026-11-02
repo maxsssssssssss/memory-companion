@@ -871,10 +871,12 @@ function MeetingTodosPanel({
 
 function WorkMeetingProjectEditor({
   api,
+  agentEnabled,
   meeting,
   onChanged
 }: Readonly<{
   api: WorkReviewApi;
+  agentEnabled: boolean;
   meeting: WorkMeetingDetail["meeting"];
   onChanged: () => void;
 }>) {
@@ -908,6 +910,22 @@ function WorkMeetingProjectEditor({
         </div>
         <Link className={styles.secondaryButton} href="/work-review/projects">管理项目</Link>
       </div>
+      {agentEnabled && meeting.reviewStatus === "completed" ? (
+        <div>
+          <h3>与项目历史对比</h3>
+          <p>{meeting.projects?.length ? "选择本次处理的项目，比较已确认结果并整理后续工作。" : "先关联项目，再进行项目内会后比较。"}</p>
+          {(meeting.projects ?? []).map(project => (
+            <Link className={styles.secondaryButton} key={project.id} href={`/work-review/projects/${encodeURIComponent(project.id)}?meeting=${encodeURIComponent(meeting.id)}`}>
+              与「{project.name}」历史对比
+            </Link>
+          ))}
+        </div>
+      ) : null}
+      {agentEnabled ? <div><h3>会议准备与会后对照</h3><p>{meeting.projects?.length ? "选择本次处理的项目，可准备本会议，或关联此前保存的准备材料。" : "先明确关联项目，才能使用项目会议准备。"}</p>
+        {(meeting.projects ?? []).map(project => <Link className={styles.secondaryButton} key={`preparation-${project.id}`}
+          href={`/work-review/projects/${encodeURIComponent(project.id)}?${meeting.reviewStatus === "completed" ? "meeting" : "prepareMeeting"}=${encodeURIComponent(meeting.id)}#work-preparation`}>
+          {meeting.reviewStatus === "completed" ? "关联会议准备" : "准备本会议"} · {project.name}
+        </Link>)}</div> : null}
       <WorkProjectPicker
         api={api}
         disabled={busy}
@@ -1015,7 +1033,7 @@ export function WorkMeetingDetailView({
         <WorkMeetingStatus meeting={detail.meeting} />
       </header>
       {projectsEnabled && api ? (
-        <WorkMeetingProjectEditor api={api} meeting={detail.meeting} onChanged={onProjectsChanged ?? (() => undefined)} />
+        <WorkMeetingProjectEditor api={api} agentEnabled={featureFlags.todoEnabled} meeting={detail.meeting} onChanged={onProjectsChanged ?? (() => undefined)} />
       ) : null}
       {mutationError && !deleteOpen ? <p className={styles.formError} role="alert">{mutationError}</p> : null}
       {reviewCompleted && followUp.sourceStats ? <WorkMeetingResultStats stats={followUp.sourceStats} /> : null}
