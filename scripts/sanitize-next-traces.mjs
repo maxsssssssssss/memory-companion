@@ -27,9 +27,12 @@ function isInside(root, target) {
   );
 }
 
-function isForbiddenReference(manifestPath, file, forbiddenRoots) {
+function isForbiddenReference(manifestPath, file, forbiddenRoots, distDir) {
   const resolved = path.resolve(path.dirname(manifestPath), file);
-  return forbiddenRoots.some((root) => isInside(root, resolved));
+  // Local validation builds may themselves live in output/. Keep that build's
+  // chunks/manifests, while excluding neighboring data and historical artifacts.
+  return !isInside(distDir, resolved)
+    && forbiddenRoots.some((root) => isInside(root, resolved));
 }
 
 export async function sanitizeNextTraceManifests({
@@ -39,8 +42,14 @@ export async function sanitizeNextTraceManifests({
   const resolvedProjectDir = path.resolve(projectDir);
   const resolvedDistDir = path.resolve(resolvedProjectDir, distDir);
   const forbiddenRoots = [
+    // With a custom dist, .next is an older build, not a runtime dependency.
+    // The selected build is exempted above, including the default .next case.
+    path.resolve(resolvedProjectDir, ".next"),
     path.resolve(resolvedProjectDir, ".data"),
-    path.resolve(resolvedProjectDir, "test-data")
+    path.resolve(resolvedProjectDir, "test-data"),
+    path.resolve(resolvedProjectDir, "output"),
+    path.resolve(resolvedProjectDir, "reports"),
+    path.resolve(resolvedProjectDir, "tmp")
   ];
   const manifests = await collectTraceManifests(resolvedDistDir);
 
@@ -59,7 +68,7 @@ export async function sanitizeNextTraceManifests({
 
     entriesBefore += manifest.files.length;
     const retainedFiles = manifest.files.filter((file) => (
-      !isForbiddenReference(manifestPath, file, forbiddenRoots)
+      !isForbiddenReference(manifestPath, file, forbiddenRoots, resolvedDistDir)
     ));
     removed += manifest.files.length - retainedFiles.length;
 
@@ -76,7 +85,7 @@ export async function sanitizeNextTraceManifests({
   for (const manifestPath of manifests) {
     const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
     forbiddenAfter += manifest.files.filter((file) => (
-      isForbiddenReference(manifestPath, file, forbiddenRoots)
+      isForbiddenReference(manifestPath, file, forbiddenRoots, resolvedDistDir)
     )).length;
   }
 
@@ -94,7 +103,9 @@ export async function sanitizeNextTraceManifests({
 
 const invokedPath = process.argv[1] ? path.resolve(process.argv[1]) : "";
 if (invokedPath === fileURLToPath(import.meta.url)) {
-  const result = await sanitizeNextTraceManifests();
+  const result = await sanitizeNextTraceManifests({
+    distDir: process.env.DAILY_BRIEF_E2E_DIST_DIR?.trim() || ".next"
+  });
   console.log(
     `Next trace sanitization: manifests=${result.manifestCount} removed=${result.removed} forbidden=${result.forbiddenAfter}`
   );

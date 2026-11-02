@@ -15849,3 +15849,14 @@ Learning与UI：新增 `agent-scope.ts`、`agent-repository.ts`、`agent-scenari
 - 证据边界与交接：P3事实修复后的真实会前准备/编辑保存已有单独PASS，真实M4会后对照到P1/P2完整闭环仍NOT RUN；复杂语义、复合Finding历史粒度和V11含数据后的回退限制保留，最早调研报告当前工作树未找到。V11相关测试和5套合成库只读完整性核对已有证据，不据此推定生产迁移或服务器验收通过。源码、测试、迁移、阶段报告和历史一并形成获授权的V1提交，实际SHA与推送结果以Git回执为准；部署需用户在对应任务另行明确授权。
 
 - 暂存检查补记：首次 git diff --cached --check 退出1，发现既有 P1 流式真实复验报告末尾多余空行（未跟踪文件在暂存前不参与普通 diff 检查）。先将原始完整字节保存在本轮忽略输出目录，再仅规范该报告的最终换行，正文、结论和原始验收输出不变；该项文档整理不改变已测试业务源码。失败日志与原件保留，不通过屏蔽 whitespace 检查取得通过。
+
+
+## 2026-11-02：发布 trace 排除验收数据与旧构建（本地修复并获授权提交推送）
+
+- 背景与基线：在 codex/work-review-agent-p1、29fb31ed3aeafd5f025ec85a3b1314b9b20d5ef1 的 clean 工作区，用户授权修复构建清单、保留原数据和证据，验证后commit/push并更新部署交接；不调用真实模型、不操作服务器。先保存1438个源码/配置、1106个旧构建文件、9489个历史输出文件与原305次账本的哈希；旧.next、验收数据库/WAL/SHM、会话与原始请求响应均不清理。
+- 实际根因：对照已安装Next 15.5.19的collect-build-traces实现，复现Windows原生反斜杠绝对路径glob未匹配，而规范为正斜杠可匹配；原postbuild又仅检查.data/test-data，漏掉配置已有的output/reports/tmp。原183份trace的隔离副本经旧清理器报告forbidden=0却仍有1649条output引用；该原件与副本前态均保留。自定义构建还可能带入默认.next中的旧构建清单，独立检查确认203个旧构建文件引用，不能把它们当成本次发布依赖。
+- 最小实现：只修改scripts/sanitize-next-traces.mjs及对应测试。清理范围覆盖项目的.data、test-data、output、reports、tmp和非当前.next；只删除清单引用，不删除或改写任何来源数据。显式保留当前dist的编译产物，兼容现有output内隔离构建，并保留node_modules中同名目录的合法依赖。CLI复用已有DAILY_BRIEF_E2E_DIST_DIR，与Next选择同一构建，避免误清理旧.next。沿用原校验、幂等与错误退出契约；没有新增生产依赖、业务状态、全局开关或通用打包框架，未改P1/P2/P3、Learning、AgentRuntime、Provider或预算。
+- 实际验证：定向命令node output/work-agent-v1-trace-fix-20261102/run.mjs test tests-old-build-final退出0，2文件8用例全部通过、0跳过；覆盖验收数据库/认证样本引用排除、源文件字节保留、必要依赖/当前构建保留、旧构建排除、CLI目录选择、重复执行及坏清单拒绝。完整npm run lint退出0；正式npm run build（含postbuild）退出0，44/44页面，独立构建H6m2LW1TqprdhWKqbsmPq。后续只增强postbuild的旧.next排除，未再改编译输入业务源码，执行正式npm run postbuild退出0、再去除406条旧构建引用；没有重复无关全量测试或重编译。node --check与git diff --check通过。
+- 发布清单结果：独立验证全部183份NFT和18项required-server-files，1457个独立引用文件，禁止引用0、缺失文件0、构建内SQLite/认证样本0。实际production服务首页200且匹配新BUILD_ID、静态JS200、办公Agent/准备API未登录401；均为本地HTTP smoke，不是业务闭环或真实Provider验收。自有服务受控停止（Windows退出1），端口释放。原构建仍按原样保留为历史证据，不能把旧.next当成已清理的新发布包。
+- 失败与修正：修复前定向5通过/3失败，其中2项真实排除断言失败，CLI辅助路径因jsdom URL转换失败；修复后首轮7通过/1失败仍为该辅助路径，改为实际仓库脚本路径后8/8通过，未删用例或降低断言。首次独立检查将reflection/sessions/page.js.nft.json误判为认证样本，按实际NFT元数据修正辅助分类；同时发现旧构建引用后补充正式排除及更强断言，所有失败日志、首次新构建清单、原始旧清单均保留，没有修改认证样本来取得通过。
+- 保护与边界：9489个历史文件、1106个旧构建文件、原账本摘要全部不变，next-env.d.ts恢复原始标准引用，只有清理脚本/测试与本条历史发生预期差异。真实Provider新增0，旧unknown不重试、不追认；未访问生产、服务器或真实用户内容，未合并main或部署。证据在output/work-agent-v1-trace-fix-20261102；本轮按用户授权正常commit/push同一开发分支，最终SHA以Git回执为准。部署须从目标SHA干净构建并使用包含postbuild的正式入口；直接next build不包含该NPM生命周期。当前Windows/现有非standalone构建已验证，不替代服务器构建/迁移验收，P3真实M4闭环未验证的既有边界不变。
