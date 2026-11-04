@@ -242,8 +242,10 @@ function installGuard(options = {}) {
     recordArtifact(id);
     (options.stdout ?? (line => process.stdout.write(line)))(`[thinking-p1-real] ${id}/${MAX_REQUESTS} sent\n`);
     let completed = false, unknown = false, finalText = '', detached = false;
+    let bytes = 0, framedEventCount = 0, eofWithPendingEvent = false;
     const streamHash = crypto.createHash('sha256');
-    const extra = () => ({ finalAssistantText: finalText });
+    const extra = () => ({ finalAssistantText: finalText,
+      stream: { bytes, framedEventCount, completionReceived: completed, eofWithPendingEvent } });
     const markUnknown = reason => {
       if (completed || unknown) return;
       unknown = true;
@@ -268,11 +270,12 @@ function installGuard(options = {}) {
     try { reader = response.body.getReader(); }
     catch { markUnknown('response_body_unreadable'); detach(); fail('response_body_unreadable'); }
     const decoder = new TextDecoder();
-    let pending = '', dataLines = [], eventName = '', bytes = 0;
+    let pending = '', dataLines = [], eventName = '';
     const eventFrame = () => {
       const dataText = dataLines.join('\n'), declaredEvent = eventName;
       dataLines = []; eventName = '';
       if (!dataText || completed || unknown || dataText.trim() === '[DONE]') return;
+      framedEventCount++;
       let event;
       try { event = JSON.parse(dataText); } catch { markUnknown('invalid_stream_event'); return; }
       if (!event || typeof event !== 'object' || typeof event.type !== 'string'
@@ -307,9 +310,11 @@ function installGuard(options = {}) {
         else if (line.startsWith('event:')) eventName = line.slice(6).trim();
       }
       if (eof) {
-        if (pending.startsWith('data:')) dataLines.push(pending.slice(5).replace(/^ /u, ''));
-        else if (pending.startsWith('event:')) eventName = pending.slice(6).trim();
-        pending = ''; eventFrame();
+        // Match the SDK's SSE framing: EOF does not dispatch a pending event.
+        // Recording a JSON envelope here would claim completion that the app
+        // never received, even though both observers saw the same wire bytes.
+        eofWithPendingEvent = !completed && Boolean(pending || dataLines.length || eventName);
+        pending = ''; dataLines = []; eventName = '';
       }
     };
     const stream = new ReadableStream({

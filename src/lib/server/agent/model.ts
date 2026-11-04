@@ -50,7 +50,10 @@ export function createAgentDecisionProvider(configure: () => AgentModelConfig): 
           defaultHeaders: config.defaultHeaders,
           timeout: config.requestTimeoutMs, maxRetries: 0, logLevel: "off", fetchOptions: { redirect: "error" } });
         const value = await parseStructuredJsonResponse({ client, model: config.model, name: "agent_action", schema: Action,
-          mode: "json", stream: true, store: false, jsonRootField: null, jsonInstruction: "按受限行动协议只输出JSON。", maxOutputTokens: config.maxOutputTokens, maxResponseBytes: 200000,
+          mode: "json", stream: true, store: false, jsonRootField: null, jsonInstruction: "按受限行动协议只输出JSON。", maxOutputTokens: config.maxOutputTokens,
+          // Match the existing Work Review transport contract: SSE envelopes and
+          // repeated snapshots are separate from the bounded generated payload.
+          streamLimits: { maxEventBytes: 200_000, maxDeltaBytes: 200_000, maxTotalBytes: 4 * 200_000 + 256 * config.maxOutputTokens },
           reasoning: { effort: "none" } as never, requestInput: messages,
           requestOptions: { maxRetries: 0, timeout: config.requestTimeoutMs,
             headers: identity ? { "X-Client-Request-Id": identity.requestId } : undefined,
@@ -68,6 +71,8 @@ export function createAgentDecisionProvider(configure: () => AgentModelConfig): 
           undefined, {
             layer: !completed ? "response" : error instanceof z.ZodError ? "action_schema" : "action_json",
             reasonCode: !completed ? "response_not_completed" : error instanceof z.ZodError ? "action_schema_invalid" : "action_json_invalid",
+            ...(diagnostics ? { response: { responseStatus: diagnostics.responseStatus, parseResult: diagnostics.parseResult,
+              validationResult: diagnostics.validationResult, stream: diagnostics.stream } } : {}),
             tool: null, ...(error instanceof z.ZodError ? decisionSchemaIssues(Action, error) : { issues: [], issuesTruncated: false }),
           });
       }

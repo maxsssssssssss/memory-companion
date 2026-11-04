@@ -9,6 +9,7 @@ import { agentDecisionRequest } from "@/lib/server/agent/model";
 import { AgentFailure, type AgentDecisionProvider, type AgentDecision } from "@/lib/server/agent/types";
 import type { DailyReflectionThinkingSource } from "@/lib/domain/daily-reflection-thinking";
 import type { ThinkingMatterView, ThinkingMatterComparisonInput } from "@/lib/domain/reflection-thinking-matter";
+import { ThinkingMatterComparisonInputSchema } from "@/lib/domain/reflection-thinking-matter";
 import { DailyReflectionWorkingCardSchema } from "@/lib/domain/daily-reflection-working-card";
 import type { DailyReflectionRepository } from "./repository";
 
@@ -188,6 +189,23 @@ function canonicalCard() {
 }
 
 describe("Thinking Agent P2 comparisons, explicit choices and canonical single-card grants", () => {
+  it("projects comparison input fields to model observation while retaining server provenance in business state", async () => {
+    let observed: unknown;
+    const h = setup(async input => {
+      observed = (input.observation as { matter: { comparison: unknown } }).matter.comparison;
+      return answer("今天只讨论现有方向。");
+    });
+    const saved = addComparison(h.service, h.created);
+    await h.turn(saved, "补充新约束，继续比较。");
+    const projected = ThinkingMatterComparisonInputSchema.safeParse(observed);
+    expect(projected.success).toBe(true);
+    expect(JSON.stringify(observed)).not.toContain("sourceEventId");
+    const durable = h.service.repository.get("account_a", saved.matter.id).matter.comparison!;
+    expect(durable.sourceEventId).toBeTruthy();
+    expect(durable.options.every(option => Boolean(option.sourceEventId))).toBe(true);
+    if (projected.success) expect(projected.data.options.map(option => option.id)).toEqual(durable.options.map(option => option.id));
+  });
+
   it("describes server-assigned option IDs in the actual model request and updates only observed IDs", async () => {
     let originalIds: string[] = [];
     const h = setup(async input => {
@@ -211,7 +229,7 @@ describe("Thinking Agent P2 comparisons, explicit choices and canonical single-c
     expect(view.matter.comparison?.options.every(option => option.id.startsWith("think_option_"))).toBe(true);
     expect(view.matter.comparison?.recommendation).toMatchObject({ optionId: null, text: expect.stringContaining("方案B") });
     expect(view.events.at(-1)?.data.promptVersion).toBe(THINKING_PROMPT_VERSION);
-    expect(THINKING_PROMPT_VERSION).toBe("reflection_thinking_p3_v1");
+    expect(THINKING_PROMPT_VERSION).toBe("reflection_thinking_p3_v2");
     const savedIds = view.matter.comparison!.options.map(option => option.id);
     view = await h.turn(view, "更新已有比较");
     expect(originalIds).toEqual(savedIds); expect(view.matter.comparison?.options.map(option => option.id)).toEqual(savedIds);

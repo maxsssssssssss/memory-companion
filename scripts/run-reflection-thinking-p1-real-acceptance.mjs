@@ -26,7 +26,8 @@ if (compiledDist.startsWith("..") || compiledDist.includes(":")) throw new Error
 const dist = development ? `tmp/reflection-thinking-real-${id}` : compiledDist;
 const manifestPath = resolve(root, compiledDist, "../..", "SOURCE_MANIFEST.json");
 const digest = bytes => createHash("sha256").update(bytes).digest("hex");
-const credentials = { ...parseEnv(await readFile(resolve(root, ".env.local"), "utf8")), ...process.env };
+const localEnvPath = resolve(root, ".env.local");
+const credentials = { ...(existsSync(localEnvPath) ? parseEnv(await readFile(localEnvPath, "utf8")) : {}), ...process.env };
 let configured;
 try { configured = new URL(credentials.OPENAI_BASE_URL); } catch { throw new Error("thinking_real_endpoint_missing"); }
 if (!credentials.OPENAI_API_KEY?.trim() || !["http:", "https:"].includes(configured.protocol)

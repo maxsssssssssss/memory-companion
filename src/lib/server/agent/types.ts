@@ -1,5 +1,6 @@
 import type { z } from "zod";
 import type { AgentAction, AgentConfirmation, AgentEvent, AgentResultRef, AgentTask, AgentWait } from "@/lib/domain/agent";
+import type { StructuredJsonDiagnostics } from "@/lib/server/openai/structured-json";
 
 export interface AgentCallRequest { kind: string; inputChars: number; maxOutputTokens: number; model?: string }
 export interface AgentCallUsage { inputTokens?: number | null; outputTokens?: number | null }
@@ -11,6 +12,8 @@ export interface AgentDecisionDiagnostic {
   tool: string | null;
   issues: Array<{ code: string; path: Array<string | number> }>;
   issuesTruncated: boolean;
+  /** Fixed response labels and byte/event counts only; old records may omit it. */
+  response?: Pick<StructuredJsonDiagnostics, "responseStatus" | "parseResult" | "validationResult" | "stream">;
 }
 export interface AgentContext {
   task: AgentTask;

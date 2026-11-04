@@ -103,9 +103,18 @@ describe("durable safe decision rejection diagnostics", () => {
     await h.runtime.advance("alice", h.task.id);
     const [record] = h.store.decisionDiagnostics("alice", h.task.id);
     expect(record).toMatchObject({ callStatus: status, diagnostic: { layer, reasonCode: code, tool: null, issues: [] } });
+    if (layer === "response") expect(record.diagnostic.response).toMatchObject({ parseResult: "not_started", validationResult: "not_started",
+      stream: { completionReceived: false, failureReason: "provider_terminal" } });
     expect(JSON.stringify(record)).not.toContain(PRIVATE);
     await h.runtime.advance("alice", h.task.id);
     expect(h.fetch).toHaveBeenCalledOnce(); expect(h.execute).not.toHaveBeenCalled();
+    h.runtime.close(); h.store.close();
+    const reopened = AgentStore.open(h.dbPath);
+    try {
+      expect(reopened.decisionDiagnostics("alice", h.task.id)).toEqual([record]);
+      expect(reopened.hasUnknownCall(h.task.id, "decision:1")).toBe(status === "unknown");
+      expect(() => reopened.decisionDiagnostics("bob", h.task.id)).toThrow();
+    } finally { reopened.close(); }
   });
 
   it("adds nullable diagnostics to old call rows without inventing historical failures or changing usage", async () => {

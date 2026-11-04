@@ -177,6 +177,33 @@ test('a completed wire response with missing usage is complete but its token usa
   } finally { h.close(); }
 });
 
+test('an unterminated EOF event cannot be promoted to a framed completed response', async () => {
+  const h = fixture(async () => new Response(frame(completed()).trimEnd(), { headers: { 'content-type': 'text/event-stream' } }));
+  try {
+    await (await globalThis.fetch(h.request().value)).text();
+    assert.equal(h.api.snapshot().completed, 0);
+    assert.equal(h.api.snapshot().unknown, 1); assert.equal(h.api.snapshot().halted, true);
+    assert.deepEqual(h.artifact().stream, { bytes: Buffer.byteLength(frame(completed()).trimEnd()), framedEventCount: 0,
+      completionReceived: false, eofWithPendingEvent: true });
+    await assert.rejects(globalThis.fetch(h.request().value), /batch_halted/u);
+    assert.equal(h.calls(), 1);
+  } finally { h.close(); }
+});
+
+for (const ending of ['\n', '\r\n']) test(`the guard preserves byte-fragmented ${JSON.stringify(ending)} SSE framing and records safe completion proof`, async () => {
+  const wire = frame(completed()).replaceAll('\n', ending), bytes = Buffer.from(wire);
+  let index = 0;
+  const h = fixture(async () => new Response(new ReadableStream({
+    pull(controller) { if (index < bytes.length) controller.enqueue(bytes.subarray(index, ++index)); else controller.close(); },
+  }, { highWaterMark: 0 })));
+  try {
+    assert.equal(await (await globalThis.fetch(h.request().value)).text(), wire);
+    assert.equal(h.api.snapshot().completed, 1);
+    assert.deepEqual(h.artifact().stream, { bytes: bytes.length, framedEventCount: 1, completionReceived: true, eofWithPendingEvent: false });
+    assert.equal(h.calls(), 1);
+  } finally { h.close(); }
+});
+
 test('a subsequent business unknown halts the batch even after the prior wire response completed', async () => {
   const h = fixture();
   try {

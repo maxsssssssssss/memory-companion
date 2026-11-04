@@ -20,7 +20,7 @@ import { createThinkingTokenHubClient, THINKING_MODEL } from "./thinking-tokenhu
 import { createDailyReflectionRepository, type DailyReflectionRepository } from "./repository";
 
 export const THINKING_SCENARIO = "daily_reflection_thinking_v1";
-export const THINKING_PROMPT_VERSION = "reflection_thinking_p3_v1";
+export const THINKING_PROMPT_VERSION = "reflection_thinking_p3_v2";
 const Scope = z.object({ matterId: z.string(), generationId: z.string(), matterVersion: z.number().int(), contextMode: z.enum(["none", "auto", "personal"]), inheritedSources: z.array(ThinkingMatterSourceSchema), explicitLinkedSources: z.array(ThinkingMatterSourceSchema).default([]) }).strict();
 const CardId = z.string().trim().min(1).max(200).regex(/^[A-Za-z0-9_-]+$/u);
 export const ThinkingMatterPublicCreateSchema = ThinkingMatterCreateSchema.omit({ source: true }).extend({
@@ -38,7 +38,7 @@ const Reply = z.object({
   judgments: z.array(z.string().trim().min(1).max(2_000)).max(12),
   suggestions: z.array(z.object({ text: z.string().trim().min(1).max(2_000), kind: z.enum(["action", "decision"]) }).strict()).max(4)
     .describe("正文提出独立可执行尝试或行动性下一步时，必须同步为待采纳建议。候选方案、方向比较、倾向和推荐只写comparison，不因此生成安排；只讨论时为空。这里不会保存为已采纳安排。"),
-  comparison: ThinkingMatterComparisonInputSchema.optional().describe("保存方案、理由、限制、成本和未知；推荐不是用户选择。新方案必须省略id，由服务端分配；仅更新已有方案时使用当前观察中的原id。首轮推荐必须optionId:null，在text用方案名称说明推荐对象；不得编造plan_a/plan_b等id。"),
+  comparison: ThinkingMatterComparisonInputSchema.optional().describe("保存方案、理由、限制、成本和未知；推荐不是用户选择。新方案必须省略id，由服务端分配；仅更新已有方案时使用当前观察中的原id。首轮推荐必须optionId:null，在text用方案名称说明推荐对象；不得编造plan_a/plan_b等id。sourceEventId由服务端维护，不是输入字段，不能复制到comparison、options或recommendation。"),
 }).strict();
 type Resolver = ReturnType<typeof getDailyReflectionThinkingContextResolver>;
 type CardReader = DailyReflectionRepository["readWorkingCardWithEvidence"];
@@ -113,6 +113,7 @@ read_source 才是原始证据。引用、解释和猜测分开，judgments只�
 已有comparison更新保留方案id；用户反馈新约束时调整比较，不覆盖用户已保存选择或改选理由。只讨论比较不要求安排计划。
 comparison.options中的id由服务端分配：新方案必须省略id字段，不填null、空字符串或自定义id；仅更新已有方案时使用当前观察comparison.options里的原id，不能编造plan_a/plan_b等id。
 comparison.recommendation.optionId只能引用当前观察中已有方案的原id，或为null。首轮推荐必须optionId:null，并在text用方案名称说明推荐对象；本轮新增方案尚无服务端id，也应以null和文字表达推荐。
+sourceEventId属于服务端溯源记录，不是工具输入字段；respond.comparison及其options、recommendation只能输出参数schema列出的字段，不能复制历史事件的溯源字段。
 history中标为corrected的旧自动解释已经被用户修正，不是当前事实；以当前understanding和用户纠正为准。
 linkedRecords是用户为此事项单独关联的日常卡片，只表明有该记录，不表示卡片中的推测已被确认，也不授权检索其他历史。
 本轮回复完成后交回用户，事项仍可能进行中。不能写长期Memory、办公Todo或其他产品。
@@ -309,7 +310,17 @@ export class ThinkingAgentService {
         const compact = (event: ThinkingMatterView["events"][number]) => ({ ...event,
           text: event.data.interpretationStatus === "corrected" ? "此前自动解释已被用户修正，不再作为当前事实。" : event.text.slice(0, 1_200),
           data: event.data.interpretationStatus === "corrected" ? { interpretationStatus: "corrected" } : {} });
+        const comparison = view.matter.comparison;
+        // Durable provenance remains in business state. Only editable comparison
+        // fields belong in the model's round-trip tool input view.
+        const comparisonInput = comparison ? {
+          question: comparison.question, dimensions: comparison.dimensions,
+          options: comparison.options.map(({ id, name, content, reasons, limits, costs, unknowns }) =>
+            ({ id, name, content, reasons, limits, costs, unknowns })),
+          recommendation: comparison.recommendation ? { optionId: comparison.recommendation.optionId, text: comparison.recommendation.text } : null,
+        } : null;
         return { matter: { ...view.matter, question: view.matter.question.slice(0, 2_000), goal: view.matter.goal.slice(0, 2_000),
+            comparison: comparisonInput,
             understanding: view.matter.understanding.slice(0, 2_000), judgments: view.matter.judgments.slice(-8).map(text => text.slice(0, 300)),
             suggestions: view.matter.suggestions.slice(-8), arrangements: view.matter.arrangements.slice(-8) },
           history: view.events.slice(-12).map(compact), historyCount: view.events.length,
