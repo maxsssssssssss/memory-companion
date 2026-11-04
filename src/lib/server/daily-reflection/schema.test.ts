@@ -161,7 +161,7 @@ describe("Daily Reflection SQLite schema", () => {
       return (sql: string) => {
         const statement = target.prepare(sql);
         if (sql !== "SELECT 1 FROM dr_schema_migrations WHERE version = ?") return statement;
-        return { get(version: number) { return version === 15 ? { version: 15 } : statement.get(version); } };
+        return { get(version: number) { return version >= 15 ? { version } : statement.get(version); } };
       };
     } }) as Database.Database;
     migrateDailyReflectionSchema(beforeV15);
@@ -245,7 +245,8 @@ describe("Daily Reflection SQLite schema", () => {
           { version: 12, count: 1 },
           { version: 13, count: 1 },
           { version: 14, count: 1 },
-          { version: 15, count: 1 }
+          { version: 15, count: 1 },
+          { version: 16, count: 1 }
         ]);
       }
       expect((web.prepare("PRAGMA table_info(dr_reflections)").all() as Array<{
@@ -300,7 +301,8 @@ describe("Daily Reflection SQLite schema", () => {
         { version: 12 },
         { version: 13 },
         { version: 14 },
-        { version: 15 }
+        { version: 15 },
+        { version: 16 }
       ]);
       expect((first.prepare("PRAGMA table_info(dr_reflections)").all() as Array<{
         name: string;
@@ -350,14 +352,14 @@ describe("Daily Reflection SQLite schema", () => {
     try {
       expect(reopened.prepare(
         "SELECT COUNT(*) AS count FROM dr_schema_migrations"
-      ).get()).toEqual({ count: 15 });
+      ).get()).toEqual({ count: 16 });
       expect(reopened.prepare(
         "SELECT source_origin FROM dr_reflections WHERE id = 'reflection_reopen'"
       ).get()).toEqual({ source_origin: "unknown" });
       migrateDailyReflectionSchema(reopened);
       expect(reopened.prepare(
         "SELECT COUNT(*) AS count FROM dr_schema_migrations"
-      ).get()).toEqual({ count: 15 });
+      ).get()).toEqual({ count: 16 });
       expect(reopened.pragma("foreign_key_check")).toEqual([]);
       expect(reopened.pragma("integrity_check", { simple: true })).toBe("ok");
     } finally {
@@ -394,7 +396,8 @@ describe("Daily Reflection SQLite schema", () => {
         { version: 12 },
         { version: 13 },
         { version: 14 },
-        { version: 15 }
+        { version: 15 },
+        { version: 16 }
       ]);
       expect(database.prepare(`
         SELECT lease_owner, lease_until, attempt_version, upload_fingerprint
@@ -698,7 +701,7 @@ describe("Daily Reflection SQLite schema", () => {
 
       expect(database.prepare(
         "SELECT version FROM dr_schema_migrations ORDER BY version DESC LIMIT 2"
-      ).all()).toEqual([{ version: 15 }, { version: 14 }]);
+      ).all()).toEqual([{ version: 16 }, { version: 15 }]);
       expect(database.prepare(`
         SELECT id, title, content, status, version
         FROM dr_working_cards WHERE id = 'card_v10_proposal'

@@ -7,13 +7,18 @@ import type { AgentContext, AgentDecisionInput } from "./types";
 
 afterEach(() => vi.unstubAllGlobals());
 
-function fixture(responseValue: unknown, eventType = "response.completed") {
+function fixture(responseValue: unknown, eventType = "response.completed", options: { defaultHeaders?: Record<string, string>; status?: number } = {}) {
   // Capture the actual SDK request at fetch; no socket or Provider is involved.
   const requests: Array<{ input: Array<{ role: string; content: string }> }> = [];
+  const requestHeaders: Headers[] = [];
   const fetch = vi.fn<typeof globalThis.fetch>(async (input, init) => {
     const request = new Request(input, init);
     expect(request.url).toBe("https://synthetic-provider.invalid/v1/responses");
     requests.push(await request.json());
+    requestHeaders.push(request.headers);
+    if (options.status) return new Response('{"error":{"message":"synthetic server failure"}}', {
+      status: options.status, headers: { "content-type": "application/json" }
+    });
     const event = { type: eventType, response: {
       status: "completed", error: null, incomplete_details: null,
       usage: { input_tokens: 9, output_tokens: 4 },
@@ -36,11 +41,21 @@ function fixture(responseValue: unknown, eventType = "response.completed") {
   const ctx: AgentContext = { task, actionId: "decision:1", signal: new AbortController().signal, assertActive: async () => {},
     call: async (request, invoke) => { call(request); return (await invoke()).value; } };
   const decide = createAgentDecisionProvider(() => ({ baseURL: "https://synthetic-provider.invalid/v1", apiKey: "synthetic-key",
+    defaultHeaders: options.defaultHeaders,
     model: "synthetic-model", maxInputChars: 48000, maxOutputTokens: 1000, requestTimeoutMs: 1000 }));
-  return { invoke: () => decide(input, ctx), requests, fetch, call };
+  return { invoke: () => decide(input, ctx), requests, requestHeaders, fetch, call };
 }
 
 describe("Agent structured action request contract", () => {
+  it("preserves raw Authorization and makes one attempt when the provider fails", async () => {
+    const h = fixture(null, "response.completed", { defaultHeaders: { Authorization: "synthetic-raw-token" }, status: 500 });
+    await expect(h.invoke()).rejects.toMatchObject({ code: "unknown", message: "agent_decision_result_unknown" });
+    expect(h.requestHeaders[0].get("authorization")).toBe("synthetic-raw-token");
+    expect(h.requestHeaders[0].get("x-stainless-retry-count")).toBe("0");
+    expect(h.fetch).toHaveBeenCalledOnce();
+    expect(h.call).toHaveBeenCalledOnce();
+  });
+
   it.each([
     { tool: "synthetic.read", args: { id: "allowed" }, reason: "Read the current authorized record." },
     { wait: { kind: "feedback", message: "What should this review focus on?" } },

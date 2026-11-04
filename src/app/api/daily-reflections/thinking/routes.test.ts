@@ -203,7 +203,7 @@ describe("Daily Reflection Thinking routes", () => {
       store: accountStore,
       contextResolver: expect.any(Object)
     });
-    expect(mocks.getConversation).toHaveBeenCalledWith("conversation_1");
+    expect(mocks.getConversation).toHaveBeenCalledWith("account_1", "conversation_1");
     await expect(found.json()).resolves.toEqual({ conversation });
 
     mocks.getConversation.mockRejectedValueOnce(

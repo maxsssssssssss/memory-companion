@@ -1,9 +1,11 @@
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { StrictMode } from "react";
 
 import type {
   DailyReflectionThinkingRequest,
-  DailyReflectionThinkingResponse
+  DailyReflectionThinkingResponse,
+  DailyReflectionThinkingConversation
 } from "@/lib/domain/daily-reflection-thinking";
 import type { DailyReflectionThinkingApi } from "@/lib/client/daily-reflection-thinking-api";
 
@@ -122,6 +124,7 @@ describe("Reflection thinking UI", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     window.sessionStorage.clear();
+    window.history.replaceState({}, "", "/reflection/think");
   });
 
   it("retains one conversation, history and unsent input across mode switches", async () => {
@@ -181,11 +184,11 @@ describe("Reflection thinking UI", () => {
     ));
     render(
       <ReflectionThinkingProvider api={client}>
-        <ReflectionThinkingWorkspace initialMode={mode} />
+        <ReflectionThinkingWorkspace initialMode={mode} initialView="legacy" />
       </ReflectionThinkingProvider>
     );
 
-    await waitFor(() => expect(screen.getByRole("button", { name: label })).toHaveAttribute("aria-pressed", "true"));
+    await waitFor(() => expect(screen.getByRole("combobox", { name: "一起想的方式" })).toHaveValue(mode));
     fireEvent.change(screen.getByLabelText("想一起推演什么"), {
       target: { value: "继续想这个问题。" }
     });
@@ -199,11 +202,28 @@ describe("Reflection thinking UI", () => {
     expect(screen.queryByText(/本轮参考/u)).not.toBeInTheDocument();
   });
 
+  it("changes the compact mode selector without sending or losing the current legacy draft", async () => {
+    const client = api();
+    render(<ReflectionThinkingProvider api={client}><ReflectionThinkingWorkspace initialView="legacy" /></ReflectionThinkingProvider>);
+    const mode = screen.getByRole("combobox", { name: "一起想的方式" });
+    const record = screen.getByRole("combobox", { name: "选择讨论记录" });
+    const composer = screen.getByLabelText("想一起推演什么");
+    expect(within(mode).getAllByRole("option")).toHaveLength(5);
+    expect(within(record).getAllByRole("option").map(option => option.textContent)).toEqual(["正在想的事", "继续旧对话"]);
+    expect(composer).toHaveAttribute("rows", "2");
+    fireEvent.change(composer, { target: { value: "这个草稿还没有发送。" } });
+    fireEvent.change(mode, { target: { value: "compare_directions" } });
+    expect(mode).toHaveValue("compare_directions");
+    expect(composer).toHaveValue("这个草稿还没有发送。");
+    expect(client.think).not.toHaveBeenCalled();
+    expect(client.getConversation).not.toHaveBeenCalled();
+  });
+
   it("does not expose internal retrieval modes in the full workspace", async () => {
     const client = api();
     render(
       <ReflectionThinkingProvider api={client}>
-        <ReflectionThinkingWorkspace />
+        <ReflectionThinkingWorkspace initialView="legacy" />
       </ReflectionThinkingProvider>
     );
 
@@ -400,13 +420,13 @@ describe("Reflection thinking UI", () => {
     const client = api();
     render(
       <ReflectionThinkingProvider api={client}>
-        <ReflectionThinkingWorkspace initialMode="past_clues" />
+        <ReflectionThinkingWorkspace initialMode="past_clues" initialView="legacy" />
       </ReflectionThinkingProvider>
     );
 
-    const modes = screen.getByRole("group", { name: "一起想的方式" });
+    const modes = screen.getByRole("combobox", { name: "一起想的方式" });
     for (const label of ["头脑风暴", "想清一个决定", "比较几个方向", "延伸一个想法", "从过去找线索"]) {
-      expect(within(modes).getByRole("button", { name: label })).toBeVisible();
+      expect(within(modes).getByRole("option", { name: label })).toBeInTheDocument();
     }
     expect(screen.queryByText("参考范围")).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "只看当前问题" })).not.toBeInTheDocument();
@@ -417,7 +437,8 @@ describe("Reflection thinking UI", () => {
     const messageViewport = screen.getByRole("log", { name: "一起想的消息" });
     const composer = screen.getByLabelText("想一起推演什么").closest("form");
     expect(messageViewport.contains(composer)).toBe(false);
-    expect(messageViewport.parentElement).toBe(composer?.parentElement);
+    expect(screen.getByRole("region", { name: "一起想工作区" })).toContainElement(messageViewport);
+    expect(screen.getByRole("region", { name: "一起想工作区" })).toContainElement(composer);
     fireEvent.change(screen.getByLabelText("想一起推演什么"), {
       target: { value: "我以前是怎么想的？" }
     });
@@ -431,9 +452,10 @@ describe("Reflection thinking UI", () => {
   it("follows new messages only while the reader remains near the bottom", async () => {
     const client = api();
     render(
-      <ReflectionThinkingProvider api={client}><ReflectionThinkingWorkspace /></ReflectionThinkingProvider>
+      <ReflectionThinkingProvider api={client}><ReflectionThinkingWorkspace initialView="legacy" /></ReflectionThinkingProvider>
     );
     const viewport = screen.getByRole("log", { name: "一起想的消息" });
+    expect(viewport).toHaveAttribute("tabindex", "0");
     Object.defineProperty(viewport, "clientHeight", { configurable: true, value: 200 });
     Object.defineProperty(viewport, "scrollHeight", { configurable: true, value: 600 });
     Object.defineProperty(viewport, "scrollTo", { configurable: true, value: vi.fn() });
@@ -458,5 +480,122 @@ describe("Reflection thinking UI", () => {
     await waitFor(() => expect(client.think).toHaveBeenCalledTimes(2));
     expect(viewport.scrollTo).not.toHaveBeenCalled();
     expect(viewport.scrollTop).toBe(40);
+    fireEvent.click(screen.getByRole("button", { name: "回到最新消息" }));
+    expect(viewport.scrollTo).toHaveBeenCalledWith(expect.objectContaining({ top: 600 }));
+    expect(screen.queryByRole("button", { name: "回到最新消息" })).not.toBeInTheDocument();
+  });
+});
+
+function historicalConversation(completionStatus: "completed" | "provider_error" | "cancelled" = "completed"): DailyReflectionThinkingConversation {
+  const input: DailyReflectionThinkingRequest = { operationKey: "legacy_operation", conversationId: "thinking_legacy", message: "以前的原问题", mode: "clarify_decision", contextMode: "personal" };
+  const response = responseFor(input, "thinking_legacy", "以前保留的回答", false);
+  return { schemaVersion: 1, conversationId: "thinking_legacy", createdAt: "2026-08-26T08:00:00.000Z", updatedAt: "2026-08-26T08:00:00.000Z", messages: [
+    { ...response.assistantMessage, id: "legacy_user", role: "user", content: input.message, personalContextClaims: [], interpretations: [], hypotheses: [], model: null, completionStatus: "completed" },
+    { ...response.assistantMessage, completionStatus },
+  ] };
+}
+
+describe("Reflection thinking P3 legacy restoration", () => {
+  beforeEach(() => { vi.clearAllMocks(); window.sessionStorage.clear(); window.history.replaceState({}, "", "/reflection/think"); });
+
+  it.each([false, true])("restores an account-authorized legacy conversation from the URL, including StrictMode=%s", async strict => {
+    window.history.replaceState({}, "", "/reflection/think?conversation=thinking_legacy");
+    const client = api();
+    client.getConversation.mockResolvedValue(historicalConversation());
+    const content = <ReflectionThinkingProvider accountId="account_a" api={client}><ReflectionThinkingWorkspace /></ReflectionThinkingProvider>;
+    render(strict ? <StrictMode>{content}</StrictMode> : content);
+    await screen.findByText("以前保留的回答");
+    expect(screen.getByRole("combobox", { name: "一起想的方式" })).toHaveValue("clarify_decision");
+    expect(client.think).not.toHaveBeenCalled();
+    fireEvent.change(screen.getByLabelText("想一起推演什么"), { target: { value: "继续旧问题" } });
+    fireEvent.click(screen.getByRole("button", { name: "一起想" }));
+    await screen.findByText("回应：继续旧问题");
+    expect(client.think).toHaveBeenCalledWith(expect.objectContaining({ conversationId: "thinking_legacy", mode: "clarify_decision" }), expect.any(AbortSignal));
+    expect(new URL(window.location.href).searchParams.get("conversation")).toBe("thinking_legacy");
+    expect(new URL(window.location.href).searchParams.has("matter")).toBe(false);
+  });
+
+  it("writes a full-workspace conversation URL while Quick Panel keeps its draft out of URLs", async () => {
+    const client = api();
+    render(<ReflectionThinkingProvider accountId="account_a" api={client}><ReflectionThinkingWorkspace initialView="legacy" /></ReflectionThinkingProvider>);
+    fireEvent.change(screen.getByLabelText("想一起推演什么"), { target: { value: "私人原问题" } });
+    fireEvent.click(screen.getByRole("button", { name: "一起想" }));
+    await screen.findByText("回应：私人原问题");
+    expect(new URL(window.location.href).searchParams.get("conversation")).toBe("thinking_conversation_1");
+    expect(decodeURIComponent(window.location.href)).not.toContain("私人原问题");
+  });
+
+  it.each([false, true])("restores a same-account handoff with its private unsent draft and mode, StrictMode=%s", async strict => {
+    window.sessionStorage.setItem("daily-reflection:thinking-handoff:v2", JSON.stringify({ accountId: "account_a", conversationId: "thinking_legacy", mode: "compare_directions", contextMode: "personal", draft: "未发送的私人草稿", createdAt: Date.now() }));
+    const client = api(); client.getConversation.mockResolvedValue(historicalConversation());
+    const content = <ReflectionThinkingProvider accountId="account_a" api={client}><ReflectionThinkingWorkspace /></ReflectionThinkingProvider>;
+    render(strict ? <StrictMode>{content}</StrictMode> : content);
+    await screen.findByText("以前保留的回答");
+    expect(screen.getByLabelText("想一起推演什么")).toHaveValue("未发送的私人草稿");
+    expect(screen.getByRole("combobox", { name: "一起想的方式" })).toHaveValue("compare_directions");
+    expect(client.think).not.toHaveBeenCalled();
+    expect(window.sessionStorage.getItem("daily-reflection:thinking-handoff:v2")).toBeNull();
+  });
+
+  it.each(["foreign", "unbound"])("does not receive or send a %s handoff draft", async kind => {
+    const key = kind === "foreign" ? "daily-reflection:thinking-handoff:v2" : "daily-reflection:thinking-handoff:v1";
+    window.sessionStorage.setItem(key, JSON.stringify({ ...(kind === "foreign" ? { accountId: "account_a" } : {}), conversationId: "thinking_private", mode: "brainstorm", contextMode: "personal", draft: "另一个账号的私人草稿", createdAt: Date.now() }));
+    const client = api();
+    render(<ReflectionThinkingProvider accountId="account_b" api={client}><ReflectionThinkingWorkspace initialView="legacy" /></ReflectionThinkingProvider>);
+    expect(screen.getByLabelText("想一起推演什么")).toHaveValue("");
+    expect(screen.queryByText("另一个账号的私人草稿")).not.toBeInTheDocument();
+    expect(client.getConversation).not.toHaveBeenCalled(); expect(client.think).not.toHaveBeenCalled();
+    expect(window.sessionStorage.getItem(key)).toBeNull();
+  });
+
+  it.each(["provider_error", "cancelled"] as const)("keeps the original saved question after %s without automatically retrying", async status => {
+    window.history.replaceState({}, "", "/reflection/think?conversation=thinking_legacy");
+    const client = api(); client.getConversation.mockResolvedValue(historicalConversation(status));
+    render(<ReflectionThinkingProvider accountId="account_a" api={client}><ReflectionThinkingWorkspace /></ReflectionThinkingProvider>);
+    await screen.findByText("以前的原问题");
+    expect(screen.getByText(status === "cancelled" ? "已停止回复" : "这次回复未完成，原问题已保留。")).toBeVisible();
+    expect(client.think).not.toHaveBeenCalled();
+  });
+
+  it("keeps the composer inside a keyboard-resized visual viewport without requesting a reply", async () => {
+    const original = Object.getOwnPropertyDescriptor(window, "visualViewport");
+    const viewport = Object.assign(new EventTarget(), { height: 500, offsetTop: 0 });
+    Object.defineProperty(window, "visualViewport", { configurable: true, value: viewport });
+    const client = api();
+    const view = render(<ReflectionThinkingProvider api={client}><ReflectionThinkingWorkspace initialView="legacy" /></ReflectionThinkingProvider>);
+    try {
+      const workspace = screen.getByRole("main");
+      vi.spyOn(workspace, "getBoundingClientRect").mockReturnValue({ top: 64 } as DOMRect);
+      viewport.dispatchEvent(new Event("resize"));
+      await waitFor(() => expect(workspace.style.getPropertyValue("--thinking-frame-height")).toBe("436px"));
+      expect(workspace).toHaveAttribute("data-keyboard-open", "true");
+      viewport.height = window.innerHeight;
+      viewport.dispatchEvent(new Event("resize"));
+      await waitFor(() => expect(workspace).toHaveAttribute("data-keyboard-open", "false"));
+      expect(workspace.style.getPropertyValue("--thinking-frame-height")).toBe(`${window.innerHeight - 64}px`);
+      expect(client.think).not.toHaveBeenCalled();
+    } finally {
+      view.unmount();
+      if (original) Object.defineProperty(window, "visualViewport", original);
+      else Reflect.deleteProperty(window, "visualViewport");
+    }
+  });
+
+  it.each(["card", "matter"] as const)("keeps an explicit %s target when entering from a shell with a legacy conversation", async target => {
+    const client = api();
+    const fetcher = vi.spyOn(globalThis, "fetch").mockImplementation(async () => new Response(JSON.stringify({ matters: [] }), { headers: { "content-type": "application/json" } }));
+    try {
+      const view = render(<ReflectionThinkingProvider accountId="account_a" api={client}><Harness /></ReflectionThinkingProvider>);
+      fireEvent.change(screen.getByLabelText("想一起推演什么"), { target: { value: "已有的旧对话" } });
+      fireEvent.click(screen.getByRole("button", { name: "一起想" }));
+      await screen.findByText("回应：已有的旧对话");
+      window.history.replaceState({}, "", `/reflection/think?${target}=target_1`);
+      view.rerender(<ReflectionThinkingProvider accountId="account_a" api={client}><ReflectionThinkingWorkspace /></ReflectionThinkingProvider>);
+      await waitFor(() => expect(screen.getByRole("combobox", { name: "选择讨论记录" })).toHaveValue("matters"));
+      expect(new URL(window.location.href).searchParams.get(target)).toBe("target_1");
+      expect(new URL(window.location.href).searchParams.has("conversation")).toBe(false);
+      expect(screen.queryByLabelText("想一起推演什么")).not.toBeInTheDocument();
+      expect(client.think).toHaveBeenCalledOnce();
+    } finally { fetcher.mockRestore(); }
   });
 });

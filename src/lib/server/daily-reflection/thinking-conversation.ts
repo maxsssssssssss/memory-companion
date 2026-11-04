@@ -14,7 +14,7 @@ import {
   type DailyReflectionThinkingMessage,
   type DailyReflectionThinkingRequest,
   type DailyReflectionThinkingResponse,
-  type DailyReflectionThinkingSource
+  type DailyReflectionThinkingSource, type ThinkingMode
 } from "@/lib/domain/daily-reflection-thinking";
 import type { JsonStore } from "@/lib/server/storage/json-store";
 
@@ -23,6 +23,7 @@ import {
   getThinkingConversationProvider,
   normalizeDailyReflectionThinkingPlainText,
   projectDailyReflectionThinkingCanonicalClaims,
+  sameDailyReflectionThinkingSource,
   type ThinkingConversationProvider
 } from "./thinking-provider";
 
@@ -31,6 +32,9 @@ const OPERATION_COLLECTION = "daily-reflection-thinking-operations";
 const NO_RESULT_ANSWER = "现有可信记录里没有找到与这个问题相关的过去线索。";
 const PROVIDER_ERROR_ANSWER = "这次一起想暂时没有完成，请稍后再试。";
 const CANCELLED_ANSWER = "这次一起想已取消。";
+const SOURCE_CHANGED_ANSWER = "本轮使用的资料已变化或撤回，这次回复未保存。请按当前资料重新讨论。";
+const SOURCE_UNAVAILABLE_HISTORY = "此前自动回复使用的资料已失效，旧摘录不再展示或用于续接。";
+const SUPERSEDED_ANSWER = "已有新的用户输入，本轮旧回复已停止保存。请以最新讨论为准。";
 const MAX_MESSAGE_CONTENT_LENGTH = 8_000;
 
 function directAssistantContent(answer: string) {
@@ -203,6 +207,9 @@ function completionForError(error: unknown) {
 function operationLockKey(accountId: string, operationKey: string) {
   return `${createHash("sha256").update(accountId).digest("hex")}:${operationStorageId(operationKey)}`;
 }
+function conversationLockKey(accountId: string, conversationId: string) {
+  return `conversation:${operationLockKey(accountId, conversationId)}`;
+}
 
 const operationLocks = new Map<string, Promise<unknown>>();
 
@@ -226,10 +233,56 @@ export class DailyReflectionThinkingConversationService {
     now?: () => Date;
   }) {}
 
-  async getConversation(conversationId: string) {
+  async getConversation(accountId: string, conversationId: string) {
     const conversation = await this.dependencies.store.readConversation(conversationId);
     if (!conversation) throw new DailyReflectionThinkingConversationNotFoundError();
-    return conversation;
+    return { ...conversation, messages: await this.projectHistory(accountId, conversation.messages) };
+  }
+
+  private async sourceIsCurrent(accountId: string, source: DailyReflectionThinkingSource, input?: { mode: ThinkingMode; message: string }) {
+    try {
+      const resolved = await this.dependencies.contextResolver.resolve({ accountId, mode: input?.mode === "past_clues" ? "past_clues" : "brainstorm", contextMode: "personal",
+        message: input?.mode === "past_clues" ? input.message : "核对这条记录", pinnedCardIds: source.claim.sourceCardIds,
+        pinnedMemoryIds: source.claim.sourceMemoryIds, pinnedEvidenceIds: source.claim.evidenceIds });
+      return DailyReflectionThinkingContextResolveResultSchema.parse({ sources: resolved.sources }).sources.some(current => sameDailyReflectionThinkingSource(source, current));
+    } catch { return false; }
+  }
+
+  private async projectHistory(accountId: string, messages: DailyReflectionThinkingMessage[], allowedSources?: DailyReflectionThinkingSource[], fallback?: { mode: ThinkingMode; message: string }) {
+    const checks = new Map<string, Promise<boolean>>();
+    const current = (source: DailyReflectionThinkingSource, message: DailyReflectionThinkingMessage) => {
+      const question = message.role === "user" ? message.content : messages.find(item => item.role === "user" && item.operationKey === message.operationKey)?.content ?? fallback?.message;
+      if (message.mode === "past_clues" && !question) return Promise.resolve(false);
+      const input = { mode: message.mode, message: question ?? "核对这条记录" };
+      const key = JSON.stringify([source, input]);
+      if (!checks.has(key)) checks.set(key, this.sourceIsCurrent(accountId, source, input));
+      return checks.get(key)!;
+    };
+    const projected: DailyReflectionThinkingMessage[] = [];
+    for (const message of messages) {
+      if (allowedSources !== undefined) {
+        if (message.role === "user") { projected.push({ ...message, sources: [], usedPersonalContext: false }); continue; }
+        if (message.safetyBoundaryVersion !== DAILY_REFLECTION_THINKING_SAFETY_BOUNDARY_VERSION
+          || message.sources.some(source => !allowedSources.some(allowed => sameDailyReflectionThinkingSource(source, allowed)))) continue;
+      }
+      const valid = (await Promise.all(message.sources.map(source => current(source, message)))).every(Boolean);
+      // User content is the user's own expression; cached source excerpts are separate.
+      if (message.role === "user") {
+        projected.push(allowedSources !== undefined || !valid ? { ...message, sources: [], usedPersonalContext: false } : message);
+        continue;
+      }
+      if (allowedSources !== undefined) {
+        if (!valid) continue;
+      }
+      projected.push(valid ? message : { ...message, content: SOURCE_UNAVAILABLE_HISTORY, sources: [], usedPersonalContext: false,
+        personalContextClaims: [], interpretations: [], hypotheses: [], safetyBoundaryVersion: null });
+    }
+    return projected;
+  }
+
+  private async projectResponse(accountId: string, response: DailyReflectionThinkingResponse, request: DailyReflectionThinkingRequest) {
+    const [assistant] = await this.projectHistory(accountId, [response.assistantMessage], undefined, request);
+    return responseFromAssistant(response.conversationId, response.operationKey, assistant)!;
   }
 
   async think(
@@ -255,7 +308,7 @@ export class DailyReflectionThinkingConversationService {
       if (existingOperation.requestFingerprint !== fingerprint) {
         throw new DailyReflectionThinkingOperationConflictError();
       }
-      if (existingOperation.response) return existingOperation.response;
+      if (existingOperation.response) return this.projectResponse(accountId, existingOperation.response, request);
       const pendingConversation = await this.dependencies.store.readConversation(
         existingOperation.conversationId
       );
@@ -272,7 +325,7 @@ export class DailyReflectionThinkingConversationService {
           response: recovered,
           updatedAt: this.nowIso()
         });
-        return recovered;
+        return this.projectResponse(accountId, recovered, request);
       }
     }
 
@@ -302,10 +355,27 @@ export class DailyReflectionThinkingConversationService {
       });
     }
 
+    // Save the user's input before any asynchronous source/model work. Its ID is
+    // the durable generation fence; the short conversation lock never spans a model call.
+    let userMessage: DailyReflectionThinkingMessage = { id: newMessageId(), operationKey: request.operationKey, role: "user", mode: request.mode,
+      contextMode: request.contextMode, content: request.message, safetyBoundaryVersion: null, usedPersonalContext: false, sources: [],
+      personalContextClaims: [], interpretations: [], hypotheses: [], model: null, createdAt: timestamp, completionStatus: "completed" };
+    conversation = await serializeOperation(conversationLockKey(accountId, conversation.conversationId), async () => {
+      const latest = await this.dependencies.store.readConversation(conversation.conversationId);
+      if (!latest) throw new DailyReflectionThinkingConversationNotFoundError();
+      const existingUser = latest.messages.find(message => message.role === "user" && message.operationKey === request.operationKey);
+      if (existingUser) { userMessage = existingUser; return latest; }
+      const registered = DailyReflectionThinkingConversationSchema.parse({ ...latest, messages: [...latest.messages, userMessage].slice(-100), updatedAt: timestamp });
+      await this.dependencies.store.writeConversation(registered);
+      return registered;
+    });
+    const latestInput = (view: DailyReflectionThinkingConversation) => [...view.messages].reverse().find(message => message.role === "user");
+    const ownsInput = latestInput(conversation)?.id === userMessage.id;
+
     const shouldResolve = request.contextMode === "personal"
       || (request.contextMode === "auto" && shouldResolveAutoContext(request));
     let sources: DailyReflectionThinkingSource[] = [];
-    if (shouldResolve) {
+    if (shouldResolve && ownsInput) {
       const resolved = await this.dependencies.contextResolver.resolve({
           accountId,
           mode: request.mode,
@@ -328,7 +398,9 @@ export class DailyReflectionThinkingConversationService {
       hypotheses: string[];
       completionStatus: DailyReflectionThinkingMessage["completionStatus"];
     };
-    if (request.mode === "past_clues" && sources.length === 0) {
+    if (!ownsInput) {
+      output = { content: SUPERSEDED_ANSWER, personalContextClaims: [], interpretations: [], hypotheses: [], completionStatus: "provider_error" };
+    } else if (request.mode === "past_clues" && sources.length === 0) {
       output = {
         content: NO_RESULT_ANSWER,
         personalContextClaims: [],
@@ -338,26 +410,36 @@ export class DailyReflectionThinkingConversationService {
       };
     } else {
       try {
+        const history = await this.projectHistory(accountId, conversation.messages.filter(message => message.id !== userMessage.id), sources);
+        if (signal?.aborted) throw new DOMException("Thinking request aborted", "AbortError");
+        const current = await this.dependencies.store.readConversation(conversation.conversationId);
+        if (!current || latestInput(current)?.id !== userMessage.id) throw new Error("Thinking input was superseded");
         const generated = await this.dependencies.provider.generate({
           mode: request.mode,
           contextMode: request.contextMode,
           message: request.message,
-          history: conversation.messages,
+          history,
           sources,
           settingsStore: this.dependencies.settingsStore,
           ...(signal ? { signal } : {})
         });
-        const personalContextClaims = projectDailyReflectionThinkingCanonicalClaims(
-          generated.personalContextClaims,
-          sources
-        );
-        output = {
-          content: directAssistantContent(generated.answer),
-          personalContextClaims,
-          interpretations: generated.interpretations,
-          hypotheses: generated.hypotheses,
-          completionStatus: "completed"
-        };
+        if (signal?.aborted) throw new DOMException("Thinking request aborted", "AbortError");
+        if (!(await Promise.all(sources.map(source => this.sourceIsCurrent(accountId, source, request)))).every(Boolean)) {
+          sources = [];
+          output = { content: SOURCE_CHANGED_ANSWER, personalContextClaims: [], interpretations: [], hypotheses: [], completionStatus: "provider_error" };
+        } else {
+          const personalContextClaims = projectDailyReflectionThinkingCanonicalClaims(
+            generated.personalContextClaims,
+            sources
+          );
+          output = {
+            content: directAssistantContent(generated.answer),
+            personalContextClaims,
+            interpretations: generated.interpretations,
+            hypotheses: generated.hypotheses,
+            completionStatus: "completed"
+          };
+        }
       } catch (error) {
         output = {
           ...completionForError(error),
@@ -368,25 +450,14 @@ export class DailyReflectionThinkingConversationService {
       }
     }
 
-    const usedPersonalContext = sources.length > 0;
-    const userMessage: DailyReflectionThinkingMessage = {
-      id: newMessageId(),
-      operationKey: request.operationKey,
-      role: "user",
-      mode: request.mode,
-      contextMode: request.contextMode,
-      content: request.message,
-      safetyBoundaryVersion: null,
-      usedPersonalContext,
-      sources,
-      personalContextClaims: [],
-      interpretations: [],
-      hypotheses: [],
-      model: null,
-      createdAt: timestamp,
-      completionStatus: "completed"
-    };
-    const assistantMessage: DailyReflectionThinkingMessage = {
+    const assistantMessage = await serializeOperation(conversationLockKey(accountId, conversation.conversationId), async () => {
+      const latest = await this.dependencies.store.readConversation(conversation.conversationId);
+      const active = latest && latestInput(latest)?.id === userMessage.id;
+      if (!active) {
+        sources = [];
+        output = { content: SUPERSEDED_ANSWER, personalContextClaims: [], interpretations: [], hypotheses: [], completionStatus: "provider_error" };
+      }
+      const assistant: DailyReflectionThinkingMessage = {
       id: newMessageId(),
       operationKey: request.operationKey,
       role: "assistant",
@@ -394,7 +465,7 @@ export class DailyReflectionThinkingConversationService {
       contextMode: request.contextMode,
       content: output.content,
       safetyBoundaryVersion: DAILY_REFLECTION_THINKING_SAFETY_BOUNDARY_VERSION,
-      usedPersonalContext,
+      usedPersonalContext: sources.length > 0,
       sources,
       personalContextClaims: output.personalContextClaims,
       interpretations: output.interpretations,
@@ -402,13 +473,11 @@ export class DailyReflectionThinkingConversationService {
       model: this.dependencies.provider.model,
       createdAt: this.nowIso(),
       completionStatus: output.completionStatus
-    };
-    conversation = DailyReflectionThinkingConversationSchema.parse({
-      ...conversation,
-      messages: [...conversation.messages, userMessage, assistantMessage].slice(-100),
-      updatedAt: assistantMessage.createdAt
+      };
+      if (active) await this.dependencies.store.writeConversation(DailyReflectionThinkingConversationSchema.parse({ ...latest,
+        messages: [...latest.messages.map(message => message.id === userMessage.id ? { ...message, sources, usedPersonalContext: sources.length > 0 } : message), assistant].slice(-100), updatedAt: assistant.createdAt }));
+      return assistant;
     });
-    await this.dependencies.store.writeConversation(conversation);
     const response = responseFromAssistant(
       conversation.conversationId,
       request.operationKey,
@@ -424,7 +493,7 @@ export class DailyReflectionThinkingConversationService {
       createdAt: existingOperation?.createdAt ?? timestamp,
       updatedAt: assistantMessage.createdAt
     });
-    return response;
+    return this.projectResponse(accountId, response, request);
   }
 
   private newConversation(conversationId: string): DailyReflectionThinkingConversation {

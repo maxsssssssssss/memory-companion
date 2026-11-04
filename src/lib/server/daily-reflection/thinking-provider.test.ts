@@ -10,6 +10,7 @@ import {
   DailyReflectionThinkingProviderTimeoutError,
   TokenHubThinkingConversationProvider,
   buildDailyReflectionThinkingSystemPrompt,
+  buildDailyReflectionThinkingUserPrompt,
   getThinkingConversationProvider
 } from "./thinking-provider";
 
@@ -71,6 +72,12 @@ function historyMessage(input: {
 describe("Daily Reflection Thinking Provider", () => {
   beforeEach(() => {
     vi.useRealTimers();
+  });
+
+  it("excludes an assistant excerpt when the same source ID now has another canonical version", () => {
+    const old = source("same_source", "OLD_CANONICAL_CLAIM"), current = source("same_source", "CURRENT_CANONICAL_CLAIM");
+    const prompt = buildDailyReflectionThinkingUserPrompt({ message: "继续", history: [historyMessage({ id: "old_version", role: "assistant", content: "OLD_DERIVED_DISCUSSION", sources: [old], safetyBoundaryVersion: "v2" })], sources: [current] });
+    expect(prompt).toContain("CURRENT_CANONICAL_CLAIM"); expect(prompt).not.toContain("OLD_DERIVED_DISCUSSION");
   });
 
   it("pins Thinking to TokenHub Pro independently of shared GPT model settings", () => {

@@ -54,7 +54,7 @@ export async function GET(
     const conversation = await createDailyReflectionThinkingConversationService({
       store: authContext.store,
       contextResolver: getDailyReflectionThinkingContextResolver()
-    }).getConversation(conversationId.data);
+    }).getConversation(authContext.user.id, conversationId.data);
     return json(DailyReflectionThinkingConversationResponseSchema.parse({ conversation }));
   } catch (error) {
     if (error instanceof DailyReflectionThinkingConversationNotFoundError) {

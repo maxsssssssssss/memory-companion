@@ -2185,3 +2185,197 @@
   .thinkingPanelBackdrop,
   .thinkingPanel { animation: none; }
 }
+
+/* Saved Together-thinking matters use the same reading surface and controls. */
+.thinkingMatterViewSwitch { display: flex; flex-wrap: wrap; gap: 8px; }
+.thinkingMatterViewSwitch button { min-height: 44px; padding: 10px 16px; border: 1px solid var(--dr-border); border-radius: 12px; background: transparent; color: var(--dr-text-secondary); font: inherit; font-size: 13px; }
+.thinkingMatterViewSwitch button[aria-pressed="true"] { border-color: var(--dr-accent); background: var(--dr-accent-soft); color: var(--dr-accent); }
+.thinkingMatters { display: grid; min-width: 0; gap: 24px; }
+.thinkingMatterToolbar { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 12px; }
+.thinkingMatterToolbar > label { display: grid; flex: 1; min-width: 0; gap: 8px; color: var(--dr-text-secondary); font-size: 13px; }
+.thinkingMatterToolbar select { width: 100%; min-width: 0; min-height: 44px; max-width: 100%; padding: 10px 12px; border: 1px solid var(--dr-border-strong); border-radius: 10px; background: var(--dr-surface); color: var(--dr-text); font: inherit; }
+.thinkingMatterHeading { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: flex-start; gap: 16px; }
+.thinkingMatterHeading > div { flex: 1; min-width: min(100%, 180px); }
+.thinkingMatterHeading h2 { margin: 0; overflow-wrap: anywhere; color: var(--dr-text); font-family: Georgia, "Times New Roman", "Songti SC", serif; font-size: 26px; font-weight: 600; line-height: 1.5; }
+.thinkingMatterHeading p { margin: 8px 0 0; color: var(--dr-text-muted); font-size: 12px; }
+.thinkingMatterUnderstanding { padding: 18px 20px; border-left: 2px solid var(--dr-accent); background: var(--dr-surface-inset); }
+.thinkingMatterUnderstanding h3, .thinkingMatterSuggestions h3, .thinkingMatterArrangements h3 { margin: 0; color: var(--dr-text); font-size: 16px; font-weight: 650; }
+.thinkingMatterUnderstanding p { margin: 12px 0 0; white-space: pre-wrap; overflow-wrap: anywhere; color: var(--dr-text-secondary); font-size: 14px; line-height: 1.75; }
+.thinkingMatterSectionTitle { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.thinkingMatterSectionTitle { flex-wrap: wrap; }
+.thinkingMatterUnderstanding summary, .thinkingMatterHistoryDetails > summary { min-height: 44px; padding-top: 14px; color: var(--dr-accent); font-size: 13px; cursor: pointer; }
+.thinkingMatterUnderstanding ul { margin: 8px 0 0; padding-left: 20px; color: var(--dr-text-secondary); font-size: 13px; line-height: 1.8; }
+.thinkingMatterEdit { display: grid; margin-top: 12px; gap: 12px; }
+.thinkingMatterEdit label { display: grid; gap: 8px; color: var(--dr-text-secondary); font-size: 13px; }
+.thinkingMatterEdit textarea { min-height: 90px; padding: 12px; border: 1px solid var(--dr-border-strong); border-radius: 10px; background: var(--dr-surface); color: var(--dr-text); font: inherit; resize: vertical; }
+.thinkingMatterSuggestions, .thinkingMatterArrangements { display: grid; gap: 12px; }
+.thinkingMatterSuggestions > p { margin: 0; color: var(--dr-text-muted); font-size: 12px; }
+.thinkingMatterSuggestions > ul, .thinkingMatterArrangements > ul { display: grid; margin: 0; padding: 0; gap: 12px; list-style: none; }
+.thinkingMatterSuggestions li, .thinkingMatterArrangements li { display: flex; flex-wrap: wrap; align-items: center; padding: 16px 0; gap: 12px; border-bottom: 1px solid var(--dr-border); }
+.thinkingMatterSuggestions li > p, .thinkingMatterArrangements li > p { flex: 1 1 260px; margin: 0; overflow-wrap: anywhere; white-space: pre-wrap; color: var(--dr-text); font-size: 14px; line-height: 1.7; }
+.thinkingMatterArrangements li > small { color: var(--dr-text-muted); font-size: 12px; }
+.thinkingMatterActions { display: flex; flex-wrap: wrap; gap: 8px; }
+.thinkingMatterConversation { display: grid; min-width: 0; gap: 20px; padding: 24px; border: 1px solid var(--dr-border); border-radius: 20px; background: var(--dr-surface); }
+.thinkingMatterMessages { display: grid; min-width: 0; gap: 28px; }
+.thinkingMatterUser, .thinkingMatterAssistant { display: grid; min-width: 0; gap: 8px; }
+.thinkingMatterUser > small, .thinkingMatterAssistant > small { color: var(--dr-text-muted); font-size: 12px; }
+.thinkingMatterUser { justify-self: end; max-width: 90%; padding: 12px 16px; border-radius: 14px 14px 4px 14px; background: var(--dr-surface-muted); }
+.thinkingMatterUser > p, .thinkingMatterAssistant > p { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; color: var(--dr-text); font-size: 15px; line-height: 1.8; }
+.thinkingMatterAssistant > p { font-family: Georgia, "Times New Roman", "Songti SC", serif; font-size: 18px; }
+.thinkingMatterAssistant details { color: var(--dr-text-muted); font-size: 12px; line-height: 1.6; }
+.thinkingMatterAssistant summary { min-height: 44px; padding-top: 12px; color: var(--dr-accent); cursor: pointer; }
+.thinkingMatterSources { display: flex; min-width: 0; flex-wrap: wrap; align-items: center; gap: 4px 12px; color: var(--dr-text-muted); font-size: 12px; line-height: 1.6; }
+.thinkingMatterSources a { display: inline-flex; max-width: 100%; min-height: 44px; align-items: center; overflow-wrap: anywhere; color: var(--dr-accent); }
+.thinkingMatterDraftLabel { color: var(--dr-text-secondary); font-size: 13px; font-weight: 650; }
+.thinkingMatterHistory { display: flex; align-items: center; min-height: 44px; gap: 8px; color: var(--dr-text-secondary); font-size: 12px; line-height: 1.6; }
+.thinkingMatterHistory input { width: 18px; height: 18px; flex: none; accent-color: var(--dr-accent); }
+.thinkingMatterNotice { margin: 0; padding: 12px 16px; border-radius: 10px; background: var(--dr-accent-soft); color: var(--dr-accent); font-size: 13px; line-height: 1.7; }
+.thinkingMatterHistoryDetails { min-width: 0; }
+.thinkingMatterHistoryDetails ol { display: grid; margin: 12px 0 0; padding-left: 20px; gap: 16px; }
+.thinkingMatterHistoryDetails time { color: var(--dr-text-muted); font-size: 12px; }
+.thinkingMatterHistoryDetails li > p { margin: 6px 0 0; overflow-wrap: anywhere; white-space: pre-wrap; color: var(--dr-text-secondary); font-size: 13px; line-height: 1.7; }
+.thinkingMatters button:focus-visible, .thinkingMatters select:focus-visible, .thinkingMatters input:focus-visible, .thinkingMatters textarea:focus-visible, .thinkingMatterViewSwitch button:focus-visible { outline: 2px solid var(--dr-accent); outline-offset: 3px; }
+@media (max-width: 680px) {
+  .thinkingMatterConversation { padding: 16px; border-radius: 16px; }
+  .thinkingMatterHeading h2 { font-size: 23px; }
+  .thinkingMatterUnderstanding { padding: 16px; }
+  .thinkingMatters .thinkingComposer > div { flex-wrap: wrap; }
+  .thinkingMatters .thinkingComposer > div > small { display: block; flex: 1 1 100%; }
+  .thinkingMatterActions { width: 100%; }
+  .thinkingMatterActions > button { flex: 1; }
+}
+
+.thinkingRecentMatters > details > summary, .thinkingRecentMatters details > details > summary { min-height: 44px; padding-block: 12px; color: var(--dr-accent); cursor: pointer; font-size: 13px; }
+.thinkingRecentMatters ul { display: grid; margin: 0; padding: 0; gap: 4px; list-style: none; }
+.thinkingRecentMatters li { display: flex; min-width: 0; flex-wrap: wrap; align-items: center; justify-content: space-between; padding-block: 6px; gap: 4px 12px; border-bottom: 1px solid var(--dr-border); }
+.thinkingRecentMatters li > button { min-width: 0; min-height: 44px; padding: 8px 0; border: 0; background: transparent; color: var(--dr-text); font: inherit; font-size: 14px; text-align: left; overflow-wrap: anywhere; }
+.thinkingRecentMatters li > button[aria-pressed="true"] { color: var(--dr-accent); font-weight: 650; }
+.thinkingRecentMatters small { color: var(--dr-text-muted); font-size: 12px; }
+.thinkingComparison { display: grid; min-width: 0; gap: 16px; padding-top: 22px; border-top: 1px solid var(--dr-border); }
+.thinkingComparison h3, .thinkingMatterLinkedSources h3 { margin: 0; color: var(--dr-text); font-size: 16px; }
+.thinkingComparison h4 { margin: 0; overflow-wrap: anywhere; color: var(--dr-text); font-size: 16px; line-height: 1.6; }
+.thinkingComparisonDimensions, .thinkingChoiceState, .thinkingMatterLinkedSources > p { margin: 0; color: var(--dr-text-secondary); font-size: 13px; line-height: 1.8; overflow-wrap: anywhere; }
+.thinkingComparisonRecommendation { display: grid; min-width: 0; padding: 16px; gap: 8px; border-left: 2px solid var(--dr-accent); background: var(--dr-surface-inset); }
+.thinkingComparisonRecommendation strong { color: var(--dr-text); font-size: 13px; }
+.thinkingComparisonRecommendation p { margin: 0; color: var(--dr-text-secondary); font-size: 14px; line-height: 1.8; white-space: pre-wrap; overflow-wrap: anywhere; }
+.thinkingComparisonRecommendation small { color: var(--dr-text-muted); font-size: 12px; }
+.thinkingChoiceReason, .thinkingComparisonEditor label { display: grid; min-width: 0; gap: 8px; color: var(--dr-text-secondary); font-size: 13px; }
+.thinkingChoiceReason textarea, .thinkingComparisonEditor textarea, .thinkingComparisonEditor input { width: 100%; min-width: 0; min-height: 44px; padding: 10px 12px; border: 1px solid var(--dr-border-strong); border-radius: 10px; background: var(--dr-surface); color: var(--dr-text); font: inherit; line-height: 1.7; }
+.thinkingChoiceReason textarea, .thinkingComparisonEditor textarea { resize: vertical; }
+.thinkingComparisonOptions { display: grid; min-width: 0; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 20px; }
+.thinkingComparisonOptions article { display: grid; min-width: 0; align-content: start; padding: 16px 0; gap: 12px; border-top: 1px solid var(--dr-border); }
+.thinkingComparisonOptions article > p { margin: 0; color: var(--dr-text-secondary); font-size: 14px; line-height: 1.8; white-space: pre-wrap; overflow-wrap: anywhere; }
+.thinkingComparisonOptions dl { display: grid; margin: 0; gap: 12px; }
+.thinkingComparisonOptions dt { color: var(--dr-text); font-size: 12px; font-weight: 650; }
+.thinkingComparisonOptions dd { margin: 5px 0 0; color: var(--dr-text-secondary); font-size: 13px; line-height: 1.7; overflow-wrap: anywhere; }
+.thinkingComparisonOptions dd ul { margin: 0; padding-left: 18px; }
+.thinkingComparisonOptions .thinkingMatterActions { align-self: end; }
+.thinkingComparison button { min-height: 44px; white-space: normal; overflow-wrap: anywhere; }
+.thinkingComparison > button { justify-self: start; }
+.thinkingComparisonEditor { display: grid; min-width: 0; padding-top: 18px; gap: 16px; border-top: 1px solid var(--dr-border); }
+.thinkingComparisonEditor fieldset { display: grid; min-width: 0; padding: 16px; gap: 12px; border: 1px solid var(--dr-border); border-radius: 12px; }
+.thinkingComparisonEditor legend { padding-inline: 6px; color: var(--dr-text-secondary); font-size: 13px; }
+.thinkingMatterLinkedSources { display: grid; min-width: 0; gap: 12px; }
+.thinkingMatterLinkedSources ul { display: flex; flex-wrap: wrap; margin: 0; padding: 0; gap: 12px; list-style: none; }
+.thinkingMatterLinkedSources li { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+.thinkingMatterLinkedSources a { display: inline-flex; min-height: 44px; align-items: center; color: var(--dr-accent); font-size: 13px; }
+.thinkingSourceUnavailable { overflow-wrap: anywhere; color: var(--dr-text-muted); font-size: 13px; line-height: 1.7; }
+.thinkingLatestFeedback { display: grid; min-width: 0; gap: 8px; padding: 16px 18px; border-left: 2px solid var(--dr-accent); background: var(--dr-surface-inset); }
+.thinkingLatestFeedback h3 { margin: 0; color: var(--dr-text); font-size: 15px; }
+.thinkingLatestFeedback time { color: var(--dr-text-muted); font-size: 12px; }
+.thinkingLatestFeedback p { margin: 0; overflow-wrap: anywhere; white-space: pre-wrap; color: var(--dr-text-secondary); font-size: 14px; line-height: 1.8; }
+
+/* The full Together-thinking page keeps navigation and the composer in view.
+   Progress lives in its own drawer; only the conversation consumes scroll space. */
+.reflectionApp .reflectionShellContent:has(> .thinkingWorkspace) { min-height: 0; padding-bottom: 0; }
+.thinkingWorkspace {
+  height: var(--thinking-frame-height, calc(100dvh - 64px - env(safe-area-inset-top)));
+  min-height: 0;
+  width: min(calc(100% - 48px), var(--dr-workspace-width));
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  padding: 14px 0 10px;
+  gap: 10px;
+  overflow: hidden;
+}
+.thinkingWorkspaceHeader { display: flex; width: 100%; min-width: 0; align-items: center; justify-content: space-between; gap: 12px; }
+.thinkingWorkspaceHeader h1 { flex: none; font-size: 26px; line-height: 1.2; letter-spacing: -.035em; }
+.thinkingWorkspaceControls { display: flex; min-width: 0; align-items: center; gap: 8px; }
+.thinkingWorkspaceControls label { min-width: 0; }
+.thinkingWorkspaceControls select { width: 100%; max-width: 190px; min-height: 44px; padding: 8px 28px 8px 12px; border: 1px solid var(--dr-border); border-radius: 10px; background: var(--dr-surface); color: var(--dr-text); font: inherit; font-size: 13px; }
+.thinkingWorkspaceCanvas { height: 100%; min-height: 0; border-radius: 16px; }
+.thinkingWorkspaceCanvas > .thinkingComposer { margin: 0 12px 12px; padding: 10px 12px; gap: 6px; }
+.thinkingWorkspaceCanvas > .thinkingComposer textarea { min-height: 48px; max-height: 120px; resize: none; overflow-y: auto; }
+.thinkingWorkspace .thinkingTrustNote { margin: 0; padding: 0 2px; font-size: 11px; line-height: 1.5; }
+.thinkingMatters { min-height: 0; grid-template-rows: auto minmax(0, 1fr); gap: 8px; }
+.thinkingMatterToolbar { display: flex; min-width: 0; align-items: center; flex-wrap: wrap; gap: 6px 8px; }
+.thinkingMatterToolbar > label { min-width: 100px; gap: 0; }
+.thinkingMatterToolbar > button { flex: none; min-height: 44px; padding: 8px 12px; font-size: 13px; white-space: nowrap; }
+.thinkingMatterToolbar select { text-overflow: ellipsis; font-size: 13px; }
+.thinkingMatterToolbarStatus { display: flex; flex: 1 1 100%; min-width: 0; align-items: center; flex-wrap: wrap; margin: 0; padding: 0 2px; gap: 4px 12px; color: var(--dr-text-muted); font-size: 12px; line-height: 1.6; }
+.thinkingMatterToolbarStatus > span { min-width: 0; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.thinkingMatterMore { position: relative; flex: none; }
+.thinkingMatterMore > summary { display: flex; min-height: 44px; align-items: center; padding: 8px 12px; border: 1px solid var(--dr-border); border-radius: 10px; background: var(--dr-surface); color: var(--dr-text-secondary); cursor: pointer; font-size: 13px; list-style: none; }
+.thinkingMatterMore > summary::-webkit-details-marker { display: none; }
+.thinkingMatterMore > div { position: absolute; z-index: 35; top: calc(100% + 6px); right: 0; display: grid; width: max-content; min-width: 168px; padding: 6px; gap: 4px; border: 1px solid var(--dr-border); border-radius: 12px; background: var(--dr-surface); box-shadow: var(--db-shadow-overlay); }
+.thinkingMatterMore button { min-height: 44px; text-align: left; }
+.thinkingMatterBody { display: grid; position: relative; min-width: 0; min-height: 0; overflow: hidden; }
+.thinkingMatterConversation { height: 100%; min-height: 0; grid-template-rows: minmax(0, 1fr) auto; padding: 0; gap: 0; overflow: hidden; border-radius: 16px; }
+.thinkingMessageArea, .thinkingMatterMessageArea { position: relative; display: grid; min-width: 0; min-height: 0; overflow: hidden; }
+.thinkingMessageArea > .thinkingMessageViewport { height: 100%; }
+.thinkingWorkspace .thinkingMessageArea > .thinkingMessageViewport { padding: 20px 24px; }
+.thinkingPanelConversation > .thinkingMessageArea { height: 100%; }
+.thinkingMatterMessages { display: flex; min-height: 0; flex-direction: column; align-items: stretch; padding: 20px 24px; gap: 24px; overflow-x: hidden; overflow-y: auto; overscroll-behavior: contain; scroll-padding-block: 20px; }
+.thinkingMatterMessages > .thinkingEmpty { flex: 1; min-height: 0; }
+.thinkingMatterUser { flex: none; align-self: flex-end; }
+.thinkingMatterAssistant { flex: none; }
+.thinkingMatterMessages .thinkingMatterSuggestions { margin-top: 10px; gap: 8px; }
+.thinkingMatterMessages .thinkingMatterSuggestions h3 { font-size: 14px; }
+.thinkingMatterMessages .thinkingMatterSuggestions li { padding: 8px 0; }
+.thinkingLatestMessage, .thinkingMatterLatestMessage { position: absolute; z-index: 2; right: 50%; bottom: 10px; min-height: 44px; max-width: calc(100% - 24px); transform: translateX(50%); padding: 8px 16px; border: 1px solid var(--dr-border-strong); border-radius: 24px; background: var(--dr-surface); color: var(--dr-accent); box-shadow: var(--db-shadow-overlay); cursor: pointer; font: inherit; font-size: 12px; white-space: nowrap; }
+.thinkingMatterComposerArea { display: grid; min-width: 0; min-height: 0; max-height: min(46dvh, 360px); padding: 0 12px 12px; gap: 6px; overflow-y: auto; overscroll-behavior: contain; }
+.thinkingMatterComposerArea > .thinkingComposer { min-width: 0; padding: 10px 12px; gap: 6px; }
+.thinkingMatterComposerArea .thinkingComposer textarea { min-height: 48px; max-height: 120px; padding: 2px 0; resize: none; overflow-y: auto; }
+.thinkingMatterComposerArea .thinkingComposer > div { flex-wrap: wrap; gap: 6px 8px; }
+.thinkingMatterComposerArea .thinkingComposer > div > small { display: none; }
+.thinkingMatterComposerArea .thinkingComposer button { min-height: 44px; padding-block: 8px; font-size: 13px; }
+.thinkingMatterComposerArea .thinkingMatterDraftLabel { font-size: 12px; }
+.thinkingMatterComposerArea .thinkingMatterNotice { padding: 8px 12px; font-size: 12px; line-height: 1.5; }
+.thinkingMatterDrawer { display: contents; }
+.thinkingMatterDrawer > div { display: flex; align-items: stretch; justify-content: flex-end; padding: 0; }
+.thinkingMatterDrawer [role="dialog"] { width: min(100%, 440px); height: 100dvh; max-height: 100dvh; grid-template-rows: auto minmax(0, 1fr); border-radius: 18px 0 0 18px; }
+.thinkingMatterDrawer [role="dialog"] > header { padding-top: max(16px, env(safe-area-inset-top)); }
+.thinkingMatterDrawer [role="dialog"] > header > h2 { font-size: 22px; }
+.thinkingMatterDrawer [role="dialog"] > div { display: grid; align-content: start; padding-bottom: max(20px, env(safe-area-inset-bottom)); gap: 22px; overscroll-behavior: contain; }
+.thinkingMatterDrawer .thinkingMatterSectionTitle { gap: 8px; }
+.thinkingMatterDrawer .thinkingMatterActions { width: auto; }
+.thinkingMatterDrawer .thinkingMatterUnderstanding { padding: 14px 16px; }
+.thinkingMatterDrawer .thinkingComparisonOptions { grid-template-columns: minmax(0, 1fr); gap: 12px; }
+.thinkingMatterDrawer .thinkingComparisonOptions article { gap: 8px; }
+.thinkingMatterDrawer .thinkingComparisonOptions article button { flex: 1 1 100%; }
+.thinkingMatterDrawer .thinkingRecentMatters { min-width: 0; }
+.thinkingMatterDrawer .thinkingMatterLinkedSources li { gap: 4px 8px; }
+.thinkingWorkspace[data-keyboard-open="true"] { grid-template-rows: auto minmax(0, 1fr); }
+.thinkingWorkspace[data-keyboard-open="true"] .thinkingTrustNote,
+.thinkingWorkspace[data-keyboard-open="true"] .thinkingMatterToolbarStatus { display: none; }
+@media (max-width: 900px) {
+  .thinkingWorkspace { height: var(--thinking-frame-height, calc(100dvh - 64px - var(--dr-mobile-nav-height) - env(safe-area-inset-top) - env(safe-area-inset-bottom))); width: min(calc(100% - 28px), var(--dr-workspace-width)); padding: 8px 0; gap: 8px; }
+  .thinkingWorkspaceHeader { gap: 8px; }
+  .thinkingWorkspaceHeader h1 { font-size: 22px; }
+  .thinkingWorkspaceControls { display: grid; flex: 1; max-width: 330px; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px; }
+  .thinkingWorkspaceControls select { padding-inline: 8px 20px; font-size: 12px; }
+  .thinkingMatterToolbar { gap: 4px 6px; }
+  .thinkingMatterToolbar > button { padding-inline: 10px; font-size: 12px; }
+  .thinkingMatterToolbar select { padding-inline: 8px 18px; font-size: 12px; }
+  .thinkingMatterMore > summary { padding-inline: 10px; font-size: 12px; }
+  .thinkingMatterMessages, .thinkingWorkspace .thinkingMessageArea > .thinkingMessageViewport { padding: 14px; gap: 20px; }
+  .thinkingMatterAssistant > p { font-size: 16px; line-height: 1.75; }
+  .thinkingMatterComposerArea { padding: 0 8px 8px; }
+  .thinkingWorkspaceCanvas > .thinkingComposer { margin: 0 8px 8px; }
+  .thinkingWorkspace .thinkingTrustNote { font-size: 10px; line-height: 1.4; }
+  .thinkingMatterDrawer [role="dialog"] { width: min(100%, 440px); border-radius: 0; }
+}
+@media (max-width: 680px) {
+  .thinkingComparisonOptions { grid-template-columns: minmax(0, 1fr); gap: 12px; }
+  .thinkingRecentMatters li > small { flex: 1 1 100%; }
+  .thinkingComparisonEditor fieldset { padding: 12px; }
+}

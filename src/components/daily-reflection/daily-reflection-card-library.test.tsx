@@ -162,6 +162,23 @@ afterEach(() => {
 });
 
 describe("DailyReflectionCardLibrary", () => {
+  it.each([false, true])("offers an ID-only Together-thinking entry only while the saved source is available (%s)", async sourceUnavailable => {
+    const client = testApi(vi.fn(), {
+      listWorkingCards: vi.fn(async () => listResponse([card("saved", sourceUnavailable)])),
+      getWorkingCard: vi.fn(async () => detail("saved", sourceUnavailable)),
+      getWorkingCardMemoryProposal: vi.fn<DailyReflectionApi["getWorkingCardMemoryProposal"]>(() => new Promise(() => undefined)),
+    });
+    render(<DailyReflectionCardLibrary api={client} initialCardId="card_1" />);
+    const dialog = await screen.findByRole("dialog", { name: card().title });
+    if (sourceUnavailable) expect(within(dialog).queryByRole("link", { name: "拿这张卡片一起想" })).not.toBeInTheDocument();
+    else {
+      const entry = within(dialog).getByRole("link", { name: "拿这张卡片一起想" });
+      expect(entry).toHaveAttribute("href", "/reflection/think?card=card_1");
+      expect(entry.getAttribute("href")).not.toContain(card().content);
+      expect(entry.getAttribute("href")).not.toContain(card().title);
+    }
+  });
+
   it("ignores an aborted list response after the sort request changes", async () => {
     let finishFirst!: (value: ReturnType<typeof listResponse>) => void;
     const first = new Promise<ReturnType<typeof listResponse>>((resolve) => { finishFirst = resolve; });

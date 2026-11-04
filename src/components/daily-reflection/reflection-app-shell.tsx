@@ -190,7 +190,7 @@ export function ReflectionAppShell({
   return (
     <ReflectionAppContext.Provider value={context}>
       <ReflectionAiReviewProvider accountId={session.auth.user.id} api={aiReviewApi} key={session.auth.user.id}>
-        <ReflectionThinkingProvider api={THINKING_API}>
+        <ReflectionThinkingProvider accountId={session.auth.user.id} api={THINKING_API}>
         <div className={`${styles.reflectionApp} ${focused ? styles.reflectionFocusedFlow : styles.reflectionRootFlow}`}>
         <header className={styles.reflectionHeader}>
           <Link className={styles.reflectionBrand} href={REFLECTION_ROUTES.home} aria-label="回到日常复盘首页">

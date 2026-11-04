@@ -35,7 +35,8 @@ const nextConfig = {
       "./node_modules/@napi-rs/canvas*/**/*"
     ]
   },
-  serverExternalPackages: ["better-sqlite3", "bullmq", "ffmpeg-static", "ffprobe-static", "ioredis", "ws", "pdfjs-dist"]
+  serverExternalPackages: ["better-sqlite3", "bullmq", "ffmpeg-static", "ffprobe-static", "ioredis", "ws", "pdfjs-dist",
+    "@langchain/core", "@langchain/langgraph", "@langchain/langgraph-checkpoint-sqlite"]
 };
 
 export default nextConfig;

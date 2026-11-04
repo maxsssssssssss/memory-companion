@@ -1,6 +1,6 @@
 import type Database from "better-sqlite3";
 
-export const DAILY_REFLECTION_SCHEMA_VERSION = 15;
+export const DAILY_REFLECTION_SCHEMA_VERSION = 16;
 
 // Version one intentionally represents the pre-provenance workflow shape.
 // Version two adds source_origin with a fail-closed legacy backfill and the
@@ -1385,6 +1385,44 @@ const DAILY_REFLECTION_SCHEMA_V15 = `
   END;
 `;
 
+// Thinking progress is product-owned. Neither suggestions nor adopted arrangements
+// are long-term Memory or office Todo entries. Events retain the complete history.
+const DAILY_REFLECTION_SCHEMA_V16 = `
+  CREATE TABLE dr_thinking_matters (
+    id TEXT NOT NULL,
+    account_id TEXT NOT NULL,
+    version INTEGER NOT NULL CHECK (version >= 0),
+    state_json TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (account_id, id)
+  );
+  CREATE INDEX idx_dr_thinking_matters_account_updated
+    ON dr_thinking_matters(account_id, updated_at DESC, id);
+  CREATE TABLE dr_thinking_events (
+    account_id TEXT NOT NULL,
+    matter_id TEXT NOT NULL,
+    id TEXT NOT NULL,
+    ordinal INTEGER NOT NULL CHECK (ordinal >= 0),
+    event_json TEXT NOT NULL,
+    PRIMARY KEY (account_id, matter_id, ordinal),
+    UNIQUE (account_id, id),
+    FOREIGN KEY (account_id, matter_id)
+      REFERENCES dr_thinking_matters(account_id, id) ON DELETE CASCADE
+  );
+  CREATE TABLE dr_thinking_receipts (
+    account_id TEXT NOT NULL,
+    operation_key TEXT NOT NULL,
+    matter_id TEXT NOT NULL,
+    fingerprint TEXT NOT NULL,
+    result_json TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (account_id, operation_key),
+    FOREIGN KEY (account_id, matter_id)
+      REFERENCES dr_thinking_matters(account_id, id) ON DELETE CASCADE
+  );
+`;
+
 const MIGRATIONS = [
   { version: 1, sql: DAILY_REFLECTION_SCHEMA_V1 },
   { version: 2, sql: DAILY_REFLECTION_SCHEMA_V2 },
@@ -1400,7 +1438,8 @@ const MIGRATIONS = [
   { version: 12, sql: DAILY_REFLECTION_SCHEMA_V12 },
   { version: 13, sql: DAILY_REFLECTION_SCHEMA_V13 },
   { version: 14, sql: DAILY_REFLECTION_SCHEMA_V14 },
-  { version: 15, sql: DAILY_REFLECTION_SCHEMA_V15 }
+  { version: 15, sql: DAILY_REFLECTION_SCHEMA_V15 },
+  { version: 16, sql: DAILY_REFLECTION_SCHEMA_V16 }
 ] as const;
 
 function tableHasColumn(

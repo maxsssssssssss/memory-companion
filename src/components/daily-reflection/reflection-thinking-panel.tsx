@@ -60,7 +60,7 @@ type ReflectionThinkingContextValue = Readonly<{
   conversationId?: string;
   draft: string;
   error: string | null;
-  initializeWorkspace(initialMode?: ThinkingMode): void;
+  initializeWorkspace(initialMode?: ThinkingMode, legacyConversationId?: string): boolean;
   mode: ThinkingMode;
   openPanel(trigger?: HTMLElement): void;
   panelOpen: boolean;
@@ -73,10 +73,12 @@ type ReflectionThinkingContextValue = Readonly<{
 
 const ThinkingContext = createContext<ReflectionThinkingContextValue | null>(null);
 const MAX_DRAFT_LENGTH = 8_000;
-const THINKING_HANDOFF_KEY = "daily-reflection:thinking-handoff:v1";
+const THINKING_HANDOFF_KEY = "daily-reflection:thinking-handoff:v2";
+const LEGACY_THINKING_HANDOFF_KEY = "daily-reflection:thinking-handoff:v1";
 const THINKING_HANDOFF_MAX_AGE_MS = 60_000;
 
 type ThinkingHandoff = Readonly<{
+  accountId: string;
   contextMode: ContextMode;
   conversationId?: string;
   createdAt: number;
@@ -97,11 +99,14 @@ export const THINKING_MODE_COPY: Readonly<Record<ThinkingMode, Readonly<{
 
 const DEFAULT_THINKING_CONTEXT_MODE: ContextMode = "personal";
 
-function readThinkingHandoff(): ThinkingHandoff | null {
+function readThinkingHandoff(accountId?: string): ThinkingHandoff | null {
   if (typeof window === "undefined") return null;
   const raw = window.sessionStorage.getItem(THINKING_HANDOFF_KEY);
   window.sessionStorage.removeItem(THINKING_HANDOFF_KEY);
-  if (!raw) return null;
+  // Unbound historical drafts cannot be assigned to whichever account signs in
+  // next. This does not change or migrate any saved JsonStore conversation.
+  window.sessionStorage.removeItem(LEGACY_THINKING_HANDOFF_KEY);
+  if (!raw || !accountId) return null;
   try {
     const candidate = JSON.parse(raw) as Partial<ThinkingHandoff>;
     const mode = ThinkingModeSchema.safeParse(candidate.mode);
@@ -109,12 +114,16 @@ function readThinkingHandoff(): ThinkingHandoff | null {
     if (
       !mode.success
       || !contextMode.success
+      || candidate.accountId !== accountId
       || typeof candidate.createdAt !== "number"
       || Date.now() - candidate.createdAt > THINKING_HANDOFF_MAX_AGE_MS
+      || candidate.createdAt > Date.now()
       || typeof candidate.draft !== "string"
+      || candidate.draft.length > MAX_DRAFT_LENGTH
       || (candidate.conversationId !== undefined && typeof candidate.conversationId !== "string")
     ) return null;
     return {
+      accountId,
       contextMode: contextMode.data,
       conversationId: candidate.conversationId,
       createdAt: candidate.createdAt,
@@ -174,17 +183,14 @@ function errorMessage(error: unknown) {
 function turnsFromConversation(
   conversation: DailyReflectionThinkingConversation
 ): ThinkingTurn[] {
-  const userByOperation = new Map(conversation.messages
-    .filter((message) => message.role === "user")
-    .map((message) => [message.operationKey, message]));
-  return conversation.messages.flatMap((assistant) => {
-    if (
-      assistant.role !== "assistant"
-      || (assistant.completionStatus !== "completed" && assistant.completionStatus !== "no_result")
-      || !assistant.model
-    ) return [];
-    const user = userByOperation.get(assistant.operationKey);
-    if (!user || user.mode !== assistant.mode || user.contextMode !== assistant.contextMode) return [];
+  const assistantByOperation = new Map(conversation.messages.filter(message => message.role === "assistant").map(message => [message.operationKey, message]));
+  return conversation.messages.filter(message => message.role === "user").map(user => {
+    const assistant = assistantByOperation.get(user.operationKey);
+    const base = { contextMode: user.contextMode, id: user.operationKey, mode: user.mode, operationKey: user.operationKey, userText: user.content };
+    if (!assistant || !assistant.model || user.mode !== assistant.mode || user.contextMode !== assistant.contextMode
+      || !["completed", "no_result"].includes(assistant.completionStatus)) {
+      return { ...base, response: null, status: assistant?.completionStatus === "cancelled" ? "cancelled" as const : "failed" as const };
+    }
     const response = DailyReflectionThinkingResponseSchema.safeParse({
       conversationId: conversation.conversationId,
       operationKey: assistant.operationKey,
@@ -193,16 +199,7 @@ function turnsFromConversation(
       sources: assistant.sources,
       model: assistant.model
     });
-    if (!response.success) return [];
-    return [{
-      contextMode: user.contextMode,
-      id: assistant.operationKey,
-      mode: user.mode,
-      operationKey: assistant.operationKey,
-      response: response.data,
-      status: "completed" as const,
-      userText: user.content
-    }];
+    return { ...base, response: response.success ? response.data : null, status: response.success ? "completed" as const : "failed" as const };
   });
 }
 
@@ -213,9 +210,11 @@ export function useReflectionThinking() {
 }
 
 export function ReflectionThinkingProvider({
+  accountId,
   api,
   children
 }: Readonly<{
+  accountId?: string;
   api: DailyReflectionThinkingApi;
   children: ReactNode;
 }>) {
@@ -230,6 +229,8 @@ export function ReflectionThinkingProvider({
   const retryRequest = useRef<RetryRequest | null>(null);
   const submitting = useRef(false);
   const conversationIdRef = useRef(conversationId);
+  const loadedConversationId = useRef<string | undefined>(undefined);
+  const restoringMode = useRef<ThinkingMode | undefined>(undefined);
   const refreshBeforeNextRequest = useRef(false);
   const panelTrigger = useRef<HTMLElement | null>(null);
   conversationIdRef.current = conversationId;
@@ -329,6 +330,7 @@ export function ReflectionThinkingProvider({
       }
       setConversationId(response.conversationId);
       conversationIdRef.current = response.conversationId;
+      loadedConversationId.current = response.conversationId;
       const completionStatus = response.assistantMessage.completionStatus;
       if (completionStatus === "provider_error") {
         retryRequest.current = {
@@ -396,7 +398,12 @@ export function ReflectionThinkingProvider({
 
   const prepareWorkspaceHandoff = useCallback(() => {
     if (typeof window === "undefined") return;
+    window.sessionStorage.removeItem(LEGACY_THINKING_HANDOFF_KEY);
+    // Authenticated shells provide the account. Isolated consumers keep their
+    // current in-memory conversation without saving an unowned private draft.
+    if (!accountId) return;
     const handoff: ThinkingHandoff = {
+      accountId,
       contextMode: DEFAULT_THINKING_CONTEXT_MODE,
       conversationId,
       createdAt: Date.now(),
@@ -404,32 +411,42 @@ export function ReflectionThinkingProvider({
       mode
     };
     window.sessionStorage.setItem(THINKING_HANDOFF_KEY, JSON.stringify(handoff));
-  }, [conversationId, draft, mode]);
+  }, [accountId, conversationId, draft, mode]);
 
-  const initializeWorkspace = useCallback((initialMode?: ThinkingMode) => {
-    const handoff = readThinkingHandoff();
-    const nextMode = handoff?.mode ?? initialMode;
-    if (nextMode && nextMode !== mode) setMode(nextMode);
-    if (handoff) {
-      setDraftState(handoff.draft);
-      if (handoff.conversationId && handoff.conversationId !== conversationIdRef.current) {
-        setConversationId(handoff.conversationId);
-        conversationIdRef.current = handoff.conversationId;
-        const controller = new AbortController();
-        activeRequest.current?.abort();
-        activeRequest.current = controller;
-        void api.getConversation(handoff.conversationId, controller.signal).then((conversation) => {
-          if (!controller.signal.aborted) setTurns(turnsFromConversation(conversation));
-        }).catch((caught) => {
-          if (!controller.signal.aborted) setError(errorMessage(caught));
-        }).finally(() => {
-          if (activeRequest.current === controller) activeRequest.current = null;
-        });
-      }
+  const initializeWorkspace = useCallback((initialMode?: ThinkingMode, legacyConversationId?: string) => {
+    const savedHandoff = readThinkingHandoff(accountId);
+    const handoff = savedHandoff && (!legacyConversationId || savedHandoff.conversationId === legacyConversationId) ? savedHandoff : null;
+    const interruptedRead = activeRequest.current?.signal.aborted && loadedConversationId.current !== conversationIdRef.current ? conversationIdRef.current : undefined;
+    const nextMode = handoff?.mode ?? initialMode ?? (interruptedRead ? restoringMode.current : undefined);
+    if (nextMode) setMode(current => current === nextMode ? current : nextMode);
+    if (handoff) setDraftState(handoff.draft);
+    const requestedConversationId = legacyConversationId ?? handoff?.conversationId ?? interruptedRead;
+    if (requestedConversationId && (requestedConversationId !== conversationIdRef.current || loadedConversationId.current !== requestedConversationId)) {
+      if (!handoff && !interruptedRead) setDraftState("");
+      setConversationId(requestedConversationId);
+      conversationIdRef.current = requestedConversationId;
+      setTurns([]);
+      const controller = new AbortController();
+      restoringMode.current = nextMode;
+      activeRequest.current?.abort();
+      activeRequest.current = controller;
+      submitting.current = true;
+      setBusy(true);
+      void api.getConversation(requestedConversationId, controller.signal).then((conversation) => {
+        if (controller.signal.aborted) return;
+        loadedConversationId.current = conversation.conversationId;
+        setTurns(turnsFromConversation(conversation));
+        if (!nextMode && conversation.messages.length) setMode(conversation.messages.at(-1)!.mode);
+      }).catch((caught) => {
+        if (!controller.signal.aborted) setError(errorMessage(caught));
+      }).finally(() => {
+        if (activeRequest.current === controller) { activeRequest.current = null; submitting.current = false; setBusy(false); }
+      });
     }
     setError(null);
     retryRequest.current = null;
-  }, [api, mode]);
+    return Boolean(handoff || legacyConversationId || interruptedRead);
+  }, [accountId, api]);
 
   const value = useMemo<ReflectionThinkingContextValue>(() => ({
     abort,
@@ -531,52 +548,69 @@ export function ThinkingConversation() {
 const FOLLOW_LATEST_THRESHOLD_PX = 96;
 
 export function ThinkingMessageViewport({ empty }: Readonly<{ empty?: ReactNode }>) {
-  const { busy, turns } = useReflectionThinking();
+  const { busy, conversationId, turns } = useReflectionThinking();
   const viewport = useRef<HTMLDivElement | null>(null);
   const followsLatest = useRef(true);
+  const previousConversation = useRef(conversationId);
+  const [hasNewMessages, setHasNewMessages] = useState(false);
+  const latestReplyId = turns.at(-1)?.response?.assistantMessage.id;
 
   const updateFollowState = useCallback(() => {
     const element = viewport.current;
     if (!element) return;
     const distanceFromBottom = element.scrollHeight - element.scrollTop - element.clientHeight;
     followsLatest.current = distanceFromBottom <= FOLLOW_LATEST_THRESHOLD_PX;
+    if (followsLatest.current) setHasNewMessages(false);
+  }, []);
+
+  const scrollToLatest = useCallback(() => {
+    const element = viewport.current;
+    if (!element) return;
+    followsLatest.current = true;
+    setHasNewMessages(false);
+    const reduceMotion = typeof window.matchMedia === "function"
+      && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    if (typeof element.scrollTo === "function") {
+      element.scrollTo({ behavior: reduceMotion ? "auto" : "smooth", top: element.scrollHeight });
+    } else element.scrollTop = element.scrollHeight;
   }, []);
 
   useEffect(() => {
-    if (!followsLatest.current) return;
+    if (previousConversation.current !== conversationId) {
+      previousConversation.current = conversationId;
+      followsLatest.current = true;
+      setHasNewMessages(false);
+    }
+    if (!followsLatest.current) {
+      if (turns.length) setHasNewMessages(true);
+      return;
+    }
     const frame = requestAnimationFrame(() => {
-      const element = viewport.current;
-      if (!element || !followsLatest.current) return;
-      const reduceMotion = typeof window.matchMedia === "function"
-        && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-      if (typeof element.scrollTo === "function") {
-        element.scrollTo({
-          behavior: reduceMotion ? "auto" : "smooth",
-          top: element.scrollHeight
-        });
-      } else {
-        element.scrollTop = element.scrollHeight;
-      }
+      if (followsLatest.current) scrollToLatest();
     });
     return () => cancelAnimationFrame(frame);
-  }, [busy, turns.length]);
+  }, [busy, conversationId, latestReplyId, scrollToLatest, turns.length]);
 
   return (
-    <div
-      aria-label="一起想的消息"
-      aria-live="polite"
-      className={styles.thinkingMessageViewport}
-      data-testid="thinking-message-viewport"
-      onScroll={updateFollowState}
-      ref={viewport}
-      role="log"
-    >
-      {turns.length === 0 && !busy ? empty : <ThinkingConversation />}
+    <div className={styles.thinkingMessageArea}>
+      <div
+        aria-label="一起想的消息"
+        aria-live="polite"
+        className={styles.thinkingMessageViewport}
+        data-testid="thinking-message-viewport"
+        onScroll={updateFollowState}
+        ref={viewport}
+        role="log"
+        tabIndex={0}
+      >
+        {turns.length === 0 && !busy ? empty : <ThinkingConversation />}
+      </div>
+      {hasNewMessages ? <button className={styles.thinkingLatestMessage} onClick={scrollToLatest} type="button">回到最新消息</button> : null}
     </div>
   );
 }
 
-export function ThinkingComposer({ compact = false }: Readonly<{ compact?: boolean }>) {
+export function ThinkingComposer({ compact = false, rows = 5 }: Readonly<{ compact?: boolean; rows?: number }>) {
   const { abort, busy, draft, error, retry, send, setDraft } = useReflectionThinking();
   const draftId = useId();
   const onKeyDown = (event: ReactKeyboardEvent<HTMLTextAreaElement>) => {
@@ -599,7 +633,7 @@ export function ThinkingComposer({ compact = false }: Readonly<{ compact?: boole
         onChange={(event) => setDraft(event.target.value)}
         onKeyDown={onKeyDown}
         placeholder="把还没想清楚的部分写在这里…"
-        rows={5}
+        rows={rows}
         value={draft}
       />
       <div>

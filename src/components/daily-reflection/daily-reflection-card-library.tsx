@@ -1084,6 +1084,7 @@ export function DailyReflectionCardLibrary({
             <section className={styles.cardExpansionReading}>
               <p>{selectedCard.content}</p>
               {selectedCard.status !== "removed" ? <button className={styles.secondaryButton} onClick={() => setEditing(true)} type="button">编辑卡片</button> : null}
+              {selectedCard.status === "saved" && !selectedCard.sourceUnavailable ? <Link className={styles.secondaryButton} href={`/reflection/think?card=${encodeURIComponent(selectedCard.id)}`} prefetch={false}>拿这张卡片一起想</Link> : null}
               <CardMemoryAction
                 busy={busy || memoryBusyCardId === selectedCard.id}
                 key={selectedCard.id}

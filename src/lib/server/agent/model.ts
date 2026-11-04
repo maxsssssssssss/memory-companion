@@ -14,6 +14,7 @@ const Action = z.union([
 ]);
 export interface AgentModelConfig {
   baseURL: string; apiKey: string; model: string; maxInputChars: number; maxOutputTokens: number; requestTimeoutMs: number;
+  defaultHeaders?: Record<string, string>;
 }
 
 const PROMPT = `你是受限的业务行动助手。依据用户目标、当前授权观察及工具真实返回，每次只选择一个合法动作。
@@ -46,6 +47,7 @@ export function createAgentDecisionProvider(configure: () => AgentModelConfig): 
     return ctx.call({ kind: "agent_decision", model: config.model, inputChars, maxOutputTokens: config.maxOutputTokens }, async (identity) => {
       try {
         const client = new OpenAI({ apiKey: config.apiKey, baseURL: config.baseURL, organization: null, project: null,
+          defaultHeaders: config.defaultHeaders,
           timeout: config.requestTimeoutMs, maxRetries: 0, logLevel: "off", fetchOptions: { redirect: "error" } });
         const value = await parseStructuredJsonResponse({ client, model: config.model, name: "agent_action", schema: Action,
           mode: "json", stream: true, store: false, jsonRootField: null, jsonInstruction: "按受限行动协议只输出JSON。", maxOutputTokens: config.maxOutputTokens, maxResponseBytes: 200000,

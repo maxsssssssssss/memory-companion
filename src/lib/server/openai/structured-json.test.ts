@@ -814,6 +814,28 @@ describe("parseStructuredJsonResponse", () => {
     expect(fetch).toHaveBeenCalledOnce();
   });
 
+  it("retains reported usage when parent cancellation during stream cleanup prevents publication", async () => {
+    const parent = new AbortController();
+    const event = completedEvent({ usage: { input_tokens: 37, output_tokens: 11 } });
+    const body = new ReadableStream({
+      start(controller) { controller.enqueue(new TextEncoder().encode(`data: ${JSON.stringify(event)}\n\n`)); },
+      cancel() { parent.abort(); }
+    });
+    const fetch = vi.fn().mockResolvedValue(new Response(body, { headers: { "content-type": "text/event-stream" } }));
+    const client = new OpenAI({ apiKey: "fixture", baseURL: "https://fixture.invalid", fetch });
+    const onDiagnostics = vi.fn();
+    const normalize = vi.fn();
+    await expect(parseStructuredJsonResponse({ ...streamingInput, client, onDiagnostics, normalize,
+      requestOptions: { signal: parent.signal }
+    })).rejects.toMatchObject({ name: "AbortError" });
+    expect(onDiagnostics).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
+      responseStatus: "completed", inputTokens: 37, outputTokens: 11,
+      parseResult: "not_started", validationResult: "not_started"
+    }));
+    expect(normalize).not.toHaveBeenCalled();
+    expect(fetch).toHaveBeenCalledOnce();
+  });
+
   it("does not expose unrecognized reasoning effort or invalid token counts", async () => {
     const fixture = streamingClient([completedEvent({
       reasoning: { effort: "private-model-text" },

@@ -80,11 +80,14 @@ type ProviderDependencies = {
   ) => Promise<string>;
 };
 
+export function sameDailyReflectionThinkingSource(left: DailyReflectionThinkingSource, right: DailyReflectionThinkingSource) {
+  return left.sourceId === right.sourceId && JSON.stringify(left.claim) === JSON.stringify(right.claim);
+}
+
 function historyForPrompt(
   history: DailyReflectionThinkingMessage[],
   sources: DailyReflectionThinkingSource[]
 ) {
-  const allowedSourceIds = new Set(sources.map((source) => source.sourceId));
   return history
     .filter((message) => {
       if (message.role === "user") return true;
@@ -93,7 +96,7 @@ function historyForPrompt(
         !== DAILY_REFLECTION_THINKING_SAFETY_BOUNDARY_VERSION
       ) return false;
       if (message.sources.length === 0) return true;
-      return message.sources.every((source) => allowedSourceIds.has(source.sourceId));
+      return message.sources.every((source) => sources.some(current => sameDailyReflectionThinkingSource(source, current)));
     })
     .slice(-12)
     .map((message) => `${message.role === "user" ? "用户" : "助手"}：${message.content}`)
