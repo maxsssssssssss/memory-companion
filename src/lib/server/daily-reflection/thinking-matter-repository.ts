@@ -21,6 +21,7 @@ import {
   type ThinkingMatterSource,
   type ThinkingMatterView,
 } from "@/lib/domain/reflection-thinking-matter";
+import { comparisonQuestion, requestedComparisonQuestion } from "./thinking-comparison-question";
 
 export class ThinkingMatterNotFoundError extends Error {
   constructor() { super("thinking_matter_not_found"); }
@@ -75,13 +76,16 @@ export class ThinkingMatterRepository {
       }
       const events = (this.database.prepare("SELECT event_json FROM dr_thinking_events WHERE account_id = ? AND matter_id = ? ORDER BY ordinal")
         .all(accountId, matterId) as Array<{ event_json: string }>).map(item => ThinkingMatterEventSchema.parse(JSON.parse(item.event_json)));
+      if (matter.comparison) matter.comparison.question = comparisonQuestion(matter.question, events);
       return { matter, events };
     })();
   }
 
-  list(accountId: string): ThinkingMatter[] {
-    return (this.database.prepare("SELECT state_json FROM dr_thinking_matters WHERE account_id = ? ORDER BY updated_at DESC, id")
-      .all(accountId) as Array<{ state_json: string }>).map(row => ThinkingMatterSchema.parse(JSON.parse(row.state_json)));
+  list(accountId: string, project = (view: ThinkingMatterView) => view.matter): ThinkingMatter[] {
+    return this.database.transaction(() => {
+      const rows = this.database.prepare("SELECT id FROM dr_thinking_matters WHERE account_id = ? ORDER BY updated_at DESC, id").all(accountId) as Array<{ id: string }>;
+      return rows.map(row => project(this.get(accountId, row.id)));
+    })();
   }
 
   private save(matter: ThinkingMatter, previousVersion: number) {
@@ -156,12 +160,23 @@ export class ThinkingMatterRepository {
   }
 
   private current(accountId: string, matterId: string, version: number) {
-    const { matter } = this.get(accountId, matterId);
-    if (matter.version !== version) throw new ThinkingMatterConflictError();
-    return matter;
+    const view = this.get(accountId, matterId);
+    if (view.matter.version !== version) throw new ThinkingMatterConflictError();
+    return view;
   }
 
   private normalizedName(value: string) { return value.normalize("NFKC").replace(/\s+/gu, "").toLocaleLowerCase("zh-CN"); }
+
+  private editedQuestion(matter: ThinkingMatter, input: Extract<ThinkingMatterMutation, { kind: "comparison" }>) {
+    const previous = matter.comparison?.question, submitted = input.comparison.question;
+    if (!previous || input.questionEdited === true) return submitted;
+    if (submitted === previous || input.questionEdited === false) return previous;
+    // An editor already open before the upgrade can echo an old automatic
+    // heading when it saves an unrelated field. Compare with what it displayed.
+    const row = this.database.prepare("SELECT json_extract(state_json, '$.comparison.question') AS question FROM dr_thinking_matters WHERE account_id=? AND id=?")
+      .get(matter.accountId, matter.id) as { question: string };
+    return submitted === row.question ? previous : submitted;
+  }
 
   private comparison(previous: ThinkingMatterComparison | null, input: ThinkingMatterComparisonInput, sourceEventId: string): ThinkingMatterComparison {
     const existing = previous?.options ?? [];
@@ -201,10 +216,16 @@ export class ThinkingMatterRepository {
     this.append(matter, "choice_changed", input.reason || (input.status === "selected" ? "用户确认选择。" : input.status === "leaning" ? "用户记录当前倾向，尚未决定。" : "用户尚未决定。"), { previousChoice, choice: matter.userChoice, reason: input.reason }, [], eventId);
   }
 
+  private recordComparisonQuestion(matter: ThinkingMatter, question: string, fromChat: boolean, reason?: string) {
+    if (matter.comparison) matter.comparison.question = question;
+    this.append(matter, "comparison_edited", `比较题目已改为「${question}」。`,
+      { comparisonQuestion: question, fromChat, ...(reason ? { reason } : {}) });
+  }
+
   mutate(accountId: string, matterId: string, rawInput: ThinkingMatterMutation, options: WriteOptions<ThinkingMatterMutation> = {}): ThinkingMatterView {
     const original = ThinkingMatterMutationSchema.parse(rawInput);
     return this.operation(accountId, original.operationKey, matterId, { kind: "mutate", matterId, input: options.receiptInput ?? original }, () => {
-      const matter = this.current(accountId, matterId, original.expectedVersion);
+      const { matter } = this.current(accountId, matterId, original.expectedVersion);
       const input = ThinkingMatterMutationSchema.parse(options.beforeWrite?.(structuredClone(original)) ?? original);
       if (input.operationKey !== original.operationKey || input.kind !== original.kind || input.expectedVersion !== original.expectedVersion)
         throw new ThinkingMatterConflictError("thinking_matter_write_identity_changed");
@@ -216,7 +237,7 @@ export class ThinkingMatterRepository {
       matter.updatedAt = this.now();
       // Explicit user edits/feedback invalidate every earlier generated result.
       const activeGeneration = matter.activeGeneration;
-      matter.activeGeneration = activeGeneration?.status === "unknown" && !["cancel", "edit", "status", "comparison", "correct", "link_source", "unlink_source"].includes(input.kind)
+      matter.activeGeneration = activeGeneration?.status === "unknown" && !["cancel", "edit", "status", "comparison", "retitle", "correct", "link_source", "unlink_source"].includes(input.kind)
         ? { ...activeGeneration, version: matter.version }
         : null;
       switch (input.kind) {
@@ -254,7 +275,10 @@ export class ThinkingMatterRepository {
           break;
         }
         case "edit": {
-          if (input.question !== undefined) matter.question = input.question;
+          if (input.question !== undefined && input.question !== matter.question) {
+            matter.question = input.question;
+            if (matter.comparison) matter.comparison.question = comparisonQuestion(input.question, []);
+          }
           if (input.goal !== undefined) matter.goal = input.goal;
           if (input.mode !== undefined) matter.mode = input.mode;
           if (input.contextMode !== undefined) matter.contextMode = input.contextMode;
@@ -283,8 +307,23 @@ export class ThinkingMatterRepository {
         }
         case "comparison": {
           const eventId = this.id("think_event"), previousComparison = matter.comparison;
-          matter.comparison = this.comparison(previousComparison, input.comparison, eventId);
-          this.append(matter, "comparison_edited", "用户修改了当前比较。", { previousComparison, comparison: matter.comparison }, [], eventId);
+          const question = this.editedQuestion(matter, input);
+          matter.comparison = this.comparison(previousComparison, { ...input.comparison, question }, eventId);
+          // Editing the heading alone does not re-author old analysis or its sources.
+          if (previousComparison && JSON.stringify(previousComparison.dimensions) === JSON.stringify(matter.comparison.dimensions)) {
+            matter.comparison.sourceEventId = previousComparison.sourceEventId;
+          }
+          const original = previousComparison?.recommendation, next = matter.comparison.recommendation;
+          if (original && next && original.optionId === next.optionId && original.text === next.text) next.sourceEventId = original.sourceEventId;
+          const changed = question !== previousComparison?.question;
+          this.append(matter, "comparison_edited", changed ? `比较题目已改为「${question}」。` : "用户修改了当前比较。",
+            { previousComparison, comparison: matter.comparison, ...(changed ? { comparisonQuestion: question } : {}) }, [], eventId);
+          break;
+        }
+        case "retitle": {
+          if (matter.status !== "active") throw new ThinkingMatterConflictError("thinking_matter_not_active");
+          if (input.message) this.append(matter, "user_message", input.message);
+          this.recordComparisonQuestion(matter, input.question, Boolean(input.message), input.reason);
           break;
         }
         case "choice": {
@@ -292,13 +331,19 @@ export class ThinkingMatterRepository {
           break;
         }
         case "correct": {
+          if (input.comparisonQuestion && input.understanding === matter.understanding) {
+            this.recordComparisonQuestion(matter, input.comparisonQuestion, false, input.reason);
+            break;
+          }
           const eventId = this.id("think_event");
           const legacyEventId = matter.understandingSourceEventId === null || matter.judgmentsSourceEventId === null
             ? [...this.get(accountId, matterId).events].reverse().find(event => event.kind === "assistant_message")?.id
             : undefined;
           const data = { previousUnderstanding: matter.understanding, previousJudgments: matter.judgments,
             previousUnderstandingSourceEventId: matter.understandingSourceEventId, previousJudgmentsSourceEventId: matter.judgmentsSourceEventId,
-            correctedEventIds: [...new Set([matter.understandingSourceEventId, matter.judgmentsSourceEventId, legacyEventId].filter((id): id is string => typeof id === "string"))], reason: input.reason ?? "" };
+            correctedEventIds: [...new Set([matter.understandingSourceEventId, matter.judgmentsSourceEventId, legacyEventId].filter((id): id is string => typeof id === "string"))], reason: input.reason ?? "",
+            ...(input.comparisonQuestion ? { comparisonQuestion: input.comparisonQuestion } : {}) };
+          if (matter.comparison && input.comparisonQuestion) matter.comparison.question = input.comparisonQuestion;
           matter.understanding = input.understanding;
           matter.judgments = [];
           matter.understandingSourceEventId = eventId;
@@ -327,7 +372,7 @@ export class ThinkingMatterRepository {
   beginTurn(accountId: string, matterId: string, rawInput: ThinkingMatterBeginTurn): BeginTurnResult {
     const input = ThinkingMatterBeginTurnSchema.parse(rawInput);
     return this.operation(accountId, input.operationKey, matterId, { kind: "begin_turn", matterId, input }, () => {
-      const matter = this.current(accountId, matterId, input.expectedVersion);
+      const { matter } = this.current(accountId, matterId, input.expectedVersion);
       if (matter.status !== "active") throw new ThinkingMatterConflictError("thinking_matter_not_active");
       if (matter.activeGeneration) throw new ThinkingMatterConflictError("thinking_generation_pending");
       const before = matter.version;
@@ -348,6 +393,8 @@ export class ThinkingMatterRepository {
       matter.activeGeneration = { id: generationId, version: matter.version, taskId: input.taskId ?? null, status: "running" };
       this.append(matter, input.feedback ? "feedback" : "user_message", input.text, { generationId, taskId: input.taskId ?? null, mode: matter.mode, contextMode: matter.contextMode,
         arrangementId: input.arrangementId ?? null, arrangementStatus: input.arrangementStatus ?? null, ...(input.choice ? { choice: input.choice } : {}) });
+      const retitle = requestedComparisonQuestion(input.text);
+      if (retitle) this.recordComparisonQuestion(matter, retitle.question, true);
       this.save(matter, before);
       return { matterId, value: { view: this.get(accountId, matterId), generationId, version: matter.version } };
     });
@@ -357,7 +404,7 @@ export class ThinkingMatterRepository {
     const input = ThinkingMatterCommitResponseSchema.parse(rawInput);
     const operationKey = `response:${input.generationId}`;
     return this.operation(accountId, operationKey, matterId, { kind: "response", matterId, input }, () => {
-      const matter = this.current(accountId, matterId, input.expectedVersion);
+      const { matter, events } = this.current(accountId, matterId, input.expectedVersion);
       if (matter.status !== "active" || matter.activeGeneration?.id !== input.generationId) throw new ThinkingMatterConflictError("thinking_generation_changed");
       if (input.taskId && matter.activeGeneration.taskId && input.taskId !== matter.activeGeneration.taskId) throw new ThinkingMatterConflictError("thinking_generation_task_changed");
       const before = matter.version;
@@ -369,7 +416,10 @@ export class ThinkingMatterRepository {
       const eventId = this.id("think_event");
       if (input.understanding !== undefined) matter.understandingSourceEventId = eventId;
       if (input.judgments !== undefined) matter.judgmentsSourceEventId = eventId;
-      if (input.comparison !== undefined) matter.comparison = this.comparison(matter.comparison, input.comparison, eventId);
+      if (input.comparison !== undefined) {
+        const question = matter.comparison?.question ?? comparisonQuestion(matter.question, events);
+        matter.comparison = this.comparison(matter.comparison, { ...input.comparison, question }, eventId);
+      }
       const event = this.append(matter, "assistant_message", input.reply, { generationId: input.generationId, taskId: input.taskId ?? null, promptVersion: input.promptVersion ?? null, model: input.model ?? null,
         understanding: input.understanding ?? null, judgments: input.judgments ?? [], suggestions: input.suggestions ?? [], comparison: input.comparison === undefined ? null : matter.comparison }, input.sources ?? [], eventId);
       if (input.suggestions !== undefined) {
@@ -386,7 +436,7 @@ export class ThinkingMatterRepository {
   failResponse(accountId: string, matterId: string, rawInput: z.infer<typeof FailureSchema>): ThinkingMatterView {
     const input = FailureSchema.parse(rawInput);
     return this.operation(accountId, `failure:${input.generationId}:${input.status}`, matterId, { kind: "failure", matterId, input }, () => {
-      const matter = this.current(accountId, matterId, input.expectedVersion);
+      const { matter } = this.current(accountId, matterId, input.expectedVersion);
       if (matter.activeGeneration?.id !== input.generationId) throw new ThinkingMatterConflictError("thinking_generation_changed");
       const before = matter.version;
       matter.version += 1;

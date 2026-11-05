@@ -6,7 +6,7 @@ import type { AgentTask } from "@/lib/domain/agent";
 import {
   ThinkingMatterBeginTurnSchema, ThinkingMatterMutationSchema,
   ThinkingMatterSourceSchema,
-  ThinkingMatterCreateSchema, ThinkingMatterComparisonInputSchema, ThinkingMatterChoiceInputSchema,
+  ThinkingMatterCreateSchema, ThinkingMatterComparisonUpdateSchema, ThinkingMatterChoiceInputSchema,
   type ThinkingMatterSource, type ThinkingMatterView, type ThinkingMatterMutation,
 } from "@/lib/domain/reflection-thinking-matter";
 import type { DailyReflectionThinkingSource } from "@/lib/domain/daily-reflection-thinking";
@@ -15,12 +15,13 @@ import { AgentStore } from "@/lib/server/agent/store";
 import { createAgentDecisionProvider } from "@/lib/server/agent/model";
 import { AgentFailure, type AgentContext, type AgentDecisionProvider, type AgentScenario } from "@/lib/server/agent/types";
 import { ThinkingMatterRepository } from "./thinking-matter-repository";
+import { requestedComparisonQuestion } from "./thinking-comparison-question";
 import { getDailyReflectionThinkingContextResolver } from "./thinking-context-resolver";
 import { createThinkingTokenHubClient, THINKING_MODEL } from "./thinking-tokenhub-transport";
 import { createDailyReflectionRepository, type DailyReflectionRepository } from "./repository";
 
 export const THINKING_SCENARIO = "daily_reflection_thinking_v1";
-export const THINKING_PROMPT_VERSION = "reflection_thinking_p3_v2";
+export const THINKING_PROMPT_VERSION = "reflection_thinking_p3_v3";
 const Scope = z.object({ matterId: z.string(), generationId: z.string(), matterVersion: z.number().int(), contextMode: z.enum(["none", "auto", "personal"]), inheritedSources: z.array(ThinkingMatterSourceSchema), explicitLinkedSources: z.array(ThinkingMatterSourceSchema).default([]) }).strict();
 const CardId = z.string().trim().min(1).max(200).regex(/^[A-Za-z0-9_-]+$/u);
 export const ThinkingMatterPublicCreateSchema = ThinkingMatterCreateSchema.omit({ source: true }).extend({
@@ -38,7 +39,7 @@ const Reply = z.object({
   judgments: z.array(z.string().trim().min(1).max(2_000)).max(12),
   suggestions: z.array(z.object({ text: z.string().trim().min(1).max(2_000), kind: z.enum(["action", "decision"]) }).strict()).max(4)
     .describe("正文提出独立可执行尝试或行动性下一步时，必须同步为待采纳建议。候选方案、方向比较、倾向和推荐只写comparison，不因此生成安排；只讨论时为空。这里不会保存为已采纳安排。"),
-  comparison: ThinkingMatterComparisonInputSchema.optional().describe("保存方案、理由、限制、成本和未知；推荐不是用户选择。新方案必须省略id，由服务端分配；仅更新已有方案时使用当前观察中的原id。首轮推荐必须optionId:null，在text用方案名称说明推荐对象；不得编造plan_a/plan_b等id。sourceEventId由服务端维护，不是输入字段，不能复制到comparison、options或recommendation。"),
+  comparison: ThinkingMatterComparisonUpdateSchema.optional().describe("保存方案、理由、限制、成本和未知；推荐不是用户选择。题目由用户确定，省略question。新方案必须省略id，由服务端分配；仅更新已有方案时使用当前观察中的原id。首轮推荐必须optionId:null，在text用方案名称说明推荐对象；不得编造plan_a/plan_b等id。sourceEventId由服务端维护，不是输入字段，不能复制到comparison、options或recommendation。"),
 }).strict();
 type Resolver = ReturnType<typeof getDailyReflectionThinkingContextResolver>;
 type CardReader = DailyReflectionRepository["readWorkingCardWithEvidence"];
@@ -111,6 +112,7 @@ read_source 才是原始证据。引用、解释和猜测分开，judgments只�
 需要多方案比较时使用respond.comparison，比较同一问题的维度、各方案理由/限制/成本/未知信息。推荐只是Agent建议；userChoice只能由用户明确操作保存，绝不能把推荐描述成用户已选。
 候选方向、比较取舍、倾向和推荐保存在comparison，不能仅因推荐方向就强制生成suggestions。用户只选择方向时记录choice即可，不要求行动安排或待办。
 已有comparison更新保留方案id；用户反馈新约束时调整比较，不覆盖用户已保存选择或改选理由。只讨论比较不要求安排计划。
+重新比较时沿用当前题目和原方案。把用户新说的条件用于对应方案的理由、限制、代价及推荐，保留时间和条件实际对应的事情，不推断活动改期。respond.comparison省略question。
 comparison.options中的id由服务端分配：新方案必须省略id字段，不填null、空字符串或自定义id；仅更新已有方案时使用当前观察comparison.options里的原id，不能编造plan_a/plan_b等id。
 comparison.recommendation.optionId只能引用当前观察中已有方案的原id，或为null。首轮推荐必须optionId:null，并在text用方案名称说明推荐对象；本轮新增方案尚无服务端id，也应以null和文字表达推荐。
 sourceEventId属于服务端溯源记录，不是工具输入字段；respond.comparison及其options、recommendation只能输出参数schema列出的字段，不能复制历史事件的溯源字段。
@@ -225,7 +227,8 @@ export class ThinkingAgentService {
     const comparison = view.matter.comparison;
     const activeInterpretation = (eventId: string) => Boolean(valid.get(eventId)) && !corrected.has(eventId);
     const safeComparison = comparison ? { ...comparison,
-      question: activeInterpretation(comparison.sourceEventId) ? comparison.question : "此前比较的依据已失效或解释已被修正。",
+      // The repository resolves the heading from user events, independently of
+      // the assistant event that owns dimensions, option details and advice.
       dimensions: activeInterpretation(comparison.sourceEventId) ? comparison.dimensions : [],
       options: comparison.options.map((option, index) => activeInterpretation(option.sourceEventId) ? option : { ...option,
         name: `此前方案 ${index + 1}（依据已失效或已修正）`, content: "旧自动内容不可作为当前依据，请重新核对。", reasons: [], limits: [], costs: [], unknowns: [] }),
@@ -242,7 +245,7 @@ export class ThinkingAgentService {
   }
   async get(accountId: string, matterId: string) { return this.safeView(accountId, this.repository.get(accountId, matterId)); }
   async list(accountId: string) {
-    return Promise.all(this.repository.list(accountId).map(async matter => (await this.get(accountId, matter.id)).matter));
+    return this.repository.list(accountId, view => this.safeView(accountId, view).matter);
   }
   async recover(accountId: string, matterId: string, operationKey: string) {
     const view = this.repository.get(accountId, matterId);
@@ -412,6 +415,11 @@ export class ThinkingAgentService {
     // Begin with one stable, idempotent receipt, before any explicit business command.
     const choice = explicitThinkingChoice(input.text);
     const previousTurn = before.events.find(event => event.data.taskId === taskId && ["user_message", "feedback"].includes(event.kind));
+    const retitle = requestedComparisonQuestion(input.text);
+    if (retitle?.standalone && !previousTurn) {
+      return this.mutate(accountId, matterId, { kind: "retitle", operationKey: input.operationKey,
+        expectedVersion: input.expectedVersion, question: retitle.question, message: input.text });
+    }
     // The saved command belongs to this exact input, even after an option is renamed.
     // Choice, user message and generation share the repository's single transaction.
     const comparisonChoice = previousTurn

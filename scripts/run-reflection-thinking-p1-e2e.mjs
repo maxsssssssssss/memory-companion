@@ -102,7 +102,7 @@ try {
     } catch (error) { await writeFile(join(artifacts, "RESTART_FAILED.json"), JSON.stringify({ message: error.message })); }
     })();
   }, 100);
-  console.log(p3 ? "[thinking-p1-runner] 2/3 running P3 compatibility/recovery browser checks, 0/3 scenarios complete" : p2 ? "[thinking-p1-runner] 2/3 running P2 browser acceptance, 0/3 scenarios complete" : "[thinking-p1-runner] 2/3 running A-E browser acceptance, 0/5 scenarios complete");
+  console.log(p3 ? "[thinking-p1-runner] 2/3 running P3 compatibility/recovery browser checks, 0/3 scenarios complete" : p2 ? "[thinking-p1-runner] 2/3 running P2 browser acceptance, 0/4 scenarios complete" : "[thinking-p1-runner] 2/3 running A-E browser acceptance, 0/5 scenarios complete");
   summary.browserExit = await run(["node_modules/@playwright/test/cli.js", "test", p3 ? "e2e/reflection-thinking-p3.spec.ts" : p2 ? "e2e/reflection-thinking-p2.spec.ts" : "e2e/reflection-thinking-p1.spec.ts", "--workers=1", "--reporter=line", `--output=${join(artifacts, "playwright")}`], "browser");
   if (summary.browserExit !== 0) throw new Error("Browser acceptance failed");
   console.log("[thinking-p1-runner] 3/3 offline acceptance passed");

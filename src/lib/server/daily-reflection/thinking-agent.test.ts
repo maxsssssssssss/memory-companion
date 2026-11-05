@@ -189,6 +189,25 @@ function canonicalCard() {
 }
 
 describe("Thinking Agent P2 comparisons, explicit choices and canonical single-card grants", () => {
+  it("keeps hypothetical headings in discussion and applies an explicit retitle with a follow-up in the same turn", async () => {
+    const observations: unknown[] = [];
+    const h = setup(async input => {
+      observations.push((input.observation as ThinkingMatterView).matter.comparison?.question);
+      return { tool: "respond", args: { reply: "按最新约束继续比较。", understanding: "讨论用户提出的问题", judgments: [], suggestions: [],
+        comparison: { ...comparison(), question: observations.length === 1 ? null : observations.length === 2 ? "" : "自动生成的错题" } } };
+    });
+    let view = addComparison(h.service, h.created);
+    const original = view.matter.comparison!.question;
+    view = await h.turn(view, "如果把标题改为周日，会不会更好？");
+    view = await h.turn(view, "把标题改为「周日安排」好吗？");
+    view = await h.turn(view, "比较题目应该是周日吗？");
+    view = await h.turn(view, "把标题改成「周日」的话会怎样？");
+    expect(view.matter.comparison?.question).toBe(original);
+    view = await h.turn(view, "请把题目改为「午饭前如何安排？」。然后按备餐时间重新比较。");
+    expect(view.matter.comparison?.question).toBe("午饭前如何安排？");
+    expect(observations).toEqual([original, original, original, original, "午饭前如何安排？"]);
+    expect(view.events.filter(event => event.kind === "comparison_edited" && event.data.fromChat)).toHaveLength(1);
+  });
   it("projects comparison input fields to model observation while retaining server provenance in business state", async () => {
     let observed: unknown;
     const h = setup(async input => {
@@ -229,7 +248,7 @@ describe("Thinking Agent P2 comparisons, explicit choices and canonical single-c
     expect(view.matter.comparison?.options.every(option => option.id.startsWith("think_option_"))).toBe(true);
     expect(view.matter.comparison?.recommendation).toMatchObject({ optionId: null, text: expect.stringContaining("方案B") });
     expect(view.events.at(-1)?.data.promptVersion).toBe(THINKING_PROMPT_VERSION);
-    expect(THINKING_PROMPT_VERSION).toBe("reflection_thinking_p3_v2");
+    expect(THINKING_PROMPT_VERSION).toBe("reflection_thinking_p3_v3");
     const savedIds = view.matter.comparison!.options.map(option => option.id);
     view = await h.turn(view, "更新已有比较");
     expect(originalIds).toEqual(savedIds); expect(view.matter.comparison?.options.map(option => option.id)).toEqual(savedIds);
@@ -340,7 +359,7 @@ describe("Thinking Agent P2 comparisons, explicit choices and canonical single-c
   it("uses only explicitly linked canonical card with none mode and removes its derived comparison after unlink", async () => {
     const detail = canonicalCard(), observations: unknown[] = [];
     const h = setup(async input => { observations.push(input.observation); return { tool: "respond", args: { reply: "PRIVATE_LINKED_DERIVED", understanding: "PRIVATE_LINKED_DERIVED", judgments: [], suggestions: [],
-      comparison: comparison([{ name: "PRIVATE_LINKED_OPTION" }, { name: "当前表达方案" }]) } }; }, undefined,
+      comparison: { ...comparison([{ name: "PRIVATE_LINKED_OPTION" }, { name: "当前表达方案" }]), question: "PRIVATE_LINKED_TITLE" } } }; }, undefined,
     (accountId, cardId) => { if (accountId !== detail.card.accountId || cardId !== detail.card.id) throw new Error("not_found"); return detail; });
     const linked = h.service.create("account_a", { operationKey: "with_card", question: "只讨论这张卡", sourceCardId: detail.card.id, sourceCardVersion: 3 });
     let view = await h.turn(linked, "比较这张卡里的方向");
@@ -351,6 +370,7 @@ describe("Thinking Agent P2 comparisons, explicit choices and canonical single-c
     view = h.service.unlinkCard("account_a", view.matter.id, { operationKey: "unlink", expectedVersion: view.matter.version, cardId: detail.card.id });
     const safe = await h.service.get("account_a", view.matter.id);
     expect(JSON.stringify(safe)).not.toContain("PRIVATE_LINKED_");
+    expect(safe.matter.comparison?.question).toBe("只讨论这张卡");
     expect(safe.matter.comparison?.options.map(option => option.name)).toEqual(["此前方案 1（依据已失效或已修正）", "此前方案 2（依据已失效或已修正）"]);
     expect(safe.matter.comparison?.options.map(option => option.id)).toEqual(view.matter.comparison?.options.map(option => option.id));
     const origin = safe.events.find(event => event.id === safe.matter.comparison!.options[0].sourceEventId)!;

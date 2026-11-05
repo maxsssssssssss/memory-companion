@@ -457,15 +457,16 @@ describe("Together-thinking P2 choices and matters", () => {
   });
 
   it("persists a direct correction and clears unconfirmed old judgments without a model call", async () => {
-    const api = client();
+    const api = client(compared());
     render(<ReflectionThinkingMatters api={api} mode="brainstorm" />);
     await openProgress();
     fireEvent.click(await screen.findByRole("button", { name: "纠正当前理解" }));
     fireEvent.change(screen.getByLabelText("更正后的理解"), { target: { value: "我并不是害怕开始，只是还没定展示对象。" } });
     fireEvent.change(screen.getByLabelText("更正说明（可不填）"), { target: { value: "技术部分已经试过" } });
+    fireEvent.change(screen.getByLabelText("同时更正比较题目（可不填）"), { target: { value: "要向谁展示作品？" } });
     fireEvent.click(screen.getByRole("button", { name: "保存更正" }));
     await screen.findByText("我并不是害怕开始，只是还没定展示对象。");
-    expect(api.mutate).toHaveBeenCalledWith("matter_1", expect.objectContaining({ kind: "correct", reason: "技术部分已经试过" }));
+    expect(api.mutate).toHaveBeenCalledWith("matter_1", expect.objectContaining({ kind: "correct", reason: "技术部分已经试过", comparisonQuestion: "要向谁展示作品？" }));
     expect(screen.queryByText("范围可能不是唯一阻力。")).not.toBeInTheDocument();
     expect(api.turn).not.toHaveBeenCalled();
   });

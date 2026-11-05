@@ -66,6 +66,7 @@ export function ReflectionThinkingMatters({ mode, onModeChange, api: suppliedApi
   const [correcting, setCorrecting] = useState(false);
   const [correction, setCorrection] = useState("");
   const [correctionReason, setCorrectionReason] = useState("");
+  const [correctionQuestion, setCorrectionQuestion] = useState("");
   const [correctionVersion, setCorrectionVersion] = useState(0);
   const [cardPreview, setCardPreview] = useState<{ id: string; title: string; version: number } | null>(null);
   const [cardError, setCardError] = useState<string | null>(null);
@@ -311,7 +312,8 @@ export function ReflectionThinkingMatters({ mode, onModeChange, api: suppliedApi
   const knownFailure = generation?.status === "known_failed"
     || (latestEvent?.kind === "generation_failed" && latestEvent.data.status === "known_failed");
   const suggestions = matter?.suggestions.filter(suggestion => suggestion.status === "proposed") ?? [];
-  const conversation = view?.events.filter(event => event.kind === "user_message" || event.kind === "assistant_message" || event.kind === "feedback") ?? [];
+  const conversation = view?.events.filter(event => event.kind === "user_message" || event.kind === "assistant_message" || event.kind === "feedback"
+    || (event.kind === "comparison_edited" && event.data.fromChat === true)) ?? [];
   const latestFeedback = [...(view?.events ?? [])].reverse().find(event => event.kind === "feedback");
   const inactive = Boolean(matter && matter.status !== "active");
   const choosing = !matter && !creating && !loading;
@@ -374,8 +376,8 @@ export function ReflectionThinkingMatters({ mode, onModeChange, api: suppliedApi
           <div aria-label="这件事的对话" className={styles.thinkingMatterMessages} role="log" aria-live="polite" onScroll={updateFollowState} ref={messageViewport} tabIndex={0}>
             {choosing ? <ProductState title="选择要继续的事，或新建一件事" description="每件事分别保存。先选择对应事项，再聊上次的安排或实际反馈。" /> : null}
             {loading ? <ProductState title="正在读取已保存的讨论…" tone="loading" /> : null}
-            {conversation.length ? conversation.map(event => <article className={event.kind === "assistant_message" ? styles.thinkingMatterAssistant : styles.thinkingMatterUser} key={event.id}>
-              <small>{event.kind === "assistant_message" ? "一起想" : event.kind === "feedback" ? "你的实际反馈" : "你"}</small><p>{event.text}</p>
+            {conversation.length ? conversation.map(event => <article className={event.kind === "assistant_message" || event.kind === "comparison_edited" ? styles.thinkingMatterAssistant : styles.thinkingMatterUser} key={event.id}>
+              <small>{event.kind === "assistant_message" ? "一起想" : event.kind === "comparison_edited" ? "已保存" : event.kind === "feedback" ? "你的实际反馈" : "你"}</small><p>{event.text}</p>
               {event.kind === "assistant_message" && event.sources.length ? <button className={styles.secondaryButton} onClick={() => setProgressOpen(true)} type="button">查看本轮依据 · {event.sources.length}</button> : null}
               {event.kind === "assistant_message" ? suggestedSteps(suggestions.filter(suggestion => suggestion.sourceEventId === event.id)) : null}
             </article>) : !choosing && !loading ? <div className={styles.thinkingEmpty}><h2>从一件在意的事聊起</h2><p>可以讨论、比较，也可以慢慢找到下一步。今天只想聊聊也没关系。</p></div> : null}
@@ -430,7 +432,7 @@ export function ReflectionThinkingMatters({ mode, onModeChange, api: suppliedApi
         <div className={styles.thinkingMatterSectionTitle}><h3>当前理解</h3>
           <div className={styles.thinkingMatterActions}>
             <button className={styles.secondaryButton} disabled={busy || inactive} onClick={() => { setEditGoal(matter.goal); setEditVersion(matter.version); setEditing(!editing); setCorrecting(false); }} type="button">修改目标</button>
-            <button className={styles.secondaryButton} disabled={busy || inactive} onClick={() => { setCorrection(matter.understanding); setCorrectionVersion(matter.version); setCorrectionReason(""); setCorrecting(!correcting); setEditing(false); }} type="button">纠正当前理解</button>
+            <button className={styles.secondaryButton} disabled={busy || inactive} onClick={() => { setCorrection(matter.understanding); setCorrectionVersion(matter.version); setCorrectionReason(""); setCorrectionQuestion(""); setCorrecting(!correcting); setEditing(false); }} type="button">纠正当前理解</button>
           </div>
         </div>
         {matter.goal ? <p>你希望：{matter.goal}</p> : null}
@@ -443,11 +445,20 @@ export function ReflectionThinkingMatters({ mode, onModeChange, api: suppliedApi
           <div className={styles.thinkingMatterActions}><button className={styles.primaryButton} disabled={busy || editVersion !== matter.version} type="submit">保存目标</button><button className={styles.secondaryButton} onClick={() => setEditing(false)} type="button">取消修改</button></div>
         </form> : null}
         {correcting ? <form className={styles.thinkingMatterEdit} onSubmit={event => {
-          event.preventDefault(); if (correctionVersion === matter.version) void mutate({ operationKey: operationKey(), expectedVersion: correctionVersion, kind: "correct", understanding: correction, reason: correctionReason });
+          event.preventDefault();
+          if (correctionVersion !== matter.version) return;
+          const question = correctionQuestion.trim(), understanding = correction.trim();
+          const edit = { operationKey: operationKey(), expectedVersion: correctionVersion, reason: correctionReason };
+          if (question && (!understanding || understanding === matter.understanding)) {
+            void mutate({ ...edit, kind: "retitle", question });
+          } else {
+            void mutate({ ...edit, kind: "correct", understanding, ...(question ? { comparisonQuestion: question } : {}) });
+          }
         }}><label>更正后的理解<textarea maxLength={8000} onChange={event => setCorrection(event.target.value)} value={correction} /></label>
           <label>更正说明（可不填）<textarea maxLength={8000} onChange={event => setCorrectionReason(event.target.value)} value={correctionReason} /></label>
+          {matter.comparison ? <label>同时更正比较题目（可不填）<input maxLength={8000} onChange={event => setCorrectionQuestion(event.target.value)} value={correctionQuestion} /></label> : null}
           {correctionVersion !== matter.version ? <p role="status">进展已更新，当前草稿已保留。请取消编辑，再根据最新内容修改。</p> : null}
-          <div className={styles.thinkingMatterActions}><button className={styles.primaryButton} disabled={busy || !correction.trim() || correctionVersion !== matter.version} type="submit">保存更正</button><button className={styles.secondaryButton} onClick={() => setCorrecting(false)} type="button">取消更正</button></div>
+          <div className={styles.thinkingMatterActions}><button className={styles.primaryButton} disabled={busy || (!correction.trim() && !correctionQuestion.trim()) || correctionVersion !== matter.version} type="submit">保存更正</button><button className={styles.secondaryButton} onClick={() => setCorrecting(false)} type="button">取消更正</button></div>
         </form> : null}
       </section> : null}
 
@@ -551,7 +562,8 @@ function ThinkingComparison({ view, busy, onMutate }: {
         reasons: lines(option.reasons), limits: lines(option.limits), costs: lines(option.costs), unknowns: lines(option.unknowns) })),
       recommendation: comparison?.recommendation ? { optionId: comparison.recommendation.optionId, text: comparison.recommendation.text } : null,
     };
-    if (await onMutate({ operationKey: operationKey(), expectedVersion: editVersion, kind: "comparison", comparison: input })) setEditing(false);
+    if (await onMutate({ operationKey: operationKey(), expectedVersion: editVersion, kind: "comparison", comparison: input,
+      questionEdited: question.trim() !== comparison?.question })) setEditing(false);
   }
 
   async function recordChoice(status: "undecided" | "leaning" | "selected", optionId: string | null, rejectedIds = choice.rejectedIds) {

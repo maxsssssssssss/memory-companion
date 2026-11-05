@@ -17,7 +17,7 @@ const completed = (value: unknown) => ({ type: "response.completed", response: {
   output: [{ type: "message", role: "assistant", content: [{ type: "output_text", text: JSON.stringify(value) }] }],
 } });
 
-function fixture(transport: (payload: { observation: { matter: { comparison: ThinkingMatterComparisonInput | null } } }, index: number) => Response) {
+function fixture(transport: (payload: { goal: string; observation: { matter: { comparison: ThinkingMatterComparisonInput | null } } }, index: number) => Response, question = "比较方案A与方案B") {
   const root = mkdtempSync(join(tmpdir(), "thinking-transport-offline-")), data = join(root, "data");
   cleanup.push(() => rmSync(root, { recursive: true, force: true }));
   mkdirSync(data);
@@ -40,7 +40,7 @@ function fixture(transport: (payload: { observation: { matter: { comparison: Thi
   const guard = installGuard({ environment: { THINKING_P1_REAL_DIR: root, APP_DATA_DIR: data, OPENAI_API_KEY: "offline-only-synthetic-key" },
     fetch, stdout: () => {} });
   cleanup.push(() => guard.close());
-  const created = service.repository.create("synthetic_account", { question: "比较方案A与方案B", operationKey: "create" });
+  const created = service.repository.create("synthetic_account", { question, operationKey: "create" });
   return { service, db, fetch, guard, created, payloads };
 }
 
@@ -48,6 +48,42 @@ function comparison(): ThinkingMatterComparisonInput {
   return { question: "选择哪个展示方向", dimensions: ["表达内容", "准备成本"],
     options: ["方案A", "方案B"].map(name => ({ name, content: `${name}内容`, reasons: ["当前理由"], limits: [], costs: [], unknowns: ["参与情况"] })), recommendation: null };
 }
+
+it("uses the user's subject even when a completed model action supplies a wrong heading and recommends B after new lunch constraints", async () => {
+  const subject = "周末去图书馆读书，还是在家做饭？", wrong = "周日下午的上午安排";
+  const constraint = "周六下午有家庭聚会，需要提前准备午饭。请重新比较。";
+  const h = fixture((payload, index) => {
+    const previous = payload.observation.matter.comparison;
+    const options = previous?.options ?? comparison().options.map((option, n) => ({ ...option, name: n ? "在家做饭" : "去图书馆读书" }));
+    if (index > 0) {
+      expect(previous?.question).toBe(subject);
+      expect(payload.goal).toBe(constraint);
+      options[1].reasons = ["在家做饭可以提前备好家庭聚会的午饭。"];
+    }
+    const updated = { dimensions: ["备餐时间"], options, recommendation: { optionId: previous?.options[1].id ?? null, text: "建议在家做饭" },
+      ...(index ? { question: wrong } : {}) };
+    return new Response(frame(completed({ tool: "respond", args: { comparison: updated, reply: "按备餐时间比较。", understanding: "比较周末安排", judgments: [], suggestions: [] } })),
+      { headers: { "content-type": "text/event-stream" } });
+  }, subject);
+  const account = "synthetic_account", id = h.created.matter.id;
+  let view = await h.service.turn(account, id, { text: subject, expectedVersion: 0, operationKey: "weekend" });
+  const [a, b] = view.matter.comparison!.options;
+  view = h.service.mutate(account, id, { kind: "choice", status: "selected", optionId: a.id, reason: "先选图书馆", expectedVersion: view.matter.version, operationKey: "choose" });
+  const originalChoice = view.matter.userChoice;
+  view = await h.service.turn(account, id, { text: constraint, expectedVersion: view.matter.version, operationKey: "lunch" });
+  expect(h.db.prepare("SELECT json_extract(args_json,'$.comparison.question') AS title FROM agent_actions WHERE tool='respond' ORDER BY rowid").all()).toEqual([{ title: null }, { title: wrong }]);
+  expect(view.matter.comparison).toMatchObject({ question: subject, recommendation: { optionId: b.id } });
+  expect(view.matter.comparison!.options[1].reasons[0]).toContain("提前备好家庭聚会的午饭");
+  expect(view.matter.userChoice).toEqual(originalChoice);
+  expect(view.matter.arrangements).toEqual([]);
+  expect(h.service.repository.get(account, id).events.at(-1)?.data.comparison).toMatchObject({ question: subject });
+  const rename = { text: "纠正一下，比较标题应该是「午饭前怎样安排？」", expectedVersion: view.matter.version, operationKey: "rename" };
+  const renamed = await h.service.turn(account, id, rename);
+  expect(renamed.matter.comparison).toEqual({ ...view.matter.comparison, question: "午饭前怎样安排？" });
+  expect(await h.service.turn(account, id, rename)).toEqual(renamed);
+  expect(renamed.matter.userChoice).toEqual(originalChoice);
+  expect(h.fetch).toHaveBeenCalledTimes(2);
+});
 
 it("keeps two comparison turns, explicit choices and an adopted action with large SSE overhead through the actual SDK and guard", async () => {
   const h = fixture((payload, index) => {

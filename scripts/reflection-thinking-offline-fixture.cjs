@@ -28,6 +28,23 @@ globalThis.fetch = async (input, init) => {
       ], recommendation: null };
     }
   }
+  else if (process.env.THINKING_P2_E2E === "1" && payload.observation.matter.question.startsWith("周末去图书馆读书，还是在家做饭？")) {
+    const { matter } = payload.observation;
+    const previous = matter.comparison?.options ?? [];
+    const lunch = goal.includes("周六下午有家庭聚会") && goal.includes("提前准备午饭");
+    action = respond(lunch ? "周六下午的家庭聚会需要提前备餐。根据这个条件更推荐在家做饭。" : "去图书馆适合安静阅读，在家做饭便于照顾家人。");
+    action.args.comparison = {
+      // Exercise both the new omission and an older model's incorrect but well-formed title.
+      ...(lunch ? { question: "周日下午的上午安排" } : {}),
+      dimensions: ["准备时间", "阅读环境"],
+      options: ["去图书馆读书", "在家做饭"].map((name, i) => ({
+        ...(previous[i] ? { id: previous[i].id } : {}), name, content: name,
+        reasons: [i ? (lunch ? "在家可以提前准备家庭聚会的午饭。" : "在家时间更灵活。") : "图书馆适合安静阅读。"],
+        limits: i === 0 && lunch ? ["外出时段要避开备餐时间。"] : [], costs: [], unknowns: ["具体可用时间"],
+      })),
+      recommendation: lunch ? { optionId: previous[1].id, text: "备餐条件下推荐在家做饭。" } : null,
+    };
+  }
   else if (process.env.THINKING_P2_E2E === "1") {
     const matter = payload.observation.matter;
     const options = matter.comparison?.options ?? [];

@@ -36,6 +36,75 @@ function compare(view: ThinkingMatterView, comparison = comparisonInput()) {
 }
 
 describe("Thinking matter P2 comparison, choice and correction boundaries", () => {
+  it("reads an old automatic heading without rewriting history and recovers the last actual user edit", () => {
+    const topic = "周末去图书馆读书，还是在家做饭？";
+    const bad = "周日下午的上午安排";
+    const view = compare(repository.create(account, { question: topic, operationKey: "weekend" }));
+    // Recreate the old storage shape in this in-memory compatibility fixture.
+    // Neither opening nor listing the legacy matter may rewrite its rows.
+    const old = structuredClone(view.matter);
+    old.comparison!.question = bad;
+    const bytes = JSON.stringify(old);
+    const storeOld = database.prepare("UPDATE dr_thinking_matters SET state_json=? WHERE id=?");
+    storeOld.run(bytes, old.id);
+    expect(repository.get(account, old.id).matter.comparison?.question).toBe(topic);
+    expect(repository.list(account)[0].comparison?.question).toBe(topic);
+    expect(database.prepare("SELECT state_json FROM dr_thinking_matters WHERE id=?").get(old.id)).toEqual({ state_json: bytes });
+
+    const oldForm = repository.mutate(account, old.id, { kind: "comparison", comparison: { ...comparisonInput(), question: bad },
+      operationKey: "pre-upgrade-editor", expectedVersion: old.version });
+    expect(oldForm.matter.comparison?.question).toBe(topic);
+    const manual = repository.mutate(account, old.id, { kind: "comparison", comparison: { ...comparisonInput(), question: "如何准备午饭？" },
+      operationKey: "edit-title", expectedVersion: oldForm.matter.version });
+    const editEvent = structuredClone(manual.events.at(-1)!);
+    delete editEvent.data.comparisonQuestion; // Old full-form events only had before/after comparison snapshots.
+    const storeEvent = database.prepare("UPDATE dr_thinking_events SET event_json=? WHERE id=?");
+    storeEvent.run(JSON.stringify(editEvent), editEvent.id);
+    const later = compare(manual);
+    const laterOld = structuredClone(later.matter);
+    laterOld.comparison!.question = bad;
+    storeOld.run(JSON.stringify(laterOld), old.id);
+    // Legacy user saved an option edit while the incorrect automatic heading was displayed.
+    const form = repository.mutate(account, old.id, { kind: "comparison", comparison: comparisonInput(),
+      operationKey: "other-field", expectedVersion: laterOld.version });
+    const unchangedTitle = structuredClone(form.events.at(-1)!);
+    delete unchangedTitle.data.comparisonQuestion;
+    for (const key of ["previousComparison", "comparison"])
+      (unchangedTitle.data[key] as { question: string }).question = bad;
+    storeEvent.run(JSON.stringify(unchangedTitle), unchangedTitle.id);
+    const resumed = repository.get(account, old.id);
+    expect(resumed.matter.comparison?.question).toBe("如何准备午饭？");
+    expect(compare(resumed).matter.comparison?.question).toBe("如何准备午饭？");
+    expect(repository.get(account, old.id).events.find(event => event.id === unchangedTitle.id)?.data).toEqual(unchangedTitle.data);
+  });
+
+  it("uses a neutral heading for long opening instructions until the user supplies a subject", () => {
+    const view = repository.create(account, { question: "请比较几种安排。".repeat(40), operationKey: "long-instructions" });
+    const initial = compare(view);
+    expect(initial.matter.comparison?.question).toBe("这几个方案怎么选？");
+    const edited = repository.mutate(account, view.matter.id, { kind: "edit", question: "周末如何安排？",
+      operationKey: "edit-subject", expectedVersion: initial.matter.version });
+    expect(compare(edited).matter.comparison?.question).toBe("周末如何安排？");
+  });
+
+  it("keeps explicit corrections, rejects a stale response and preserves analysis provenance on a manual title edit", () => {
+    const view = compare(create()), before = view.matter.comparison!;
+    const start = repository.beginTurn(account, view.matter.id, { text: "继续比较", operationKey: "in-flight", expectedVersion: view.matter.version });
+    const manual = repository.mutate(account, view.matter.id, { kind: "comparison", operationKey: "new-title", expectedVersion: start.version,
+      comparison: { ...comparisonInput(), question: "周六上午如何安排？" } });
+    expect(manual.matter.comparison).toEqual({ ...before, question: "周六上午如何安排？" });
+    expect(() => repository.commitResponse(account, view.matter.id, { generationId: start.generationId, expectedVersion: start.version,
+      reply: "旧回复", comparison: comparisonInput() })).toThrow(ThinkingMatterConflictError);
+    const corrected = repository.mutate(account, view.matter.id, { kind: "correct", understanding: "聚会在下午，午饭需要提前准备。",
+      comparisonQuestion: "午饭前可以做什么？", operationKey: "correct-title", expectedVersion: manual.matter.version });
+    const resumed = compare(corrected);
+    expect(resumed.matter.comparison?.question).toBe("午饭前可以做什么？");
+    const titleOnly = repository.mutate(account, view.matter.id, { kind: "correct", understanding: resumed.matter.understanding,
+      comparisonQuestion: "准备午饭要留多久？", reason: "只调整题目", operationKey: "title-only", expectedVersion: resumed.matter.version });
+    expect(titleOnly.matter.comparison).toEqual({ ...resumed.matter.comparison, question: "准备午饭要留多久？" });
+    expect(titleOnly.matter.understandingSourceEventId).toBe(resumed.matter.understandingSourceEventId);
+    expect(titleOnly.events.at(-1)).toMatchObject({ kind: "comparison_edited", data: { reason: "只调整题目" } });
+  });
   it("reads legacy P1 JSON with defaults without rewriting it or changing schema version", () => {
     const original = reply(create().matter.id, 0);
     const legacy = { ...original.matter } as Record<string, unknown>;

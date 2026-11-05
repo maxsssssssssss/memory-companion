@@ -112,7 +112,7 @@ async function measureChat(page: Page, filename: string) {
   await writeFile(join(artifacts, `${filename}.json`), JSON.stringify(dimensions, null, 2));
   await page.screenshot({ path: join(artifacts, `${filename}.png`), fullPage: true });
 }
-function mark(scenario: string) { results.push({ scenario, result: "PASS_OFFLINE_BROWSER" }); console.log(`[thinking-p2] ${results.length}/3 ${scenario} passed`); }
+function mark(scenario: string) { results.push({ scenario, result: "PASS_OFFLINE_BROWSER" }); console.log(`[thinking-p2] ${results.length}/4 ${scenario} passed`); }
 
 test("1 compare, choose A, change to B, keep earlier arrangement and reasons", async ({ page }) => {
   await page.goto(`${baseURL}/reflection/think`);
@@ -281,4 +281,80 @@ test("3 enter from a real saved card, compare only, no action or memory", async 
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
   await page.screenshot({ path: join(artifacts, "3-card-discussion.png"), fullPage: true });
   mark("authorized card and discussion without plans");
+});
+
+test("4 weekend comparison keeps its heading and choice after a wrong model title and a new lunch constraint", async ({ page }) => {
+  const subject = "周末去图书馆读书，还是在家做饭？";
+  const constraint = "周六下午有家庭聚会，需要提前准备午饭。请重新比较 A、B，今天只讨论。";
+  await page.goto(`${baseURL}/reflection/think`);
+  await page.getByRole("button", { name: "新建一件事", exact: true }).click();
+  await page.getByLabel("一起想的方式", { exact: true }).selectOption("compare_directions");
+  await page.getByLabel("你正在想什么", { exact: true }).fill(subject + "请比较 A 和 B。");
+  await page.getByRole("button", { name: "开始一起想", exact: true }).click();
+  const log = page.getByRole("log", { name: "这件事的对话" });
+  await expect(log).toContainText("图书馆适合安静阅读");
+  await progress(page, true);
+  const comparison = page.getByRole("region", { name: "方案比较", exact: true });
+  await expect(comparison.getByRole("heading", { name: subject, exact: true })).toBeVisible();
+  const first = await readMatter(page);
+  const [a, b] = first.matter.comparison!.options;
+  await comparison.getByRole("textbox", { name: "取舍原因（可不填）" }).fill("我想先去图书馆读书");
+  await comparison.getByRole("button", { name: "选择：去图书馆读书", exact: true }).click();
+  await expect(comparison).toContainText("已选择去图书馆读书");
+  const chosen = (await readMatter(page)).matter.userChoice;
+  expect(chosen).toMatchObject({ status: "selected", optionId: a.id, reason: "我想先去图书馆读书" });
+  await progress(page, false);
+  await send(page, constraint);
+  await expect(log).toContainText("根据这个条件更推荐在家做饭");
+  await page.reload();
+  await progress(page, true);
+  await expect(comparison.getByRole("heading", { name: subject, exact: true })).toBeVisible();
+  await expect(comparison).toContainText("助手的建议：在家做饭");
+  await expect(comparison).toContainText("在家可以提前准备家庭聚会的午饭");
+  await expect(comparison).toContainText("已选择去图书馆读书");
+  const final = await readMatter(page);
+  expect(final.matter.comparison!.options.map(option => option.id)).toEqual([a.id, b.id]);
+  expect(final.matter.comparison!.recommendation?.optionId).toBe(b.id);
+  expect(final.matter.userChoice).toEqual(chosen);
+  expect(final.matter.arrangements).toHaveLength(0);
+  expect(final.events.filter(event => event.kind === "choice_changed")).toHaveLength(1);
+  expect(final.events.filter(event => event.text === constraint)).toHaveLength(1);
+  const database = new Database(join(data, "daily-reflection.sqlite"), { readonly: true, fileMustExist: true });
+  try {
+    const actions = database.prepare("SELECT json_extract(args_json,'$.comparison.question') AS heading FROM agent_actions a JOIN agent_tasks t ON a.task_id=t.id WHERE t.account_id=? AND t.resource_id=? AND a.tool='respond' ORDER BY a.rowid")
+      .all(final.matter.accountId, final.matter.id);
+    expect(actions).toEqual([{ heading: null }, { heading: "周日下午的上午安排" }]);
+    const row = database.prepare("SELECT state_json FROM dr_thinking_matters WHERE id=? AND account_id=?").get(final.matter.id, final.matter.accountId) as { state_json: string };
+    expect(JSON.parse(row.state_json)).toEqual(final.matter);
+    await writeFile(join(artifacts, "weekend-comparison.json"), JSON.stringify({ syntheticActionHeadings: actions,
+      subject: final.matter.comparison!.question, constraint, recommendation: final.matter.comparison!.recommendation, chosen, options: final.matter.comparison!.options }, null, 2));
+  } finally { database.close(); }
+  await comparison.getByRole("heading", { name: subject, exact: true }).scrollIntoViewIfNeeded();
+  await page.screenshot({ path: join(artifacts, "weekend-comparison.png") });
+  await progress(page, false);
+  await send(page, "把比较题目改为「聚会前怎么准备午饭？」");
+  await expect(log).toContainText("比较题目已改为「聚会前怎么准备午饭？」");
+  await page.reload();
+  await progress(page, true);
+  await expect(comparison.getByRole("heading", { name: "聚会前怎么准备午饭？", exact: true })).toBeVisible();
+  const retitled = await readMatter(page);
+  expect(retitled.matter.comparison).toEqual({ ...final.matter.comparison, question: "聚会前怎么准备午饭？" });
+  expect(retitled.matter.userChoice).toEqual(chosen);
+  expect(retitled.events.filter(event => event.kind === "assistant_message")).toHaveLength(2);
+  await page.getByRole("button", { name: "纠正当前理解", exact: true }).click();
+  await page.getByLabel("同时更正比较题目（可不填）").fill("周六午饭要预留多少时间？");
+  await page.getByRole("button", { name: "保存更正", exact: true }).click();
+  await expect(comparison.getByRole("heading", { name: "周六午饭要预留多少时间？", exact: true })).toBeVisible();
+  await page.reload();
+  const corrected = await readMatter(page);
+  expect(corrected.matter.comparison).toEqual({ ...final.matter.comparison, question: "周六午饭要预留多少时间？" });
+  expect(corrected.matter.userChoice).toEqual(chosen);
+  expect(corrected.matter.understandingSourceEventId).toBe(final.matter.understandingSourceEventId);
+  expect(corrected.events.filter(event => event.kind === "corrected")).toHaveLength(0);
+  const check = new Database(join(data, "daily-reflection.sqlite"), { readonly: true, fileMustExist: true });
+  try {
+    expect(check.prepare("SELECT c.status FROM agent_calls c JOIN agent_tasks t ON c.task_id=t.id WHERE t.account_id=? AND t.resource_id=?").all(final.matter.accountId, final.matter.id))
+      .toEqual([{ status: "succeeded" }, { status: "succeeded" }]);
+  } finally { check.close(); }
+  mark("weekend constraint, stable heading and user choice after refresh");
 });

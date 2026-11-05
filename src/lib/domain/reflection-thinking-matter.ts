@@ -33,6 +33,12 @@ export const ThinkingMatterComparisonInputSchema = z.object({
   recommendation: z.object({ optionId: Id.nullable(), text: ComparisonText }).strict().nullable(),
 }).strict();
 
+// Older respond actions include a question. The user owns the title, so the
+// model may omit it and a saved action can still be replayed in its old shape.
+export const ThinkingMatterComparisonUpdateSchema = ThinkingMatterComparisonInputSchema.extend({
+  question: z.string().max(8_000).nullish().describe("题目由用户确定，请省略。"),
+});
+
 export const ThinkingMatterComparisonSchema = z.object({
   question: Text,
   dimensions: z.array(z.string().trim().min(1).max(240)).max(16),
@@ -142,9 +148,10 @@ export const ThinkingMatterMutationSchema = z.discriminatedUnion("kind", [
   z.object({ ...MutationBase, kind: z.literal("edit"), question: Text.optional(), goal: z.string().trim().max(8_000).optional(), mode: ThinkingModeSchema.optional(), contextMode: ContextModeSchema.optional(), arrangementId: Id.optional(), text: Text.optional() }).strict(),
   z.object({ ...MutationBase, kind: z.literal("status"), status: ThinkingMatterSchema.shape.status, reason: Text.optional() }).strict(),
   z.object({ ...MutationBase, kind: z.literal("cancel"), generationId: Id.optional() }).strict(),
-  z.object({ ...MutationBase, kind: z.literal("comparison"), comparison: ThinkingMatterComparisonInputSchema }).strict(),
+  z.object({ ...MutationBase, kind: z.literal("comparison"), comparison: ThinkingMatterComparisonInputSchema, questionEdited: z.boolean().optional() }).strict(),
+  z.object({ ...MutationBase, kind: z.literal("retitle"), question: Text, message: Text.optional(), reason: z.string().trim().max(8_000).optional() }).strict(),
   z.object({ ...MutationBase, kind: z.literal("choice"), ...ThinkingMatterChoiceInputSchema.shape }).strict(),
-  z.object({ ...MutationBase, kind: z.literal("correct"), understanding: Text, reason: z.string().trim().max(8_000).optional() }).strict(),
+  z.object({ ...MutationBase, kind: z.literal("correct"), understanding: Text, reason: z.string().trim().max(8_000).optional(), comparisonQuestion: Text.optional() }).strict(),
   z.object({ ...MutationBase, kind: z.literal("link_source"), source: ThinkingMatterSourceSchema }).strict(),
   z.object({ ...MutationBase, kind: z.literal("unlink_source"), sourceId: ThinkingMatterSourceSchema.shape.sourceId }).strict(),
 ]);
@@ -173,7 +180,7 @@ export const ThinkingMatterCommitResponseSchema = z.object({
   taskId: z.string().min(1).max(256).optional(),
   promptVersion: z.string().trim().min(1).max(256).optional(),
   model: z.string().trim().min(1).max(256).optional(),
-  comparison: ThinkingMatterComparisonInputSchema.optional(),
+  comparison: ThinkingMatterComparisonUpdateSchema.optional(),
 }).strict();
 
 export type ThinkingMatter = z.infer<typeof ThinkingMatterSchema>;

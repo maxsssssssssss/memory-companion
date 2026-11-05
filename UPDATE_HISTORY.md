@@ -15919,3 +15919,21 @@ Learning与UI：新增 `agent-scope.ts`、`agent-repository.ts`、`agent-scenari
 提交前在外部socket阻断守卫及合成数据路径下复跑受影响及相邻12文件297例，全部通过、0失败/0跳过，exit0；npm run lint（Next typegen及完整TypeScript）exit0；两份运行脚本node --check及git diff --check均exit0。核对5个关键源码/运行脚本与前批真实验收所用生产快照hash一致，复用该次含postbuild的production build和浏览器证据，不重复构建或消耗模型。此次提交准备新增真实Provider请求0，前批独立真实复验仍为2/12；原unknown根因及首问反馈分类瑕疵仍按既有报告保留，不扩大PASS范围。不操作服务器或部署，不更改本地其他工作区文件；最终提交及远程SHA以Git回执为准。日志保留output/thinking-unknown-fix-commit-20261104/。
 
 提交准备的首次文档格式检查因新追加部分采用CRLF而报trailing whitespace（exit2）；仅将此次新增后缀转换为LF，原有历史字节前缀保持不变，修正后重新核对。首次失败日志保留，未修改产品代码或业务数据。
+
+## 2026-11-04 「一起想」重新比较时保留用户题目
+
+线上合成测试在第二轮补充周六家庭聚会、需提前备餐后，推荐与用户选择正确，但比较标题出现矛盾时间。迁移工作区基底为09e4a5bf0738efd1286f3a5a1799d6ac6856eb61，开始时仅有原未跟踪tmp。沿调用链确认，原respond要求每轮填写question，仓储直接采用后一次的题目，页面和下一轮模型都读取该值。未取得所报线上两轮的原始返回，因此不归因于某一轮模型或解析器。
+
+在reflection-thinking-matter.ts、thinking-comparison-question.ts、thinking-matter-repository.ts和thinking-agent.ts中拆开用户题目与助手分析的写入。首轮使用用户的简短原问题或中性标题，重新比较可以省略question，兼容旧动作所带的标题，严格的方案字段校验与稳定ID继续生效。当前题目按已有用户事件读取和保存。旧事项恢复用户实际改过的题目，未改标题的旧表单不确认为新题，自动错题不进入当前比较及下一轮观察。读取无需迁移或批量更新SQLite。明确的聊天改题、手动编辑及纠正使用已有版本、回执、取消和来源检查。改题同时要求继续分析时在同一用户轮次保存。页面reflection-thinking-matters.tsx增加可选纠正题目，只有题目改变时保留原有分析和出处。保留现有Runtime、数据库和产品边界，没有新依赖。
+
+定向验证覆盖仓储、场景、真实SDK离线传输、来源撤回、正式API、客户端和组件。最终npm test运行7文件173例，全部通过，0跳过，exit 0。npm run lint含Next typegen与TypeScript，exit 0。首次生产浏览器4/4通过后，复核发现仅改题目的纠正表单会连带作废原分析，已修正并补验。最终另建隔离快照，核对1728个源码文件，npm run build含postbuild exit 0，185份trace无禁止引用。既有P2 fixture与生产模式Playwright脚本新增家庭聚会案例，核对864个生产文件与构建一致，最终4/4浏览器流程通过，exit 0。一次编辑补丁因上下文不符未应用，按当前源码修正后正常落地，最终无工程门禁失败。
+
+浏览器经真实页面、API、共享Runtime和SQLite运行，仅模型传输使用合成fixture。该事项首轮响应省略标题，第二轮respond参数确实携带错误标题，两条已保存助手事件和刷新后的页面均保留原问题。备餐约束进入B的理由，助手推荐在家做饭，用户选择图书馆读书的理由和ID保留，只有一次choice_changed，安排为0。随后聊天明确改题、表单仅纠正题目并刷新，两次分析的推荐和来源均保留，该事项始终只有2次合成SDK调用。只读核对与截图在output/thinking-comparison-question-20261104/final/receipt.json及其指向的浏览器目录。本次真实Provider请求0，验收服务端口已释放，next-env.d.ts恢复。
+
+结论限于本地工程及离线浏览器验收。明确题目指令和手动编辑可改题，含糊的建议或假设留在讨论中，生成理由的真实语义质量未在本轮复测。本轮未访问生产环境，未提交、推送或部署。原工作区未提交资料、数据和历史证据保留。
+
+## 2026-11-05 「一起想」标题修复的提交与推送前核对
+
+用户明确要求将本次标题修复提交并推送main。当前仍在reflection-thinking-main-migration工作区的codex/reflection-thinking-main-migration分支，GitHub与fetch核对main为09e4a5bf0738efd1286f3a5a1799d6ac6856eb61，与本地基底一致。精确选择产品源码、定向测试、离线fixture、浏览器脚本及共用历史共13个文件，原tmp、数据、账本和历史证据不纳入提交，不切换或改写其他工作区。
+
+提交前使用独立合成数据路径和外部socket阻断守卫复跑7文件173例，全部通过、0失败、0跳过，exit 0。npm run lint含Next typegen及完整TypeScript，exit 0。逐一核对当前1728个源码文件与此前最终生产构建快照hash一致，复用已通过的build/postbuild和4条生产模式离线浏览器流程，不重复构建或调用模型。检查覆盖错误模型标题不覆盖用户题目、备餐约束参与比较、推荐B与用户选择A独立保留，以及明确改题和旧事项兼容。命令日志在output/thinking-title-fix-commit-20261105，git diff --check与精确暂存清单在提交前再次核对，实际提交及远端SHA以Git回执为准。本轮新增真实Provider请求0，无服务器访问或部署，真实语义复验仍为NOT RUN，无新增数据库迁移或生产依赖。
