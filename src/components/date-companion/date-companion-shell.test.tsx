@@ -153,6 +153,23 @@ function readyMemoryBridgeState(personQaSources: SourceRefVM[] = []): DateCompan
 }
 
 describe("DateCompanionShell", () => {
+  it.each(["home", "prepare"] as const)("opens %s without a recording, relationship form, or detail load", async (entryScreen) => {
+    vi.stubGlobal("ResizeObserver", class { observe() {} disconnect() {} });
+    vi.stubGlobal("fetch", vi.fn(async () => Response.json({ preparations: [], availableSources: [] })));
+    const session = makeSession({ auth: { status: "authenticated", user: { id: "user-1", email: "user@example.com" } }, relationshipState: { status: "absent" }, relationshipDetailsLoaded: false });
+    mockedUseDateCompanionSession.mockReturnValue(session);
+    render(<DateCompanionShell entry="companion" screen={entryScreen} />);
+    await screen.findByText("从你现在想说的开始。");
+    expect(screen.getByRole("textbox", { name: "想聊点什么？" })).toBeInTheDocument();
+    expect(session.ensureRelationshipDetailsLoaded).not.toHaveBeenCalled();
+    expect(session.createRelationship).not.toHaveBeenCalled();
+    expect(screen.queryByText("正在读取相处内容…")).not.toBeInTheDocument();
+    if (entryScreen === "home") {
+      fireEvent.click(screen.getByRole("button", { name: "从相处录音开始" }));
+      expect(session.createRelationship).toHaveBeenCalledWith("Ta");
+    }
+  });
+
   beforeEach(() => {
     vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => {
       callback(0);
@@ -1047,7 +1064,7 @@ describe("DateCompanionShell", () => {
     expect(retryRead).toHaveBeenCalledTimes(1);
   });
 
-  it("requires the user to create the single relationship explicitly", async () => {
+  it("keeps the existing explicit relationship setup for the recording recap entry", async () => {
     const createRelationship = vi.fn(async () => undefined);
     mockedUseDateCompanionSession.mockReturnValue(makeSession({
       auth: {
@@ -1058,7 +1075,7 @@ describe("DateCompanionShell", () => {
       createRelationship
     }));
 
-    render(<DateCompanionShell entry="companion" screen="home" />);
+    render(<DateCompanionShell entry="companion" screen="recap" />);
     expect(screen.getByRole("heading", { name: "你想怎样称呼 Ta？" })).toBeInTheDocument();
     fireEvent.change(screen.getByLabelText("称呼（可选）"), { target: { value: "  小林  " } });
     fireEvent.click(screen.getByRole("button", { name: /开始记录这段关系/u }));

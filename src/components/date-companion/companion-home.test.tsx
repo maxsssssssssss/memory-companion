@@ -154,7 +154,7 @@ describe("CompanionHome", () => {
     fireEvent.click(within(beforeMeeting).getByText("查看原话"));
     fireEvent.click(within(beforeMeeting).getByRole("button", { name: "在完整文字稿中查看" }));
     expect(onOpenSource).toHaveBeenCalledWith(expect.objectContaining({ id: "source-2", quote: "这周刷题遇到了些难题。" }), "segment-2");
-    expect(screen.getByRole("link", { name: /打开准备卡/u })).toHaveAttribute("href", "/date-companion/a/prepare");
+    expect(screen.getByRole("link", { name: /回看准备卡/u })).toHaveAttribute("href", "/date-companion/a/prepare?view=records");
     expect(screen.queryByText(/认识.*天|河边|周六/u)).not.toBeInTheDocument();
   });
 

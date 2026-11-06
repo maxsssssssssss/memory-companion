@@ -13,6 +13,7 @@ const INSTALLED = Symbol.for('daily-brief.reflection-thinking-real-network-guard
 const ENDPOINT = 'https://tokenhub.vision-intelligence.tech/v1/responses';
 const MODEL = 'deepseek-v4-pro';
 const MAX_REQUESTS = 12;
+const DATE_SCENARIO = 'date_companion_preparation_v1';
 const uuid = value => typeof value === 'string' && /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/iu.test(value);
 const sha = value => crypto.createHash('sha256').update(value).digest('hex');
 function fail(code) { throw new Error(`thinking_real_guard:${code}`); }
@@ -22,10 +23,21 @@ function loopback(host) {
 }
 function samePath(left, right) { return path.relative(left, right) === ''; }
 function identifier(value) { return typeof value === 'string' && /^[a-zA-Z0-9_-]{1,200}$/u.test(value) ? value : null; }
-function proof(body) {
+function proof(body, dateScenario) {
   try {
     const payload = JSON.parse(body.input.find(item => item.role === 'user').content);
     const observation = payload.observation, matter = observation?.matter;
+    if (dateScenario) {
+      return {
+        preparationId: identifier(payload.authorizedScope?.preparationId),
+        preparationVersion: Number.isSafeInteger(payload.authorizedScope?.version) ? payload.authorizedScope.version : null,
+        selectedItems: Array.isArray(observation?.items) ? observation.items.filter(item => item.status === 'selected')
+          .map(item => ({ id: identifier(item.id), textSha256: typeof item.text === 'string' ? sha(item.text) : null })) : [],
+        latestFeedbackTextSha256: typeof observation?.latestFeedback?.text === 'string' ? sha(observation.latestFeedback.text) : null,
+        historyCount: Number.isSafeInteger(observation?.historyCount) ? observation.historyCount : null,
+        historyAllowed: observation?.historyAllowed === true,
+      };
+    }
     return { matterId: identifier(matter?.id), matterVersion: Number.isSafeInteger(matter?.version) ? matter.version : null,
       arrangements: Array.isArray(matter?.arrangements) ? matter.arrangements.map(item => ({
         id: identifier(item.id), status: ['adopted', 'tried', 'not_started', 'changed', 'completed'].includes(item.status) ? item.status : null,
@@ -52,6 +64,9 @@ function installGuard(options = {}) {
   const authorizationBytes = fs.readFileSync(authorizationPath);
   const authorization = JSON.parse(authorizationBytes.toString('utf8'));
   if (authorization.mode !== 'real' || authorization.maxRequests !== MAX_REQUESTS || authorization.model !== MODEL) fail('authorization_invalid');
+  const dateScenario = authorization.scenario === DATE_SCENARIO;
+  if (authorization.scenario !== undefined && !dateScenario && authorization.scenario !== 'daily_reflection_thinking_v1') fail('authorization_scenario_invalid');
+  const sharedPath = path.join(data, dateScenario ? 'date-companion.sqlite' : 'daily-reflection.sqlite');
   const authorizationHash = sha(authorizationBytes);
   const captureInput = env.THINKING_REAL_CAPTURE_SYNTHETIC_INPUT === '1';
   if (captureInput && (authorization.captureSyntheticInput !== true || authorization.accountScope !== 'new local synthetic account only'))
@@ -133,8 +148,8 @@ function installGuard(options = {}) {
     });
     persistState();
   }
-  function checkShared(requestId) {
-    const file = path.join(data, 'daily-reflection.sqlite');
+  function checkShared(requestId, body) {
+    const file = sharedPath;
     let shared;
     try {
       if (!samePath(fs.realpathSync(file), file)) fail('shared_ledger_path_invalid');
@@ -142,6 +157,20 @@ function installGuard(options = {}) {
       shared.pragma('busy_timeout = 5000');
       const current = shared.prepare('SELECT status FROM agent_calls WHERE id=?').get(requestId);
       if (!current || current.status !== 'running') return 'shared_request_not_running';
+      if (dateScenario) {
+        const task = shared.prepare(`SELECT c.kind,t.scenario,t.resource_id,t.scope_json FROM agent_calls c
+          JOIN agent_tasks t ON t.id=c.task_id WHERE c.id=?`).get(requestId);
+        if (!task || task.kind !== 'agent_decision' || task.scenario !== DATE_SCENARIO || !identifier(task.resource_id))
+          return 'date_scenario_mismatch';
+        let savedScope, requestScope;
+        try {
+          savedScope = JSON.parse(task.scope_json);
+          requestScope = JSON.parse(body.input.find(message => message.role === 'user').content).authorizedScope;
+        } catch { return 'date_scope_mismatch'; }
+        if (savedScope?.preparationId !== task.resource_id || requestScope?.preparationId !== task.resource_id
+          || !identifier(savedScope.generationId) || requestScope.generationId !== savedScope.generationId
+          || !Number.isSafeInteger(savedScope.version) || requestScope.version !== savedScope.version) return 'date_scope_mismatch';
+      }
       if (shared.prepare("SELECT 1 FROM agent_calls WHERE status='unknown' OR (status='running' AND id<>?) LIMIT 1").get(requestId)) return 'shared_unresolved_request';
       return null;
     } catch { return 'shared_ledger_unavailable'; }
@@ -149,6 +178,7 @@ function installGuard(options = {}) {
   }
   function reconcileCompletedStartupPause() {
     if (closed) fail('guard_closed');
+    if (dateScenario) fail('startup_reconciliation_not_applicable');
     // This is solely a repair for the old install-time false positive. A real
     // unknown, another halt cause or incomplete/mismatched receipts cannot use it.
     const result = db.transaction(() => {
@@ -159,7 +189,6 @@ function installGuard(options = {}) {
       const networkRows = db.prepare('SELECT * FROM requests ORDER BY id').all();
       if (networkRows.length < 1 || networkRows.length >= MAX_REQUESTS) fail('startup_reconciliation_budget_ineligible');
       if (networkRows.some(row => row.state !== 'completed' || row.model !== MODEL || !uuid(row.request_id))) fail('startup_reconciliation_network_not_completed');
-      const sharedPath = path.join(data, 'daily-reflection.sqlite');
       let shared, sharedRows;
       try {
         if (!samePath(fs.realpathSync(sharedPath), sharedPath)) fail('startup_reconciliation_shared_path_invalid');
@@ -205,10 +234,10 @@ function installGuard(options = {}) {
     if (db.prepare("SELECT 1 FROM requests WHERE state IN ('dispatched','streaming','unknown') LIMIT 1").get()) return denied('unresolved_request', true);
     if (db.prepare('SELECT 1 FROM requests WHERE request_id=?').get(requestId)) return denied('duplicate_request_id', true);
     if (db.prepare('SELECT count(*) n FROM requests').get().n >= MAX_REQUESTS) return denied('request_budget_exhausted');
-    const sharedIssue = checkShared(requestId);
+    const sharedIssue = checkShared(requestId, body);
     if (sharedIssue) return denied(sharedIssue, true);
     const inserted = db.prepare(`INSERT INTO requests(request_id,state,started_at,model,input_chars,output_limit,request_body_sha256,request_proof_json)
-      VALUES(?,'dispatched',?,?,?,?,?,?)`).run(requestId, now(), MODEL, text.length, body.max_output_tokens, sha(text), JSON.stringify(proof(body)));
+      VALUES(?,'dispatched',?,?,?,?,?,?)`).run(requestId, now(), MODEL, text.length, body.max_output_tokens, sha(text), JSON.stringify(proof(body, dateScenario)));
     return { id: Number(inserted.lastInsertRowid) };
   });
   async function guardedFetch(input, init) {

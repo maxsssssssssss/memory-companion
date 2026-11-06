@@ -8,6 +8,7 @@ import {
   getDateCompanionDatabasePath,
   openDateCompanionDatabase
 } from "./db";
+import { DateCompanionRepository } from "./repository";
 import { DATE_COMPANION_SCHEMA_VERSION, migrateDateCompanionSchema } from "./schema";
 
 const roots: string[] = [];
@@ -17,6 +18,39 @@ afterEach(async () => {
 });
 
 describe("date-companion SQLite schema", () => {
+  it("upgrades version 12 to 13 without altering any existing dating records or creating preparations or grants", () => {
+    const db = openDateCompanionDatabase({ filePath: ":memory:" });
+    try {
+      // V13 is strictly additive. Removing its two tables and migration row reproduces V12.
+      db.exec("DROP TABLE dc_preparation_operations; DROP TABLE dc_preparations; DELETE FROM dc_schema_migrations WHERE version=13");
+      const repo = new DateCompanionRepository(db);
+      const userId = "migration-user", relationship = repo.createOrGetRelationship(userId).relationship;
+      const upload = "migration-fixture", { interactionId } = repo.importInteraction({
+        userId, relationshipId: relationship.id, sourceUploadId: upload, recordingDate: "2026-11-03", originalName: "synthetic.wav",
+        participants: [{ speakerId: "self" }], recapCandidates: [{ kind: "promise", proposedText: "把书名发给你", sortOrder: 0,
+          evidence: [{ uploadId: upload, sourceSegmentId: "migration-segment", startSeconds: 0, endSeconds: 2, speakerId: "self", quote: "我把书名发给你。" }] }],
+      });
+      const item = repo.getInteractionDetail(userId, relationship.id, interactionId).recapItems[0];
+      repo.updateRecap({ userId, interactionId, version: 0, assignments: [{ speakerId: "self", role: "self" }],
+        mutations: [{ id: item.id, version: 0, disposition: "kept" }], finalize: true });
+      const tables = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'dc_%' AND name!='dc_schema_migrations' ORDER BY name").all() as { name: string }[];
+      const rows = () => tables.map(({name}) => [name, db.prepare(`SELECT * FROM "${name}"`).all()]);
+      const before = rows();
+      const migrations = db.prepare("SELECT * FROM dc_schema_migrations ORDER BY version").all();
+      expect(migrations).toHaveLength(12);
+      expect(db.prepare("SELECT COUNT(*) AS n FROM dc_promises").get()).toEqual({n:1});
+      expect(db.prepare("SELECT COUNT(*) AS n FROM dc_evidence_snapshots").get()).toEqual({n:1});
+      migrateDateCompanionSchema(db);
+      migrateDateCompanionSchema(db);
+      expect(rows()).toEqual(before);
+      expect(db.prepare("SELECT * FROM dc_schema_migrations WHERE version<13 ORDER BY version").all()).toEqual(migrations);
+      expect(db.prepare("SELECT COUNT(*) AS n FROM dc_schema_migrations WHERE version=13").get()).toEqual({n:1});
+      for (const table of ["dc_preparations", "dc_preparation_operations"])
+        expect(db.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get()).toEqual({n:0});
+      expect(db.pragma("foreign_key_check")).toEqual([]);
+    } finally { db.close(); }
+  });
+
   it("migrates the V11 cache to TokenHub without losing payloads, leases, uniqueness or account-scoped delete cascades", () => {
     const database = openDateCompanionDatabase({ filePath: ":memory:" });
     try {
@@ -156,7 +190,7 @@ describe("date-companion SQLite schema", () => {
       expect(database.pragma("foreign_keys", { simple: true })).toBe(1);
       migrateDateCompanionSchema(database);
       expect(database.prepare("SELECT COUNT(*) AS count FROM dc_schema_migrations").get()).toEqual({
-        count: 12
+        count: DATE_COMPANION_SCHEMA_VERSION
       });
       expect(database.prepare("PRAGMA table_info(dc_participant_audio_samples)").all()).not.toHaveLength(0);
       expect(database.prepare("PRAGMA table_info(dc_relationship_speaker_bindings)").all()).not.toHaveLength(0);
@@ -264,12 +298,13 @@ describe("date-companion SQLite schema", () => {
         { version: 9 },
         { version: 10 },
         { version: 11 },
-        { version: 12 }
+        { version: 12 },
+        { version: 13 }
       ]);
       migrateDateCompanionSchema(database);
       expect(database.prepare(
         "SELECT COUNT(*) AS count FROM dc_schema_migrations"
-      ).get()).toEqual({ count: 12 });
+      ).get()).toEqual({ count: DATE_COMPANION_SCHEMA_VERSION });
     } finally {
       database.close();
     }

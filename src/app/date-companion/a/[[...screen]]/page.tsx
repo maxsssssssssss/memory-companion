@@ -15,6 +15,7 @@ const dateCompanionServerScreens: readonly DateCompanionScreen[] = ["home", "per
 type DateCompanionScreenPageProps = {
   params: Promise<{ screen?: string[] }>;
   searchParams: Promise<{
+    view?: string | string[];
     interaction?: string | string[];
     segment?: string | string[];
   }>;
@@ -45,6 +46,7 @@ export default async function DateCompanionScreenPage({ params, searchParams }: 
         initialPersonId={initialPersonId}
         initialSegmentId={initialSegmentId}
         screen={screen}
+        showPreparationRecords={screen === "prepare" && query.view === "records"}
         toySyncEnabled={isToySyncEnabled()}
       />
     </div>

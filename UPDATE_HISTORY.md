@@ -15937,3 +15937,90 @@ Learning与UI：新增 `agent-scope.ts`、`agent-repository.ts`、`agent-scenari
 用户明确要求将本次标题修复提交并推送main。当前仍在reflection-thinking-main-migration工作区的codex/reflection-thinking-main-migration分支，GitHub与fetch核对main为09e4a5bf0738efd1286f3a5a1799d6ac6856eb61，与本地基底一致。精确选择产品源码、定向测试、离线fixture、浏览器脚本及共用历史共13个文件，原tmp、数据、账本和历史证据不纳入提交，不切换或改写其他工作区。
 
 提交前使用独立合成数据路径和外部socket阻断守卫复跑7文件173例，全部通过、0失败、0跳过，exit 0。npm run lint含Next typegen及完整TypeScript，exit 0。逐一核对当前1728个源码文件与此前最终生产构建快照hash一致，复用已通过的build/postbuild和4条生产模式离线浏览器流程，不重复构建或调用模型。检查覆盖错误模型标题不覆盖用户题目、备餐约束参与比较、推荐B与用户选择A独立保留，以及明确改题和旧事项兼容。命令日志在output/thinking-title-fix-commit-20261105，git diff --check与精确暂存清单在提交前再次核对，实际提交及远端SHA以Git回执为准。本轮新增真实Provider请求0，无服务器访问或部署，真实语义复验仍为NOT RUN，无新增数据库迁移或生产依赖。
+
+## 2026-11-05 约会陪伴 Agent P0＋P1 本地首版闭环
+
+背景与目标：按用户指定 ae329e9c45a7eca7e8b4eb09dd83934cfbdb27be 开发无录音自然聊天、按次历史授权检索、可选准备、明确选用与回来反馈的完整首版。原主目录 HEAD 为 dd3e131 且存在其他任务 dirty，因此使用从目标 SHA 创建的 date-companion-agent-p1 managed worktree，未修改原主目录、历史数据或账本。当前 worktree detached HEAD；未提交、推送、部署；本记录仅本地追加，虽目标基线已跟踪 UPDATE_HISTORY.md，本轮不暂存或提交它。
+
+调查判断：读取当前产品、设计、验证合同并跟踪 prepare/Shell/session、confirmed recap、关系搜索、canonical Evidence、Promise、Person catalog、Memory bridge、AgentRuntime。唯一 Ta 不增人物选择；settings 初始 enabled/version 不能推断明确长期授权；复盘按次使用与 Memory 准入分开。关系搜索 API 的 Person admission 限制不适合直接承担临时复盘使用，采用既有 repository.search 与 relationship QA canonical allowlist 再交集本次 scope；长期来源继续通过既有 publication/receipt/revocation resolver。准备页不再触发旧 proactive 生成，旧缓存和助手输出不当新事实。
+
+实现：新增 domain/date-companion-preparation、server/date-companion/preparation-repository/sources/agent/service、api/date-companion/preparations、client/date-companion-preparation-api、companion-preparation 组件及 CSS/测试，修改现有 Shell、首页入口、约会样式和 schema/schema测试；新增三流程 e2e、模型传输 fixture 与窄范围 runner。schema13 新增 dc_preparations（完整消息、事件、建议、用户选择、反馈及来源）和 dc_preparation_operations（幂等收据），因为录音 interaction 无法表达无录音讨论及恢复；未新增生产依赖、全局开关、共享 Runtime、Memory 或 Promise authority。输入先事务持久化，服务端生成 ID，手动选择/编辑不调用模型。Runtime 场景使用既有 TokenHub deepseek-v4-pro，每次 ctx.call 记账，每轮8次/10steps/180秒上限，不隐藏重试；达到上限保留输入与明确未完成状态，只有后续真实预算验收证明常见合法任务持续触顶才调整既有上限，不预建第二执行平台。
+
+关键保护：检索与人物目录只返回定位信息，原话须read_source；Runtime resultRef只存ID/指纹。日期与约束也绑定来源并每轮重验；scope撤回、外部源删除和纠正不能让旧摘录通过历史回复或metadata回流。明确单对象选用的回复与真实选择同一事务；模糊肯定不自动采用。版本、幂等、generationId及Runtime lease阻断晚到覆盖；删除清正文保留调用账本；中断重开检测过期执行，不自动重发。UI沿用既有设计token和Dialog/Evidence，自然输入、轻历史/资料抽屉、紧凑记事、文字反馈、内部消息滚动、上翻保持、visualViewport与safe-area；修复初始旧加载响应覆盖新会话的race及失败重读丢草稿/重复请求问题。
+
+验证：后端/API/schema/来源4文件21例PASS，来源与相邻4文件37例PASS，最终来源+Agent2文件15例PASS（用例重叠不累计）；UI+Shell最终2文件39例PASS，首页12例PASS。npm run lint修正类型后exit0，最终production build完整类型检查再次通过；git diff --check通过。生产构建成功证据 output/date-companion-agent-p1/2026-11-05T03-42-50-868Z，含既有postbuild，188 manifests、removed447、forbidden0。复用同一未变产品构建的最终浏览器3/3 PASS、7.5秒，证据2026-11-05T03-46-14-859Z；覆盖正式页面/API/SQLite/shared Runtime、授权检索与原话、明确选用、重开反馈、无录音新账号首页、只讨论、纠正撤回、手机长对话和缩短视口。实际查看最终截图，报告 DATE_COMPANION_AGENT_P1_IMPLEMENTATION_REPORT.md 已附默认、反馈和手机页面。
+
+真实失败保留：首次沙箱spawn EPERM为启动失败，升级后测试通过；schema版本硬编码与fixture类型错误修正；首次browser第2流程发现旧响应竞态、修复后3/3通过；首次production build编译后因闭包类型收窄失败，postbuild/Browser未运行，修正后重建成功；一次自动审批超时未启动，按指引重试成功。成功构建后的browser曾将合成复盘种子已有bridge outbox事件错误断言为零而失败，仅改测试为前后不增加并复跑Browser，不改产品、不重建。最终实际Memory items=0、Person facts=0、Promise=0，办公数据库未创建；12条成功agent_decision均为synthetic transport，真实Provider/ASR请求0。本次本地服务退出，13065/13422端口无监听。所有失败证据保留。
+
+限制与收口：这是本地工程及离线闭环完成，真实模型自然度/语义质量、生产环境、真机软键盘均NOT RUN。长期user_reflection复用现有近期24条/人物记忆200条限制，direct catalog与按次复盘不靠该窗口；用户需要更早长期转述却未找到时须明确说明，并据实扩展已有检索。P2录音完整对照、订位/发消息/提醒/多人/评分诊断不在本轮。无服务器访问，无提交推送部署。P0＋P1完成后停止，等待检查。
+
+## 2026-11-05 约会陪伴 P1 轻量真实模型验收（部分通过）
+
+目标与边界：在 P1 隔离工作区沿用此前通过的本地生产构建，用两个新建合成账号验证检索原话、选用、关闭重开、反馈调整及无历史纯讨论，并查看桌面和移动视口。只在明确的12次总预算内使用约会产品模型，无生产、ASR或其他远端操作，未提交、推送或部署。没有修改产品功能或提示词。
+
+判断与实现：原验收守卫只核对日常复盘账本，不能证明约会请求归属。复用 scripts/reflection-thinking-real-network-guard.cjs 及其测试，按明确授权场景核对约会共享账本中运行的请求、任务、业务资源和版本；网络传输前原子计数，保留零重试和未知结果停批。新增 scripts/run-date-companion-agent-real.mjs 和 e2e/date-companion-agent-real.spec.ts，以正式页面/API/SQLite/Runtime走流程，保存合成业务状态、用量、截图和失败证据。结果见 DATE_COMPANION_AGENT_P1_REAL_ACCEPTANCE_REPORT.md，无新增生产依赖、共享业务状态或功能开关。
+
+实际结果：预算使用5/12，均收到完整真实响应，网络与业务账本逐条一致，无未知状态，未用剩余预算重抽结果。账号一实际检索、阅读并逐字引用正确原话，手动选用后重开仍是原条目；反馈原文、选用项和反馈轮模型输入哈希相符。建议由旅行转为安静陪伴，原选择未覆盖，新建议未自动采纳。账号二无来源、无条目，能讨论分歧顾虑并问一个相关问题。真实浏览器1文件2例，1通过1失败、0跳过、exit 1：用户要一个调整建议，实际回复登记两条。人工核对还发现反馈轮沿用先前的相对日期、正文与条目不完全对应，个别措辞将用户理解说得过于确定；纯讨论回复有一句轻微行动引导。未将数据闭环或模型返回成功写成语义全通过。Promise、Memory条目及Person事实均为0，未创建办公数据库。验收后本次服务退出并确认端口释放。
+
+检查和后续：预算守卫定向测试1文件44例通过，含8条约会授权与拒绝用例；npm run lint（含类型检查）和 git diff --check 通过。此次复用原构建，未重跑全仓或生产构建。已查看真实桌面来源/反馈和390×844、390×480浏览器视口，输入与发送可见，无明显横向溢出。发布前需真机快速检查中文软键盘候选栏、安全区、发送与收起键盘后的恢复，本次真机/生产NOT RUN。后续以本次失败样本检验反馈时态、用户指定数量、选项与正文一致性；样本有限，不代表普遍语义质量。全部本轮证据保存在 output/date-companion-agent-real/20261105-p1-light，不覆盖历史数据或失败账本。
+
+## 2026-11-05 约会陪伴 P1 单条建议、时间和主观反馈的定向修复
+
+本轮依据上次真实反馈失败记录，限定修复用户要一条建议时的数量、下次见面的时态、建议正文与选用对象一致性，以及用户主观理解的归因。逐条追查确认原数据未丢失，旧时间来自仍被投影为当前目标的首次表达，正文与条目则是两个独立的生成位置。沿用 ae329e9c45a7eca7e8b4eb09dd83934cfbdb27be 工作树和已有 P1 未提交实现。
+
+src/lib/server/date-companion/preparation-agent.ts 收紧每轮 respond 参数和发布上限，按反馈分开当前对话与旧进展，读历史仍标出此前见面。src/lib/server/date-companion/preparation-repository.ts 把规划日期及约束绑定到反馈边界，保留原始记录、来源和用户选择，未绑定到当前见面的旧数据按保守方式读取。src/components/date-companion/companion-preparation.tsx 和同目录 CSS 按 sourceMessageId 展示可直接修改、选用的建议，共用服务端条目。回来反馈只有一条调整且本轮未读个人来源时，直接发布条目，避免自由前言推测 Ta 的状态或额外提出动作。只讨论仍展示自然回复。本次未新增数据库表、Provider、生产依赖或共享抽象。
+
+验收沿用原有 e2e/date-companion-agent-p1.spec.ts、e2e/date-companion-agent-real.spec.ts、scripts/run-date-companion-agent-real.mjs 及离线传输 scripts/date-companion-agent-fixture.cjs。scripts/date-companion-real-budget.test.mjs 验证跨独立数据目录累计计数、已知完成与未知拦截；受影响 Agent 和组件回归在 preparation-agent.test.ts、companion-preparation.test.tsx。真实运行沿用原批 5 次，新增 2+5 次，累计 12/12。中间批两个用例均因模型工具参数或动作外层格式不符失败，保留原始响应、账本及截图。补入约会场景调用示例后，独立反馈、只讨论和授权原话读取三个真实浏览器用例均通过。人工复核反馈仍有将用户印象说成事实的额外前言，随后修正发布规则。在最终生产构建，用原样第 8 次返回离线回放同一反馈，只有一条可选建议，旧时间未带入，额外前言未发布，选用内容逐字一致、关页重开可恢复。未以回放代替最终版本的新生成验收，预算耗尽后继续保持真实调用为零。三个真实场景使用各自的合成账号，首个已选进展通过正式业务仓储预置。没有额外 Promise、Memory、Person 或办公写入。
+
+定向验证结果为 6 个 Vitest 文件 80/80、最终离线浏览器 3/3、受影响 TypeScript 及 git diff --check 通过。最终构建 o2sOf_SoF_-DU-vgooiaQ 和既有 postbuild 成功，46/46 静态页面、188 份清单、禁用引用 0。全项目 lint 在 typegen 后多次因本机内存不足退出；定向 TS 初次缺少项目测试 matcher 和本地模块声明，补入后通过。沙箱 worker 曾遇 spawn EPERM，初次构建启动还遇守卫路径失败，随后构建 worker 遇内存不足；经本地审批并限制并行和堆容量后，使用定向类型配置完成实际生产构建。失败证据保留。最终截图已实际查看，桌面与手机均可识别原反馈和待选建议。详见 DATE_COMPANION_AGENT_P1_REAL_ACCEPTANCE_REPORT.md 新增定向复验章节。全仓测试、发布前真机中文软键盘、生产和最终发布规则上的新模型样本未执行，无提交、推送或部署。
+
+## 2026-11-05 约会陪伴 P2 关联已确认复盘、纠正反馈及继续准备
+
+目标与判断：在指定 ae329e9c45a7eca7e8b4eb09dd83934cfbdb27be 加 P1 未提交实现的工作树，完成用户从会前选用、会后回顾到下一次准备的本地闭环。现有约会库已经保存 preparation 对话、选用、反馈及幂等回执，正式复盘与 canonical Evidence 已能提供源记录；缺少的是用户明确指定哪份复盘属于这次回顾，以及旧选用和下一次准备的归属。复用上述业务对象、已有复盘及共享 Runtime，无新增生产依赖、数据表、长期准入途径或执行框架。
+
+实现：src/lib/domain/date-companion-preparation.ts、src/lib/server/date-companion/preparation-repository.ts 扩展原 JSON 和事件，保存单份复盘关联、独立的按次授权、相处背景与原选用项。关联和解除走现有版本化 PATCH；同一讨论可直接文字返回、纠正，准备和选用下次内容。旧 P1 按已有反馈顺序还原归属，不自动匹配录音。preparation-sources.ts 和 preparation-agent.ts 只按获准账号、关系和记录定位本次复盘，可按需再读取、引用真实原话；继承已选项和约束进入本轮的来源依赖，重验指纹并防止撤回后旧比较经普通对话、分页进展或晚到结果恢复。以前未记录跨轮来源的旧产物在相关资料失效后保守退出模型输入，保留原始数据。追查并补齐 P1 修复前已持久化的反馈自由前言：助手消息和进展事件在读取时采用同一展示规则，归档原文及 Runtime 账本不改。历史相对时间保留原消息时点，复盘日期不会自动成为下次安排。已有 Promise、Memory、Person 均沿用其权威。
+
+页面与验收文件：src/components/date-companion/companion-preparation.tsx、companion-preparation.module.css、src/lib/client/date-companion-preparation-api.ts 接入手选记录、来源、解除和按相处分组的已选内容。复用 scripts/run-date-companion-agent-p1.mjs 和 scripts/date-companion-agent-fixture.cjs，新增 e2e/date-companion-agent-p2.spec.ts。回归覆盖 preparation-review.test.ts、preparation-sources.test.ts、preparation-agent.test.ts 和 companion-preparation.test.tsx。说明及桌面、手机实拍页面在 DATE_COMPANION_AGENT_P2_IMPLEMENTATION_REPORT.md。
+
+实际验证：7 个指定测试文件 70 项通过，单独按测试名核对旧 P1 前言，目标 1 项通过。全项目 lint、最终定向 TypeScript 和 git diff --check 通过。独立 P2 production build 为 286kyAMQSaU9ZZBLlXiC4，46/46 静态页面，既有 postbuild 检查 188 份 trace 清单、禁用引用 0，P1 原构建保留。最终 Chromium 在同一构建完成 A/B/C 三项：手选复盘、读原话与打开原记录、手机编辑选用和实际关闭重开；无录音继续讨论；纠正后解除并核对两页真实 runtime 进展输入。16 个合成传输请求 ID 与共享账本逐条对应，真实 LLM/ASR 0，准备操作未增加长期写入或承诺。最终证据 output/date-companion-agent-p2/2026-11-05T08-50-27-710Z，启用的本地服务已关闭。
+
+失败与边界：早期内存不足导致一次定向类型检查及测试 worker 失败，沙箱配置 worker 曾被拒，资源恢复后串行复验通过。第一次隔离构建因临时配置的源码别名基准错误未编译，修正后最终构建通过；第一次浏览器三个场景在重开后辅助请求收到 401，改用页面自身同源登录态复验通过。失败目录和历史账本保留。当前一段讨论同时关联一份复盘。P1 的 12/12 真实额度未复用，P2 真实语义、真机键盘及生产环境均 NOT RUN，未提交、推送、部署或进入 P3。
+
+## 2026-11-05 约会陪伴 P3 旧讨论延续、跨次准备和发布前核对
+
+目标是在 ae329e9c45a7eca7e8b4eb09dd83934cfbdb27be 加未提交 P1、P2 的指定本地工作树，收好长期使用中的会面归属、数据兼容、旧入口与资料权限。追踪实际调用发现，12 条长消息即可超过共享传输上限，只有 schema 13 版本号也不足以判断旧客户端能理解新选择。新账号首页聊天占用了原录音路径；原准备卡还承担按既有长期资格回看约定的用途。沿用单一 Ta、原约会库、原卡、共享 AgentRuntime/AgentStore 和正式 Provider 配置，未新增表、依赖、长期权限、全局开关或执行平台。
+
+src/lib/domain/date-companion-preparation.ts、src/lib/server/date-companion/preparation-repository.ts、preparation-agent.ts 从已有事件补齐旧 JSON 缺失的归属，区分当前、较早、后来放下和从未采用。明确改变决定与用户输入同事务保存；明确另一次已发生的见面推进会面标识并清旧日期，保留早先记录原有授权。按实际请求序列化长度保留近期优先信息，完整事件可按位置找回；页内保存当时文字与目前状态。模型继续前核验已读来源，撤权、修改或删除后屏蔽失效原话、派生内容和旧 P1 错误前言，保留账本及合法选择。有限输入本身无法容纳时沿用原失败处理，不扩大预算。
+
+src/components/date-companion/companion-preparation.tsx、companion-preparation.module.css、companion-home.tsx、date-companion-shell.tsx、date-companion.module.css、src/lib/client/date-companion-preparation-api.ts 与 src/app/date-companion/a/[[...screen]]/page.tsx 分别处理当前与折叠旧选择、讨论地址、上翻阅读、未知网络结果、暂停和草稿、首页录音和按需旧准备卡。按原 adapter 权限显示跨次约定。无录音可直接说话；未长期准入也可在原复盘核对已确认的单次记录。复用 scripts/run-date-companion-agent-p1.mjs、date-companion-agent-fixture.cjs 与既有网络守卫，提取共用浏览器辅助到 e2e/date-companion-agent-helpers.ts，更新 P1/P2 离线定位，新增 e2e/date-companion-agent-p3.spec.ts。
+
+独立合成库通过 v12→v13 迁移重复执行、原约会数据逐行保留；实际保留的 P1/P2 生产编译模块分别写出 schema 13 旧数据，P3 初读零写回，普通写回后选择、反馈、事件、来源和原关联保留。反向探针显示 P1/P2 可进行部分读写，却不能完整表达新会面/已撤回历史，原 HEAD v12 的 bridge preflight 对 v13 报版本不兼容。因此不能凭相同 schema 降级续写，需在一致性备份或副本上评估恢复。细节见 DATE_COMPANION_AGENT_P3_IMPLEMENTATION_REPORT.md 及 output/date-companion-agent-p3/compatibility-2026-11-05T09-21-35-247Z。
+
+验证按实际批次记录。Agent/仓储/来源三个文件 41/41；仓储 9 项和 schema 5 项各自通过；聊天 18 项、首页 12 项、八个相邻文件 124/124 通过，有重叠不累加。npm run lint、git diff --check 通过。最终构建 RdaWHDYVlAS_lOA17MxkJ 完成 46/46 页、postbuild 188 个 trace、禁用引用 0。最终构建的联合批次 B/C 通过，A 在同一构建定向 1/1 通过。1280×720 桌面和移动视口的实际 Chromium 页面已查看，手机使用 390×844 及 390×480 模拟视口，输入与发送保持可见。以业务库核对传输 ID；受控在途撤回留下 1 条 unknown、任务 cancelled、业务版本未被晚到结果改变。保留此前真实/离线证据、原始账本和所有中途失败。
+
+失败与处理：沙箱启动测试 worker 曾 spawn EPERM，没有发现用例；在本地获准运行后复验。混合 JSON 的旧归属及解除复盘后分组标签各有过一次定向失败，已修正。首批浏览器发现录音按钮被 CSS 隐藏，修复并用最终构建复验；最终联合批次的 A 因错误期望未长期准入的 Promise 出现在旧卡而失败。核对正式权限后改为验证原复盘可见、跨次卡受限。下一批 A 过早刷新回到旧卡，模糊名字筛选还多跑 B；精确选取 A 并等待真实切页后通过。日志、截图、复验和备份/回退说明均在报告。P3 实际 LLM、ASR 及其他 Provider 请求 0，P1 历史 12/12 不变；P2/P3 真实新生成语义与生产验收 NOT RUN。真机中文键盘待发布前快检，无提交、推送或部署。
+
+## 2026-11-06 约会陪伴 P1—P3 最终轻量真实验收及定向修复
+
+在 ae329e9c45a7eca7e8b4eb09dd83934cfbdb27be 加既有 P1/P2/P3 未提交内容上，先读 P3 报告并逐一核对 16 个产品文件哈希，复用最终构建 RdaWHDYVlAS_lOA17MxkJ。使用独立合成账号、正式页面/API/SQLite/shared Runtime 和现有约会模型；新预算 11/12，网络 completed 11、unknown 0、active 0，共享调用 succeeded 10、failed 1，全部 ID 和输入/返回哈希对齐。历史 P1 12/12 账本 SHA-256 未变。没有真实 ASR、其他 Provider、生产访问或部署。
+
+首轮回顾真实发现：模型把按话题筛选为空当作整份记录无原话，并返回不合协议的裸正文；正式校验拒绝发布，原选择和用户输入保留。最小修改 src/lib/server/date-companion/preparation-agent.ts，说明空筛选不等于整份无来源、可省略 query 浏览关联复盘、工具返回后仍须通过 respond；没有包装非法正文、放松 schema 或自动重试。恢复到同一账号/讨论实际读取原话、反馈、编辑选用和关重开完成，但人工另发现回顾把原来选用的准备说成了录音支持的内容。继续仅补充三种依据的明确区分，最终 prompt version date_companion_p3_v3；剩余预算内一次纠正回合实际重新检索/读原话/回答，归属定向通过，没有新增建议或覆盖选择。原始格式失败、内容错误、被发布层移除的额外前言、输入及调用账本均保留。第 8 次裸模型前言仍有疲劳预设/性别推断；页面与后续完整模型输入均排除该前言，不能由此声称裸模型归因已稳定。
+
+复用并修改 scripts/run-date-companion-agent-real.mjs、scripts/date-companion-real-budget.test.mjs、e2e/date-companion-agent-real.spec.ts。固定独立 final 预算目录，手动同账本恢复前核对完整已结束传输和业务调用；仅接纳诊断可证的 JSON/schema 已知失败，unknown、ID 变化、未退出、halt、超额均拒绝；各次 claim/log/summary 独立，不清账本。用正式本地会话写入器恢复经过验证的原合成账号，无密码重置，不注入回复。新增 preparation-agent.test.ts 的空查询后读取回归及本轮原始失败返回的离线回放。没有新生产依赖、schema、权限体系或共享 Runtime 修改。
+
+验证：预算/guard 初次 2 文件47/47；恢复保护最终2文件49/49（含前次重叠）。首处修复Agent/来源/复盘/共享模型4文件62/62，最后归属修复Agent27/27（是前批子集），不累加成独立总数。npm run lint 初始及首处修复通过，最终 production build 类型检查通过，git diff --check通过。沙箱测试 worker 启动 EPERM 的失败及获准本地复验保留。真实首批2流程1过1失败；恢复1/1自动断言通过但人工判来源内容错误；最终纠正1/1通过。两次产品修复各构建并跑受影响A流程1/1，fixture真实调用0；最终构建 d2Xgdb0QX4f1Z4k1dIqf8、46/46页，postbuild188 trace、forbidden0。未无条件重跑全仓或其他Agent验收。
+
+已实际查看1280×720桌面、390×844及390×480移动视口截图，输入发送可见、消息内部滚动；单条建议编辑/选用/重开文字和ID一致，旧选择、原始反馈和手选关联仍在，未知下次日期为空。无历史只讨论自然回应，无清单/虚构历史。Promise、Memory、Person与办公写入为0，bridge仅预置复盘确认1条。各本地服务已停、端口已释放。DATE_COMPANION_AGENT_FINAL_REAL_ACCEPTANCE_REPORT.md 收录具体回复质量、原始失败、分构建结果、对账和截图。最终版本没有额外从零重跑全链或重新生成只讨论，最终归属复验是在用户明确纠正后的同一讨论，不外推普遍语义稳定；真机中文键盘与生产验收NOT RUN。保留全部dirty、数据、旧报告、账本及失败；未提交、推送、部署。剩余1次不自动使用，完成后停止。
+
+
+## 2026-11-06 约会陪伴 P1—P3 提交与 main 推送前核对
+
+用户要求停止本地项目并 commit/push，随后明确目标为 main。按本地预览回执核对 Node PID 与启动时点，只停止本任务的 3077 服务，确认进程退出且端口无监听；预览副本、原合成数据和历史证据保留。当前指定工作树为 detached HEAD ae329e9c45a7eca7e8b4eb09dd83934cfbdb27be，GitHub 接口及 Git 远端查询均确认 main 与该基底一致。按精确清单选择本次产品源码、相关测试、验收脚本、5 份报告及根历史，共 41 个文件；不切换、合并或覆盖其他工作区，不包含 output、数据库、原始模型返回、凭据或个人配置。共享真实网络守卫的改动仅为本次明确约会场景所需的账本、资源和版本校验，已核对原 Reflection 路径及引用完整性。
+
+提交前使用独立合成数据和现有外部网络阻断守卫运行受影响及必要相邻测试：11 文件 178 项全部通过，0 失败、0 跳过，exit 0；npm run lint（Next typegen 与完整 TypeScript）exit 0，4 个运行脚本 node --check、git diff --check 通过。16 个产品文件逐项 SHA-256 与最终构建 d2Xgdb0QX4f1Z4k1dIqf8 一致，因此复用其已完成的 build/postbuild 与受影响浏览器证据，没有重复构建或调用模型。next-env.d.ts 与 tsconfig.json 未产生新差异。日志、精确清单及构建对照位于 output/date-companion-agent-commit-20261106/。
+
+保留过程中的环境失败：首次测试配置加载因沙箱 spawn EPERM 未发现用例，获准本地 worker 后定向复验通过；首次 Git HTTPS 查询出现 Schannel SEC_E_NO_CREDENTIALS，使用本次命令级 OpenSSL 后成功，未改全局 Git 配置；首次停止前的时点比较因 PowerShell JSON 自动 DateTime 转换而拒绝执行，改为原生 UTC 比较后确认同一进程再停止，未误停其他服务。只读进程命令行查询曾被环境拒绝，进程身份最终由已保存的 PID、精确启动时点、Node 路径及释放端口核对。
+
+本轮新增真实 Provider/ASR 请求 0；历史 P1 12/12、本次最终真实验收 11/12（unknown 0）保持不变。已有语义限制、最终纠正属于定向复验、真机中文键盘和生产验收 NOT RUN 等结论继续有效，不因提交而提升验收等级。报告内 output 链接是保留在本地的证据路径，不作为已上传附件。实际提交和远端 SHA 以 Git 回执为准；本次只提交及推送 main，不访问服务器或部署。
+
+精确暂存首次因共享 worktree Git 元数据目录在默认沙箱中只读而无法创建 index.lock；未发生部分暂存，继续在用户已授权的提交范围内申请该本地 Git 写入能力。

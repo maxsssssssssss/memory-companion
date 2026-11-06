@@ -5,7 +5,7 @@ import {
   dateCompanionEvidenceDigest
 } from "./memory-bridge-digest";
 
-export const DATE_COMPANION_SCHEMA_VERSION = 12;
+export const DATE_COMPANION_SCHEMA_VERSION = 13;
 
 const DATE_COMPANION_SCHEMA_V1 = `
   CREATE TABLE dc_relationships (
@@ -600,6 +600,20 @@ const DATE_COMPANION_SCHEMA_V12 = `
     ON dc_proactive_value_cache(user_id, scope, relationship_id, updated_at DESC);
 `;
 
+const DATE_COMPANION_SCHEMA_V13 = `
+  CREATE TABLE dc_preparations (
+    id TEXT PRIMARY KEY, user_id TEXT NOT NULL, relationship_id TEXT NOT NULL,
+    body_json TEXT NOT NULL, deleted INTEGER NOT NULL DEFAULT 0 CHECK(deleted IN (0,1)),
+    created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+    FOREIGN KEY(relationship_id,user_id) REFERENCES dc_relationships(id,user_id) ON DELETE CASCADE
+  );
+  CREATE INDEX idx_dc_preparations_account ON dc_preparations(user_id,relationship_id,updated_at DESC);
+  CREATE TABLE dc_preparation_operations (
+    user_id TEXT NOT NULL, operation_key TEXT NOT NULL, request_hash TEXT NOT NULL, result_json TEXT NOT NULL,
+    PRIMARY KEY(user_id,operation_key)
+  );
+`;
+
 const MIGRATIONS = [
   { version: 1, sql: DATE_COMPANION_SCHEMA_V1 },
   { version: 2, sql: DATE_COMPANION_SCHEMA_V2 },
@@ -612,7 +626,8 @@ const MIGRATIONS = [
   { version: 9, sql: DATE_COMPANION_SCHEMA_V9 },
   { version: 10, sql: DATE_COMPANION_SCHEMA_V10 },
   { version: 11, sql: DATE_COMPANION_SCHEMA_V11 },
-  { version: 12, sql: DATE_COMPANION_SCHEMA_V12 }
+  { version: 12, sql: DATE_COMPANION_SCHEMA_V12 },
+  { version: 13, sql: DATE_COMPANION_SCHEMA_V13 }
 ] as const;
 
 function backfillEvidenceProvenance(database: Database.Database) {

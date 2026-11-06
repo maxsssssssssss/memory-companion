@@ -1850,3 +1850,14 @@
   .peopleTrustDisclosure > summary > span:last-child,
   .retentionSwitch > span::after { transition: none; }
 }
+
+/* Preparation is a bounded conversation; other product pages keep their layout. */
+.companionPage[data-screen="prepare"] { height: 100dvh; min-height: 0; overflow: hidden; }
+.companionPage[data-screen="prepare"] > .shell { padding-bottom: 0; }
+.companionPage[data-screen="prepare"] .page { padding-top: 8px; }
+.companionPage[data-screen="prepare"] .navActions:empty { display: none; }
+.homeChatLink { display: inline-flex; align-items: center; min-height: 44px; margin-top: 16px; color: var(--dc-brand-primary); font-size: 14px; text-decoration: underline !important; text-underline-offset: 4px; }
+@media (max-height: 520px) { .companionPage[data-screen="prepare"] .topBar { display: none; } .companionPage[data-screen="prepare"] .nav { min-height: 44px; padding-block: 0; } }
+
+.companionPage[data-screen="prepare"][data-chat-compact="true"] .topBar { display: none; }
+.companionPage[data-screen="prepare"][data-chat-compact="true"] .nav { min-height: 44px; padding-block: 0; }

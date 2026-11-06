@@ -262,6 +262,7 @@ export function CompanionHome({
         <LocalTimeGreeting className={styles.homeDate} />
         <h1>今天，有什么值得留在心里？</h1>
         <p>上传这次相处的完整录音。整理完成后，你可以查看复盘、完整文字稿和每条内容的来源。</p>
+        <Link className={styles.homeChatLink} href="/date-companion/a/prepare">想聊聊 Ta？从一句话开始 →</Link>
 
         <details className={styles.uploadDetails} ref={detailsRef}>
           <summary>
@@ -447,7 +448,7 @@ export function CompanionHome({
             ))}
           </ul>
         ) : <p className={styles.homeContentStatus} role="status">{homeContentStatusText(homeContent, "beforeMeeting")}</p>}
-        <Link className={styles.sideLink} href="/date-companion/a/prepare">打开准备卡 <span aria-hidden="true">→</span></Link>
+        <Link className={styles.sideLink} href="/date-companion/a/prepare?view=records">回看准备卡 <span aria-hidden="true">→</span></Link>
       </section>
 
       {remembered ? (

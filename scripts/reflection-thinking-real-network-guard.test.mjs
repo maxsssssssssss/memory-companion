@@ -24,13 +24,18 @@ const completed = (overrides = {}) => ({ type: 'response.completed', response: {
 } });
 const eventResponse = event => new Response(frame(event), { headers: { 'content-type': 'text/event-stream' } });
 
-function fixture(transport = async () => eventResponse(completed()), captureSyntheticInput = false) {
+function fixture(transport = async () => eventResponse(completed()), captureSyntheticInput = false, dateScenario = false) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'thinking-real-guard-test-'));
   const data = path.join(root, 'data'); fs.mkdirSync(data);
   fs.writeFileSync(path.join(root, 'AUTHORIZATION.json'), JSON.stringify({ mode: 'real', maxRequests: 12, model: 'deepseek-v4-pro',
+    ...(dateScenario ? { scenario: 'date_companion_preparation_v1' } : {}),
     ...(captureSyntheticInput ? { captureSyntheticInput: true, accountScope: 'new local synthetic account only' } : {}) }));
-  const shared = new Database(path.join(data, 'daily-reflection.sqlite'));
-  shared.exec('CREATE TABLE agent_calls(id TEXT PRIMARY KEY,status TEXT NOT NULL)');
+  const shared = new Database(path.join(data, dateScenario ? 'date-companion.sqlite' : 'daily-reflection.sqlite'));
+  const dateScope = { preparationId: 'synthetic-preparation', generationId: 'synthetic-generation', version: 4 };
+  if (dateScenario) {
+    shared.exec('CREATE TABLE agent_calls(id TEXT PRIMARY KEY,status TEXT NOT NULL,kind TEXT NOT NULL,task_id TEXT NOT NULL); CREATE TABLE agent_tasks(id TEXT PRIMARY KEY,scenario TEXT NOT NULL,resource_id TEXT NOT NULL,scope_json TEXT NOT NULL)');
+    shared.prepare("INSERT INTO agent_tasks VALUES('synthetic-task','date_companion_preparation_v1',?,?)").run(dateScope.preparationId, JSON.stringify(dateScope));
+  } else shared.exec('CREATE TABLE agent_calls(id TEXT PRIMARY KEY,status TEXT NOT NULL)');
   const environment = { THINKING_P1_REAL_DIR: root, APP_DATA_DIR: data, OPENAI_API_KEY: 'SYNTHETIC_SECRET_KEY' };
   if (captureSyntheticInput) environment.THINKING_REAL_CAPTURE_SYNTHETIC_INPUT = '1';
   let calls = 0;
@@ -44,9 +49,16 @@ function fixture(transport = async () => eventResponse(completed()), captureSynt
         latestFeedback: { text: 'PRIVATE_FEEDBACK_TEXT' }, historyCount: 7 },
     }) }],
   };
+  if (dateScenario) body.input[1].content = JSON.stringify({ authorizedScope: dateScope,
+    observation: { items: [{ id: 'saved', status: 'selected', text: 'PRIVATE_SELECTED_TEXT' },
+      { id: 'other', status: 'suggested', text: 'PRIVATE_SUGGESTION' }], latestFeedback: { text: 'PRIVATE_FEEDBACK_TEXT' },
+      historyCount: 7, historyAllowed: false } });
   function request(overrides = {}) {
     const id = overrides.id ?? crypto.randomUUID();
-    if (!shared.prepare('SELECT 1 FROM agent_calls WHERE id=?').get(id)) shared.prepare("INSERT INTO agent_calls VALUES(?,'running')").run(id);
+    if (!shared.prepare('SELECT 1 FROM agent_calls WHERE id=?').get(id)) {
+      const insert = dateScenario ? "INSERT INTO agent_calls VALUES(?,'running','agent_decision','synthetic-task')" : "INSERT INTO agent_calls VALUES(?,'running')";
+      shared.prepare(insert).run(id);
+    }
     return { id, value: new Request(overrides.url ?? endpoint, { method: overrides.method ?? 'POST',
       headers: { authorization: 'SYNTHETIC_SECRET_KEY', 'content-type': 'application/json', 'x-client-request-id': id,
         'x-stainless-retry-count': overrides.retry ?? '0' }, body: JSON.stringify(overrides.body ?? body), signal: overrides.signal }) };
@@ -372,3 +384,39 @@ test('authorization changes permanently halt instead of silently extending the b
     assert.equal(h.calls(), 0); assert.equal(h.api.snapshot().halted, true);
   } finally { h.close(); }
 });
+
+test('date authorization binds the running decision and preparation scope to its own database and records redacted progress proof', async () => {
+  const h = fixture(undefined, false, true);
+  try {
+    assert.equal(fs.existsSync(path.join(h.data, 'daily-reflection.sqlite')), false);
+    const request = h.request();
+    await (await globalThis.fetch(request.value)).text();
+    h.settle(request.id);
+    assert.equal(h.calls(), 1);
+    assert.deepEqual(h.artifact().requestProof, { preparationId: 'synthetic-preparation', preparationVersion: 4,
+      selectedItems: [{ id: 'saved', textSha256: crypto.createHash('sha256').update('PRIVATE_SELECTED_TEXT').digest('hex') }],
+      latestFeedbackTextSha256: crypto.createHash('sha256').update('PRIVATE_FEEDBACK_TEXT').digest('hex'), historyCount: 7, historyAllowed: false });
+    assert.doesNotMatch(JSON.stringify(h.artifact()), /PRIVATE_|SYNTHETIC_SECRET/u);
+    assert.throws(() => h.api.reconcileCompletedStartupPause(), /not_applicable/u);
+  } finally { h.close(); }
+});
+
+for (const reason of ['kind', 'scenario', 'saved scope', 'request scope', 'generation', 'version', 'not running']) {
+  test(`date authorization refuses ${reason} mismatch before transport`, async () => {
+    const h = fixture(undefined, false, true);
+    try {
+      const payload = JSON.parse(h.body.input[1].content);
+      if (reason === 'request scope') payload.authorizedScope.preparationId = 'other';
+      if (reason === 'generation') payload.authorizedScope.generationId = 'other-generation';
+      if (reason === 'version') payload.authorizedScope.version++;
+      h.body.input[1].content = JSON.stringify(payload);
+      const request = h.request();
+      if (reason === 'kind') h.shared.exec("UPDATE agent_calls SET kind='other'");
+      if (reason === 'scenario') h.shared.exec("UPDATE agent_tasks SET scenario='daily_reflection_thinking_v1'");
+      if (reason === 'saved scope') h.shared.exec("UPDATE agent_tasks SET resource_id='other'");
+      if (reason === 'not running') h.settle(request.id);
+      await assert.rejects(globalThis.fetch(request.value), /date_scenario_mismatch|date_scope_mismatch|shared_request_not_running/u);
+      assert.equal(h.calls(), 0); assert.equal(h.api.snapshot().sent, 0); assert.equal(h.api.snapshot().halted, true);
+    } finally { h.close(); }
+  });
+}

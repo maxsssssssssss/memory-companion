@@ -30,6 +30,7 @@ import { CompanionLogin, type CompanionAuthMode } from "./companion-login";
 import { CompanionModules } from "./companion-modules";
 import { CompanionPeople } from "./companion-people";
 import { CompanionPerson } from "./companion-person";
+import { CompanionPreparation } from "./companion-preparation";
 import { CompanionPrepare } from "./companion-prepare";
 import { CompanionProactiveObservation } from "./companion-proactive-observation";
 import { CompanionQuestionDrawer, type CompanionQaPresentationState } from "./companion-question-drawer";
@@ -50,6 +51,7 @@ type DateCompanionShellProps =
       screen: DateCompanionScreen;
       dailyReflectionEnabled?: boolean;
       toySyncEnabled?: boolean;
+      showPreparationRecords?: boolean;
       initialPersonId?: string | null;
       initialSegmentId?: string | null;
       initialInteractionId?: string | null;
@@ -218,12 +220,13 @@ function DateCompanionShellContent({
     }
   }, [props.entry, session.ensureMemoryBridgeLoaded, session.relationshipState.status]);
 
+  const showPreparationRecords = props.entry === "companion" && props.screen === "prepare" && props.showPreparationRecords === true;
   useEffect(() => {
-    if (props.entry === "companion" && (props.screen === "prepare" || props.screen === "person")
+    if (props.entry === "companion" && (props.screen === "person" || showPreparationRecords)
       && session.relationshipState.status === "ready") {
       void session.ensureRelationshipDetailsLoaded();
     }
-  }, [props.entry, props.entry === "companion" ? props.screen : undefined,
+  }, [props.entry, props.entry === "companion" ? props.screen : undefined, showPreparationRecords,
     session.relationshipState.status,
     session.relationshipState.status === "ready" ? session.relationshipState.relationship.id : undefined,
     session.ensureRelationshipDetailsLoaded]);
@@ -326,7 +329,7 @@ function DateCompanionShellContent({
     && proactiveMapping?.status === "confirmed"
     && proactiveMapping.selfPersonId !== proactiveMapping.companionPersonId
     && homeCanonicalSources.length > 0
-    && props.entry === "companion"
+    && props.entry === "companion" && props.screen !== "prepare"
     ? {
         scope: "person_relationship",
         accountId: auth.user.id,
@@ -436,7 +439,7 @@ function DateCompanionShellContent({
   }
 
   if (
-    session.relationshipState.status === "absent"
+    (session.relationshipState.status === "absent" && props.screen !== "prepare" && props.screen !== "home")
     || session.relationshipState.status === "creating"
     || session.relationshipState.status === "error"
   ) {
@@ -448,7 +451,7 @@ function DateCompanionShellContent({
     );
   }
 
-  if (session.relationshipState.status !== "ready") {
+  if (session.relationshipState.status !== "ready" && !(session.relationshipState.status === "absent" && (props.screen === "prepare" || props.screen === "home"))) {
     return <LoadingScreen label="正在找回你和 Ta 的记录…" />;
   }
 
@@ -459,10 +462,10 @@ function DateCompanionShellContent({
     return <LoadingScreen label="正在找回这次相处…" />;
   }
 
-  const { screen } = props;
+  const screen = props.screen === "home" && session.relationshipState.status === "absent" ? "prepare" : props.screen;
   const interaction = viewModel.currentInteraction;
-  const relationship = session.relationshipState.relationship;
-  const relationshipName = relationship.displayName?.trim() || "Ta";
+  const relationship = session.relationshipState.status === "ready" ? session.relationshipState.relationship : null;
+  const relationshipName = relationship?.displayName?.trim() || "Ta";
   const chapters: TranscriptChapterPresentation[] = viewModel.recap.chapters.map((chapter) => ({
     id: chapter.id,
     title: chapter.title,
@@ -472,7 +475,7 @@ function DateCompanionShellContent({
   }));
   const recapInteraction = viewModel.recap.interaction;
   const detailPending = screen === "recap" ? recapInteraction?.detailLoaded === false
-    : (screen === "prepare" || screen === "person") && !session.relationshipDetailsLoaded;
+    : (screen === "person" || showPreparationRecords && relationship !== null) && !session.relationshipDetailsLoaded;
   const canPersistRecap = Boolean(
     recapInteraction?.relationshipInteractionId
     && recapInteraction.persistenceStatus === "draft"
@@ -497,7 +500,7 @@ function DateCompanionShellContent({
       : personArchiveState;
 
   return (
-    <main className={styles.companionPage} data-screen={screen}>
+    <main className={styles.companionPage} data-screen={showPreparationRecords ? "prepare-records" : screen}>
       <div className={styles.companionChrome}>
         <div className={styles.topBar}>
           <ProductSwitcher
@@ -532,7 +535,12 @@ function DateCompanionShellContent({
             ))}
           </div>
           <div className={styles.navActions}>
-            <CompanionQuestionDrawer
+            {props.screen === "home" && session.relationshipState.status === "absent" && (
+              <button className={styles.textButton} type="button" onClick={() => void session.createRelationship("Ta")}>
+                从相处录音开始
+              </button>
+            )}
+            {screen !== "prepare" ? <CompanionQuestionDrawer
               answers={session.qaHistory}
               disabledMessage={personQaAvailability.enabled ? undefined : personQaAvailability.message}
               enabled={personQaEnabled}
@@ -549,7 +557,7 @@ function DateCompanionShellContent({
               suggestedQuestions={relationshipSuggestedQuestions}
               validSegmentIds={validSegmentIds}
               linkableSegmentIds={linkableSegmentIds}
-            />
+            /> : null}
           </div>
         </nav>
       </div>
@@ -578,7 +586,7 @@ function DateCompanionShellContent({
               onOpenSource={openSource}
               rememberedItem={viewModel.home.remembered}
               relationshipName={relationshipName}
-              relationshipId={relationship.id}
+              relationshipId={relationship?.id}
               toySyncEnabled={props.toySyncEnabled ?? false}
               uploadState={uploadPresentation(session.uploadState, interaction?.status === "ready")}
             />
@@ -688,14 +696,14 @@ function DateCompanionShellContent({
               )}
             />
           ) : null}
-          {screen === "prepare" ? (
-            <CompanionPrepare
-              items={viewModel.prepare.items}
-              latestInteractionId={latestConfirmedInteractionId}
-              onOpenSource={openSource}
-              openPromises={viewModel.prepare.openPromises}
-              relationshipName={relationshipName}
-            />
+          {showPreparationRecords ? (
+            <>
+              <Link className={styles.textButton} href={screenPath("prepare")}>回到相处讨论</Link>
+              <CompanionPrepare items={viewModel.prepare.items} openPromises={viewModel.prepare.openPromises}
+                relationshipName={relationshipName} latestInteractionId={latestConfirmedInteractionId} onOpenSource={openSource} />
+            </>
+          ) : screen === "prepare" ? (
+            <CompanionPreparation key={auth.user.id} relationshipName={relationshipName} />
           ) : null}
           {screen === "people" ? (
             <CompanionPeople
