@@ -54,6 +54,8 @@ The table reflects the entry points checked on 2026-09-14. Follow the linked run
 
 For affected product flows, use their current tests and acceptance runners rather than treating the legacy E2E command as a universal gate. Other scripts in `package.json`, including real-ASR, Provider smoke, migration, replay, and benchmark commands, retain their own arguments, side effects, and authorization requirements; inspect the relevant runner before invoking it.
 
+The current Date Companion browser fixture runs with `node scripts/run-date-companion-fixture-e2e.mjs`. It exercises the default book route through normal sign-in and uses isolated audio and model fixtures. The Stage 2 browser spec remains an archived contract for its original checkout, including the old login route and history admission behavior. Its assertions and evidence stay available for that baseline. Current access and retention checks use the Date Companion API, memory bridge and book browser fixtures.
+
 Report the exact command, exit code, discovered cases or processed count, artifact location when produced, and evidence tier. A successful process or HTTP response alone does not establish product-schema or semantic acceptance. Fixture, Browser mock, real Provider, and target-environment results are separate evidence. If a test selection discovers no tests, it cannot establish acceptance; a mixed selection must also be checked for missing files. Preserve failed and unrun cases instead of converting them to PASS.
 
 ## Installed Dependencies

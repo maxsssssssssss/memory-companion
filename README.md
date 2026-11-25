@@ -22,6 +22,12 @@ npm run lint
 npm test
 ```
 
+## 约会陪伴
+
+从 `/date-companion` 登录，在产品选择页选「约会陪伴」，即进入默认书页 `/date-companion/a`。在项目已有环境配置下，本机用 `npm run dev` 启动开发服务，或用 `npm run build` 后执行 `npm start` 启动正式构建。正常路径不需要试用开关、账号夹具或版式参数。
+
+维护准备手帐时运行 `npm run test:prepare-book`。正式入口、旧深链接及预览和验收工具见[约会陪伴接手指南](docs/约会陪伴新UI-接手指南.md)。
+
 `lint` 已包含 Next.js typegen 和 TypeScript 检查。小步修改优先运行相关测试；全量测试、build 与 E2E 按任务风险和根规则选择。Worker、Queue、Pipeline 命令的连接目标和写入范围见[验证工具](docs/validation-tools.md)，不属于默认的离线检查。
 
 运行前，请根据 `.env.example` 核对 Provider、存储和 Queue 的配置名称及目标环境，不输出秘密。服务器及远程 Provider 操作需要用户的明确授权。不要提交 `.env.local`、音频、SQLite 或 `.data/evaluation/` 运行产物。
