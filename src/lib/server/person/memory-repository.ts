@@ -1,4 +1,5 @@
 import type Database from "better-sqlite3";
+import { isIndependentDateEvidence } from "@/lib/server/memory/projection-visibility";
 import {
   MemoryEvidenceSchema,
   MemoryItemSchema,
@@ -184,7 +185,7 @@ function sourceAttributionForMemory(input: {
     FROM memory_evidence evidence
     INNER JOIN memory_daily_reflection_publications publication
       ON publication.user_id = ? AND publication.upload_id = evidence.upload_id
-    WHERE evidence.memory_id = ?
+    WHERE evidence.memory_id = ? AND NOT ${isIndependentDateEvidence("evidence")}
   `).all(input.accountId, input.memory.id) as Array<{
     id: string;
     reflection_id: string;
@@ -258,6 +259,7 @@ export function createPersonMemoryRepository(database: Database.Database) {
         AND hidden_publication.upload_id = hidden_memory_evidence.upload_id
         AND hidden_publication.status <> 'published'
       WHERE hidden_memory_evidence.memory_id = memory_items.id
+        AND NOT ${isIndependentDateEvidence("hidden_memory_evidence")}
     )`);
     const scopedConditions = [
       "scoped_memory_evidence.memory_id = memory_items.id",
@@ -271,6 +273,7 @@ export function createPersonMemoryRepository(database: Database.Database) {
         SELECT 1 FROM memory_daily_reflection_publications reflection_publication
         WHERE reflection_publication.user_id = scoped_person_evidence.account_id
           AND reflection_publication.upload_id = scoped_memory_evidence.upload_id
+          AND NOT ${isIndependentDateEvidence("scoped_memory_evidence")}
           AND reflection_publication.status <> 'published'
       )`
     ];
@@ -331,6 +334,7 @@ export function createPersonMemoryRepository(database: Database.Database) {
           SELECT 1 FROM memory_daily_reflection_publications reflection_publication
           WHERE reflection_publication.user_id = person_evidence.account_id
             AND reflection_publication.upload_id = memory_evidence.upload_id
+            AND NOT ${isIndependentDateEvidence("memory_evidence")}
             AND reflection_publication.status <> 'published'
         )`
       ];
@@ -396,6 +400,7 @@ export function createPersonMemoryRepository(database: Database.Database) {
             SELECT 1 FROM memory_daily_reflection_publications reflection_publication
             WHERE reflection_publication.user_id = person_evidence.account_id
               AND reflection_publication.upload_id = memory_evidence.upload_id
+              AND NOT ${isIndependentDateEvidence("memory_evidence")}
               AND reflection_publication.status <> 'published'
           )
         ORDER BY subject.person_id

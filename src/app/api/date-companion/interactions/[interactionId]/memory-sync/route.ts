@@ -37,10 +37,11 @@ export async function POST(
       userId: auth.authContext.user.id,
       interactionId: id.data,
       mappingVersion: body.data.mappingVersion,
+      retryGrantId: body.data.retryGrantId,
       selections: body.data.selections,
       subjectSuggestionConfirmation: body.data.subjectSuggestionConfirmation,
       relationshipReconfirmation: body.data.relationshipReconfirmation,
-      ...(body.data.relationshipReconfirmation ? { memoryDatabase: getMemoryDatabase() } : {})
+      memoryDatabase: getMemoryDatabase()
     });
     const bridge = repository.getInteractionBridgeStatus(auth.authContext.user.id, id.data);
     return privateMemoryJson({ bridge });

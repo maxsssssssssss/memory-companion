@@ -28,7 +28,7 @@ const interaction = {
   status: "confirmed", sourceState: "server_cleaned", version: 2, createdAt: now, updatedAt: now, confirmedAt: now,
   participants: [{ speakerId: "home_speaker_ta", role: "companion", confirmedAt: now }],
   recapItems: evidence.map((source, index) => ({
-    id: source.recapItemId, interactionId, kind: "mentioned", proposedText: rawTranscript, displayedText: rawTranscript,
+    id: source.recapItemId, interactionId, kind: "mentioned", proposedText: source.quote, displayedText: source.quote,
     disposition: "kept", version: 1, sortOrder: index, evidence: [source]
   })),
   memoryBridge: { status: "completed", attemptCount: 1, updatedAt: now, retryable: false }
@@ -36,10 +36,11 @@ const interaction = {
 const payload = {
   upload: { id: uploadId, originalName: interaction.originalName, mimeType: "audio/mp4", sizeBytes: 1000, recordingDate, createdAt: now, status: "ready", durationSeconds: 60 },
   job: { id: "home_job", uploadId, status: "ready", progress: 100 },
-  segments: evidence.map((source) => ({
+  segments: [...evidence.map((source) => ({
     id: source.sourceSegmentId, uploadId, startSeconds: source.startSeconds, endSeconds: source.endSeconds,
     speaker: source.speakerId, text: source.quote, confidence: 0.95, sceneLabels: ["unknown"], valueLabels: []
-  })),
+  })), { id: "home_segment_excluded", uploadId, startSeconds: 28, endSeconds: 33, speaker: "home_speaker_ta",
+    text: rawTranscript, confidence: 0.95, sceneLabels: ["unknown"], valueLabels: [] }],
   audioInsights: [], semanticSegments: [], semanticSegmentsAvailable: true, briefItems: [], relationshipSignals: [],
   relationshipSignalsAvailable: true, proactiveInsights: [], proactiveInsightsAvailable: true, speakerAliases: {}
 };
@@ -71,7 +72,8 @@ async function installFixture(page: Page) {
     }]));
   }, { userId, payload });
   await page.route("**/api/**", async (route) => {
-    const path = new URL(route.request().url()).pathname;
+    const url = new URL(route.request().url());
+    const path = url.pathname;
     const method = route.request().method();
     if (method !== "GET") {
       unexpectedRequests.push(`${method} ${path}`);
@@ -79,7 +81,15 @@ async function installFixture(page: Page) {
     }
     if (path === "/api/auth/me") return fulfill(route, { user: { id: userId, email: "home-fixture@example.com" } });
     if (path === "/api/date-companion/relationships") return fulfill(route, { relationships: [relationship] });
-    if (path === `/api/date-companion/relationships/${relationshipId}/view`) return fulfill(route, { view: { relationship, interactions: [interaction], promises: [] } });
+    if (path === "/api/date-companion/preparations") return fulfill(route, { preparations: [], availableSources: [] });
+    if (path === `/api/date-companion/relationships/${relationshipId}/view`) {
+      if (url.searchParams.get("scope") === "summary") {
+        const { recapItems: _recapItems, ...metadata } = interaction;
+        return fulfill(route, { summary: { relationship, interactions: [{ ...metadata, promiseRecapItems: [] }], promises: [] } });
+      }
+      return fulfill(route, { view: { relationship, interactions: [interaction], promises: [] } });
+    }
+    if (path === `/api/date-companion/interactions/${interactionId}`) return fulfill(route, { interaction });
     if (path === "/api/people") return fulfill(route, { people });
     if (path === "/api/people/self") return fulfill(route, { selfBinding: { personId: "home_self", status: "active", version: 1, setAt: now, clearedAt: null, updatedAt: now } });
     if (path === "/api/people/home_self/memories") return fulfill(route, { person: people[0], memories: [] });
@@ -134,33 +144,37 @@ for (const viewport of [{ width: 1920, height: 1080 }, { width: 390, height: 844
     const label = `${viewport.width}x${viewport.height}`;
     console.log(`[home-content-${label}] 0/4 opening fixture home`);
     await page.goto("/date-companion/a");
-    const about = page.getByRole("region", { name: "关于 Love 的首页摘要" });
-    const before = page.getByRole("region", { name: "下次见面前的首页建议" });
+    const about = page.getByRole("region", { name: "人物近况" });
+    const before = page.getByRole("region", { name: "下次见面前" });
     await expect(about.getByText(aboutText, { exact: true })).toBeVisible();
     await expect(before.getByText(beforeText, { exact: true })).toBeVisible();
     await expect(about.getByText(beforeText, { exact: true })).toHaveCount(0);
     await expect(before.getByText(aboutText, { exact: true })).toHaveCount(0);
     await expect(page.getByText(rawTranscript, { exact: true })).toHaveCount(0);
-    await expect(about.getByText(evidence[0].quote, { exact: true })).not.toBeVisible();
+    await expect(about.locator("blockquote").filter({ hasText: evidence[0].quote })).not.toBeVisible();
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
     await page.screenshot({ path: resolve(artifactDir, `home-ready-${label}.png`), fullPage: true });
     console.log(`[home-content-${label}] 1/4 distinct summaries and viewport verified`);
 
     await before.getByText("查看原话", { exact: true }).click();
-    await expect(before.getByText(evidence[1].quote, { exact: true })).toBeVisible();
-    await expect(before.getByText(evidence[0].quote, { exact: true })).toHaveCount(0);
+    await expect(before.locator("blockquote")).toHaveText(`“${evidence[1].quote}”`);
+    await expect(before.locator("blockquote").filter({ hasText: evidence[0].quote })).toHaveCount(0);
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
     await page.screenshot({ path: resolve(artifactDir, `home-source-${label}.png`), fullPage: true });
     await before.getByRole("button", { name: "在完整文字稿中查看" }).click();
-    await expect(page).toHaveURL(/\/date-companion\/a\/recap\?segment=home_segment_before#full-transcript$/u);
-    await expect(page.locator("#full-transcript")).toBeVisible();
-    await expect(page.locator("#full-transcript").getByText(evidence[1].quote, { exact: true })).toBeVisible();
+    await expect(page).toHaveURL(url => url.pathname === "/date-companion/a/recap" &&
+      url.searchParams.get("interaction") === interactionId && url.searchParams.get("segment") === "home_segment_before" &&
+      !url.searchParams.has("view") && url.hash === "#full-transcript");
+    const transcript = page.getByRole("dialog", { name: "完整文字稿" });
+    await expect(transcript).toBeVisible();
+    await expect(transcript.locator('[data-segment-id="home_segment_before"][aria-current="true"]'))
+      .toHaveText(new RegExp(evidence[1].quote, "u"));
     console.log(`[home-content-${label}] 2/4 canonical source opened in transcript`);
 
     fixture.setMode("empty");
     await page.goto("/date-companion/a");
-    await expect(about.getByText("还没有适合放在这里的近况。", { exact: true })).toBeVisible();
-    await expect(before.getByText("暂时没有需要跟进的事。", { exact: true })).toBeVisible();
+    await expect(about.getByText("暂时没有可展示的人物近况。", { exact: true })).toBeVisible();
+    await expect(before.getByText("暂时没有可展示的见面准备。", { exact: true })).toBeVisible();
     await expect(page.getByText(rawTranscript, { exact: true })).toHaveCount(0);
     await expect(page.getByText(aboutText, { exact: true })).toHaveCount(0);
     await page.screenshot({ path: resolve(artifactDir, `home-empty-${label}.png`), fullPage: true });
@@ -168,8 +182,8 @@ for (const viewport of [{ width: 1920, height: 1080 }, { width: 390, height: 844
 
     fixture.setMode("failure");
     await page.reload();
-    await expect(about.getByText("近况暂时未能整理，请稍后再看。", { exact: true })).toBeVisible();
-    await expect(before.getByText("见面前的建议暂时未能整理，请稍后再看。", { exact: true })).toBeVisible();
+    await expect(page.getByRole("status").filter({ hasText: /人物近况与见面准备暂时未能/ })).toBeVisible();
+    await expect(page.getByRole("button", { name: "重新读取相关内容" })).toBeVisible();
     await expect(page.getByText(rawTranscript, { exact: true })).toHaveCount(0);
     await expect(page.getByText(beforeText, { exact: true })).toHaveCount(0);
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);

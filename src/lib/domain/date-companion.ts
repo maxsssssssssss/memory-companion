@@ -19,11 +19,18 @@ export type SourceRefVM = {
   recordingDate: string;
   startSeconds: number;
   endSeconds: number;
+  /** False when the retained snapshot has no verified recording offset. */
+  timeKnown?: boolean;
+  sourceOrigin?: "direct_conversation" | "user_reflection" | "unknown";
+  sourceStatement?: string;
   speakerId?: string;
   speakerLabel?: string;
   quote: string;
   /** Server-verified digest for this exact canonical Evidence source. */
   contentDigest?: string;
+  authorizationRevision?: string;
+  /** Legacy answers without a revision cannot establish who spoke on a corrected segment. */
+  requiresReviewedSpeakerBinding?: true;
   kind: "transcript" | "brief" | "semantic" | "relationship" | "proactive";
   presentation: "direct_quote" | "derived_summary" | "suggestion";
   /** Only true when this browser has the complete DayPayload for uploadId. */
@@ -112,6 +119,7 @@ export type DateCompanionRelationshipReconfirmationRequest = {
 
 export type DateCompanionMemoryReviewInteraction = {
   interactionId: string;
+  retryGrantId?: string;
   sourceUploadId: string;
   recordingDate: string;
   sourceState: "available" | "server_cleaned" | "explicitly_deleted";
@@ -145,6 +153,8 @@ export type DateCompanionMemoryBridgeState =
       memoryRetainedSourceKeys: string[];
       /** Exact relationship-only sources admitted by the server-owned catalog. */
       relationshipPersonSources: DateCompanionRelationshipPersonSource[];
+      withdrawalVersion?: string;
+      qaCatalogStatus?: DateCompanionPersonSourceCatalog["status"];
       /** Exact server-retained sources currently eligible for asking about Ta. */
       personQaSources: SourceRefVM[];
       notice?: string;
@@ -199,6 +209,8 @@ export type TranscriptLineVM = {
 export type InteractionVM = {
   /** False until the canonical single-interaction detail has been fetched. */
   detailLoaded?: boolean;
+  /** Final kept, evidence-backed excerpt belonging to this saved meeting. */
+  savedExcerpt?: string | null;
   id: string;
   uploadIds: string[];
   recordingDate: string;
@@ -240,6 +252,7 @@ export type RecapItemVM = {
 export type ParticipantReviewVM = {
   speakerId: string;
   memberSpeakerIds?: string[];
+  reviewedSegments?: import("./date-companion-stage2").DcReviewedSegment[];
   audioSpeakerId?: string;
   voiceEnrollmentEligible?: true;
   displayLabel: string;
@@ -274,6 +287,7 @@ export type TranscriptChapterVM = {
 };
 
 export type HomeVM = {
+  lastSaved?: { interaction: InteractionVM; summary: string | null } | null;
   remembered: RecapItemVM | null;
   preparePreview: RecapItemVM | null;
   participantNotice: string | null;
@@ -283,6 +297,7 @@ export type PersonVM = {
   remembered: RecapItemVM[];
   recent: RecapItemVM[];
   relationship: RecapItemVM[];
+  conversationTopics?: RecapItemVM[];
   promises: PromiseVM[];
   interactions: InteractionVM[];
   observation: RecapItemVM | null;
@@ -291,6 +306,8 @@ export type PersonVM = {
 
 export type RecapVM = {
   interaction: InteractionVM | null;
+  /** Confirmed meetings for reopening a recap without granting long-term use. */
+  history: InteractionVM[];
   items: RecapItemVM[];
   participants: ParticipantReviewVM[];
   chapters: TranscriptChapterVM[];
@@ -420,9 +437,9 @@ export type UploadState =
 
 export type QaState =
   | { status: "idle" }
-  | { status: "streaming"; question: string; committedText: string }
+  | { status: "streaming"; question: string; committedText: string; phase?: "reading" | "generating" }
   | { status: "complete"; answer: QuestionAnswer }
-  | { status: "failed"; question: string; message: string };
+  | { status: "failed"; question: string; message: string; outcome?: "unconfirmed" | "ineligible" };
 
 export function emptyDateCompanionViewModel(): DateCompanionViewModel {
   return {
@@ -444,6 +461,7 @@ export function emptyDateCompanionViewModel(): DateCompanionViewModel {
     },
     recap: {
       interaction: null,
+      history: [],
       items: [],
       participants: [],
       chapters: []
@@ -459,4 +477,4 @@ export function emptyDateCompanionViewModel(): DateCompanionViewModel {
     }
   };
 }
-import type { DateCompanionRelationshipPersonSource } from "./date-companion-person-source";
+import type { DateCompanionPersonSourceCatalog, DateCompanionRelationshipPersonSource } from "./date-companion-person-source";

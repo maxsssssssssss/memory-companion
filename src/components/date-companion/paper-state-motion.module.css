@@ -1,0 +1,4 @@
+.feedback { position: absolute; inset: 0; pointer-events: none; border-radius: inherit; overflow: hidden; }
+.edge { position: absolute; inset: 0 0 auto; height: 8px; border-top: 1px solid rgb(124 77 63 / .6); box-shadow: 0 3px 5px rgb(103 67 52 / .18) inset; opacity: 0; }
+.mark { position: absolute; inset: auto 12px 2px; height: 4px; border-bottom: 3px solid #946653; border-radius: 50% 20% 40% 30%; transform-origin: left center; opacity: 0; }
+.choice { position: absolute; height: 4px; border-bottom: 3px solid var(--prep-accent, var(--pa-accent, #946653)); border-radius: 50% 20% 40% 30%; transform-origin: left center; visibility: hidden; pointer-events: none; }

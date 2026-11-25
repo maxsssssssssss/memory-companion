@@ -4,7 +4,7 @@ import Link from "next/link";
 
 import type { PromiseVM, RecapItemVM, SourceRefVM } from "@/lib/domain/date-companion";
 
-import styles from "./date-companion.module.css";
+import styles from "./companion-prepare.module.css";
 
 type CompanionPrepareProps = {
   items: RecapItemVM[];
@@ -72,19 +72,16 @@ export function CompanionPrepare({
   const displayName = relationshipName?.trim() || "Ta";
 
   return (
-    <div className={`${styles.twoColumnPage} ${styles.preparePage} date-companion-prepare-page`}>
-      <header className={`${styles.stickyHero} ${styles.prepareHero} date-companion-prepare-header`}>
-        <span className={styles.heroMark} aria-hidden="true">想</span>
+    <section className={styles.spread} aria-labelledby="prepare-records-title">
+      <header className={styles.folio}>
         <p>见 {displayName} 前看一眼</p>
-        <h1>见 {displayName} 之前，花半分钟想一想</h1>
+        <h1 id="prepare-records-title">见 {displayName} 之前，花半分钟想一想</h1>
         <span>这里只回看你确认留下的内容和待完成约定，不猜见面时间，也不会自动创建提醒。</span>
-        <blockquote className={`${styles.prepareClosing} date-companion-prepare-closing`}>
-          不用准备很多。见面时，认真听 {displayName} 说话就好。
-        </blockquote>
+        <Link className={styles.sourceJump} href="/date-companion/a/prepare">回到相处讨论</Link>
       </header>
 
-      <div className={`${styles.contentColumn} ${styles.prepareContent} date-companion-prepare-content`}>
-        <section className={`${styles.letterStack} ${styles.prepareLetterStack} date-companion-prepare-letter-stack`} aria-label="见面前准备卡">
+      <div className={styles.pages}>
+        <section className={styles.letterStack} aria-label="见面前准备卡">
           {PREPARE_GROUPS.map((group, index) => {
             const groupItems = validItems.filter((item) => item.kind === group.kind);
             return (
@@ -109,16 +106,16 @@ export function CompanionPrepare({
             );
           })}
         </section>
-        <div className={`${styles.prepareActions} date-companion-prepare-actions`}>
+        <div className={styles.prepareActions}>
           <Link
-            className={`${styles.secondaryButton} ${styles.prepareReviewLink} date-companion-prepare-review-link`}
+            className={styles.sourceJump}
             href={latestInteractionId
               ? `/date-companion/a/recap?interaction=${encodeURIComponent(latestInteractionId)}`
               : "/date-companion/a/recap"}
           >查看最近一次相处</Link>
-          <Link className={`${styles.returnLink} ${styles.preparePersonLink} date-companion-prepare-person-link`} href="/date-companion/a/person">回到关于 Ta</Link>
+          <Link className={styles.sourceJump} href="/date-companion/a/person">回到关于 Ta</Link>
         </div>
       </div>
-    </div>
+    </section>
   );
 }

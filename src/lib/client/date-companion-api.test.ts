@@ -774,6 +774,23 @@ describe("date-companion API", () => {
     });
   });
 
+  it("takes date and origin from the matching retained evidence, and refuses mixed links and people", async () => {
+    const quote = "我提到她也许想参展。";
+    const personEvidence = { uploadId: "record", sourceSegmentId: "line", quote };
+    const memoryEvidence = { uploadId: "record", sourceId: "line", quote, date: "2026-11-03" };
+    const sourceAttribution = { origin: "user_reflection", statement: "来自用户自述" };
+    const apiFor = (patch: Partial<typeof memoryEvidence>, person = "person_ta") => createDateCompanionApi(vi.fn(async () => jsonResponse({
+      memories: [{ subjectPersonIds: [person], sourceAttribution, evidenceLinks: [{ personEvidence, memoryEvidence: { ...memoryEvidence, ...patch } }] }]
+    })) as typeof fetch);
+    await expect(apiFor({}).getPersonRetainedSources("person_ta")).resolves.toMatchObject([{
+      ...personEvidence, recordingDate: memoryEvidence.date, sourceOrigin: "user_reflection", sourceStatement: "来自用户自述"
+    }]);
+    for (const change of [{uploadId:"another"}, {sourceId:"different"}, {quote:"相同键下的另一句。"}]) {
+      await expect(apiFor(change).getPersonRetainedSources("person_ta")).resolves.toEqual([]);
+    }
+    await expect(apiFor({}, "another").getPersonRetainedSources("person_ta")).resolves.toEqual([]);
+  });
+
   it("fails closed when retained Person evidence reuses a canonical key with conflicting digests", async () => {
     const source = {
       uploadId: "upload_1",
@@ -866,8 +883,19 @@ describe("date-companion API", () => {
   it("does not present a failed retained-content purge as success", async () => {
     const fetcher = vi.fn().mockResolvedValue(jsonResponse({ error: "retained_memory_purge_failed" }, 503));
     const api = createDateCompanionApi(fetcher as typeof fetch);
-    await expect(api.purgeRetainedMemory("relationship_1")).rejects.toMatchObject({ status: 503 });
-    expect(JSON.parse(String((fetcher.mock.calls[0][1] as RequestInit).body))).toEqual({ confirmation: "purge_retained_memory" });
+    await expect(api.purgeRetainedMemory("relationship_1", "scope-1")).rejects.toMatchObject({ status: 503 });
+    expect(JSON.parse(String((fetcher.mock.calls[0][1] as RequestInit).body))).toEqual({ confirmation: "purge_retained_memory", previewVersion: "scope-1" });
+  });
+
+  it("distinguishes an accepted withdrawal with cleanup left from an unconfirmed 503", async () => {
+    const purge = {purgeId:"withdrawal_1", previewVersion:"v1", status:"retryable_failed", totalCount:2, retainedCount:1,
+      processingCount:1, completedCount:1, failedCount:1, usageStopped:true, retryable:true, updatedAt:"2026-11-24T12:00:00Z"};
+    const fetcher = vi.fn().mockResolvedValueOnce(jsonResponse({purge},503)).mockResolvedValueOnce(jsonResponse({
+      preview:{version:"v2", totalCount:1, retainedCount:1, processingCount:0}, pendingCleanup:purge
+    }));
+    const api = createDateCompanionApi(fetcher as typeof fetch);
+    await expect(api.purgeRetainedMemory("relationship_1","v1")).resolves.toEqual(purge);
+    expect((await api.previewRetainedMemory("relationship_1")).pendingCleanup?.previewVersion).toBe("v1");
   });
 
   it("preserves all four supported relationship types and the actual mapping version", async () => {

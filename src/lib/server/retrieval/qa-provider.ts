@@ -76,6 +76,14 @@ export class QaProviderStreamError extends Error {
   }
 }
 
+/** Safe codes exposed by text QA. Do not expose raw SDK errors to the client. */
+export class QaTurnError extends Error {
+  constructor(readonly code: "qa_scope_changed" | "qa_result_unconfirmed" | "qa_provider_failed") {
+    super(code);
+    this.name = "QaTurnError";
+  }
+}
+
 export function getQaWireApi(): QaWireApi {
   const rawWireApi = (process.env.OPENAI_QA_WIRE_API ?? process.env.OPENAI_WIRE_API ?? "")
     .trim()

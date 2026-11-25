@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { type ReactNode, useEffect, useMemo, useState } from "react";
+import { type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import type {
   DateCompanionMutationState,
@@ -19,21 +19,21 @@ import type {
   TranscriptLineVM
 } from "@/lib/domain/date-companion";
 import type {
+  DcReviewedSegment,
+  DcSpeakerReviewMutation,
+  DcSubjectDraftPreview,
   DcSubjectSuggestionBatch,
   DcSubjectSuggestionConfirmation
 } from "@/lib/domain/date-companion-stage2";
 import {
   loadDateCompanionSubjectSuggestions
 } from "@/lib/client/date-companion-subject-suggestions";
-import { ProductEvidence, ProductReviewCompletion, ProductState } from "@/components/product-system/product-primitives";
-
-import { CompanionTranscript, type TranscriptChapterPresentation } from "./companion-transcript";
+import { formatTimestamp, type TranscriptChapterPresentation } from "./companion-transcript";
+import { BookRecap, bookItemCopy, bookMeetingTitle, bookRetentionReason, type BookItem } from "./book-recap";
+import { BookMemory, BookPanelsProvider } from "./book-panels";
 import styles from "./date-companion.module.css";
 
-export type CompanionParticipantMutation = {
-  speakerId: string;
-  role: DateCompanionParticipantRole;
-};
+export type CompanionParticipantMutation = DcSpeakerReviewMutation;
 
 export type CompanionRecapItemMutation = {
   id: string;
@@ -43,8 +43,11 @@ export type CompanionRecapItemMutation = {
 };
 
 type CompanionRecapProps = {
+  relationshipName?: string;
   chapters?: TranscriptChapterPresentation[];
   initialSegmentId?: string | null;
+  bookHomeHref?: string;
+  onReturnToSourceOrigin?: () => void;
   interaction: InteractionVM | null;
   items: RecapItemVM[];
   mutationState?: DateCompanionMutationState;
@@ -52,8 +55,8 @@ type CompanionRecapProps = {
   memoryBridgeState?: DateCompanionMemoryBridgeState;
   memoryMutationState?: DateCompanionMemoryMutationState;
   proactiveObservation?: ReactNode;
-  proactiveObservationStatus?: "ready" | "fallback";
   questionControl?: ReactNode;
+  onSaveSegmentReview?: (assignments: CompanionParticipantMutation[]) => Promise<void>;
   onFinalize?: (
     assignments: CompanionParticipantMutation[],
     items: CompanionRecapItemMutation[],
@@ -73,9 +76,10 @@ type CompanionRecapProps = {
 };
 
 type SubjectSuggestionState =
-  | { status: "idle" | "loading" }
-  | { status: "ready"; batch: DcSubjectSuggestionBatch }
-  | { status: "error"; message: string };
+  | { status: "idle" }
+  | { status: "loading"; scope: string }
+  | { status: "ready"; scope: string; batch: DcSubjectSuggestionBatch }
+  | { status: "error"; scope: string; message: string };
 
 const GROUPS: Array<{ kind: RecapItemVM["kind"]; eyebrow: string; title: string; empty: string }> = [
   { kind: "moment", eyebrow: "01 · 一个瞬间", title: "这次值得记住", empty: "还没有找到带真实来源的特别片段" },
@@ -113,6 +117,8 @@ function latestMemoryStatus(
   reviewInteraction: DateCompanionMemoryReviewInteraction | undefined
 ) {
   if (!reviewInteraction) return interactionBridge?.status ?? "not_queued";
+  // A fresh review with no active grant supersedes the old interaction's saved receipt.
+  if (reviewInteraction.status === "not_queued") return "not_queued";
   if (!interactionBridge) return reviewInteraction.status;
   const interactionUpdatedAt = Date.parse(interactionBridge.updatedAt);
   const reviewUpdatedAt = reviewInteraction.updatedAt ? Date.parse(reviewInteraction.updatedAt) : Number.NaN;
@@ -126,27 +132,6 @@ function memoryReviewRevisionToken(review: DateCompanionMemoryReviewInteraction 
   const updatedAtMs = Date.parse(review.updatedAt);
   if (!Number.isFinite(updatedAtMs) || updatedAtMs < 0) return null;
   return `a${review.attemptCount.toString(36)}-t${updatedAtMs.toString(36)}`;
-}
-
-function formatDuration(seconds?: number) {
-  if (typeof seconds !== "number" || !Number.isFinite(seconds) || seconds <= 0) return null;
-  const totalMinutes = Math.round(seconds / 60);
-  const hours = Math.floor(totalMinutes / 60);
-  const minutes = totalMinutes % 60;
-  return hours > 0 ? `${hours} 小时 ${minutes} 分钟` : `${minutes} 分钟`;
-}
-
-function formatTimestamp(seconds: number) {
-  const whole = Math.max(0, Math.floor(seconds));
-  const minutes = Math.floor(whole / 60);
-  const remainder = whole % 60;
-  return `${minutes}:${String(remainder).padStart(2, "0")}`;
-}
-
-function sourcePresentationLabel(source: SourceRefVM) {
-  if (source.presentation === "direct_quote") return "原话片段";
-  if (source.presentation === "suggestion") return "根据原话整理的建议";
-  return "根据原话整理";
 }
 
 function normalizedSpeakerId(value: string | undefined) {
@@ -182,42 +167,6 @@ function speakerGroups(lines: TranscriptLineVM[], participants: ParticipantRevie
   return [...groups.values()];
 }
 
-function RecapSourceList({
-  availableSegmentIds,
-  onJump,
-  sources
-}: {
-  availableSegmentIds: ReadonlySet<string>;
-  onJump: (segmentId: string) => void;
-  sources: SourceRefVM[];
-}) {
-  return (
-    <details className={styles.sourceDetails}>
-      <summary><span>{sources.length} 条来源</span><span>查看原话</span></summary>
-      <ul className={styles.sourceList}>
-        {sources.map((source) => {
-          const firstSegmentId = source.segmentIds.find((segmentId) => availableSegmentIds.has(segmentId));
-          return (
-            <li className={styles.sourceItem} key={source.id}>
-              <ProductEvidence
-                label={sourcePresentationLabel(source)}
-                meta={formatTimestamp(source.startSeconds)}
-              >
-                {source.presentation === "direct_quote" ? `“${source.quote}”` : source.quote}
-              </ProductEvidence>
-              <div className={styles.sourceMeta}>
-                {firstSegmentId ? (
-                  <button className={styles.sourceJump} onClick={() => onJump(firstSegmentId)} type="button">在文字稿中查看</button>
-                ) : <span className={styles.evidenceOnlyLabel}>已保留可核对原话</span>}
-              </div>
-            </li>
-          );
-        })}
-      </ul>
-    </details>
-  );
-}
-
 function initialRoles(
   speakers: Array<{ id: string }>,
   participants: ParticipantReviewVM[]
@@ -251,11 +200,11 @@ function sourceSpeakerRoles(
 
 function automaticDisposition(
   item: RecapItemVM,
-  roles: Readonly<Record<string, DateCompanionParticipantRole>>
+  roleFor: (id?: string, segmentId?: string) => DateCompanionParticipantRole | undefined
 ): RecapItemVM["disposition"] {
   const safe = item.sources.length > 0 && item.sources.every((source) => {
     if (!source.speakerId) return false;
-    const role = roles[source.speakerId] ?? "unresolved";
+    const role = roleFor(source.speakerId, source.segmentIds[0]) ?? "unresolved";
     if (role === "unresolved") return false;
     if (item.kind === "mentioned") return role === "companion";
     if (item.kind === "promise") return role === "self";
@@ -264,27 +213,12 @@ function automaticDisposition(
   return safe ? "kept" : "excluded";
 }
 
-function automaticExclusionReason(
-  item: RecapItemVM,
-  roles: Readonly<Record<string, DateCompanionParticipantRole>>
-) {
-  if (item.sources.length === 0 || item.sources.some((source) => !source.speakerId)) {
-    return "缺少可核对的说话人来源";
-  }
-  const sourceRoles = item.sources.map((source) => roles[source.speakerId!] ?? "unresolved");
-  if (sourceRoles.some((role) => role === "unresolved")) return "说话人暂不确定";
-  if (item.kind === "mentioned" && sourceRoles.some((role) => role !== "companion")) {
-    return "这条需要确认是由 Ta 说出的";
-  }
-  if (item.kind === "promise" && sourceRoles.some((role) => role !== "self")) {
-    return "这条需要确认是由你说出的";
-  }
-  return null;
-}
-
 export function CompanionRecap({
+  relationshipName,
   chapters,
   initialSegmentId,
+  bookHomeHref,
+  onReturnToSourceOrigin,
   interaction,
   items,
   mutationState = { status: "idle" },
@@ -292,28 +226,29 @@ export function CompanionRecap({
   memoryBridgeState = { status: "idle" },
   memoryMutationState = { status: "idle" },
   proactiveObservation,
-  proactiveObservationStatus = "ready",
   questionControl,
   onFinalize,
+  onSaveSegmentReview,
   onMemorySync,
   onMemoryRefresh
 }: CompanionRecapProps) {
-  const [highlightedSegmentId, setHighlightedSegmentId] = useState<string | null>(initialSegmentId ?? null);
-  const [roles, setRoles] = useState<Record<string, DateCompanionParticipantRole>>({});
+  const operationLock = useRef(false);
+  const [segmentEdits, setSegmentEdits] = useState<{ scope: string; groups: Record<string, DcReviewedSegment[]> } | null>(null);
+  const [roleEdits, setRoleEdits] = useState<{ scope: string; values: Record<string, DateCompanionParticipantRole> } | null>(null);
   const [audioErrors, setAudioErrors] = useState<Record<string, boolean>>({});
-  const [expandedGroups, setExpandedGroups] = useState<Set<RecapItemVM["kind"]>>(() => new Set());
   const [manuallyExcludedIds, setManuallyExcludedIds] = useState<Set<string>>(() => new Set());
   const [editedTexts, setEditedTexts] = useState<Record<string, string>>({});
   const [editingItemId, setEditingItemId] = useState<string | null>(null);
   const [editingText, setEditingText] = useState("");
   const [rememberVoiceGroupId, setRememberVoiceGroupId] = useState<string | null>(null);
-  const [participantReviewOpen, setParticipantReviewOpen] = useState(false);
-  const [reviewedSpeakerIds, setReviewedSpeakerIds] = useState<Set<string>>(() => new Set());
-  const [includeLongTerm, setIncludeLongTerm] = useState(false);
-  const [localOperation, setLocalOperation] = useState<"finalize" | "sync" | "refresh" | null>(null);
+
+  const [longTermDraftId, setLongTermDraftId] = useState<string | null>(null);
+  const includeLongTerm = Boolean(interaction && longTermDraftId === interaction.id);
+  const [localOperation, setLocalOperation] = useState<"finalize" | "sync" | "refresh" | "participants" | null>(null);
   const [localError, setLocalError] = useState<string | null>(null);
-  const [localErrorOperation, setLocalErrorOperation] = useState<"finalize" | "sync" | "refresh" | null>(null);
+  const [localErrorOperation, setLocalErrorOperation] = useState<"finalize" | "sync" | "refresh" | "participants" | null>(null);
   const [subjectSuggestionState, setSubjectSuggestionState] = useState<SubjectSuggestionState>({ status: "idle" });
+  const subjectRequest = useRef<AbortController | null>(null);
 
   const validItems = useMemo(() => items.filter((item) => item.sources.length > 0), [items]);
   const speakers = useMemo(
@@ -324,41 +259,51 @@ export function CompanionRecap({
     () => interaction?.transcript.filter((line) => !line.speakerId).length ?? 0,
     [interaction?.transcript]
   );
-  const duration = formatDuration(interaction?.durationSeconds);
-  const availableSegmentIds = useMemo(
-    () => new Set(interaction?.transcript.map((line) => line.id) ?? []),
-    [interaction?.transcript]
-  );
   const participantSyncKey = participants.map((participant) =>
-    `${participant.speakerId}:${participant.memberSpeakerIds?.join(",") ?? ""}:${participant.audioSpeakerId ?? ""}:${participant.role}:${participant.version ?? 0}`
+    `${participant.speakerId}:${participant.memberSpeakerIds?.join(",") ?? ""}:${participant.audioSpeakerId ?? ""}:${participant.role}:${participant.state}:${participant.version ?? 0}`
   ).join("|");
   const speakerSyncKey = speakers.map((speaker) => speaker.id).join("|");
 
-  useEffect(() => {
-    const nextRoles = initialRoles(speakers, participants);
-    const nextReviewedSpeakerIds = new Set(
-      speakers.flatMap((speaker) => participants.some(
-        (participant) => participant.speakerId === speaker.id && participant.state === "confirmed"
-      ) ? [speaker.id] : [])
-    );
-    setRoles(nextRoles);
-    setReviewedSpeakerIds(nextReviewedSpeakerIds);
-    setParticipantReviewOpen(
-      Boolean(onFinalize)
-      && interaction?.persistenceStatus !== "confirmed"
-      && speakers.length > 0
-    );
-  }, [interaction?.id, participantSyncKey, speakerSyncKey]); // eslint-disable-line react-hooks/exhaustive-deps
+  // The detail response already includes the saved identities. Render them in
+  // the same commit as the entries; only unsaved manual choices need local state.
+  const roleScope = JSON.stringify([interaction?.id, participantSyncKey, speakerSyncKey]);
+  const localRoles = roleEdits?.scope === roleScope ? roleEdits.values : undefined;
+  const splitGroups = useMemo(() => ({
+    ...Object.fromEntries(participants.flatMap(p => p.reviewedSegments ? [[p.speakerId, p.reviewedSegments] as const] : [])),
+    ...(segmentEdits?.scope === roleScope ? segmentEdits.groups : {})
+  }), [participants, roleScope, segmentEdits]);
+  const roles = useMemo(() => ({
+    ...initialRoles(speakers, participants), ...localRoles,
+    ...Object.fromEntries(Object.keys(splitGroups).map(id => [id, "unresolved" as const]))
+  }), [speakers, participants, localRoles, splitGroups]);
+  const segmentSources = useMemo(() => {
+    const byId = new Map<string, SourceRefVM>();
+    for (const item of validItems) for (const source of item.sources) {
+      if (source.segmentIds.length === 1 && source.contentDigest && source.presentation === "direct_quote") {
+        byId.set(source.segmentIds[0], source);
+      }
+    }
+    return byId;
+  }, [validItems]);
+  function changeSegmentReview(groupId: string, reviewed: DcReviewedSegment[]) {
+    setSegmentEdits(current => ({
+      scope: roleScope, groups: { ...(current?.scope === roleScope ? current.groups : {}), [groupId]: reviewed }
+    }));
+    if (rememberVoiceGroupId === groupId) setRememberVoiceGroupId(null);
+  }
+  const reviewedSpeakerIds = useMemo(() => new Set([
+    ...participants.filter(person => person.state === "confirmed").map(person => person.speakerId),
+    ...Object.keys(localRoles ?? {}), ...Object.keys(splitGroups)
+  ]), [participants, localRoles, splitGroups]);
 
   useEffect(() => {
     setAudioErrors({});
-    setExpandedGroups(new Set());
     setManuallyExcludedIds(new Set());
     setEditedTexts({});
     setEditingItemId(null);
     setEditingText("");
     setRememberVoiceGroupId(null);
-    setIncludeLongTerm(false);
+    setLongTermDraftId(null);
     setSubjectSuggestionState({ status: "idle" });
     setLocalError(null);
     setLocalErrorOperation(null);
@@ -367,11 +312,52 @@ export function CompanionRecap({
   const editable = Boolean(onFinalize);
   const confirmed = interaction?.persistenceStatus === "confirmed";
   const participantReviewComplete = speakers.every((speaker) => reviewedSpeakerIds.has(speaker.id));
-  const participantReviewCollapsible = confirmed || !editable || participantReviewComplete;
   const rolesBySourceSpeaker = useMemo(
     () => sourceSpeakerRoles(participants, roles),
     [participants, roles]
   );
+  const confirmedSpeakers = useMemo(() => {
+    const ids = new Set(reviewedSpeakerIds);
+    for (const person of participants) {
+      if (ids.has(person.speakerId)) {
+        for (const id of participantMemberSpeakerIds(person,person.speakerId)) ids.add(id);
+      }
+    }
+    return ids;
+  }, [participants,reviewedSpeakerIds]);
+  const splitByMember = useMemo(() => {
+    const result = new Map<string, Map<string, DcReviewedSegment>>();
+    for (const [groupId, reviewed] of Object.entries(splitGroups)) {
+      const participant = participants.find(p => p.speakerId === groupId);
+      const byId = new Map(reviewed.map(s => [s.sourceSegmentId, s]));
+      for (const id of participantMemberSpeakerIds(participant, groupId)) result.set(id, byId);
+    }
+    return result;
+  }, [participants, splitGroups]);
+  const roleForSource = useCallback((id?: string, segmentId?: string) => {
+    if (!id) return undefined;
+    const group = splitByMember.get(id);
+    if (!group) return rolesBySourceSpeaker[id];
+    const source = segmentId && segmentSources.get(segmentId);
+    const review = segmentId && group.get(segmentId);
+    return source && review && source.speakerId === id && review.contentDigest === source.contentDigest
+      ? review.role : "unresolved";
+  }, [rolesBySourceSpeaker, segmentSources, splitByMember]);
+  const knownRole = useCallback((id?: string, segmentId?: string) =>
+    id && confirmedSpeakers.has(id) ? roleForSource(id, segmentId) : undefined,
+  [confirmedSpeakers,roleForSource]);
+  const speakerLabel = useCallback((id?: string, segmentId?: string, line?: TranscriptLineVM) => {
+    if (!id) return "说话人未识别";
+    if (line && splitByMember.has(id)) {
+      const snapshot = segmentSources.get(line.id);
+      if (!snapshot || snapshot.uploadId !== line.uploadId || snapshot.quote !== line.text
+        || snapshot.startSeconds !== line.startSeconds || snapshot.endSeconds !== line.endSeconds) return "身份暂不确定";
+    }
+    const role = knownRole(id, segmentId);
+    if (role === "self") return "我";
+    if (role === "companion") return relationshipName?.trim() || "Ta";
+    return role === "unresolved" ? "身份暂不确定" : "说话人待核对";
+  },[knownRole,relationshipName,segmentSources,splitByMember]);
   const finalizeItems = useMemo(() => validItems.map((item) => {
     const editedText = editedTexts[item.id]?.trim();
     return {
@@ -382,11 +368,10 @@ export function CompanionRecap({
         ? item.disposition
         : manuallyExcludedIds.has(item.id)
         ? "excluded"
-        : automaticDisposition(item, rolesBySourceSpeaker)
+        : automaticDisposition(item, roleForSource)
     } satisfies CompanionRecapItemMutation;
-  }), [confirmed, editedTexts, manuallyExcludedIds, rolesBySourceSpeaker, validItems]);
+  }), [confirmed, editedTexts, manuallyExcludedIds, roleForSource, validItems]);
   const keptCount = finalizeItems.filter((item) => item.disposition === "kept").length;
-  const excludedCount = finalizeItems.length - keptCount;
   const saving = mutationState.status === "saving" || memoryMutationState.status === "saving" || localOperation !== null;
   const mutationError = mutationState.status === "error"
     ? mutationState.message
@@ -444,28 +429,44 @@ export function CompanionRecap({
   const memoryStillProcessing = memoryStatus === "waiting_for_cleanup"
     || memoryStatus === "pending"
     || memoryStatus === "processing";
+  const previewItemIds = !confirmed && includeLongTerm ? validItems
+    .filter(item => !manuallyExcludedIds.has(item.id) && item.disposition !== "excluded"
+      && automaticDisposition(item, knownRole) === "kept")
+    .map(item => item.id) : [];
   const subjectEditable = Boolean(
-    longTermReady
-    && (
-      (interaction?.persistenceStatus !== "confirmed" && includeLongTerm)
-      || memoryStatus === "not_queued"
-      || relationshipReconfirmationRequired
-    )
+    longTermReady && (confirmed
+      ? keptCount > 0 && (memoryStatus === "not_queued" || relationshipReconfirmationRequired)
+      : previewItemIds.length > 0)
   );
   const subjectInteractionId = interaction?.relationshipInteractionId;
   const subjectInteractionVersion = interaction?.version ?? 0;
   const subjectMappingVersion = mapping?.version;
-  useEffect(() => {
-    if (!subjectEditable || !subjectInteractionId || subjectMappingVersion === undefined) {
-      setSubjectSuggestionState({ status: "idle" });
-      return;
-    }
+  const participantAssignments = speakers.flatMap((speaker) => {
+    const participant = participants.find((candidate) => candidate.speakerId === speaker.id);
+    return participantMemberSpeakerIds(participant, speaker.id).map((speakerId) => ({
+      speakerId,
+      role: roles[speaker.id] ?? "unresolved",
+      ...(splitGroups[speaker.id] ? { reviewedSegments: splitGroups[speaker.id].filter(s =>
+        segmentSources.get(s.sourceSegmentId)?.speakerId === speakerId) } : {})
+    }));
+  });
+  const previewKey = subjectEditable && !confirmed ? JSON.stringify({
+    version: subjectInteractionVersion,
+    itemIds: previewItemIds,
+    assignments: participantAssignments.filter(a => confirmedSpeakers.has(a.speakerId))
+  } satisfies DcSubjectDraftPreview) : null;
+  const subjectScope = JSON.stringify([subjectInteractionId, subjectInteractionVersion, subjectMappingVersion,
+    mapping?.selfPersonId, mapping?.companionPersonId, confirmed, previewKey]);
+  const requestSubjectPreview = useCallback(() => {
+    if (!subjectEditable || !subjectInteractionId || subjectMappingVersion === undefined || subjectRequest.current) return;
     const controller = new AbortController();
-    setSubjectSuggestionState({ status: "loading" });
+    subjectRequest.current = controller;
+    setSubjectSuggestionState({ status: "loading", scope: subjectScope });
     void loadDateCompanionSubjectSuggestions({
       interactionId: subjectInteractionId,
       interactionVersion: subjectInteractionVersion,
       mappingVersion: subjectMappingVersion,
+      draftPreview: previewKey ? JSON.parse(previewKey) as DcSubjectDraftPreview : undefined,
       signal: controller.signal
     }).then((batch) => {
       if (controller.signal.aborted) return;
@@ -474,23 +475,39 @@ export function CompanionRecap({
         || batch.mappingVersion !== subjectMappingVersion
         || batch.interactionVersion !== subjectInteractionVersion
       ) {
-        setSubjectSuggestionState({ status: "error", message: "这次内容已经变化，请稍后重新查看整理结果。" });
+        setSubjectSuggestionState({ status: "error", scope: subjectScope, message: "这次内容已经变化，请重新核对归属建议。" });
         return;
       }
-      setSubjectSuggestionState({ status: "ready", batch });
+      setSubjectSuggestionState({ status: "ready", scope: subjectScope, batch });
     }).catch((error: unknown) => {
       if (controller.signal.aborted) return;
       setSubjectSuggestionState({
         status: "error",
-        message: error instanceof Error && error.message === "subject_suggestion_provider_unavailable"
-          ? "这次人物范围暂时没有整理好；你仍可完成本次复盘。"
-          : "这次内容范围暂时没有整理好；你仍可完成本次复盘。"
+        scope: subjectScope,
+        message: confirmed ? "这次归属建议未能取得，可以重试。"
+          : error instanceof Error && error.message === "subject_suggestion_provider_unavailable"
+            ? "这次人物范围暂时没有整理好；你仍可完成本次复盘。"
+            : "这次内容范围暂时没有整理好；你仍可完成本次复盘。"
       });
+    }).finally(() => {
+      if (subjectRequest.current === controller) subjectRequest.current = null;
     });
-    return () => controller.abort();
-  }, [subjectEditable, subjectInteractionId, subjectInteractionVersion, subjectMappingVersion]);
-  const subjectSuggestionBatch = subjectSuggestionState.status === "ready"
-    ? subjectSuggestionState.batch
+  }, [subjectEditable, subjectInteractionId, subjectInteractionVersion, subjectMappingVersion, confirmed, previewKey, subjectScope]);
+  const cancelSubjectRequest = useCallback(() => {
+    subjectRequest.current?.abort();
+    subjectRequest.current = null;
+  }, []);
+  useEffect(() => {
+    setSubjectSuggestionState({ status: "idle" });
+    // Only an opted-in draft follows changes to the selected material. A saved
+    // recap starts this same loader exclusively from its explicit preview button.
+    if (previewKey) requestSubjectPreview();
+    return cancelSubjectRequest;
+  }, [previewKey, requestSubjectPreview, cancelSubjectRequest]);
+  const currentSubjectState = subjectEditable && subjectSuggestionState.status !== "idle"
+    && subjectSuggestionState.scope === subjectScope ? subjectSuggestionState : null;
+  const subjectSuggestionBatch = currentSubjectState?.status === "ready"
+    ? currentSubjectState.batch
     : null;
   const suggestedSubjectByEvidenceId = useMemo(() => new Map(
     subjectSuggestionBatch?.suggestions.flatMap((suggestion) =>
@@ -554,82 +571,12 @@ export function CompanionRecap({
     const item = validItems.find((candidate) => candidate.id === mutation.id);
     return item ? [item] : [];
   }), [finalizeItems, validItems]);
-  const visibleSubjectSuggestions = useMemo(() => {
-    if (!subjectSuggestionBatch) return [];
-    const retainedItemIds = new Set(retainedItems.map((item) => item.id));
-    const retainedSources = new Map(
-      retainedItems.flatMap((item) => item.sources).map((source) => [source.id, source])
-    );
-    return subjectSuggestionBatch.suggestions.flatMap((suggestion) => {
-      const evidenceSnapshotIds = suggestion.evidenceSnapshotIds.filter((id) => retainedSources.has(id));
-      if (evidenceSnapshotIds.length === 0) return [];
-      const group = GROUPS.find((candidate) => suggestion.recapItemIds.some((id) =>
-        retainedItemIds.has(id)
-        && retainedItems.some((item) => item.id === id && item.kind === candidate.kind)
-      ));
-      const source = retainedSources.get(evidenceSnapshotIds[0]);
-      return [{
-        ...suggestion,
-        evidenceSnapshotIds,
-        subject: suggestion.proposedSubject,
-        kind: group?.kind ?? "moment",
-        quote: source?.quote ?? "原话来源"
-      }];
-    });
-  }, [retainedItems, subjectSuggestionBatch]);
-  const subjectCounts = useMemo(() => {
-    const counts: Record<DateCompanionMemorySubject, number> = {
-      self: 0,
-      companion: 0,
-      both: 0,
-      unknown: 0
-    };
-    for (const suggestion of visibleSubjectSuggestions) {
-      counts[suggestion.subject ?? "unknown"] += 1;
-    }
-    return counts;
-  }, [visibleSubjectSuggestions]);
-  const subjectThemes = useMemo(() => GROUPS.flatMap((group) => {
-    const themeItems = retainedItems.filter((item) => item.kind === group.kind);
-    const suggestions = visibleSubjectSuggestions.filter((suggestion) => suggestion.kind === group.kind);
-    if (suggestions.length === 0) return [];
-    const counts: Record<DateCompanionMemorySubject, number> = {
-      self: 0,
-      companion: 0,
-      both: 0,
-      unknown: 0
-    };
-    for (const suggestion of suggestions) counts[suggestion.subject] += 1;
-    return [{
-      ...group,
-      items: themeItems,
-      suggestions,
-      counts
-    }];
-  }), [retainedItems, visibleSubjectSuggestions]);
-
-  const jumpToSource = (segmentId: string) => {
-    setHighlightedSegmentId(segmentId);
-    const targetUrl = new URL(window.location.href);
-    targetUrl.searchParams.set("segment", segmentId);
-    targetUrl.hash = "full-transcript";
-    window.history.replaceState(
-      window.history.state,
-      "",
-      `${targetUrl.pathname}${targetUrl.search}${targetUrl.hash}`
-    );
-    const reduceMotion = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false;
-    requestAnimationFrame(() => document.getElementById("full-transcript")?.scrollIntoView({
-      behavior: reduceMotion ? "auto" : "smooth",
-      block: "start"
-    }));
-  };
-
   const runMutation = async (
-    operation: "finalize" | "sync" | "refresh",
+    operation: "finalize" | "sync" | "refresh" | "participants",
     action: () => Promise<void> | void
   ) => {
-    if (saving) return;
+    if (saving || operationLock.current) return;
+    operationLock.current = true;
     setLocalOperation(operation);
     setLocalError(null);
     setLocalErrorOperation(null);
@@ -639,17 +586,10 @@ export function CompanionRecap({
       setLocalError(error instanceof Error && error.message.trim() ? error.message : "暂时没有保存成功，请稍后再试。");
       setLocalErrorOperation(operation);
     } finally {
+      operationLock.current = false;
       setLocalOperation(null);
     }
   };
-
-  const participantAssignments = speakers.flatMap((speaker) => {
-    const participant = participants.find((candidate) => candidate.speakerId === speaker.id);
-    return participantMemberSpeakerIds(participant, speaker.id).map((speakerId) => ({
-      speakerId,
-      role: roles[speaker.id] ?? "unresolved"
-    }));
-  });
 
   const recapItemPresentation = (item: RecapItemVM) => {
     const manuallyExcluded = manuallyExcludedIds.has(item.id);
@@ -657,176 +597,58 @@ export function CompanionRecap({
       ? item.disposition
       : manuallyExcluded
         ? "excluded"
-        : automaticDisposition(item, rolesBySourceSpeaker);
-    const automaticReason = automaticExclusionReason(item, rolesBySourceSpeaker);
-    const exclusionReason = disposition === "excluded"
-      ? manuallyExcluded
-        ? "你选择不留下这条"
-        : automaticReason ?? "这条在确认时没有留下"
-      : null;
-    return { item, disposition, exclusionReason, manuallyExcluded };
+        : automaticDisposition(item, roleForSource);
+    return { item, disposition, manuallyExcluded };
   };
 
-  const renderRecapItem = (presentation: ReturnType<typeof recapItemPresentation>) => {
-    const { item, disposition, exclusionReason, manuallyExcluded } = presentation;
-    const editing = editingItemId === item.id;
-    const displayedText = editedTexts[item.id] ?? (item.displayedText || item.proposedText);
-    const displayedSubjectOptions = SUBJECT_OPTIONS.filter((option) =>
-      item.sources.some((source) => source.memorySubject === option.subject)
-    );
-    return (
-      <div className={styles.recapItemEditor} data-disposition={disposition} key={item.id}>
-        <div className={styles.recapItemHeading}>
-          <h4>{item.title}</h4>
-          <span>{disposition === "kept" ? (confirmed ? "已保留" : "将保留") : "未保留"}</span>
-        </div>
-        {editing ? (
-          <div className={styles.recapOptionalEditor}>
-            <label htmlFor={`recap-edit-${item.id}`}>修改整理后的文字</label>
-            <textarea
-              id={`recap-edit-${item.id}`}
-              aria-label={`修改这条：${item.title}`}
-              disabled={saving}
-              onChange={(event) => setEditingText(event.currentTarget.value)}
-              value={editingText}
-            />
-            <span>
-              <button disabled={saving} onClick={() => setEditingItemId(null)} type="button">取消</button>
-              <button
-                disabled={saving || !editingText.trim()}
-                onClick={() => {
-                  setEditedTexts((current) => ({ ...current, [item.id]: editingText.trim() }));
-                  setEditingItemId(null);
-                }}
-                type="button"
-              >应用修改</button>
-            </span>
-          </div>
-        ) : <p className={styles.recapText}>{displayedText}</p>}
-        {exclusionReason ? <p className={styles.recapExclusionReason}>{exclusionReason}</p> : null}
-        {editable && !confirmed && !editing ? (
-          <div className={styles.recapOptionalActions}>
-            {disposition === "kept" ? (
-              <button
-                disabled={saving}
-                onClick={() => {
-                  setEditingItemId(item.id);
-                  setEditingText(displayedText);
-                }}
-                type="button"
-              >修改</button>
-            ) : null}
-            {disposition === "kept" ? (
-              <button
-                disabled={saving}
-                onClick={() => {
-                  setManuallyExcludedIds((current) => new Set(current).add(item.id));
-                  setEditingItemId((current) => current === item.id ? null : current);
-                }}
-                type="button"
-              >这条不留下</button>
-            ) : manuallyExcluded ? (
-              <button
-                disabled={saving}
-                onClick={() => setManuallyExcludedIds((current) => {
-                  const next = new Set(current);
-                  next.delete(item.id);
-                  return next;
-                })}
-                type="button"
-              >恢复这条</button>
-            ) : <small>核对上面的说话人后，这条会自动恢复。</small>}
-          </div>
-        ) : null}
-        {disposition === "kept" && memoryStatus === "completed" && displayedSubjectOptions.length > 0 ? (
-          <div aria-label="这条内容的长期归属" className={styles.subjectReadOnly}>
-            {displayedSubjectOptions.map((option) => (
-              <span key={option.subject}>{option.label}</span>
-            ))}
-          </div>
-        ) : null}
-        <RecapSourceList availableSegmentIds={availableSegmentIds} sources={item.sources} onJump={jumpToSource} />
-      </div>
-    );
-  };
-
-  const renderRecapGroup = (group: (typeof GROUPS)[number]) => {
-    const groupItems = validItems.filter((item) => item.kind === group.kind);
-    const presentations = groupItems.map(recapItemPresentation);
-    const includedItems = presentations.filter((item) => item.disposition !== "excluded");
-    const excludedItems = presentations.filter((item) => item.disposition === "excluded");
-    const expanded = expandedGroups.has(group.kind);
-    const visibleItems = expanded ? includedItems : includedItems.slice(0, 5);
-    const hiddenCount = includedItems.length - visibleItems.length;
-    return (
-      <section className={styles.recapReviewGroup} data-card-kind={group.kind} key={group.kind}>
-        <header>
-          <span>{group.eyebrow}</span>
-          <h3>{group.title}</h3>
-        </header>
-        <div id={`recap-group-${group.kind}-items`}>
-          {includedItems.length === 0
-            ? <p className={styles.recapGroupEmpty}>{group.empty}</p>
-            : visibleItems.map(renderRecapItem)}
-        </div>
-        {includedItems.length > 5 ? (
-          <button
-            aria-controls={`recap-group-${group.kind}-items`}
-            aria-expanded={expanded}
-            className={styles.recapGroupToggle}
-            onClick={() => setExpandedGroups((current) => {
-              const next = new Set(current);
-              if (next.has(group.kind)) next.delete(group.kind);
-              else next.add(group.kind);
-              return next;
-            })}
-            type="button"
-          >
-            {expanded ? "收起，仅显示前 5 条" : `展开其余 ${hiddenCount} 条`}
-          </button>
-        ) : null}
-        {excludedItems.length > 0 ? (
-          <details className={styles.recapExcludedGroup}>
-            <summary>未保留 {excludedItems.length} 条</summary>
-            <div>{excludedItems.map(renderRecapItem)}</div>
-          </details>
-        ) : null}
-      </section>
-    );
-  };
+  function editItem(item: RecapItemVM) {
+    if (!editable || confirmed || saving || recapItemPresentation(item).disposition !== "kept") return;
+    setEditingItemId(item.id);
+    setEditingText(editedTexts[item.id] ?? (item.displayedText || item.proposedText));
+  }
+  function applyEdit() {
+    if (!editingItemId || !editingText.trim() || !editable || confirmed || saving) return;
+    setEditedTexts((current) => ({ ...current, [editingItemId]: editingText.trim() }));
+    setEditingItemId(null);
+  }
+  function changeRetention(item: RecapItemVM) {
+    if (!editable || confirmed || saving) return;
+    const { disposition, manuallyExcluded } = recapItemPresentation(item);
+    if (!manuallyExcluded && disposition !== "kept") return;
+    setManuallyExcludedIds((current) => {
+      const next = new Set(current);
+      if (manuallyExcluded) next.delete(item.id);
+      else next.add(item.id);
+      return next;
+    });
+    if (editingItemId === item.id) setEditingItemId(null);
+  }
+  function finalize() {
+    if (!onFinalize || !canFinalize) return;
+    void runMutation("finalize", () => includeLongTerm && memoryAdmission
+      ? onFinalize(participantAssignments, finalizeItems, voiceEnrollmentIntents, memoryAdmission)
+      : onFinalize(participantAssignments, finalizeItems, voiceEnrollmentIntents));
+  }
 
   const participantReviewPanel = (
     <details
       className={`${styles.contentPanel} ${styles.participantPanel}`}
       data-panel-state={confirmed ? "confirmed" : editable ? "current" : "readonly"}
       data-review-complete={participantReviewComplete ? "true" : "false"}
-      onToggle={(event) => {
-        if (!event.currentTarget.open && !participantReviewCollapsible) {
-          event.currentTarget.open = true;
-          setParticipantReviewOpen(true);
-          return;
-        }
-        setParticipantReviewOpen(event.currentTarget.open);
-      }}
-      open={participantReviewOpen}
+      open
     >
       <summary
         className={styles.participantSummary}
-        onClick={(event) => {
-          if (participantReviewOpen && !participantReviewCollapsible) event.preventDefault();
-        }}
+        tabIndex={-1}
+        onClick={(event) => event.preventDefault()}
       >
         <div>
           <h2>核对说话人</h2>
-          <p>{confirmed
-            ? "本次说话人归属已保存；需要时可以重新展开核对。"
-            : participantReviewComplete
-              ? "说话人已核对；你可以收起这一段，继续阅读复盘。"
-              : "请为每个声音明确选择“我”“Ta”或“暂不确定”；全部核对后可以收起。"}</p>
+          <p>{confirmed ? "这次录音的身份已保存，原话仍可随时核对。"
+            : Object.keys(splitGroups).length ? "按原段核对声音。混声或未确认的原段可在本次复盘查看。"
+            : participantReviewComplete ? "身份已核对，读完可返回书页继续。"
+            : "结合下面的原话，为每个声音确认身份。不确定时可以先留待核对。"}</p>
         </div>
-        <span aria-hidden="true" className={styles.participantSummaryAction}>
-          {!participantReviewCollapsible ? "请先核对" : participantReviewOpen ? "收起" : "展开"}
-        </span>
       </summary>
       <div className={styles.participantPanelBody}>
         {unassignedTranscriptCount > 0 ? (
@@ -840,10 +662,14 @@ export function CompanionRecap({
               const speakerName = speaker.label?.trim() || `说话人 ${index + 1}`;
               const review = participants.find((participant) => participant.speakerId === speaker.id);
               const memberSpeakerIds = participantMemberSpeakerIds(review, speaker.id);
+              const reviewed = splitGroups[speaker.id];
+              const sources = [...segmentSources.values()].filter(s => s.speakerId && memberSpeakerIds.includes(s.speakerId))
+                .sort((a,b) => a.startSeconds - b.startSeconds);
+              const groupLines = (interaction?.transcript ?? []).filter(line => line.speakerId && memberSpeakerIds.includes(line.speakerId));
               const audioSpeakerId = review?.audioSpeakerId;
               const audioAvailable = Boolean(interaction?.relationshipInteractionId && audioSpeakerId && !audioErrors[speaker.id]);
               return (
-                <article className={styles.participantCard} key={speaker.id}>
+                <article className={styles.participantCard} data-recap-speaker={speaker.id} key={speaker.id}>
                   <span className={styles.speakerMark} aria-hidden="true">{index + 1}</span>
                   <div className={styles.participantCopy}>
                     <b>{speakerName}</b>
@@ -861,11 +687,46 @@ export function CompanionRecap({
                         />
                       </label>
                     ) : <small>声音节选暂不可用，请结合原话判断。</small>}
-                    <ul className={styles.participantSamples}>
+                    {!reviewed && <ul className={styles.participantSamples} data-speaker-samples="">
                       {speaker.samples.map((sample) => <li key={sample}>“{sample}”</li>)}
-                    </ul>
-                    {editable ? (
+                    </ul>}
+                    {!reviewed && sources.length > 0 && groupLines.length > 1 && <details>
+                      <summary>查看本组全部 {groupLines.length} 段转写</summary>
+                      <ol>{groupLines.map(line => <li key={line.id}><time>{formatTimestamp(line.startSeconds)}</time>　{line.text}</li>)}</ol>
+                    </details>}
+                    {reviewed ? (
+                      <div className={styles.segmentReview}>
+                        <b>逐段核对</b>
+                        <p>只确认整段都由一人说出的原话。混有双方或听不清的段落留作未确认，可继续查看本次文字。</p>
+                        {editable && !confirmed && !review?.reviewedSegments && <button type="button" className={styles.roleChoice}
+                          disabled={saving} onClick={() => setSegmentEdits(current => {
+                            if (!current || current.scope !== roleScope) return current;
+                            const remaining = { ...current.groups };
+                            delete remaining[speaker.id];
+                            return {scope: roleScope, groups: remaining};
+                          })}>返回整组核对</button>}
+                        {sources.map(source => {
+                          const segmentId = source.segmentIds[0];
+                          const choice = reviewed.find(s => s.sourceSegmentId === segmentId && s.contentDigest === source.contentDigest);
+                          return <label key={segmentId} data-segment-review={segmentId}>
+                            <span>{formatTimestamp(source.startSeconds)} – {formatTimestamp(source.endSeconds)}</span>
+                            <q>{source.quote}</q>
+                            <select aria-label={`${formatTimestamp(source.startSeconds)} 起的原段说话人`}
+                              value={choice?.role ?? "unresolved"} disabled={!editable || confirmed || saving}
+                              onChange={event => {
+                                const role = event.currentTarget.value;
+                                const others = reviewed.filter(s => s.sourceSegmentId !== segmentId);
+                                changeSegmentReview(speaker.id, role === "self" || role === "companion"
+                                  ? [...others,{ sourceSegmentId: segmentId, contentDigest: source.contentDigest!, role }] : others);
+                              }}>
+                              <option value="unresolved">混声或暂不确定</option><option value="self">我</option><option value="companion">Ta</option>
+                            </select>
+                          </label>;
+                        })}
+                      </div>
+                    ) : editable ? (
                       <div className={styles.participantRoleGroup} aria-label={`${speakerName}的身份`}>
+                        {sources.length > 0 && !confirmed && <small>整组选择适用于这些原段都是同一人的情况。</small>}
                         {ROLE_OPTIONS.map((option) => (
                           <button
                             aria-pressed={(roles[speaker.id] ?? "unresolved") === option.role}
@@ -873,25 +734,29 @@ export function CompanionRecap({
                             disabled={confirmed || saving}
                             key={option.role}
                             onClick={() => {
-                              setRoles((current) => ({ ...current, [speaker.id]: option.role }));
-                              setReviewedSpeakerIds((current) => new Set(current).add(speaker.id));
+                              setRoleEdits(current => ({ scope: roleScope, values: {
+                                ...(current?.scope === roleScope ? current.values : {}), [speaker.id]: option.role
+                              } }));
                               if (option.role !== "companion" && rememberVoiceGroupId === speaker.id) setRememberVoiceGroupId(null);
                             }}
                             type="button"
-                          >{option.label}</button>
+                          >{sources.length && speakers.length > 1 && option.role !== "unresolved"
+                            ? `整组都是${option.label}` : option.label}</button>
                         ))}
+                        {sources.length > 0 && !confirmed && <button type="button" disabled={saving}
+                          className={styles.roleChoice} onClick={() => changeSegmentReview(speaker.id, [])}>混有不同声音，逐段核对</button>}
                       </div>
                     ) : (
                       <span className={styles.readOnlyBadge}>{(roles[speaker.id] ?? "unresolved") === "self" ? "已确认：我" : (roles[speaker.id] ?? "unresolved") === "companion" ? "已确认：Ta" : "尚未核对"}</span>
                     )}
                     {editable && !confirmed && roles[speaker.id] === "companion" && enrollmentEligibleGroups.some((candidate) => candidate.speaker.id === speaker.id) ? (
-                      <label className={styles.voiceEnrollmentChoice}>
+                      <label className={styles.voiceEnrollmentChoice} data-voice-consent="">
                         <input
                           checked={rememberVoiceGroupId === speaker.id}
                           disabled={saving}
                           name="date-companion-voice-enrollment"
-                          onChange={() => setRememberVoiceGroupId(speaker.id)}
-                          type="radio"
+                          onChange={event => setRememberVoiceGroupId(event.currentTarget.checked ? speaker.id : null)}
+                          type="checkbox"
                         />
                         <span><b>记住这段声音，方便下次认出 Ta</b><small>整次最多选择一段；默认关闭。</small></span>
                       </label>
@@ -902,219 +767,130 @@ export function CompanionRecap({
             })}
           </div>
         ) : <div className={styles.emptyState}><div><b>没有可核对的说话人</b><span>{unassignedTranscriptCount > 0 ? "文字稿没有稳定的说话人标记。" : "文字稿中没有识别到可用内容。"}</span></div></div>}
+        {onSaveSegmentReview && !confirmed && segmentEdits?.scope === roleScope && Object.keys(segmentEdits.groups).length > 0 && (
+          <button type="button" className={styles.secondaryButton} disabled={saving}
+            onClick={() => void runMutation("participants", () => onSaveSegmentReview(participantAssignments.filter(a =>
+              confirmedSpeakers.has(a.speakerId))))}>保存分段核对，继续留作草稿</button>
+        )}
+        {localErrorOperation === "participants" && localError && <p role="alert">{localError}</p>}
       </div>
     </details>
   );
 
-  return (
-    <main className={styles.recapReviewPage}>
-      <header className={styles.recapReviewHeader}>
-        <div>
-          <p className={styles.eyebrow}>{interaction?.recordingDate ?? "这次相处"}</p>
-          <h1>{!interaction
-            ? "还没有相处记录"
-            : interaction.status === "ready"
-              ? confirmed ? "这次相处的复盘已完成" : "完成这次相处的复盘"
-              : interaction.status === "failed" ? "这次整理没有完成" : "这次相处正在整理"}</h1>
-          <p>{!interaction
-            ? "上传一段录音后，这里会出现可核对的复盘。"
-            : interaction.status === "ready"
-              ? confirmed
-                ? "你留下的内容和原话仍可随时核对。"
-                : "先读这次相处里值得带走的内容，再处理真正需要你确认的部分。"
-              : interaction.status === "failed"
-                ? "录音和已有内容不会因此丢失。"
-                : "录音正在转成文字并整理重点。"}</p>
-        </div>
-        {interaction ? (
-          <div className={styles.recapHeaderMeta} aria-label="本次录音信息">
-            <span>{interaction.fileName}</span>
-            <span>{[duration, interaction.status === "ready" ? "已整理" : interaction.status === "failed" ? "处理失败" : "正在处理"].filter(Boolean).join(" · ")}</span>
-          </div>
-        ) : null}
-        {questionControl ? <div className={styles.recapQaControl}>{questionControl}</div> : null}
-      </header>
-
-      <div aria-label="这次相处详情" className={styles.recapReviewBody} role="region">
-        {!interaction ? (
-          <ProductState
-            action={<Link href="/date-companion/a">返回上传</Link>}
-            description="整理完成后，这里会显示带真实来源的复盘和文字稿。"
-            title="先上传一段录音"
-            tone="empty"
-          />
-        ) : interaction.status !== "ready" ? (
-          <ProductState
-            action={<Link href="/date-companion/a">返回此刻</Link>}
-            description={interaction.status === "failed"
-              ? "请返回此刻查看失败原因并选择是否重试。"
-              : `当前进度${typeof interaction.progress === "number" ? ` ${Math.round(interaction.progress)}%` : "正在更新"}；现在没有内容不代表最终结果为空。`}
-            title={interaction.status === "failed" ? "整理暂未完成" : "还在整理"}
-            tone={interaction.status === "failed" ? "error" : "loading"}
-          />
-        ) : (
-          <>
-            {pageError ? <p className={styles.inlineError} role="alert">{pageError}</p> : null}
-
-            {participantReviewPanel}
-
-            <section className={styles.recapOverview} aria-labelledby="recap-overview-title">
-              <div>
-                <h2 id="recap-overview-title">这次相处里，整理出 {validItems.length} 条有原话支撑的内容</h2>
-                <p>复盘会保存你确认的说话人和内容；长期记忆不会自动改变。</p>
-              </div>
-              <span>{confirmed ? "已完成" : editable ? "等你看看" : "只读查看"}</span>
-            </section>
-
-            {proactiveObservation ? (
-              <section
-                className={styles.recapObservation}
-                data-observation-origin={proactiveObservationStatus}
-                aria-labelledby="current-proactive-observation-title"
-              >
-                <span aria-hidden="true" className={styles.recapObservationMark}>
-                  {proactiveObservationStatus === "ready" ? "AI" : "原话"}
-                </span>
-                <div className={styles.recapObservationBody}>
-                  <header className={styles.recapObservationHeader}>
-                    <h2 id="current-proactive-observation-title">
-                      {proactiveObservationStatus === "ready" ? "AI 观察" : "原话线索"}
-                    </h2>
-                    <p>{proactiveObservationStatus === "ready"
-                      ? "基于这次可核对的原话，提供一个值得再看一眼的角度。"
-                      : "从这次可核对的原话里，整理出一个值得留意的线索。"}</p>
-                  </header>
-                  {proactiveObservation}
-                </div>
-              </section>
-            ) : null}
-
-            <section className={styles.recapFindings} aria-labelledby="recap-findings-title">
-              <header>
-                <h2 id="recap-findings-title">值得带走</h2>
-                <p>先阅读内容；需要时再编辑、移除或查看原话。</p>
-              </header>
-              <div className={styles.recapPrimaryGroups}>
-                {GROUPS.slice(0, 2).map(renderRecapGroup)}
-              </div>
-              <details className={styles.recapMore}>
-                <summary>
-                  <span>更多可能有用的内容</span>
-                  <span>{validItems.filter((item) => GROUPS.slice(2).some((group) => group.kind === item.kind)).length} 条</span>
-                </summary>
-                <div className={styles.recapSecondaryGroups}>
-                  {GROUPS.slice(2).map(renderRecapGroup)}
-                </div>
-              </details>
-            </section>
-
-            <section className={styles.memoryAdmissionPanel} aria-labelledby="long-term-review-title">
-              <header>
-                <div>
-                  <h2 id="long-term-review-title">长期记忆（可选）</h2>
-                  <p>只在你明确选择时使用；不影响“完成本次复盘”。</p>
-                </div>
-                {!longTermReady
-                  ? <Link className={styles.textButton} href="/date-companion/a/people">查看人物设置</Link>
-                  : <span className={styles.memoryStatusBadge} data-status={memoryStatus}>{MEMORY_STATUS_COPY[memoryStatus]}</span>}
-              </header>
-              {!confirmed && longTermReady ? (
-                <label className={styles.longTermChoice}>
-                  <input checked={includeLongTerm} disabled={saving} onChange={(event) => setIncludeLongTerm(event.currentTarget.checked)} type="checkbox" />
-                  <span><b>这次也整理进长期记忆</b><small>会先展示内容归属；你不选择时，不会写入长期记忆。</small></span>
-                </label>
-              ) : null}
-              {memoryBridgeState.status === "error" ? <p>人物设置暂时没有读取成功；本次复盘仍可完成。</p> : null}
-              {longTermReady && memoryStillProcessing ? (
-                <div className={styles.longTermStatus}>
-                  <p>{saving ? "正在整理；本次复盘仍可单独完成。" : "长期整理仍在后台继续。"}</p>
-                  {!saving && onMemoryRefresh ? <button className={styles.secondaryButton} onClick={() => void runMutation("refresh", onMemoryRefresh)} type="button">{localOperation === "refresh" ? "正在查看…" : "查看整理结果"}</button> : null}
-                </div>
-              ) : null}
-              {subjectEditable && subjectSuggestionState.status === "loading" ? <p role="status">正在整理内容归属；你仍可先完成本次复盘。</p> : null}
-              {subjectEditable && subjectSuggestionState.status === "error" ? <p className={styles.inlineError} role="alert">{subjectSuggestionState.message}</p> : null}
-              {subjectEditable && subjectSuggestionBatch ? (
-                <div className={styles.subjectReview}>
-                  <p>准备长期保留的内容归属</p>
-                  <div className={styles.subjectReadOnly} aria-label="内容范围统计">
-                    <span>关于 Ta {subjectCounts.companion}</span><span>关于我们 {subjectCounts.both}</span><span>关于我 {subjectCounts.self}</span><span>暂不确定 {subjectCounts.unknown}</span>
-                  </div>
-                  {subjectSuggestionBatch.status === "degraded" ? <small>无法确认归属的内容会保持“暂不确定”，不会自动关联人物。</small> : null}
-                  {subjectThemes.map((theme) => (
-                    <details className={styles.subjectSource} key={theme.kind}>
-                      <summary>{theme.title} · {theme.suggestions.length} 条原话</summary>
-                      <div className={styles.subjectReadOnly} aria-label={`${theme.title}的内容范围`}>
-                        {SUBJECT_OPTIONS.flatMap((option) => theme.counts[option.subject] > 0 ? [<span key={option.subject}>{option.label} {theme.counts[option.subject]}</span>] : [])}
-                      </div>
-                      <ol className={styles.subjectSourceList}>
-                        {theme.suggestions.map((suggestion, index) => (
-                          <li key={suggestion.canonicalSourceKey}>
-                            <q>{suggestion.quote}</q>
-                            <span aria-label={`${theme.title}第 ${index + 1} 条原话的内容范围`}>
-                              {SUBJECT_OPTIONS.find((option) => option.subject === suggestion.subject)?.label ?? "暂不确定"}
-                            </span>
-                          </li>
-                        ))}
-                      </ol>
-                    </details>
-                  ))}
-                  <small>完成复盘时会接受这些归属；真正长期保留哪些内容，仍受现有安全规则约束。</small>
-                </div>
-              ) : null}
-              {relationshipReconfirmationRequired ? <p className={styles.boundaryNote} role="note">这段长期关系记录之前已被清理；重新启用后会按你确认的归属继续整理。</p> : memoryStatus === "needs_review" ? <p className={styles.boundaryNote} role="note">{memoryReview?.kind === "evidence_review_required" ? "这次原话来源已经变化，暂时不能继续长期整理。" : "人物设置已经变化，需要重新确认后才能继续长期整理。"}</p> : null}
-              {memorySyncError ? <p className={styles.inlineError} role="alert">{memorySyncError}</p> : null}
-              {confirmed && longTermReady && onMemorySync && (memoryStatus === "not_queued" || memoryStatus === "retryable_failed" || relationshipReconfirmationRequired) ? (
-                <button
-                  className={styles.secondaryButton}
-                  disabled={saving || (memoryStatus !== "retryable_failed" && !automaticSubjectsComplete)}
-                  onClick={() => void runMutation("sync", async () => {
-                    if (memoryStatus === "retryable_failed") return onMemorySync();
-                    if (!subjectSuggestionConfirmation || !automaticSubjectsComplete) throw new Error("内容归属还没有整理完成，请稍后再试。");
-                    if (relationshipReconfirmationRequired && !relationshipReconfirmation) throw new Error("长期关系恢复信息还没有准备好，请稍后再试。");
-                    return relationshipReconfirmation
-                      ? onMemorySync(memoryAdmissionSelections, subjectSuggestionConfirmation, relationshipReconfirmation)
-                      : onMemorySync(memoryAdmissionSelections, subjectSuggestionConfirmation);
-                  })}
-                  type="button"
-                >{localOperation === "sync" || (memoryMutationState.status === "saving" && memoryMutationState.operation === "sync") ? "正在整理…" : memoryStatus === "retryable_failed" ? "重新整理" : relationshipReconfirmationRequired ? "重新启用并继续整理" : "开始长期整理"}</button>
-              ) : null}
-            </section>
-
-            {editable ? (
-              <ProductReviewCompletion
-                action={!confirmed ? (
-                  <button
-                    className={styles.primaryButton}
-                    disabled={!canFinalize}
-                    onClick={() => onFinalize && void runMutation("finalize", () => (
-                      includeLongTerm && memoryAdmission
-                        ? onFinalize(participantAssignments, finalizeItems, voiceEnrollmentIntents, memoryAdmission)
-                        : onFinalize(participantAssignments, finalizeItems, voiceEnrollmentIntents)
-                    ))}
-                    type="button"
-                  >{localOperation === "finalize" || (mutationState.status === "saving" && mutationState.operation === "finalize") ? "正在完成…" : "完成本次复盘"}</button>
-                ) : <span className={styles.recapCompletionStatus}>已完成</span>}
-                className={styles.recapCompletion}
-                description={confirmed
-                  ? `已保留 ${keptCount} 条带原话的内容。长期记忆只会保留你明确选择并通过安全核对的部分。`
-                  : keptCount === 0
-                    ? "需要先确认至少一条有真实来源、且说话人归属一致的内容。"
-                    : `将保留 ${keptCount} 条内容${excludedCount > 0 ? `，另有 ${excludedCount} 条未保留` : ""}。${includeLongTerm ? (memoryAdmission ? "你还选择了长期整理。" : "长期整理尚未准备好，但不会阻止完成复盘。") : "不会自动写入长期记忆。"}`}
-                title={confirmed ? "本次复盘已完成" : "准备好就完成本次复盘"}
-              />
-            ) : null}
-
-            {interaction.transcript.length > 0 ? (
-              <CompanionTranscript chapters={chapters} highlightedSegmentId={highlightedSegmentId} lines={interaction.transcript} />
-            ) : (
-              <section className={styles.contentPanel}>
-                <h2>完整文字记录</h2>
-                <p className={styles.contentIntro}>这台设备没有完整文字稿；上面的来源片段仍可核对，不会生成失效入口。</p>
-              </section>
-            )}
-          </>
-        )}
+  const memoryControls = (
+    <>
+    {!confirmed && editable && longTermReady ? (
+      <label className={styles.longTermChoice} data-memory-consent="">
+        <input checked={includeLongTerm} disabled={saving} onChange={(event) => setLongTermDraftId(event.currentTarget.checked ? interaction?.id ?? null : null)} type="checkbox" />
+        <span><b>这次也整理进长期记忆</b><small>勾选后，先为本次保留且已核对说话人的内容生成归属建议。</small></span>
+      </label>
+    ) : null}
+    {!confirmed && includeLongTerm && longTermReady && !previewItemIds.length ? (
+      <p role="status">保留一条已核对说话人的内容，即可查看归属建议。</p>
+    ) : null}
+    {memoryBridgeState.status === "error" ? <p>人物设置暂时没有读取成功；本次复盘仍可完成。</p> : null}
+    {longTermReady && memoryStillProcessing ? (
+      <div className={styles.longTermStatus}>
+        <p>{saving ? "正在整理；本次复盘仍可单独完成。" : "长期整理仍在后台继续。"}</p>
+        {!saving && onMemoryRefresh ? <button className={styles.secondaryButton} onClick={() => void runMutation("refresh", onMemoryRefresh)} type="button">{localOperation === "refresh" ? "正在查看…" : "查看整理结果"}</button> : null}
       </div>
-    </main>
+    ) : null}
+    {confirmed && subjectEditable && onMemorySync && subjectInteractionId && subjectMappingVersion !== undefined ? (
+      <button type="button" className={styles.secondaryButton} disabled={saving}
+        aria-disabled={currentSubjectState?.status === "loading" || Boolean(subjectSuggestionBatch)}
+        onClick={() => {
+          if (!subjectSuggestionBatch && currentSubjectState?.status !== "loading") requestSubjectPreview();
+        }}>
+        {subjectSuggestionBatch ? "已生成归属建议" : currentSubjectState?.status === "loading" ? "正在生成归属建议…" :
+          currentSubjectState?.status === "error" ? "重新生成归属建议" : "生成归属建议"}
+      </button>
+    ) : null}
+    {currentSubjectState?.status === "loading" ? <p role="status">{confirmed ? "正在核对本次保留的内容。" : "正在整理内容归属；你仍可先完成本次复盘。"}</p> : null}
+    {currentSubjectState?.status === "error" ? <p className={styles.inlineError} role="alert">{currentSubjectState.message}</p> : null}
+    {subjectEditable && subjectSuggestionBatch ? (
+      <div className={styles.subjectReview} role="note">
+        {subjectSuggestionBatch.status === "degraded" ? <p>无法确认归属的内容会保持“暂不确定”，不会自动关联人物。</p> : null}
+        <small>{confirmed
+          ? "翻看不会授权长期保存；点击下方整理按钮后，才会接受这些归属并开始长期整理。"
+          : includeLongTerm
+            ? "完成复盘时会接受这些归属；真正长期保留哪些内容，仍受现有安全规则约束。"
+            : "目前只是在查看内容归属。勾选长期记忆并完成复盘后，才会接受这些归属并开始长期整理。"}</small>
+      </div>
+    ) : null}
+    {relationshipReconfirmationRequired ? <p className={styles.boundaryNote} role="note">这段长期关系记录之前已被清理；重新启用后会按你确认的归属继续整理。</p> : memoryStatus === "needs_review" ? <p className={styles.boundaryNote} role="note">{memoryReview?.kind === "evidence_review_required" ? "这次原话来源已经变化，暂时不能继续长期整理。" : "人物设置已经变化，需要重新确认后才能继续长期整理。"}</p> : null}
+    {memorySyncError ? <p className={styles.inlineError} role="alert">{memorySyncError}</p> : null}
+    {confirmed && longTermReady && onMemorySync && (subjectSuggestionBatch || memoryStatus === "retryable_failed") ? (
+      <button
+        className={styles.secondaryButton}
+        disabled={saving || (memoryStatus !== "retryable_failed" && !automaticSubjectsComplete)}
+        onClick={() => void runMutation("sync", async () => {
+          if (memoryStatus === "retryable_failed") return onMemorySync();
+          if (!subjectSuggestionConfirmation || !automaticSubjectsComplete) throw new Error("内容归属还没有整理完成，请稍后再试。");
+          if (relationshipReconfirmationRequired && !relationshipReconfirmation) throw new Error("长期关系恢复信息还没有准备好，请稍后再试。");
+          return relationshipReconfirmation
+            ? onMemorySync(memoryAdmissionSelections, subjectSuggestionConfirmation, relationshipReconfirmation)
+            : onMemorySync(memoryAdmissionSelections, subjectSuggestionConfirmation);
+        })}
+        type="button"
+      >{localOperation === "sync" || (memoryMutationState.status === "saving" && memoryMutationState.operation === "sync") ? "正在整理…" : memoryStatus === "retryable_failed" ? "重新整理" : relationshipReconfirmationRequired ? "重新启用并继续整理" : "开始长期整理"}</button>
+    ) : null}
+    </>
+  );
+
+  const meetingTitle = bookMeetingTitle(interaction);
+  const entries: BookItem[] = validItems.map(item => {
+    const presentation = recapItemPresentation(item);
+    const pendingIdentity = item.sources.some(source => {
+      const role = knownRole(source.speakerId, source.segmentIds[0]);
+      return !role || role === "unresolved";
+    });
+    const text = editedTexts[item.id] ?? (item.displayedText || item.proposedText);
+    return {
+      ...presentation,
+      exclusionReason: bookRetentionReason(item,presentation.disposition,presentation.manuallyExcluded,knownRole),
+      ...bookItemCopy(item,text,pendingIdentity),
+      pendingIdentity,
+      subjects: memoryStatus === "completed" && presentation.disposition === "kept" ? SUBJECT_OPTIONS
+        .filter(option => item.sources.some(source => source.memorySubject === option.subject))
+        .map(option => option.label.replace(/^关于\s*/,"")) : [],
+    };
+  });
+  const sources = validItems.flatMap(item => item.sources);
+  let bookMemoryStatus: string = MEMORY_STATUS_COPY[memoryStatus];
+  if (!memoryReady) {
+    bookMemoryStatus = memoryBridgeState.status === "error" ? "人物设置暂时未能读取" : "正在读取人物设置…";
+  } else if (!longTermReady) {
+    bookMemoryStatus = readyMemoryBridge?.setting.enabled ? "人物归属尚待核对" : "长期整理未开启";
+  } else if (!confirmed && includeLongTerm && memoryStatus === "not_queued") {
+    bookMemoryStatus = memoryAdmission ? "已选择随本次复盘整理" : "已选择长期整理，尚待核对归属";
+  }
+  const memory = validItems.length > 0 && <BookMemory meetingTitle={meetingTitle} items={retainedItems}
+    suggestedSubjects={suggestedSubjectByEvidenceId} status={memoryStatus}
+    onDismiss={() => {
+      if (confirmed && subjectRequest.current) {
+        cancelSubjectRequest();
+        setSubjectSuggestionState({ status: "idle" });
+      }
+    }}
+    statusLabel={bookMemoryStatus}
+    itemTitle={item=>entries.find(entry=>entry.item.id===item.id)?.title || item.displayedText}
+    controls={<>
+      {memoryBridgeState.status === "error" && onMemoryRefresh && <button type="button" disabled={saving}
+        onClick={() => void runMutation("refresh", onMemoryRefresh)}>重新读取人物设置</button>}
+      {memoryReady && !longTermReady && <Link href="/date-companion/a/people">查看人物设置</Link>}
+      {memoryControls}
+    </>}/>;
+  return (
+    <BookPanelsProvider interaction={interaction} meetingTitle={meetingTitle} chapters={chapters} initialSegmentId={initialSegmentId} onReturnToSourceOrigin={onReturnToSourceOrigin} sources={sources} speakerLabel={speakerLabel}>
+      <BookRecap interaction={interaction} entries={entries} groups={GROUPS}
+        confirmed={confirmed} editable={editable} saving={saving} participantReviewComplete={participantReviewComplete}
+        participantPanel={speakers.length || unassignedTranscriptCount ? participantReviewPanel : null}
+        hasTranscript={Boolean(interaction?.transcript.length || sources.length)} homeHref={bookHomeHref}
+        question={questionControl} observation={proactiveObservation} memory={memory}
+        canFinalize={canFinalize} submitting={localOperation==="finalize" || mutationState.status==="saving" && mutationState.operation==="finalize"}
+        error={pageError} memoryNote={includeLongTerm ? (memoryAdmission ? "这次也会整理进长期记忆。" : "长期整理还未就绪，本次复盘仍可完成。") : "仅保存在本次复盘。"}
+        speakerLabel={speakerLabel} editingId={editingItemId} editingText={editingText} onEdit={editItem} onText={setEditingText}
+        onApply={applyEdit} onCancel={()=>setEditingItemId(null)} onChangeRetention={changeRetention} onFinalize={finalize}/>
+    </BookPanelsProvider>
   );
 }

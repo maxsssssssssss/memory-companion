@@ -19,7 +19,7 @@ const nextConfig = {
   // ASR fetch URLs contain short-lived learning capabilities; omit only these
   // requests from Next's development access log. Other product logging is unchanged.
   logging: { incomingRequests: { ignore: [/^\/api\/learning\/asr-audio\//] } },
-  ...(fixtureDistDir ? { distDir: fixtureDistDir } : {}),
+  ...(fixtureDistDir ? { distDir: fixtureDistDir, devIndicators: false } : {}),
   ...(fixtureTsconfig ? { typescript: { tsconfigPath: fixtureTsconfig } } : {}),
   outputFileTracingRoot: projectDir,
   outputFileTracingExcludes: {

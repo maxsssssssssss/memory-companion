@@ -19,12 +19,14 @@ import { dateCompanionRetainedEvidenceDigest } from "@/lib/server/memory/retenti
 import type { PersonEvidence } from "./types";
 
 export type TrustedPersonQaEvidenceResolution = {
+  readFailed?: true;
   segments: TranscriptSegment[];
   conflictingEvidenceKeys: string[];
   activeSelfPersonId: string | null;
 };
 
 export type TrustedPersonQaEvidenceResolver = (input: {
+  relationshipId?: string;
   accountId: string;
   personId: string;
   evidence: readonly PersonEvidence[];
@@ -406,8 +408,8 @@ function resolveSnapshotLink(input: {
       ON s.evidence_snapshot_id = e.id AND s.user_id = e.user_id
     LEFT JOIN dc_relationship_person_mappings m
       ON m.relationship_id = i.relationship_id AND m.user_id = i.user_id
-    LEFT JOIN dc_participant_assignments p
-      ON p.interaction_id = i.id AND p.user_id = i.user_id AND p.speaker_id = e.speaker_id
+    LEFT JOIN dc_evidence_speaker_reviews p
+      ON p.interaction_id = i.id AND p.user_id = i.user_id AND p.evidence_id = e.id
     WHERE e.id = ? AND e.user_id = ?
   `).get(input.link.dc_evidence_snapshot_id, input.accountId) as SnapshotRow | undefined;
   if (!snapshot) return null;
@@ -512,6 +514,7 @@ export function resolveTrustedPersonQaEvidence(input: {
   dateCompanionDatabase: Database.Database;
   accountId: string;
   personId: string;
+  relationshipId?: string;
   evidence: readonly PersonEvidence[];
 }): TrustedPersonQaEvidenceResolution {
   try {
@@ -547,6 +550,9 @@ export function resolveTrustedPersonQaEvidence(input: {
         || !evidence.sourceSegmentId.trim()
         || !normalizedText(evidence.quote)
       ) continue;
+      if (input.memoryDatabase.prepare(
+        "SELECT 1 FROM memory_upload_tombstones WHERE user_id = ? AND upload_id = ?"
+      ).get(input.accountId, evidence.uploadId)) continue;
       const personEvidence = input.memoryDatabase.prepare(`
         SELECT id, account_id AS accountId, upload_id AS uploadId,
                source_segment_id AS sourceSegmentId, quote,
@@ -564,8 +570,9 @@ export function resolveTrustedPersonQaEvidence(input: {
                dc_evidence_snapshot_id, snapshot_digest
         FROM person_evidence_dc_links
         WHERE account_id = ? AND person_evidence_id = ?
+          AND (? IS NULL OR dc_relationship_id = ?)
         ORDER BY dc_evidence_snapshot_id
-      `).all(input.accountId, evidence.id) as MemoryLinkRow[];
+      `).all(input.accountId, evidence.id, input.relationshipId ?? null, input.relationshipId ?? null) as MemoryLinkRow[];
       if (links.length === 0) continue;
 
       const duplicateSnapshots = input.dateCompanionDatabase.prepare(`
@@ -642,7 +649,7 @@ export function resolveTrustedPersonQaEvidence(input: {
       activeSelfPersonId
     };
   } catch {
-    return emptyResolution();
+    return { ...emptyResolution(), readFailed: true };
   }
 }
 

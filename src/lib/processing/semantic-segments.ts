@@ -77,7 +77,7 @@ const titleTopicRules: Array<{ label: string; pattern: RegExp }> = [
   { label: "硬件形态", pattern: /实体屏幕|屏幕|平板|键盘|显示屏|硬件|设备|CPU|电子曲笛/gi },
   { label: "软件平台", pattern: /软件|平台|服务|移动互联网|互联网|网飞|Netflix|Facebook|内容库|更迭/gi },
   { label: "生态合作", pattern: /生态|合作伙伴|合作夥伴|协同|替代|对手|开放|合作/gi },
-  { label: "渠道销售", pattern: /渠道|销售|营收|占比|客户|用户|合同|续费|授权|费用|报价|市场/gi },
+  { label: "渠道销售", pattern: /渠道|销售|经销商|分销商|营收|续费|客户.{0,12}(?:报价|合同|采购)|(?:报价|签约).{0,12}客户/gi },
   { label: "产品规划", pattern: /产品|功能|版本|需求|体验|定价|CMF|硬件|耳机|输入法|转写|离线|技术|组件/gi },
   { label: "融资资金", pattern: /融资|资金|研发投入|估值|投资人|股东|资本/gi },
   { label: "团队协作", pattern: /团队|负责人|协作|跟进|推进|王敏|杨总|胡伟|沟通/gi },

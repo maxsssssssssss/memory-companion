@@ -61,7 +61,7 @@ export function CompanionRelationshipSetup({ errorMessage, onCreate }: Companion
         </form>
 
         <p className={styles.relationshipSetupBoundary}>
-          第一版只保留这一段当前关系，不提供人物列表或自动切换。
+          这里建立当前关系，人物设置可稍后补充。
         </p>
       </section>
     </main>

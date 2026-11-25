@@ -26,7 +26,7 @@ describe("Date Companion Subject suggestion batches", () => {
 
   afterEach(() => database.close());
 
-  function seed(userId = "user_a") {
+  function seed(userId = "user_a", draft = false) {
     const relationship = repository.createOrGetRelationship(userId, "Ta").relationship;
     const imported = repository.importInteraction({
       userId,
@@ -74,7 +74,16 @@ describe("Date Companion Subject suggestion batches", () => {
       relationshipType: "dating",
       expectedVersion: 0
     });
-    return { relationship, interactionId: imported.interactionId, mapping };
+    const interactionId = imported.interactionId;
+    const detail = repository.getInteractionDetail(userId, relationship.id, interactionId);
+    const assignments = [{ speakerId: "speaker_1", role: "companion" as const }];
+    const draftPreview = { version: detail.version, itemIds: detail.recapItems.map(item => item.id), assignments };
+    if (!draft) repository.updateRecap({
+      userId, interactionId, version: detail.version, assignments,
+      mutations: detail.recapItems.map(item => ({id:item.id,version:item.version,disposition:"kept"})),
+      finalize: true, skipMemoryAdmission: true
+    });
+    return { relationship, interactionId, mapping, draftPreview };
   }
 
   function provider(
@@ -128,7 +137,7 @@ describe("Date Companion Subject suggestion batches", () => {
     expect(before).toMatchObject({
       status: "idle",
       interactionId,
-      interactionVersion: 0,
+      interactionVersion: 1,
       mappingVersion: mapping.version
     });
     const claims = new DateCompanionSubjectSuggestionRepository(database);
@@ -315,12 +324,12 @@ describe("Date Companion Subject suggestion batches", () => {
   });
 
   it("does not turn proposed Subjects into formal selections without explicit batch confirmation", async () => {
-    const { relationship, interactionId, mapping } = seed();
+    const { relationship, interactionId, mapping, draftPreview } = seed("user_a", true);
     const batch = await getOrCreateDateCompanionSubjectSuggestionBatch({
       database,
       userId: "user_a",
       interactionId,
-      provider: provider()
+      provider: provider(), draftPreview
     });
     const interaction = repository.getRelationshipView("user_a", relationship.id)
       .interactions.find((item) => item.id === interactionId)!;
@@ -539,5 +548,76 @@ describe("Date Companion Subject suggestion batches", () => {
       interactionId,
       provider: provider()
     })).rejects.toThrowError(/not found/u);
+  });
+
+  it("requires a scoped draft preview, preserves excluded decisions and sends only the selected context", async () => {
+    const { interactionId, draftPreview } = seed("user_a", true);
+    const mocked = provider(), input = {database, userId:"user_a", interactionId, provider:mocked};
+    await expect(getOrCreateDateCompanionSubjectSuggestionBatch(input)).rejects.toThrow("subject_suggestion_draft_preview_required");
+    await expect(getOrCreateDateCompanionSubjectSuggestionBatch({...input, draftPreview:{
+      ...draftPreview, assignments:[]
+    }})).rejects.toThrow("subject_suggestion_evidence_empty");
+    await expect(getOrCreateDateCompanionSubjectSuggestionBatch({...input, draftPreview:{
+      ...draftPreview, version:draftPreview.version + 1
+    }})).rejects.toThrow("subject_suggestion_batch_stale");
+    expect(mocked.suggest).not.toHaveBeenCalled();
+    const [first,second] = draftPreview.itemIds;
+    const batch = await getOrCreateDateCompanionSubjectSuggestionBatch({...input, draftPreview:{...draftPreview, itemIds:[first]}});
+    expect(batch.suggestions[0].recapItemIds).toEqual([first]);
+    expect(mocked.suggest.mock.calls[0][0][0].recapContexts.map(c=>c.recapItemId)).toEqual([first]);
+    database.prepare("UPDATE dc_recap_items SET disposition='excluded' WHERE id=?").run(first);
+    expect(() => getDateCompanionSubjectSuggestionBatchStatus({...input,draftPreview:{...draftPreview,itemIds:[first]}}))
+      .toThrow("subject_suggestion_evidence_empty");
+    const next = await getOrCreateDateCompanionSubjectSuggestionBatch({...input, draftPreview});
+    expect(next.suggestions[0].recapItemIds).toEqual([second]);
+    expect(next.batchId).not.toBe(batch.batchId);
+    expect(mocked.suggest.mock.calls[1][0][0].recapContexts.map(c=>c.recapItemId)).toEqual([second]);
+  });
+
+  it("rejects a group-only preview for a persisted mixed group and keeps incomplete multi-source recaps out of model context", async () => {
+    const { relationship, interactionId, draftPreview } = seed("user_a", true);
+    const draft=repository.getInteractionDetail("user_a",relationship.id,interactionId);
+    const [valid, other] = draft.recapItems;
+    const source = valid.evidence[0];
+    // One item has an additional unreviewed line. Neither its quote nor its summary may travel.
+    database.prepare(`INSERT INTO dc_evidence_snapshots
+      (id,user_id,recap_item_id,upload_id,source_segment_id,start_seconds,end_seconds,speaker_id,quote,content_digest,created_at)
+      SELECT 'extra','user_a',?,upload_id,'mixed_extra',5,6,speaker_id,'额外未核对原话',content_digest,created_at
+      FROM dc_evidence_snapshots WHERE id=?`).run(other.id,source.id);
+    const review={speakerId:source.speakerId!,role:"unresolved" as const,reviewedSegments:[{
+      sourceSegmentId:source.sourceSegmentId,contentDigest:source.contentDigest!,role:"companion" as const
+    }]};
+    repository.updateParticipants({userId:"user_a",interactionId,version:0,assignments:[review]});
+    const mocked=provider(), input={database,userId:"user_a",interactionId,provider:mocked};
+    await expect(getOrCreateDateCompanionSubjectSuggestionBatch({...input,draftPreview:{...draftPreview,version:1}}))
+      .rejects.toThrow("subject_suggestion_evidence_empty");
+    expect(mocked.suggest).not.toHaveBeenCalled();
+    const scoped=await getOrCreateDateCompanionSubjectSuggestionBatch({...input,draftPreview:{...draftPreview,version:1,assignments:[review]}});
+    expect(scoped.suggestions).toHaveLength(1);
+    expect(scoped.suggestions[0].recapItemIds).toEqual([valid.id]);
+    const outgoing=mocked.suggest.mock.calls[0][0];
+    expect(outgoing[0].recapContexts.map(c=>c.recapItemId)).toEqual([valid.id]);
+    expect(JSON.stringify(outgoing)).not.toContain("额外未核对原话");
+    // Simulate a legacy saved row with insufficient proof: the full item's context stays excluded.
+    database.prepare("UPDATE dc_interactions SET status='confirmed' WHERE id=?").run(interactionId);
+    database.prepare("UPDATE dc_recap_items SET disposition='kept' WHERE interaction_id=?").run(interactionId);
+    const saved = await getOrCreateDateCompanionSubjectSuggestionBatch(input);
+    expect(saved.suggestions[0].recapItemIds).toEqual([valid.id]);
+  });
+
+  it("discards an in-flight suggestion when the current evidence is no longer eligible", async () => {
+    const { interactionId } = seed();
+    const input={database,userId:"user_a",interactionId};
+    const mocked=provider(vi.fn(async sources=>{
+      database.prepare("UPDATE dc_recap_items SET disposition='excluded' WHERE interaction_id=?").run(interactionId);
+      return sources.map(s=>({canonicalSourceKey:s.canonicalSourceKey,proposedSubject:"both" as const,
+        confidence:1,reasonCode:"mutual_relationship_context" as const}));
+    }));
+    await expect(getOrCreateDateCompanionSubjectSuggestionBatch({...input,provider:mocked})).rejects.toThrow("subject_suggestion_evidence_empty");
+    for (const table of ["dc_subject_suggestion_claims","dc_subject_suggestion_batches","dc_memory_bridge_outbox"]) {
+      expect(database.prepare(`SELECT COUNT(*) AS count FROM ${table}`).get()).toEqual({count:0});
+    }
+    await expect(getOrCreateDateCompanionSubjectSuggestionBatch({...input,provider:mocked})).rejects.toThrow("subject_suggestion_evidence_empty");
+    expect(mocked.suggest).toHaveBeenCalledTimes(1);
   });
 });

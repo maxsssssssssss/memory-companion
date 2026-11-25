@@ -19,6 +19,18 @@ function segment(overrides: Partial<TranscriptSegment>): TranscriptSegment {
 }
 
 describe("buildSemanticSegments", () => {
+  it("grounds a sales heading in the sales context, not a supplier price alone", () => {
+    const print = "我们没有下单。我答应周五发样图。至于印厂报价，我没答应去问。";
+    const sale = "渠道客户确认了试点范围，我会把正式报价发给经销商。";
+    for (const [text, isSales] of [[print, false], [sale, true]] as const) {
+      const [block] = buildSemanticSegments("upload_1", [segment({ text, valueLabels: ["commitment"] })]);
+      expect(block.title.includes("渠道销售")).toBe(isSales);
+      expect(block.summary.includes("渠道销售")).toBe(isSales);
+      expect(block.summary).toContain(text);
+      expect(block.sourceSegmentIds).toEqual(["seg_base"]);
+    }
+  });
+
   it("groups long contiguous meeting transcripts into multi-minute topic blocks", () => {
     const segments = Array.from({ length: 60 }, (_, index) =>
       segment({

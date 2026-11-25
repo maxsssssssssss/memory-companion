@@ -116,7 +116,8 @@ describe("memory database", () => {
       { version: 11 },
       { version: 12 },
       { version: 13 },
-      { version: 14 }
+      { version: 14 },
+      { version: 15 }
     ]);
     expect(dailyReflectionPublicationColumns.map((column) => column.name)).toEqual(
       expect.arrayContaining([
@@ -295,6 +296,8 @@ describe("memory database", () => {
       SELECT version, '2026-08-21T00:00:00.000Z' FROM versions;
 
       CREATE TABLE memory_evidence (id TEXT PRIMARY KEY);
+      CREATE TABLE dc_retained_uploads (user_id TEXT NOT NULL, upload_id TEXT NOT NULL);
+      CREATE TABLE person_evidence_dc_links (id TEXT PRIMARY KEY);
       CREATE TABLE memory_daily_reflection_publications (
         id TEXT PRIMARY KEY,
         user_id TEXT NOT NULL,

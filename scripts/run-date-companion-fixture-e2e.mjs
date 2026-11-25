@@ -7,9 +7,11 @@ import { resolve } from "node:path";
 const BLOCK_MARKER = "[date-companion-e2e-network] blocked_external_request";
 const workspaceDir = resolve(process.cwd());
 const requestedSpec = process.argv[2] ?? "date-companion-fixture.spec.ts";
+if (requestedSpec === "date-companion-stage2-fixture.spec.ts") {
+  throw new Error("The Stage 2 browser fixture is a historical baseline. Use its matching checkout, or run the current Date Companion fixtures.");
+}
 const allowedSpecs = new Set([
   "date-companion-fixture.spec.ts",
-  "date-companion-stage2-fixture.spec.ts",
   "date-companion-memory-ui-fixture.spec.ts",
   "date-companion-home-content-fixture.spec.ts",
   "date-companion-auth-registration-fixture.spec.ts",

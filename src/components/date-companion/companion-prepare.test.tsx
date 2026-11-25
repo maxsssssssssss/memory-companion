@@ -39,7 +39,7 @@ const openPromise: PromiseVM = {
 
 describe("CompanionPrepare", () => {
   it("uses only kept items and open promises", () => {
-    const { container } = render(
+    render(
       <CompanionPrepare
         items={[kept, { ...kept, id: "excluded", displayedText: "不该出现", disposition: "excluded" }]}
         openPromises={[openPromise, { ...openPromise, id: "promise-done", text: "已经做完", status: "done" }]}
@@ -48,12 +48,8 @@ describe("CompanionPrepare", () => {
     );
 
     expect(screen.getByRole("heading", { name: "见 小林 之前，花半分钟想一想" })).toBeInTheDocument();
-    expect(container.firstElementChild).toHaveClass("date-companion-prepare-page");
-    expect(container.querySelector(".date-companion-prepare-header")).toBeInTheDocument();
-    expect(container.querySelector(".date-companion-prepare-letter-stack")).toBeInTheDocument();
-    expect(container.querySelector(".date-companion-prepare-boundary")).not.toBeInTheDocument();
+    expect(screen.getByRole("region", {name: "见面前准备卡"})).toBeInTheDocument();
     expect(screen.queryByText(/被排除、尚未确认/u)).not.toBeInTheDocument();
-    expect(screen.getByText("不用准备很多。见面时，认真听 小林 说话就好。")).toBeInTheDocument();
     expect(screen.getByText("Ta 最近在准备考试")).toBeInTheDocument();
     expect(screen.queryByText("不该出现")).not.toBeInTheDocument();
     fireEvent.click(screen.getByText("你答应过"));
@@ -66,6 +62,7 @@ describe("CompanionPrepare", () => {
 
     expect(screen.getByRole("link", { name: "查看最近一次相处" })).toHaveAttribute("href", "/date-companion/a/recap");
     expect(screen.getByRole("link", { name: "回到关于 Ta" })).toHaveAttribute("href", "/date-companion/a/person");
+    expect(screen.getByRole("link", { name: "回到相处讨论" })).toHaveAttribute("href", "/date-companion/a/prepare");
     expect(screen.queryByText("我准备好了")).not.toBeInTheDocument();
     expect(screen.queryByText(/周六|河边|18:30/)).not.toBeInTheDocument();
   });

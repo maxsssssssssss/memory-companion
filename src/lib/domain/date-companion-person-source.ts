@@ -8,6 +8,8 @@ import {
 
 export const DateCompanionPersonSourceCatalogStatusSchema = z.enum([
   "ready",
+  "unlinked",
+  "withdrawn",
   "needs_review",
   "unavailable"
 ]);
@@ -23,6 +25,7 @@ export const DateCompanionRelationshipPersonSourceSchema = z.object({
   speakerId: z.string().trim().min(1).max(512).optional(),
   quote: z.string().min(1),
   contentDigest: z.string().length(64).regex(/^[a-f0-9]+$/u).optional(),
+  authorizationRevision: z.string().regex(/^[a-f0-9]{64}$/u).optional(),
   subject: DcMemorySubjectSchema.extract(["companion", "both"])
 }).strict().refine((source) => source.endSeconds > source.startSeconds, {
   message: "endSeconds must be greater than startSeconds"
@@ -32,6 +35,7 @@ export const DateCompanionPersonSourceCatalogSchema = z.object({
   relationshipId: DcIdSchema,
   companionPersonId: DcIdSchema.nullable(),
   mappingVersion: z.number().int().positive().nullable(),
+  withdrawalVersion: z.string().uuid().optional(),
   status: DateCompanionPersonSourceCatalogStatusSchema,
   sources: z.array(DateCompanionRelationshipPersonSourceSchema)
 }).strict();

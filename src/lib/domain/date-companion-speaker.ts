@@ -3,6 +3,52 @@ import {
   trustedTranscriptSpeakerIdentity
 } from "./speaker-identity";
 import type { TranscriptSegment } from "./types";
+import type { DcEvidenceSnapshot, DcInteractionRead } from "./date-companion-stage2";
+
+type ReviewedSource = Pick<DcEvidenceSnapshot, "uploadId" | "sourceSegmentId" | "speakerId" | "contentDigest">;
+
+export type DateCompanionSpeakerReadingSource = {
+  uploadId: string;
+  speakerId?: string;
+  segmentIds?: readonly string[];
+  quote?: string;
+  startSeconds?: number;
+  endSeconds?: number;
+};
+
+/** A segment exception belongs to the recording's reviewed snapshot, never to the ASR label alone. */
+export function dateCompanionEvidenceSpeakerRole(record: DcInteractionRead, source: ReviewedSource) {
+  if (record.sourceState === "explicitly_deleted" || record.sourceUploadId !== source.uploadId) return undefined;
+  const assignment = record.participants.find(p => p.speakerId === source.speakerId);
+  if (!assignment) return undefined;
+  if (assignment.reviewedSegments !== undefined) {
+    return assignment.reviewedSegments.find(segment => segment.sourceSegmentId === source.sourceSegmentId
+      && segment.contentDigest === source.contentDigest)?.role;
+  }
+  return assignment.confirmedAt && assignment.role !== "unresolved" ? assignment.role : undefined;
+}
+
+/** Local transcript and recording-QA citations have a different revision format.
+ * Compare their actual line with the server snapshot before using its reviewed role. */
+export function dateCompanionReadingSpeakerRole(record: DcInteractionRead, source: DateCompanionSpeakerReadingSource) {
+  if (record.sourceState === "explicitly_deleted" || record.sourceUploadId !== source.uploadId) return undefined;
+  const assignment = record.participants.find(p => p.speakerId === source.speakerId);
+  if (!assignment) return undefined;
+  if (assignment.reviewedSegments === undefined) {
+    return assignment.confirmedAt && assignment.role !== "unresolved" ? assignment.role : undefined;
+  }
+  if (source.segmentIds?.length !== 1 || source.quote === undefined) return undefined;
+  const [id] = source.segmentIds;
+  const reviewed = assignment.reviewedSegments.find(review => review.sourceSegmentId === id);
+  if (!reviewed) return undefined;
+  const items = "recapItems" in record ? record.recapItems : record.promiseRecapItems;
+  const matches = items.some(item => item.evidence.some(snapshot =>
+    snapshot.uploadId === source.uploadId && snapshot.speakerId === source.speakerId &&
+    snapshot.sourceSegmentId === reviewed.sourceSegmentId && snapshot.contentDigest === reviewed.contentDigest &&
+    snapshot.quote === source.quote && snapshot.startSeconds === source.startSeconds && snapshot.endSeconds === source.endSeconds
+  ));
+  return matches ? reviewed.role : undefined;
+}
 
 const CHUNK_INDEX_PATTERN = /(?:^|_)chunk_(\d+)(?:_|$)/u;
 const SAFE_KEY_TOKEN_PATTERN = /^[A-Za-z0-9_-]+$/u;

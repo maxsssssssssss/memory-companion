@@ -93,6 +93,23 @@ export const PreparationTurnSchema = z.object({
   operationKey: z.string().trim().min(1).max(200), expectedVersion: z.number().int().nonnegative(),
   text: z.string().trim().min(1).max(6000), kind: z.enum(["message", "feedback", "correction"]).default("message"),
 }).strict();
+export const PreparationRetrySchema = PreparationTurnSchema.pick({ operationKey: true, expectedVersion: true })
+  .extend({ retryMessageId: Id }).strict();
+
+export function unansweredSuggestionFailure(view: PreparationView) {
+  const message = view.messages.at(-1);
+  if (message?.role !== "user") return;
+  // A scope edit changes what the next attempt may read, without answering the turn.
+  for (let i = view.events.length - 1; i >= 0; i--) {
+    const event = view.events[i];
+    if (event.kind === "scope_changed") continue;
+    return event.kind === "generation_stopped" && event.data.failureCode === "missing_suggestions"
+      && event.data.messageId === message.id ? { message, event } : undefined;
+  }
+}
+export function missingSuggestionTurn(view: PreparationView) {
+  return view.generationStatus === "failed" ? unansweredSuggestionFailure(view)?.message : undefined;
+}
 export const PreparationMutationSchema = z.object({
   operationKey: z.string().trim().min(1).max(200), expectedVersion: z.number().int().nonnegative(),
   kind: z.enum(["select", "edit", "remove", "scope", "pause", "link_review", "unlink_review"]), itemId: Id.optional(), interactionId: Id.optional(),

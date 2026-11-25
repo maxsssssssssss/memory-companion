@@ -364,12 +364,15 @@ export const ProcessingJobSchema = z.object({
   finishedAt: z.string().datetime().optional()
 });
 
+
 export const QuestionAnswerSchema = z.object({
   id: z.string().min(1),
   uploadId: z.string().min(1),
   question: z.string().min(1),
   answer: z.string().min(1),
   citedSegmentIds: z.array(z.string().min(1)),
+  // Uncited relationship answers must not outlive the source grants used to generate them.
+  relationshipWithdrawalVersion: z.string().uuid().optional(),
   citations: z
     .array(
       z.object({
@@ -379,6 +382,11 @@ export const QuestionAnswerSchema = z.object({
         endSeconds: z.number().positive(),
         excerpt: z.string().min(1),
         sourceSegmentIds: z.array(z.string().min(1)).min(1),
+        evidenceKind: z.enum(["raw", "brief", "semantic", "audio", "audio_emotion", "relationship_signal"]).optional(),
+        sourceBindings: z.array(z.object({
+          segmentId: z.string().min(1), uploadId: z.string().min(1), revision: z.string().min(1),
+          authorizationRevision: z.string().regex(/^[a-f0-9]{64}$/u).optional()
+        })).optional(),
         memoryIds: z.array(z.string().min(1)).min(1).optional(),
         memoryEvidenceIds: z.array(z.string().min(1)).min(1).optional(),
         sourceOrigin: z.enum([

@@ -26,6 +26,43 @@ afterEach(async () => {
 });
 
 describe("DateCompanionService import", () => {
+  it.each([
+    ["commitment", "看完也可以把数字抄清楚给你，但只做私人对比。", "看完可以抄清数字供私人对比。", "moment"],
+    ["task", "至于印厂报价，我没答应去问。", "我答应去问印厂报价。", "moment"],
+    ["commitment", "我答应周五晚八点前发样图。至于报价，我没答应去问。", "答应周五晚八点前发样图，没答应问报价。", "promise"],
+    ["task", "要是地址确认了，我就把样纸寄给你。", "地址确认后寄出样纸。", "promise"],
+    ["commitment", "下周二我把书带给你。", "下周二带书。", "promise"],
+    ["commitment", "门票我订，最迟今晚八点把截图发给你。", "我答应订门票，今晚八点前把截图发给Ta。", "promise"],
+    ["commitment", "门票不是我订，最迟今晚八点会知道结果。", "我并没有答应订门票。", "moment"],
+    ["commitment", "他说「门票我订，最迟今晚八点把截图发给你。」", "我转述对方答应订门票。", "moment"],
+    ["commitment", "我转述他说的「我一定会寄出样稿」。", "我转述对方答应寄出样稿。", "moment"],
+    ["commitment", "他说「自己订票」，我答应今晚去接你。", "我答应今晚接你。", "promise"],
+    ["commitment", "我一定会在周五之前把蓝色样稿寄给你。", "我承诺周五之前寄出蓝色样稿。", "promise"],
+    ["commitment", "我会在周五之前把蓝色样稿寄给你。", "我承诺周五之前寄出蓝色样稿。", "promise"],
+    ["commitment", "如果工坊先确认收件地址，我答应周五晚饭前寄出纸样。之后再给你发消息。", "我答应周五晚饭前寄出纸样，之后再给你发消息。", "promise"],
+    ["commitment", "我答应下周一寄纸样，前提是拿到可用地址。", "答应下周一再寄纸样。", "promise"],
+    ["commitment", "我答应下周一晚饭前寄出纸样，前提是先拿到地址。", "答应下周一晚饭前寄出纸样，前提是先拿到地址。", "promise"]
+  ] as const)("checks the source before filing a %s as a promise: %s", (category, quote, body, kind) => {
+    const uploadId = "recap-evidence";
+    const segmentId = "first";
+    const payload = parseDayPayload({
+      upload: { id: uploadId, originalName: "test.wav", sizeBytes: 1, mimeType: "audio/wav", recordingDate: "2026-11-12", status: "ready" },
+      segments: [{ id: segmentId, uploadId, startSeconds: 0, endSeconds: 6, speaker: "A", text: quote, confidence: 1, sceneLabels: [], valueLabels: [] }],
+      briefItems: [{ id: "brief", uploadId, category, body, title: "摘要", sourceSegmentIds: [segmentId], transcriptExcerpt: quote,
+        sourceTimeRange: { startSeconds: 0, endSeconds: 6 }, confidence: 1, priority: "high", status: "candidate", people: [], topics: [] }],
+      audioInsights: [], semanticSegments: [], semanticSegmentsAvailable: true, relationshipSignals: [], relationshipSignalsAvailable: true,
+      proactiveInsights: [], proactiveInsightsAvailable: true, speakerAliases: {}, speakerAliasesByUploadId: {}
+    });
+    const [item] = buildDateCompanionImportCandidates(payload);
+    expect(item.kind).toBe(kind);
+    expect(item.evidence[0].quote).toBe(quote);
+    if (kind === "promise") {
+      const withSourceCondition = /如果工坊|要是地址|前提是拿到可用地址/u.test(quote);
+      expect(item.proposedText).toBe(withSourceCondition ? quote : body);
+    }
+    if (quote.includes("没答应去问") && kind === "moment") expect(item.proposedText).toContain("没答应去问");
+  });
+
   it("fails closed before first import when a Toy upload is bound to another relationship", async () => {
     const root = await mkdtemp(join(tmpdir(), "date-companion-toy-scope-"));
     roots.push(root);

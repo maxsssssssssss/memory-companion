@@ -43,6 +43,8 @@ const hasRetainedMemoryProvenanceMock = vi.hoisted(() => vi.fn());
 const deleteMemoryUploadAndRefreshIndexMock = vi.hoisted(() => vi.fn());
 const memoryDatabaseMock = vi.hoisted(() => ({}));
 const dateCompanionRepositoryMock = vi.hoisted(() => ({
+  getSegmentReviewVersionByUpload: vi.fn(),
+  getInteractionDetail: vi.fn(),
   getRelationshipView: vi.fn(),
   getInteractionVersionByUpload: vi.fn(),
   getInteractionRelationshipId: vi.fn(),
@@ -287,6 +289,7 @@ describe("API routes", () => {
     });
     hasRetainedMemoryProvenanceMock.mockReturnValue(false);
     dateCompanionRepositoryMock.getInteractionVersionByUpload.mockReturnValue(null);
+    dateCompanionRepositoryMock.getSegmentReviewVersionByUpload.mockReturnValue(undefined);
     dateCompanionRepositoryMock.getRelationshipView.mockReturnValue({
       relationship: { id: "relationship_1" }
     });
@@ -2137,6 +2140,58 @@ describe("API routes", () => {
     );
   });
 
+  it("limits explicit date-companion recording turns to this upload and reconstitutes only its matching prior references", async () => {
+    const text = "保存的片段说明周日有画展。";
+    const request = (scope: string) => new Request("http://localhost/api/days/context/qa", {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ caller: "date_companion_current", scope, uploadId: "current_one", question: "画展是哪天？",
+        conversation: [{ role: "assistant", content: "其他场次的假上下文" }],
+        priorCitations: [{ sourceSegmentId: "other_seg", excerpt: "不相关" },
+          { sourceSegmentId: "current_seg", excerpt: "同 ID 旧字" }, { sourceSegmentId: "current_seg", excerpt: text }],
+        segments: [{ id: "current_seg", uploadId: "current_one", text, startSeconds: 0, endSeconds: 5,
+          confidence: 1, sceneLabels: [], valueLabels: [] }] })
+    });
+    expect((await postContextQa(request("week"))).status).toBe(400);
+    expect(answerQuestionWithAIMock).not.toHaveBeenCalled();
+    answerQuestionWithAIMock.mockResolvedValueOnce({ id: "answer_one", uploadId: "current_one", question: "画展是哪天？",
+      answer: text, createdAt: "2026-06-03T10:00:00.000Z", citedSegmentIds: ["current_seg"] });
+    expect((await postContextQa(request("current"))).status).toBe(200);
+    const input = answerQuestionWithAIMock.mock.calls[0][0];
+    expect(input).toMatchObject({ uploadId: "current_one", requireExplicitRetry: true, includeCitationKind: true,
+      conversation: [{ role: "assistant", content: "上轮使用的已核实依据：" + text }] });
+    expect(JSON.stringify(input)).not.toContain("其他场次的假上下文");
+    expect(retrieveMemoryIndexEvidenceMock).not.toHaveBeenCalled();
+  });
+
+  it("passes only reviewed lines of a mixed recording group to single-recording QA and fences late stream events", async () => {
+    const uploadId = "recording_mixed";
+    const original = { id: "one", uploadId, speaker: "speaker_1", text: "我们没有下单，也没答应报价。",
+      startSeconds: 1, endSeconds: 4, confidence: 1, sceneLabels: [], valueLabels: [] };
+    const mixed = {...original, id: "two", startSeconds: 5, endSeconds: 10, text: "这一段接上了另一个人的转述。"};
+    const independent = {...original, id: "three", speaker: "speaker_2", startSeconds: 11, endSeconds: 16, text: "另一组的可读原话。"};
+    const speakerId = "local_speaker_1", contentDigest = "a".repeat(64);
+    const version = { interactionId: "i", relationshipId: "r", version: 2 };
+    dateCompanionRepositoryMock.getSegmentReviewVersionByUpload.mockReturnValue(version);
+    dateCompanionRepositoryMock.getInteractionDetail.mockReturnValue({ sourceUploadId: uploadId, participants: [{
+      speakerId, role: "unresolved", reviewedSegments: [{sourceSegmentId: original.id, contentDigest, role: "companion"}]
+    }, {speakerId:"local_speaker_2",role:"unresolved"}], recapItems: [{evidence: [{uploadId, speakerId, contentDigest, sourceSegmentId: original.id,
+      startSeconds: 1, endSeconds: 4, quote: original.text}]}] });
+    answerQuestionWithAIMock.mockResolvedValueOnce({ id: "turn", uploadId, answer: "没有下单。", citedSegmentIds: ["one"] });
+    const response = await postContextQa(new Request("http://localhost/api/days/context/qa", {method: "POST",
+      headers: {"content-type":"application/json"}, body:JSON.stringify({ caller:"date_companion_current",
+        scope:"current", uploadId, question:"是否下单？", segments:[original,mixed,independent],
+        priorCitations:[{sourceSegmentId:original.id,excerpt:original.text}] })}));
+    expect(response.status).toBe(200);
+    const input = answerQuestionWithAIMock.mock.calls[0][0];
+    expect(input.segments).toMatchObject([{id:"one",speaker:"Ta",text:original.text},{id:"three",speaker:"speaker_2"}]);
+    expect(input.conversation).toBeUndefined();
+    expect(input.retrievalSourceSegmentIds).toEqual(["one","three"]);
+    expect(input.disableHybridRetrieval).toBe(true);
+    expect(() => input.assertSourceScope()).not.toThrow();
+    dateCompanionRepositoryMock.getSegmentReviewVersionByUpload.mockReturnValue({...version,version:3});
+    expect(() => input.assertSourceScope()).toThrow();
+  });
+
   it("rejects historical or cross-upload Evidence from current-upload QA", async () => {
     const request = new Request("http://localhost/api/days/context/qa", {
       method: "POST",
@@ -3031,7 +3086,8 @@ describe("API routes", () => {
     });
   });
 
-  it("captures provenance before opt-in browser cleanup and retains existing Memory", async () => {
+  it("retains previously projected evidence during browser cleanup without granting anything new", async () => {
+    hasRetainedMemoryProvenanceMock.mockReturnValue(true);
     dateCompanionRepositoryMock.getInteractionVersionByUpload.mockReturnValue({
       interactionId: "interaction_1",
       version: 3
@@ -3063,19 +3119,8 @@ describe("API routes", () => {
     ), { params: Promise.resolve({ uploadId: "upload_1" }) });
 
     expect(response.status).toBe(200);
-    expect(captureRetainedMemoryEvidenceProvenanceMock).toHaveBeenCalledWith(expect.objectContaining({
-      database: memoryDatabaseMock,
-      store: storeMock,
-      userId: "user_default",
-      uploadId: "upload_1",
-      relationshipId: "relationship_1",
-      interactionId: "interaction_1"
-    }));
-    const segmentsDeleteIndex = storeMock.delete.mock.calls.findIndex(
-      ([collection, id]) => collection === "segments" && id === "upload_1"
-    );
-    expect(captureRetainedMemoryEvidenceProvenanceMock.mock.invocationCallOrder[0])
-      .toBeLessThan(storeMock.delete.mock.invocationCallOrder[segmentsDeleteIndex]);
+    expect(captureRetainedMemoryEvidenceProvenanceMock).not.toHaveBeenCalled();
+    expect(deleteMemoryUploadAndRefreshIndexMock).not.toHaveBeenCalled();
     expect(memoryRepositoryMock.deleteByUpload).not.toHaveBeenCalled();
     expect(deleteMemoryOwnerReviewCandidatesForUploadMock).not.toHaveBeenCalled();
     await expect(response.json()).resolves.toMatchObject({
@@ -3085,7 +3130,7 @@ describe("API routes", () => {
     });
   });
 
-  it("returns memory_provenance_required without downstream cleanup when capture fails", async () => {
+  it("returns memory_provenance_required without downstream cleanup when reading retained state fails", async () => {
     dateCompanionRepositoryMock.getInteractionVersionByUpload.mockReturnValue({
       interactionId: "interaction_1",
       version: 3
@@ -3094,9 +3139,7 @@ describe("API routes", () => {
       enabled: true,
       version: 1
     });
-    captureRetainedMemoryEvidenceProvenanceMock.mockRejectedValueOnce(
-      new Error("transcript evidence unavailable")
-    );
+    hasRetainedMemoryProvenanceMock.mockImplementationOnce(() => { throw new Error("memory unavailable"); });
     storeMock.read.mockImplementation(async (collection: string) =>
       collection === "uploads"
         ? {

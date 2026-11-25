@@ -102,6 +102,57 @@ describe("SentenceCommitManager sentence boundaries", () => {
 });
 
 describe("SentenceCommitManager citation alignment", () => {
+  it.each([
+    "图例编号是 [E1]。",
+    "图例编号是 [E1]，旁边留白。",
+    "[E1]",
+    "读作。 [E1]  这几个字符连在一起。",
+    "图例编号是 [E2]。"
+  ])("R18 grounds a verbatim quotation only in its outer citation: %s", (quote) => {
+    const commitManager = manager();
+    const raw = "青柠计划定在周四。[E1]\n\n原话是「" + quote + "」[E2] 地点是图书馆。[E1]";
+    const payload = JSON.stringify({ mode: "memory_answer", answer: raw, citationIds: ["E1", "E2"] });
+    const closingQuote = payload.indexOf("」");
+    commitManager.ingestDelta(payload.slice(0, closingQuote));
+    expect(commitManager.drainCommitted().map(commit => commit.sentence)).toEqual(["青柠计划定在周四。"]);
+    commitManager.ingestDelta(payload.slice(closingQuote));
+    const expected = { sentence: "原话是「" + quote + "」", citationIds: ["E2"], supportIds: ["segment_2", "segment_shared"] };
+    expect(commitManager.drainCommitted()).toEqual([
+      expect.objectContaining(expected),
+      expect.objectContaining({ sentence: "地点是图书馆。", citationIds: ["E1"], supportIds: ["segment_1"] })
+    ]);
+    const final = commitManager.commitValidatedAnswer(answer({
+      answer: raw,
+      citedSegmentIds: ["segment_1", "segment_2", "segment_shared"],
+      citations: [...answer().citations!, {
+        id: "E2", title: "图例", startSeconds: 20, endSeconds: 30, excerpt: quote, sourceSegmentIds: expected.supportIds
+      }]
+    }));
+    expect(final[1]).toMatchObject({ ...expected, status: "committed" });
+  });
+
+  it("R18 does not use a quoted number as sentence support without an external citation", () => {
+    const commitManager = manager();
+    const raw = "便笺上写的是「编号 [E1]。」";
+    commitManager.ingestDelta(JSON.stringify({ mode: "memory_answer", answer: raw, citationIds: ["E1"] }));
+    expect(commitManager.drainCommitted()).toEqual([]);
+    expect(commitManager.commitValidatedAnswer(answer({ answer: raw }))[0]).toMatchObject({
+      status: "withheld", reason: "missing_sentence_support", supportIds: [], sentence: raw
+    });
+  });
+
+  it("R18 quarantines a malformed citation spanning a quote and preserves the next quotation", () => {
+    const commitManager = manager();
+    const raw = "先核对。[E1][E1「说明」] 后文是「字面标记。[E1] 照录。」[E2]";
+    commitManager.ingestDelta(JSON.stringify({ mode: "memory_answer", answer: raw, citationIds: ["E1", "E2"] }));
+    expect(commitManager.drainCommitted()).toEqual([expect.objectContaining({
+      sentence: "后文是「字面标记。[E1] 照录。」", citationIds: ["E2"], supportIds: ["segment_2", "segment_shared"]
+    })]);
+    expect(commitManager.commitValidatedAnswer(answer({ answer: raw }))[0]).toMatchObject({
+      status: "withheld", reason: "invalid_citation"
+    });
+  });
+
   it("commits a semicolon compound sentence as one grounded unit", () => {
     const commits = manager().commitValidatedAnswer(answer({
       answer: "A；B。[E1]"

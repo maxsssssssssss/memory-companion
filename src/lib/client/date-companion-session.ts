@@ -24,7 +24,6 @@ import {
   type DateCompanionMemoryMutationState,
   type DateCompanionMemorySubject,
   type DateCompanionMutationState,
-  type DateCompanionParticipantRole,
   type DateCompanionRelationshipState,
   type DateCompanionRelationshipReconfirmationRequest,
   type DateCompanionRelationshipType,
@@ -41,16 +40,22 @@ import {
 } from "@/lib/domain/date-companion";
 import type {
   DcRelationshipView,
+  DcInteractionRead,
   DcRelationshipReadView,
+  DcSpeakerReviewMutation,
   DcSubjectSuggestionConfirmation
 } from "@/lib/domain/date-companion-stage2";
+import { dateCompanionEvidenceSpeakerRole, dateCompanionReadingSpeakerRole, type DateCompanionSpeakerReadingSource } from "@/lib/domain/date-companion-speaker";
+import { recordingQaReviewedMaterials } from "@/lib/domain/date-companion-recording-qa";
 import type { DateCompanionRelationshipPersonSource } from "@/lib/domain/date-companion-person-source";
+import { QA_INSUFFICIENT_EVIDENCE_ANSWER } from "@/lib/domain/qa-copy";
 import { QuestionAnswerSchema, type QuestionAnswer } from "@/lib/domain/types";
 
 import {
   applyDateCompanionRelationshipView,
   buildDateCompanionSearchResults,
   buildDateCompanionViewModel,
+  dateCompanionProcessingError,
   dateCompanionRetainedSourceKey,
   dateCompanionReadRecapItems
 } from "./date-companion-adapter";
@@ -63,14 +68,23 @@ import {
   type DateCompanionApi,
   type DateCompanionToyUploadRequest,
   type DateCompanionRetainedSource,
+  type WithdrawalImpact,
+  type WithdrawalReceipt,
   type LoginInput,
   type RegisterInput
 } from "./date-companion-api";
 import { isToySyncReceiptDurablyAccepted } from "./daily-reflection-toy-sync";
+import { bindQaAnswerSources, qaPriorCitations, recordingQaAnswerIsReadable, recordingQaPaperSources, resolveQaPaperCitation } from "./date-companion-qa-evidence";
+import { readPersonMaterialWithDeadline } from "./date-companion-read-deadline";
 
 const ACTIVE_USER_STORAGE_KEY = "daily-brief:active-user-id";
 const PERSISTED_SESSION_VERSION = 1;
-const PERSON_QA_HISTORY_VERSION = 1;
+// Earlier person-wide answers cannot establish the relationship used during generation.
+const PERSON_QA_HISTORY_VERSION = 2;
+function withdrawalNotifications(): BroadcastChannel | null {
+  try { return typeof window !== "undefined" && window.BroadcastChannel ? new window.BroadcastChannel("date-companion:withdrawal") : null; }
+  catch { return null; }
+}
 const MAX_PERSON_QA_HISTORY_ITEMS = 40;
 const DEFAULT_MEMORY_BRIDGE_POLL_TIMEOUT_MS = 120_000;
 const TOY_RECEIPT_RECOVERY_LOOKUP_ATTEMPTS = 3;
@@ -119,7 +133,10 @@ type PersistedSession = z.infer<typeof PersistedSessionSchema>;
 
 export type DateCompanionSessionSnapshot = {
   relationshipDetailsLoaded: boolean;
-  detailReadState: { status: "idle" | "loading" | "ready" } | { status: "error"; message: string };
+  detailReadState:
+    | { status: "idle" | "ready" }
+    | { status: "loading"; interactionId?: string | null; targetUnavailable?: boolean }
+    | { status: "error"; message: string; interactionId?: string | null; targetUnavailable?: boolean };
   auth: AuthState;
   viewModel: DateCompanionViewModel;
   uploadState: UploadState;
@@ -128,6 +145,7 @@ export type DateCompanionSessionSnapshot = {
   currentQaHistory: QuestionAnswer[];
   qaState: QaState;
   qaHistory: QuestionAnswer[];
+  qaWithheldHistoryCount?: number;
   relationshipState: DateCompanionRelationshipState;
   mutationState: DateCompanionMutationState;
   searchState: DateCompanionSearchState;
@@ -163,10 +181,13 @@ export type DateCompanionQaMode = "current-interaction" | "person";
 
 export type DateCompanionCurrentQaAvailability =
   | { enabled: true; uploadId: string }
-  | { enabled: false; message: string };
+  | { enabled: false; message: string; reason?: "missing_local_transcript" };
 
 export type DateCompanionSessionValue = DateCompanionSessionSnapshot & {
-  ensureRelationshipDetailsLoaded(): Promise<void>;
+  ensureRelationshipDetailsLoaded(options?: { timeoutMs?: number }): Promise<void>;
+  readSavedMeeting(interactionId: string): Promise<void>;
+  readProcessingProgress(): Promise<void>;
+  sourceSpeakerLabel(source: DateCompanionSpeakerReadingSource, companionName?: string | null): string | undefined;
   retryInteractionDetail(): Promise<void>;
   login(input: LoginInput): Promise<void>;
   register(input: RegisterInput): Promise<void>;
@@ -181,11 +202,12 @@ export type DateCompanionSessionValue = DateCompanionSessionSnapshot & {
     request: DateCompanionToyUploadRequest
   ): Promise<ToyIngestionReceipt | null>;
   retryRead(): Promise<void>;
+  refreshRelationship(): Promise<void>;
   createRelationship(displayName?: string): Promise<void>;
   updateParticipants(
     interactionId: string,
     version: number,
-    assignments: Array<{ speakerId: string; role: DateCompanionParticipantRole }>
+    assignments: DcSpeakerReviewMutation[]
   ): Promise<void>;
   updateRecap(
     interactionId: string,
@@ -195,7 +217,7 @@ export type DateCompanionSessionValue = DateCompanionSessionSnapshot & {
   finalizeRecap(
     interactionId: string,
     version: number,
-    assignments: Array<{ speakerId: string; role: DateCompanionParticipantRole }>,
+    assignments: DcSpeakerReviewMutation[],
     items: Array<{ id: string; version: number; userText?: string | null; disposition: RecapItemVM["disposition"] }>,
     voiceEnrollmentIntents?: DateCompanionVoiceEnrollmentIntent[],
     memoryAdmission?: {
@@ -204,17 +226,22 @@ export type DateCompanionSessionValue = DateCompanionSessionSnapshot & {
       selections: Array<{ evidenceSnapshotId: string; subject: DateCompanionMemorySubject }>;
     }
   ): Promise<void>;
-  updatePromise(promiseId: string, version: number, status: "open" | "done"): Promise<void>;
+  updatePromise(promiseId: string, version: number, status: "open" | "done", options?: { reconcile: boolean }): Promise<void>;
   searchRelationship(query: string): Promise<void>;
   deleteInteraction(interactionId: string): Promise<void>;
   selectCachedInteraction(uploadId: string): boolean;
+  readRecordingForRecap(uploadId: string, signal: AbortSignal): Promise<boolean>;
   selectRelationshipInteraction(interactionId: string | null): boolean;
   relationshipQaSources(): SourceRefVM[];
   personQaSources(): SourceRefVM[];
+  scopedPersonQaSources(): SourceRefVM[];
+  qaSourceDay(uploadId: string): DayPayload | null;
+  recordingSpeakerReview(uploadId: string): DcInteractionRead | undefined;
   personQaAvailability(): DateCompanionPersonQaAvailability;
   currentInteractionQaAvailability(): DateCompanionCurrentQaAvailability;
   activateQaMode(mode: DateCompanionQaMode): void;
   ensureMemoryBridgeLoaded(force?: boolean): Promise<void>;
+  checkOpenQaCatalog(signal: AbortSignal): Promise<void>;
   createConfirmedPerson(displayName: string): Promise<void>;
   savePersonMapping(input: {
     selfPersonId: string;
@@ -228,7 +255,8 @@ export type DateCompanionSessionValue = DateCompanionSessionSnapshot & {
     subjectSuggestionConfirmation?: DcSubjectSuggestionConfirmation,
     relationshipReconfirmation?: DateCompanionRelationshipReconfirmationRequest
   ): Promise<void>;
-  purgeRetainedMemory(): Promise<void>;
+  previewRetainedMemory(signal?: AbortSignal): Promise<WithdrawalImpact>;
+  purgeRetainedMemory(previewVersion: string): Promise<WithdrawalReceipt>;
   ask(question: string): Promise<QuestionAnswer | null>;
   askCurrentInteraction(question: string): Promise<QuestionAnswer | null>;
   cancelQa(): void;
@@ -372,7 +400,10 @@ export function buildUnifiedPersonSourceCatalog(input: {
       continue;
     }
     source.subjectPersonIds.forEach((personId) => existing.subjectPersonIds.add(personId));
-    if (normalizedSourceText(existing.source.quote) !== normalizedSourceText(source.quote)) {
+    if (normalizedSourceText(existing.source.quote) !== normalizedSourceText(source.quote)
+      || existing.source.contentDigest !== source.contentDigest
+      || existing.source.recordingDate !== source.recordingDate
+      || existing.source.sourceOrigin !== source.sourceOrigin) {
       existing.conflict = true;
     }
   }
@@ -387,6 +418,8 @@ export function buildUnifiedPersonSourceCatalog(input: {
     const signature = JSON.stringify([
       source.evidenceSnapshotId,
       source.interactionId,
+      source.authorizationRevision ?? null,
+      source.contentDigest,
       source.recordingDate,
       source.startSeconds,
       source.endSeconds,
@@ -450,10 +483,14 @@ export function buildUnifiedPersonSourceCatalog(input: {
       id: relationshipSource?.id ?? `person-qa:${source.uploadId}:${source.sourceSegmentId}`,
       uploadId: source.uploadId,
       segmentIds: [source.sourceSegmentId],
-      recordingDate: relationshipSource?.recordingDate ?? localDay?.upload.recordingDate ?? "",
+      recordingDate: source.recordingDate ?? relationshipSource?.recordingDate ?? (localSegment ? localDay?.upload.recordingDate : undefined) ?? "",
       startSeconds: localSegment?.startSeconds ?? relationshipSource?.startSeconds ?? 0,
       endSeconds: localSegment?.endSeconds ?? relationshipSource?.endSeconds ?? 0,
-      speakerId: localSegment?.speaker ?? relationshipSource?.speakerId,
+      ...(!localSegment && (!relationshipSource || relationshipSource.timeKnown === false) ? { timeKnown: false } : {}),
+      sourceOrigin: source.sourceOrigin,
+      sourceStatement: source.sourceStatement,
+      // A device diarization label alone is not a confirmed relationship speaker.
+      speakerId: relationshipSource?.speakerId,
       quote: source.quote,
       contentDigest: source.contentDigest,
       kind: "transcript",
@@ -470,6 +507,8 @@ export function buildUnifiedPersonSourceCatalog(input: {
     );
     unifiedByKey.set(key, {
       id: source.evidenceSnapshotId,
+      ...(source.authorizationRevision ? { authorizationRevision: source.authorizationRevision } : {}),
+      sourceOrigin: "direct_conversation",
       uploadId: source.uploadId,
       segmentIds: [source.sourceSegmentId],
       recordingDate: source.recordingDate,
@@ -599,20 +638,13 @@ export function buildDateCompanionRelationshipQaSources(
       !interaction.confirmedAt ||
       interaction.sourceState === "explicitly_deleted"
     ) continue;
-    const roleBySpeaker = new Map(
-      interaction.participants.flatMap((participant) =>
-        participant.confirmedAt && participant.role !== "unresolved"
-          ? [[participant.speakerId, participant.role] as const]
-          : []
-      )
-    );
     const localSegments = new Set(
       getLocalDay(interaction.sourceUploadId)?.segments.map((segment) => segment.id) ?? []
     );
     for (const recap of dateCompanionReadRecapItems(interaction)) {
       if (recap.disposition !== "kept") continue;
       for (const evidence of recap.evidence) {
-        const role = evidence.speakerId ? roleBySpeaker.get(evidence.speakerId) : undefined;
+        const role = dateCompanionEvidenceSpeakerRole(interaction, evidence);
         if (
           !role ||
           evidence.uploadId !== interaction.sourceUploadId ||
@@ -656,26 +688,35 @@ export function buildDateCompanionRelationshipQaSources(
     );
 }
 
-function currentQaCitationSourcesResolve(answer: QuestionAnswer, payload: DayPayload): boolean {
-  if (answer.uploadId !== payload.upload.id) return false;
-  const knownSegmentIds = new Set(payload.segments.map((segment) => segment.id));
-  return answer.citedSegmentIds.every((segmentId) => knownSegmentIds.has(segmentId)) &&
-    (answer.citations ?? []).every((citation) =>
-      citation.sourceSegmentIds.every((segmentId) => knownSegmentIds.has(segmentId))
-    );
-}
-
 function personQaCitationSourcesResolve(
   answer: QuestionAnswer,
   personId: string,
-  sources: SourceRefVM[]
+  sources: SourceRefVM[],
+  withdrawalVersion?: string
 ): boolean {
   if (answer.uploadId !== personId) return false;
+  if (answer.citedSegmentIds.length === 0 || !answer.citations?.length) {
+    return answer.citedSegmentIds.length === 0 && !answer.citations?.length
+      && answer.answer === QA_INSUFFICIENT_EVIDENCE_ANSWER
+      && answer.relationshipWithdrawalVersion === withdrawalVersion;
+  }
   const knownSegmentIds = new Set(sources.flatMap((source) => source.segmentIds));
   return answer.citedSegmentIds.every((segmentId) => knownSegmentIds.has(segmentId)) &&
-    (answer.citations ?? []).every((citation) =>
-      citation.sourceSegmentIds.every((segmentId) => knownSegmentIds.has(segmentId))
-    );
+    (answer.citations ?? []).every(citation => {
+      const evidence = resolveQaPaperCitation(citation, sources);
+      return evidence.kind === "quote" || evidence.kind === "self-report";
+    }) && answer.citedSegmentIds.every(id => answer.citations?.some(citation => citation.sourceSegmentIds.includes(id)));
+}
+
+function failedQa(question: string, error: unknown, streamCode: string | null): QaState {
+  const code = streamCode ?? (error instanceof DateCompanionApiError ? error.code : null);
+  if (code === "qa_scope_changed" || (error instanceof DateCompanionApiError && [403, 404, 409].includes(error.status))) {
+    return {status: "failed", question, outcome: "ineligible", message: "人物或材料资格已经变化，请重新核对后再问。"};
+  }
+  if (code === "qa_result_unconfirmed" || (!streamCode && (!(error instanceof DateCompanionApiError) || error.status === 200))) {
+    return {status: "failed", question, outcome: "unconfirmed", message: "未收到可确认的完整结果。"};
+  }
+  return {status: "failed", question, message: "这次回答没有生成成功，可以重试。"};
 }
 
 function personQaSourceSignature(sources: SourceRefVM[]) {
@@ -687,7 +728,8 @@ function personQaSourceSignature(sources: SourceRefVM[]) {
     source.endSeconds,
     source.speakerId ?? null,
     normalizedSourceText(source.quote),
-    source.contentDigest ?? null
+    source.contentDigest ?? null,
+    source.authorizationRevision ?? null
   ]));
 }
 
@@ -697,6 +739,7 @@ type PersonQaTarget = {
   personId: string;
   mappingVersion: number;
   historyKey: string;
+  withdrawalVersion?: string;
 };
 
 export class DateCompanionSessionController {
@@ -730,6 +773,7 @@ export class DateCompanionSessionController {
   private pollController: AbortController | null = null;
   private toyReceiptRecoveryController: AbortController | null = null;
   private qaController: AbortController | null = null;
+  private checkActiveRecordingQa: (() => boolean) | null = null;
   private relationshipController: AbortController | null = null;
   private mutationController: AbortController | null = null;
   private searchController: AbortController | null = null;
@@ -842,10 +886,27 @@ export class DateCompanionSessionController {
           relationshipPersonSources: readyBridge?.relationshipPersonSources ?? []
         })
       : current;
-    this.update({ viewModel });
+    const previousQaUploadId = this.snapshot.viewModel.recap.interaction?.sourceUploadId
+      ?? this.snapshot.viewModel.recap.interaction?.id;
+    const qaUploadId = viewModel.recap.interaction?.sourceUploadId ?? viewModel.recap.interaction?.id;
+    const qaScopeChanged = previousQaUploadId !== qaUploadId;
+    if (qaScopeChanged && this.snapshot.activeQaMode === "current-interaction") this.cancelQa();
+    this.update({
+      viewModel,
+      ...(qaScopeChanged ? { currentQaState: { status: "idle" as const } } : {}),
+      // Reading a historical recap must not change the recording being processed.
+      // Its question history nevertheless belongs to the page the reader opened.
+      currentQaHistory: qaUploadId
+        ? this.cache.readQaHistory(qaUploadId).filter((answer) => answer.uploadId === qaUploadId)
+        : []
+    });
+    this.checkActiveRecordingQa?.();
   }
 
   private applyRelationshipView(view: DcRelationshipReadView) {
+    if (this.relationshipView && this.relationshipView.relationship.id !== view.relationship.id) {
+      this.clearPreviousRelationship();
+    }
     if (
       this.activeToyRecoveryScope
       && this.activeToyRecoveryScope.relationshipId !== view.relationship.id
@@ -884,11 +945,28 @@ export class DateCompanionSessionController {
         retainedSubjects: {},
         memoryRetainedSourceKeys: [],
         relationshipPersonSources: [],
+        qaCatalogStatus: "unavailable",
         personQaSources: []
       }
     });
     this.refreshViewModel();
     this.syncPersonQaHistory(true);
+  }
+
+  /** A refreshed account can have a different active relationship. Fence late
+   * mutations and reads before projecting the new relationship onto the shell. */
+  private clearPreviousRelationship() {
+    this.cancelRelationshipWork();
+    this.nextUploadVersion();
+    this.currentPayload = null;
+    this.activeUploadId = null;
+    this.relationshipView = null;
+    this.update({
+      viewModel: emptyDateCompanionViewModel(), uploadState: { status: "idle" },
+      currentQaHistory: [], currentQaState: { status: "idle" }, qaHistory: [], qaState: { status: "idle" },
+      searchState: { status: "idle" }, mutationState: { status: "idle" },
+      memoryBridgeState: { status: "idle" }, memoryMutationState: { status: "idle" }
+    });
   }
 
   private expireAuthentication() {
@@ -1044,6 +1122,7 @@ export class DateCompanionSessionController {
     };
     return {
       ...target,
+      withdrawalVersion: bridge.withdrawalVersion,
       historyKey: personQaHistoryStorageKey(target)
     };
   }
@@ -1070,19 +1149,26 @@ export class DateCompanionSessionController {
   };
 
   readonly currentInteractionQaAvailability = (): DateCompanionCurrentQaAvailability => {
-    const payload = this.currentPayload;
-    const activeUploadId = this.activeUploadId;
     const recapInteraction = this.snapshot.viewModel.recap.interaction;
+    const uploadId = recapInteraction?.sourceUploadId ?? recapInteraction?.id;
+    const belongsToContext = uploadId && (
+      (uploadId === this.activeUploadId && this.currentPayload?.upload.id === uploadId)
+      || this.relationshipContainsUpload(uploadId)
+    );
+    const payload = belongsToContext ? this.localPayload(uploadId) : null;
     if (
       payload
-      && activeUploadId
-      && payload.upload.id === activeUploadId
-      && isRealDateCompanionUploadId(activeUploadId)
+      && uploadId
+      && payload.upload.id === uploadId
+      && isRealDateCompanionUploadId(uploadId)
       && (payload.job?.status ?? payload.upload.status) === "ready"
       && recapInteraction?.status === "ready"
-      && (recapInteraction.sourceUploadId ?? recapInteraction.id) === activeUploadId
     ) {
-      return { enabled: true, uploadId: activeUploadId };
+      const review = this.recordingSpeakerReview(uploadId);
+      if (review && !recordingQaReviewedMaterials(review, payload).materials.segments.length) {
+        return { enabled: false, message: "这场录音的说话人混在一起。可在复盘按段核对清楚的原句，再针对这场提问。" };
+      }
+      return { enabled: true, uploadId };
     }
     if (recapInteraction?.status === "processing") {
       return { enabled: false, message: "这次录音还在整理，完成后就可以针对这次相处提问。" };
@@ -1090,12 +1176,11 @@ export class DateCompanionSessionController {
     if (recapInteraction?.status === "failed") {
       return { enabled: false, message: "这次录音尚未整理成功，暂时不能针对这次相处提问。" };
     }
-    return {
-      enabled: false,
-      message: recapInteraction
-        ? "这台设备没有保存这次相处的完整文字稿，仍可以使用“问问 Ta”回看已确认内容。"
-        : "先完成并打开一次相处记录，再针对这次相处提问。"
+    if (recapInteraction) return {
+      enabled: false, reason: "missing_local_transcript",
+      message: "这台设备没有这场录音的完整文字稿，暂时无法针对这场提问。"
     };
+    return { enabled: false, message: "先完成并打开一次相处记录，再针对这次相处提问。" };
   };
 
   readonly activateQaMode = (mode: DateCompanionQaMode): void => {
@@ -1104,18 +1189,14 @@ export class DateCompanionSessionController {
     this.update({ activeQaMode: mode });
   };
 
-  private readPersonQaHistory(target: PersonQaTarget): QuestionAnswer[] {
+  private readStoredPersonAnswers(key: string, personId: string): QuestionAnswer[] {
     try {
-      const raw = this.storage.getItem(target.historyKey);
+      const raw = this.storage.getItem(key);
       const values = raw ? JSON.parse(raw) as unknown : [];
       if (!Array.isArray(values)) return [];
       return values.flatMap((value) => {
         const parsed = QuestionAnswerSchema.safeParse(value);
-        return parsed.success && personQaCitationSourcesResolve(
-          parsed.data,
-          target.personId,
-          this.personQaSources()
-        ) ? [parsed.data] : [];
+        return parsed.success && parsed.data.uploadId === personId ? [parsed.data] : [];
       }).slice(-MAX_PERSON_QA_HISTORY_ITEMS);
     } catch {
       return [];
@@ -1123,9 +1204,9 @@ export class DateCompanionSessionController {
   }
 
   private appendPersonQaHistory(target: PersonQaTarget, answer: QuestionAnswer): QuestionAnswer[] {
-    if (!personQaCitationSourcesResolve(answer, target.personId, this.personQaSources())) return this.snapshot.qaHistory;
+    if (!personQaCitationSourcesResolve(answer, target.personId, this.scopedPersonQaSources(), target.withdrawalVersion)) return this.snapshot.qaHistory;
     const next = [
-      ...this.snapshot.qaHistory.filter((item) => item.id !== answer.id),
+      ...this.readStoredPersonAnswers(target.historyKey, target.personId).filter((item) => item.id !== answer.id),
       answer
     ].slice(-MAX_PERSON_QA_HISTORY_ITEMS);
     try {
@@ -1133,13 +1214,13 @@ export class DateCompanionSessionController {
     } catch {
       // The current answer remains visible even when local history storage is blocked.
     }
-    return next;
+    return next.filter(item => personQaCitationSourcesResolve(item, target.personId, this.scopedPersonQaSources(), target.withdrawalVersion));
   }
 
   private syncPersonQaHistory(force = false) {
     const target = this.currentPersonQaTarget();
     const nextKey = target?.historyKey ?? null;
-    const nextSourceSignature = target ? personQaSourceSignature(this.personQaSources()) : null;
+    const nextSourceSignature = target ? JSON.stringify([target.withdrawalVersion, personQaSourceSignature(this.scopedPersonQaSources())]) : null;
     if (
       !force
       && this.activePersonQaHistoryKey === nextKey
@@ -1155,9 +1236,13 @@ export class DateCompanionSessionController {
     ) this.cancelQa();
     this.activePersonQaHistoryKey = nextKey;
     this.activePersonQaSourceSignature = nextSourceSignature;
+    const saved = target ? this.readStoredPersonAnswers(target.historyKey, target.personId) : [];
+    const scoped = this.scopedPersonQaSources();
+    const visible = target ? saved.filter(item => personQaCitationSourcesResolve(item, target.personId, scoped, target.withdrawalVersion)) : [];
+    const legacyCount = target ? this.readStoredPersonAnswers(target.historyKey.replace(/:v2$/, ":v1"), target.personId).length : 0;
     this.update({
-      qaState: { status: "idle" },
-      qaHistory: target ? this.readPersonQaHistory(target) : []
+      ...((this.snapshot.qaState.status !== "streaming" || !target) ? { qaState: { status: "idle" as const } } : {}),
+      qaHistory: visible, qaWithheldHistoryCount: legacyCount + saved.length - visible.length
     });
   }
 
@@ -1225,6 +1310,7 @@ export class DateCompanionSessionController {
   private nextUploadVersion(): number {
     this.cancelUploadWork();
     this.cancelQa();
+    this.selectedRelationshipInteractionId = null;
     this.uploadRequestVersion += 1;
     return this.uploadRequestVersion;
   }
@@ -1256,14 +1342,11 @@ export class DateCompanionSessionController {
   }
 
   private showPayload(payload: DayPayload) {
-    this.selectedRelationshipInteractionId = null;
+    // A background poll may finish while the reader has a different recap open.
+    // Only an explicit change of the active recording resets that selection.
     this.currentPayload = payload;
     this.activeUploadId = payload.upload.id;
     this.refreshViewModel();
-    this.update({
-      currentQaState: { status: "idle" },
-      currentQaHistory: this.cache.readQaHistory(payload.upload.id)
-    });
   }
 
   private relationshipContainsUpload(uploadId: string): boolean {
@@ -1339,6 +1422,13 @@ export class DateCompanionSessionController {
     return false;
   }
 
+  /** A preparation's first real send may create the relationship server-side.
+   * Re-read that result without issuing another create request. */
+  readonly refreshRelationship = async (): Promise<void> => {
+    if (this.disposed || !this.authenticatedUserId()) return;
+    await this.loadRelationship();
+  };
+
   private async loadRelationship(): Promise<void> {
     this.cancelDetailRead();
     this.fenceActiveToyRecoveryForRelationshipChange();
@@ -1354,6 +1444,7 @@ export class DateCompanionSessionController {
       if (this.disposed || version !== this.relationshipRequestVersion) return;
       const relationship = relationships.find((candidate) => candidate.status === "active");
       if (!relationship) {
+        if (this.relationshipView) this.clearPreviousRelationship();
         this.relationshipView = null;
         this.update({ relationshipState: { status: "absent" } });
         this.refreshViewModel();
@@ -1371,7 +1462,9 @@ export class DateCompanionSessionController {
         this.expireAuthentication();
         return;
       }
-      this.relationshipView = null;
+      // Keep the last relationship identity while retrying a temporary read
+      // failure. The error boundary hides it; if the subsequent response is a
+      // different relationship, applyRelationshipView fences its old state.
       this.update({ relationshipState: { status: "error", message: relationshipActionErrorMessage(error, "暂时无法读取这段关系") } });
       this.refreshViewModel();
     } finally {
@@ -1387,7 +1480,7 @@ export class DateCompanionSessionController {
     this.detailReadVersion += 1;
   }
 
-  private readRelationshipDetails(interactionId: string | null): Promise<void> {
+  private readRelationshipDetails(interactionId: string | null, timeoutMs?: number): Promise<void> {
     const view = this.relationshipView;
     const userId = this.authenticatedUserId();
     if (!view || !userId) return Promise.resolve();
@@ -1399,7 +1492,7 @@ export class DateCompanionSessionController {
       return Promise.resolve();
     }
     const relationshipId = view.relationship.id;
-    const key = `${userId}:${relationshipId}:${interactionId ?? "all"}`;
+    const key = `${userId}:${relationshipId}:${interactionId ?? "all"}:${timeoutMs ?? "unbounded"}`;
     if (this.detailReadKey === key && this.detailReadPromise) return this.detailReadPromise;
     this.cancelDetailRead();
     const controller = new AbortController();
@@ -1416,18 +1509,24 @@ export class DateCompanionSessionController {
       && this.relationshipView?.relationship.id === relationshipId;
     const request = Promise.resolve().then(async () => {
       if (!isCurrent()) return;
-      this.update({ detailReadState: { status: "loading" } });
+      const previous = this.snapshot.detailReadState;
+      const targetUnavailable = (previous.status === "error" || previous.status === "loading")
+        && previous.interactionId === interactionId && previous.targetUnavailable === true;
+      this.update({ detailReadState: { status: "loading", interactionId, targetUnavailable } });
       try {
         if (interactionId) {
           const interaction = await this.api.getInteractionDetail(relationshipId, interactionId, controller.signal);
           if (!isCurrent()) return;
           if (interaction.id !== interactionId || interaction.relationshipId !== relationshipId
-            || interaction.sourceState === "explicitly_deleted") throw new Error("Invalid interaction detail scope");
+            || interaction.sourceState === "explicitly_deleted") {
+            throw new DateCompanionApiError({status: 404, code: "interaction_detail_unavailable"});
+          }
           this.applyRelationshipView({ ...this.relationshipView!, interactions: this.relationshipView!.interactions.map(
             (item) => item.id === interactionId ? interaction : item
           ) });
         } else {
-          const fullView = await this.api.getRelationshipView(relationshipId, controller.signal);
+          const fullView = timeoutMs === undefined ? await this.api.getRelationshipView(relationshipId, controller.signal)
+            : await readPersonMaterialWithDeadline(signal => this.api.getRelationshipView(relationshipId, signal), controller.signal, timeoutMs);
           if (!isCurrent()) return;
           if (fullView.relationship.id !== relationshipId || fullView.relationship.status !== "active") throw new Error("Invalid relationship detail scope");
           this.applyRelationshipView(fullView);
@@ -1439,7 +1538,13 @@ export class DateCompanionSessionController {
           this.expireAuthentication();
           return;
         }
-        this.update({ detailReadState: { status: "error", message: relationshipActionErrorMessage(error, "这次相处的内容暂时没有读取成功。") } });
+        const unavailable = error instanceof DateCompanionApiError && (error.status === 403 || error.status === 404);
+        const message = error && typeof error === "object" && "name" in error && error.name === "TimeoutError" ? "相处材料读取超时。"
+          : unavailable ? "这段记录不存在，或已经无法访问。"
+          : error instanceof TypeError && /failed to fetch|networkerror|load failed|fetch failed/i.test(error.message)
+          ? "未能连上服务，请检查连接后重新读取。"
+          : relationshipActionErrorMessage(error, "这次相处的内容暂时没有读取成功。");
+        this.update({ detailReadState: { status: "error", message, interactionId, targetUnavailable: unavailable || targetUnavailable } });
       } finally {
         if (this.detailController === controller) {
           this.detailController = null;
@@ -1452,7 +1557,21 @@ export class DateCompanionSessionController {
     return request;
   }
 
-  readonly ensureRelationshipDetailsLoaded = () => this.readRelationshipDetails(null);
+  readonly ensureRelationshipDetailsLoaded = (options?: { timeoutMs?: number }) => this.readRelationshipDetails(null, options?.timeoutMs);
+
+  readonly readSavedMeeting = (id: string) => this.readRelationshipDetails(id);
+
+  readonly sourceSpeakerLabel = (
+    source: DateCompanionSpeakerReadingSource,
+    companionName: string | null | undefined = this.relationshipView?.relationship.displayName
+  ) => {
+    const record = this.relationshipInteractionForUpload(source.uploadId);
+    if (!record || record.sourceState === "explicitly_deleted") return undefined;
+    const role = dateCompanionReadingSpeakerRole(record, source);
+    if (role === "self") return "我";
+    if (role === "companion") return companionName?.trim() || "Ta";
+    return undefined;
+  };
 
   readonly retryInteractionDetail = (): Promise<void> => {
     const interactionId = this.selectedRelationshipInteractionId
@@ -1486,7 +1605,7 @@ export class DateCompanionSessionController {
           uploadId,
           receipt,
           failedReceipt,
-          message: payload.job?.errorMessage ?? "这次处理没有完成，可以重新读取状态",
+          message: dateCompanionProcessingError(payload.job?.errorMessage) ?? "这次处理没有完成，可以重新读取状态",
           failureStage: "processing"
         }
       });
@@ -1949,6 +2068,41 @@ export class DateCompanionSessionController {
     }
   }
 
+  readonly checkOpenQaCatalog = async (signal: AbortSignal): Promise<void> => {
+    const target = this.currentPersonQaTarget();
+    const bridge = this.snapshot.memoryBridgeState;
+    if (!target || bridge.status !== "ready" || this.memoryController) return;
+    const version = this.memoryRequestVersion;
+    try {
+      const catalog = await this.api.getPersonSourceCatalog(target.relationshipId, signal);
+      if (signal.aborted || version !== this.memoryRequestVersion || this.currentPersonQaTarget()?.historyKey !== target.historyKey) return;
+      const previous = new Map(bridge.relationshipPersonSources.map(source => [source.evidenceSnapshotId, source]));
+      if (catalog.relationshipId === target.relationshipId && catalog.status === bridge.qaCatalogStatus && catalog.withdrawalVersion === bridge.withdrawalVersion &&
+        catalog.mappingVersion === target.mappingVersion && catalog.companionPersonId === target.personId &&
+        catalog.sources.length === previous.size && catalog.sources.every(source => {
+          const saved = previous.get(source.evidenceSnapshotId);
+          return saved && saved.uploadId === source.uploadId && saved.sourceSegmentId === source.sourceSegmentId &&
+            saved.contentDigest === source.contentDigest && saved.authorizationRevision === source.authorizationRevision &&
+            saved.quote === source.quote && saved.subject === source.subject && saved.speakerId === source.speakerId;
+        })) {
+        if (catalog.sources.length || !["withdrawn", "unlinked", "ready"].includes(catalog.status)) return;
+        // A new authorized task is visible in the review before its first catalog source is ready.
+        const review = await this.api.getMemoryReview(target.relationshipId, signal);
+        if (signal.aborted || version !== this.memoryRequestVersion || this.currentPersonQaTarget()?.historyKey !== target.historyKey) return;
+        if (review.mapping?.status === "confirmed" && review.mapping.id === bridge.mapping?.id &&
+          review.mapping.version === target.mappingVersion && review.mapping.companionPersonId === target.personId &&
+          review.mapping.selfPersonId === bridge.mapping.selfPersonId) {
+          this.applyMemoryReview(review);
+          return;
+        }
+      }
+    } catch {
+      if (signal.aborted || version !== this.memoryRequestVersion || this.currentPersonQaTarget()?.historyKey !== target.historyKey) return;
+    }
+    this.invalidatePersonSourceCatalog();
+    await this.ensureMemoryBridgeLoaded(true);
+  };
+
   readonly ensureMemoryBridgeLoaded = async (force = false): Promise<void> => {
     const relationshipId = this.relationshipView?.relationship.id;
     if (!relationshipId || this.snapshot.auth.status !== "authenticated") return;
@@ -2028,6 +2182,10 @@ export class DateCompanionSessionController {
           mapping,
           review,
           retainedSubjects,
+          withdrawalVersion: sourceCatalog.relationshipId === relationshipId ? sourceCatalog.withdrawalVersion : undefined,
+          qaCatalogStatus: sourceCatalog.relationshipId !== relationshipId ||
+            ((sourceCatalog.status === "ready" || sourceCatalog.status === "unlinked" || sourceCatalog.status === "withdrawn") && (sourceCatalog.mappingVersion !== mapping?.version ||
+              sourceCatalog.companionPersonId !== mapping?.companionPersonId)) ? "unavailable" : sourceCatalog.status,
           memoryRetainedSourceKeys,
           relationshipPersonSources,
           personQaSources
@@ -2155,7 +2313,7 @@ export class DateCompanionSessionController {
     const version = this.memoryMutationRequestVersion;
     const controller = new AbortController();
     this.memoryMutationController = controller;
-    if (operation === "mapping" || operation === "purge") this.invalidatePersonSourceCatalog();
+    if (operation === "mapping") this.invalidatePersonSourceCatalog();
     this.update({ memoryMutationState: { status: "saving", operation, ...(targetId ? { targetId } : {}) } });
     try {
       const result = await mutate(controller.signal);
@@ -2169,9 +2327,12 @@ export class DateCompanionSessionController {
         this.expireAuthentication();
         return;
       }
+      if (operation === "purge") {
+        this.update({ memoryMutationState: { status: "idle" } });
+        throw error;
+      }
       if (
         operation === "mapping"
-        || operation === "purge"
         || error instanceof DateCompanionApiError && error.status === 409
       ) {
         await this.ensureMemoryBridgeLoaded(true);
@@ -2260,8 +2421,11 @@ export class DateCompanionSessionController {
       throw new Error(message);
     }
     await this.runMemoryMutation("sync", async (signal) => {
+      const previous = bridge.review.interactions.find(row => row.interactionId === interactionId);
       const result = await this.api.syncInteractionMemory(interactionId, {
         mappingVersion: bridge.mapping!.version,
+        ...(!selections && previous?.status === "retryable_failed" && previous.retryGrantId
+          ? { retryGrantId: previous.retryGrantId } : {}),
         ...(selections ? { selections } : {}),
         ...(subjectSuggestionConfirmation ? { subjectSuggestionConfirmation } : {}),
         ...(relationshipReconfirmation ? { relationshipReconfirmation } : {})
@@ -2281,12 +2445,34 @@ export class DateCompanionSessionController {
     }, interactionId);
   };
 
-  readonly purgeRetainedMemory = async (): Promise<void> => {
+  readonly previewRetainedMemory = async (signal?: AbortSignal): Promise<WithdrawalImpact> => {
     const relationshipId = this.relationshipView?.relationship.id;
-    if (!relationshipId) return;
+    if (!relationshipId) throw new Error("当前关系尚未确认。");
+    return this.api.previewRetainedMemory(relationshipId, signal);
+  };
+
+  readonly refreshWithdrawalScope = (scope: { accountId: string; relationshipId: string }) => {
+    if (scope.accountId !== this.authenticatedUserId() || scope.relationshipId !== this.relationshipView?.relationship.id) return;
+    this.invalidatePersonSourceCatalog();
+    void this.ensureMemoryBridgeLoaded(true);
+  };
+
+  readonly purgeRetainedMemory = async (previewVersion: string): Promise<WithdrawalReceipt> => {
+    const relationshipId = this.relationshipView?.relationship.id;
+    const accountId = this.authenticatedUserId();
+    if (!relationshipId || !accountId) throw new Error("当前关系尚未确认。");
+    let receipt: WithdrawalReceipt | undefined;
     await this.runMemoryMutation("purge", async (signal) => {
-      await this.api.purgeRetainedMemory(relationshipId, signal);
+      receipt = await this.api.purgeRetainedMemory(relationshipId, previewVersion, signal);
+      if (signal.aborted) return;
+      this.invalidatePersonSourceCatalog();
+      // Notify other tabs without persisting questions, source text or draft data.
+      const channel = withdrawalNotifications();
+      try { channel?.postMessage({ accountId, relationshipId }); } catch { /* Visible readers also recheck the catalog. */ }
+      finally { channel?.close(); }
     });
+    if (!receipt) throw new Error("尚未收到撤回回执。");
+    return receipt;
   };
 
   async initialize(): Promise<void> {
@@ -2926,6 +3112,25 @@ export class DateCompanionSessionController {
     return receiptReceived;
   };
 
+  // A manual progress check observes the active job. Its background poll owns
+  // cache writes, import and cleanup when a terminal result is received.
+  readonly readProcessingProgress = async (): Promise<void> => {
+    const state = this.snapshot.uploadState;
+    const id = this.activeUploadId;
+    if (!id || state.status !== "processing") return;
+    const version = this.uploadRequestVersion;
+    try {
+      const payload = await this.api.getDay(id, this.pollController?.signal);
+      if (!this.isCurrentUpload(version, id) || this.snapshot.uploadState !== state || payload.upload.id !== id) return;
+      const jobStatus = processingStatus(payload);
+      if (jobStatus) this.update({ uploadState: { ...state, jobStatus, progress: payload.job?.progress } });
+    } catch (error) {
+      if (isAbortError(error) || !this.isCurrentUpload(version, id) || this.snapshot.uploadState !== state) return;
+      if (error instanceof DateCompanionApiError && error.status === 401) this.expireAuthentication();
+      else this.update({ uploadState: { ...state, statusMessage: "这次进度暂时没有读到，可以再查一次。" } });
+    }
+  };
+
   readonly retryRead = async (): Promise<void> => {
     const uploadId = this.activeUploadId;
     if (!uploadId || !isRealDateCompanionUploadId(uploadId)) return;
@@ -3061,7 +3266,7 @@ export class DateCompanionSessionController {
   readonly updateParticipants = async (
     interactionId: string,
     version: number,
-    assignments: Array<{ speakerId: string; role: DateCompanionParticipantRole }>
+    assignments: DcSpeakerReviewMutation[]
   ): Promise<void> => {
     await this.runRelationshipMutation("participants", (signal) =>
       this.api.updateParticipants(interactionId, { version, assignments }, signal)
@@ -3082,7 +3287,7 @@ export class DateCompanionSessionController {
   readonly finalizeRecap = async (
     interactionId: string,
     version: number,
-    assignments: Array<{ speakerId: string; role: DateCompanionParticipantRole }>,
+    assignments: DcSpeakerReviewMutation[],
     items: Array<{ id: string; version: number; userText?: string | null; disposition: RecapItemVM["disposition"] }>,
     voiceEnrollmentIntents: DateCompanionVoiceEnrollmentIntent[] = [],
     memoryAdmission?: {
@@ -3098,7 +3303,7 @@ export class DateCompanionSessionController {
           assignments,
           items,
           ...(voiceEnrollmentIntents.length > 0 ? { voiceEnrollmentIntents } : {}),
-          ...(memoryAdmission ? { memoryAdmission } : {}),
+          ...(memoryAdmission ? { memoryAdmission } : { skipMemoryAdmission: true }),
           finalize: true
         }, signal)
       );
@@ -3112,11 +3317,33 @@ export class DateCompanionSessionController {
   readonly updatePromise = async (
     promiseId: string,
     version: number,
-    status: "open" | "done"
+    status: "open" | "done",
+    options?: { reconcile: boolean }
   ): Promise<void> => {
-    await this.runRelationshipMutation("promise", (signal) =>
-      this.api.patchPromise(promiseId, { version, status }, signal)
-    );
+    const account = this.authenticatedUserId();
+    const relationshipId = this.relationshipView?.relationship.id;
+    const before = this.snapshot.memoryBridgeState;
+    await this.runRelationshipMutation("promise", async signal => {
+      if (!options?.reconcile) return this.api.patchPromise(promiseId, { version, status }, signal);
+      if (!account || !relationshipId || before.status !== "ready" || before.mapping?.status !== "confirmed") {
+        throw new Error("请先核对当前关系中的人物。");
+      }
+      const [fresh] = await Promise.all([this.api.getRelationshipView(relationshipId, signal), this.ensureMemoryBridgeLoaded(true)]);
+      const now = this.snapshot.memoryBridgeState;
+      if (signal.aborted || this.disposed || this.authenticatedUserId() !== account ||
+        this.relationshipView?.relationship.id !== relationshipId || fresh.relationship.id !== relationshipId ||
+        fresh.relationship.status !== "active" || now.status !== "ready" || now.mapping?.status !== "confirmed" ||
+        now.mapping.id !== before.mapping.id || now.mapping.version !== before.mapping.version) {
+        throw new Error("关系资料已变化，请重新查看这条约定。");
+      }
+      this.applyRelationshipView(fresh);
+      const current = this.snapshot.viewModel.person.promises.find(p => p.id === promiseId && p.relationshipId === relationshipId);
+      if (!current) throw new Error("这条约定已不可用于当前人物。");
+      // A lost response may already have committed this intent. A successful
+      // reread is sufficient; a stale version must never flip the intent.
+      if (current.status === status) return fresh;
+      return this.api.patchPromise(promiseId, { version: current.version, status }, signal);
+    });
   };
 
   readonly searchRelationship = async (query: string): Promise<void> => {
@@ -3233,6 +3460,24 @@ export class DateCompanionSessionController {
     return true;
   };
 
+  /** A trial deep link can also open an owned upload before it has a persistent recap. */
+  readonly readRecordingForRecap = async (uploadId: string, signal: AbortSignal): Promise<boolean> => {
+    const userId = this.authenticatedUserId();
+    const relationshipId = this.relationshipView?.relationship.id;
+    if (!userId || !relationshipId || signal.aborted || !isRealDateCompanionUploadId(uploadId)) return false;
+    if (this.selectCachedInteraction(uploadId)) return true;
+    const version = this.nextUploadVersion();
+    // Without relationship membership, a cached day alone cannot grant access.
+    // Ask the account-scoped day endpoint; opening the page never imports or cleans an upload.
+    const payload = await this.api.getDay(uploadId, signal);
+    if (this.disposed || signal.aborted || this.uploadRequestVersion !== version ||
+        this.authenticatedUserId() !== userId || this.relationshipView?.relationship.id !== relationshipId ||
+        payload.upload.id !== uploadId || (payload.job?.status ?? payload.upload.status) !== "ready") return false;
+    this.showPayload(payload);
+    await this.retryInteractionDetail();
+    return true;
+  };
+
   readonly selectRelationshipInteraction = (interactionId: string | null): boolean => {
     const normalized = interactionId?.trim() || null;
     if (
@@ -3272,13 +3517,35 @@ export class DateCompanionSessionController {
       ? this.snapshot.memoryBridgeState.personQaSources
       : [];
 
+  readonly scopedPersonQaSources = (): SourceRefVM[] => {
+    const bridge = this.snapshot.memoryBridgeState;
+    if (!this.currentPersonQaTarget() || bridge.status !== "ready") return [];
+    const snapshots = new Set(bridge.relationshipPersonSources.map(source => source.evidenceSnapshotId));
+    // This catalog reads both timestamps from the relationship evidence snapshot.
+    return bridge.personQaSources.filter(source => snapshots.has(source.id)).map(source => ({...source, timeKnown: true}));
+  };
+
+  readonly recordingSpeakerReview = (uploadId: string) => {
+    const record = this.relationshipInteractionForUpload(uploadId);
+    return record?.participants.some(p => p.reviewedSegments !== undefined) ? record : undefined;
+  };
+
+  readonly qaSourceDay = (uploadId: string): DayPayload | null => {
+    if (!this.authenticatedUserId()) return null;
+    const current = this.currentInteractionQaAvailability();
+    const inScope = this.snapshot.activeQaMode === "current-interaction"
+      ? current.enabled && current.uploadId === uploadId
+      : this.scopedPersonQaSources().some(s => s.uploadId === uploadId && s.canOpenTranscript);
+    return inScope ? this.localPayload(uploadId) : null;
+  };
+
   readonly askCurrentInteraction = async (question: string): Promise<QuestionAnswer | null> => {
     const normalizedQuestion = question.trim();
     if (!normalizedQuestion) return null;
     this.activateQaMode("current-interaction");
     const availability = this.currentInteractionQaAvailability();
-    const payload = this.currentPayload;
-    const uploadId = this.activeUploadId;
+    const uploadId = availability.enabled ? availability.uploadId : null;
+    const payload = uploadId ? this.localPayload(uploadId) : null;
     if (!availability.enabled || !payload || !uploadId) {
       this.update({
         currentQaState: {
@@ -3296,22 +3563,41 @@ export class DateCompanionSessionController {
     const version = this.qaRequestVersion;
     this.qaController = new AbortController();
     const controller = this.qaController;
-    this.update({
-      currentQaState: { status: "streaming", question: normalizedQuestion, committedText: "" }
-    });
-    const conversation = this.snapshot.currentQaHistory.slice(-4).flatMap((answer) => [
-      { role: "user" as const, content: answer.question },
-      { role: "assistant" as const, content: answer.answer }
-    ]);
+    const sourceState = (day: DayPayload) => {
+      const interaction = this.relationshipView?.interactions.find(row => row.sourceUploadId === uploadId);
+      // Compare the actual inputs to retrieval, plus the identity and attribution shown to the reader.
+      return JSON.stringify([this.authenticatedUserId(), this.relationshipView?.relationship.id,
+        interaction?.id, interaction?.participants.map(p => [p.speakerId, p.role, p.reviewedSegments]).sort(),
+        day.upload.id, day.upload.recordingDate, day.speakerAliases, day.speakerAliasesByUploadId[uploadId],
+        day.segments, day.audioInsights, day.semanticSegments, day.briefItems, day.relationshipSignals]);
+    };
+    const initialSources = sourceState(payload);
+    const isCurrentQuestion = () => {
+      if (this.disposed || version !== this.qaRequestVersion || controller.signal.aborted
+        || this.snapshot.activeQaMode !== "current-interaction") return false;
+      const current = this.qaSourceDay(uploadId);
+      if (current && sourceState(current) === initialSources) return true;
+      controller.abort();
+      this.update({currentQaState: failedQa(normalizedQuestion, null, "qa_scope_changed")});
+      return false;
+    };
+    this.checkActiveRecordingQa = isCurrentQuestion;
+    this.update({currentQaState: {status: "streaming", question: normalizedQuestion, committedText: "", phase: "reading"}});
     let finalAnswer: QuestionAnswer | null = null;
     let streamErrorCode: string | null = null;
     let streamCompleted = false;
 
     try {
+      const sources = await recordingQaPaperSources(payload, this.recordingSpeakerReview(uploadId));
+      if (!isCurrentQuestion()) return null;
+      const allowedSegmentIds = new Set(sources.map(source => source.id));
+      const readableHistory = this.snapshot.currentQaHistory.filter(answer => recordingQaAnswerIsReadable(answer, uploadId, sources));
+      const priorCitations = qaPriorCitations(readableHistory, sources);
+      this.update({currentQaState: {status: "streaming", question: normalizedQuestion, committedText: "", phase: "generating"}});
       for await (const event of this.api.streamCurrentInteractionQa({
         uploadId,
         question: normalizedQuestion,
-        conversation,
+        priorCitations,
         segments: payload.segments,
         audioInsights: payload.audioInsights,
         semanticSegments: payload.semanticSegments,
@@ -3319,13 +3605,9 @@ export class DateCompanionSessionController {
         relationshipSignals: payload.relationshipSignals,
         signal: controller.signal
       })) {
-        if (
-          version !== this.qaRequestVersion
-          || this.snapshot.activeQaMode !== "current-interaction"
-          || this.activeUploadId !== uploadId
-          || this.currentPayload !== payload
-        ) return null;
+        if (!isCurrentQuestion()) return null;
         if (event.type === "sentence") {
+          if (event.citedSegmentIds.some(id => !allowedSegmentIds.has(id))) throw new Error("invalid_sentence_scope");
           const currentText = this.snapshot.currentQaState.status === "streaming"
             ? this.snapshot.currentQaState.committedText
             : "";
@@ -3340,10 +3622,11 @@ export class DateCompanionSessionController {
           if (event.answer.uploadId !== uploadId) {
             throw new Error("QA final answer belongs to another upload");
           }
-          if (!currentQaCitationSourcesResolve(event.answer, payload)) {
+          const bound = bindQaAnswerSources(event.answer, sources);
+          if (!recordingQaAnswerIsReadable(bound, uploadId, sources)) {
             throw new Error("QA final answer contains an unresolved source");
           }
-          finalAnswer = event.answer;
+          finalAnswer = bound;
         } else if (event.type === "error") {
           streamErrorCode = event.code;
         } else if (event.type === "complete") {
@@ -3352,34 +3635,24 @@ export class DateCompanionSessionController {
       }
 
       if (!finalAnswer || !streamCompleted) throw new Error(streamErrorCode ?? "问答没有返回完整答案");
-      if (
-        version !== this.qaRequestVersion
-        || this.snapshot.activeQaMode !== "current-interaction"
-        || this.activeUploadId !== uploadId
-        || this.currentPayload !== payload
-      ) return null;
+      if (!isCurrentQuestion()) return null;
       this.cache.appendQaHistory(uploadId, finalAnswer);
-      const currentQaHistory = this.cache.readQaHistory(uploadId);
+      const currentQaHistory = this.cache.readQaHistory(uploadId).filter((answer) => answer.uploadId === uploadId);
       this.update({
         currentQaState: { status: "complete", answer: finalAnswer },
         currentQaHistory
       });
       return finalAnswer;
     } catch (error) {
-      if (isAbortError(error) || version !== this.qaRequestVersion) return null;
+      if (controller.signal.aborted || isAbortError(error) || version !== this.qaRequestVersion) return null;
       if (error instanceof DateCompanionApiError && error.status === 401) {
         this.expireAuthentication();
         return null;
       }
-      this.update({
-        currentQaState: {
-          status: "failed",
-          question: normalizedQuestion,
-          message: errorMessage(error, "这次提问没有完成")
-        }
-      });
+      this.update({ currentQaState: failedQa(normalizedQuestion, error, streamErrorCode) });
       return null;
     } finally {
+      if (this.checkActiveRecordingQa === isCurrentQuestion) this.checkActiveRecordingQa = null;
       if (this.qaController === controller) this.qaController = null;
     }
   };
@@ -3390,14 +3663,17 @@ export class DateCompanionSessionController {
     this.activateQaMode("person");
     this.cancelQa();
     const version = this.qaRequestVersion;
+    const startingTarget = this.currentPersonQaTarget();
+    this.update({qaState: {status: "streaming", question: normalizedQuestion, committedText: "", phase: "reading"}});
     await this.ensureMemoryBridgeLoaded(true);
     if (version !== this.qaRequestVersion) return null;
     const target = this.currentPersonQaTarget();
-    if (!target) {
+    if (!target || (startingTarget && (startingTarget.historyKey !== target.historyKey || startingTarget.withdrawalVersion !== target.withdrawalVersion))) {
       const availability = this.personQaAvailability();
       this.update({
         qaState: {
           status: "failed",
+          outcome: "ineligible",
           question: normalizedQuestion,
           message: availability.enabled
             ? "人物设置已经变化，请重新确认后再试。"
@@ -3406,15 +3682,12 @@ export class DateCompanionSessionController {
       });
       return null;
     }
-    const allowedSources = this.personQaSources();
+    const allowedSources = this.scopedPersonQaSources();
+    const allowedIds = new Set(allowedSources.flatMap(source => source.segmentIds));
 
     this.qaController = new AbortController();
     const controller = this.qaController;
     this.update({ qaState: { status: "streaming", question: normalizedQuestion, committedText: "" } });
-    const conversation = this.snapshot.qaHistory.slice(-4).flatMap((answer) => [
-      { role: "user" as const, content: answer.question },
-      { role: "assistant" as const, content: answer.answer }
-    ]);
     let finalAnswer: QuestionAnswer | null = null;
     let streamErrorCode: string | null = null;
     let streamCompleted = false;
@@ -3423,7 +3696,9 @@ export class DateCompanionSessionController {
       for await (const event of this.api.streamPersonQa({
         personId: target.personId,
         question: normalizedQuestion,
-        conversation,
+        scope: {type: "date_companion_relationship", relationshipId: target.relationshipId, mappingVersion: target.mappingVersion,
+          ...(target.withdrawalVersion ? {withdrawalVersion: target.withdrawalVersion} : {})},
+        priorCitations: qaPriorCitations(this.snapshot.qaHistory, allowedSources),
         signal: controller.signal
       })) {
         if (
@@ -3432,6 +3707,7 @@ export class DateCompanionSessionController {
           this.currentPersonQaTarget()?.historyKey !== target.historyKey
         ) return null;
         if (event.type === "sentence") {
+          if (event.citedSegmentIds.some(id => !allowedIds.has(id))) throw new Error("invalid_sentence_scope");
           const currentText = this.snapshot.qaState.status === "streaming" ? this.snapshot.qaState.committedText : "";
           this.update({
             qaState: {
@@ -3441,10 +3717,14 @@ export class DateCompanionSessionController {
             }
           });
         } else if (event.type === "final") {
-          if (!personQaCitationSourcesResolve(event.answer, target.personId, allowedSources)) {
+          const answer = event.answer.citations?.length ? bindQaAnswerSources(event.answer, allowedSources) : {
+            ...event.answer,
+            relationshipWithdrawalVersion: target.withdrawalVersion
+          };
+          if (!personQaCitationSourcesResolve(answer, target.personId, allowedSources, target.withdrawalVersion)) {
             throw new Error("QA final answer contains an unresolved source");
           }
-          finalAnswer = event.answer;
+          finalAnswer = answer;
         } else if (event.type === "error") {
           streamErrorCode = event.code;
         } else if (event.type === "complete") {
@@ -3470,18 +3750,12 @@ export class DateCompanionSessionController {
         this.expireAuthentication();
         return null;
       }
-      if (error instanceof DateCompanionApiError && (error.status === 404 || error.status === 409)) {
+      const failure = failedQa(normalizedQuestion, error, streamErrorCode);
+      if (failure.status === "failed" && failure.outcome === "ineligible") {
         await this.ensureMemoryBridgeLoaded(true);
+        if (version !== this.qaRequestVersion || this.currentPersonQaTarget()?.historyKey !== target.historyKey) return null;
       }
-      this.update({
-        qaState: {
-          status: "failed",
-          question: normalizedQuestion,
-          message: error instanceof DateCompanionApiError && (error.status === 404 || error.status === 409)
-            ? "人物设置已经变化，请重新确认后再试。"
-            : errorMessage(error, "这次提问没有完成")
-        }
-      });
+      this.update({qaState: failure});
       return null;
     } finally {
       if (this.qaController === controller) this.qaController = null;
@@ -3489,6 +3763,7 @@ export class DateCompanionSessionController {
   };
 
   readonly cancelQa = () => {
+    this.checkActiveRecordingQa = null;
     this.qaController?.abort();
     this.qaController = null;
     this.qaRequestVersion += 1;
@@ -3519,12 +3794,20 @@ export function useDateCompanionSession(options: DateCompanionSessionOptions = {
 
   useEffect(() => {
     void controller.initialize();
-    return () => controller.dispose();
+    const channel = withdrawalNotifications();
+    if (channel) channel.onmessage = event => {
+      if (event.data && typeof event.data === "object") controller.refreshWithdrawalScope(event.data);
+    };
+    return () => { channel?.close(); controller.dispose(); };
   }, [controller]);
 
   return {
     ...snapshot,
     ensureRelationshipDetailsLoaded: controller.ensureRelationshipDetailsLoaded,
+    checkOpenQaCatalog: controller.checkOpenQaCatalog,
+    readSavedMeeting: controller.readSavedMeeting,
+    readProcessingProgress: controller.readProcessingProgress,
+    sourceSpeakerLabel: controller.sourceSpeakerLabel,
     retryInteractionDetail: controller.retryInteractionDetail,
     login: controller.login,
     register: controller.register,
@@ -3533,6 +3816,7 @@ export function useDateCompanionSession(options: DateCompanionSessionOptions = {
     upload: controller.upload,
     adoptToyIngestionReceipt: controller.adoptToyIngestionReceipt,
     retryRead: controller.retryRead,
+    refreshRelationship: controller.refreshRelationship,
     createRelationship: controller.createRelationship,
     updateParticipants: controller.updateParticipants,
     updateRecap: controller.updateRecap,
@@ -3541,9 +3825,13 @@ export function useDateCompanionSession(options: DateCompanionSessionOptions = {
     searchRelationship: controller.searchRelationship,
     deleteInteraction: controller.deleteInteraction,
     selectCachedInteraction: controller.selectCachedInteraction,
+    readRecordingForRecap: controller.readRecordingForRecap,
     selectRelationshipInteraction: controller.selectRelationshipInteraction,
     relationshipQaSources: controller.relationshipQaSources,
     personQaSources: controller.personQaSources,
+    scopedPersonQaSources: controller.scopedPersonQaSources,
+    qaSourceDay: controller.qaSourceDay,
+    recordingSpeakerReview: controller.recordingSpeakerReview,
     personQaAvailability: controller.personQaAvailability,
     currentInteractionQaAvailability: controller.currentInteractionQaAvailability,
     activateQaMode: controller.activateQaMode,
@@ -3552,6 +3840,7 @@ export function useDateCompanionSession(options: DateCompanionSessionOptions = {
     savePersonMapping: controller.savePersonMapping,
     setLongTermRetention: controller.setLongTermRetention,
     syncInteractionMemory: controller.syncInteractionMemory,
+    previewRetainedMemory: controller.previewRetainedMemory,
     purgeRetainedMemory: controller.purgeRetainedMemory,
     ask: controller.ask,
     askCurrentInteraction: controller.askCurrentInteraction,

@@ -15,6 +15,7 @@ import {
 } from "@/lib/server/proactive-insights/deepseek-provider";
 
 import { openDateCompanionDatabase } from "./db";
+import { getDateCompanionWithdrawalPreview, purgeDateCompanionRetainedMemory } from "./memory-bridge-purge";
 import {
   DATE_COMPANION_PROACTIVE_VALUE_LEASE_MS,
   createDateCompanionProactiveValueService
@@ -616,6 +617,54 @@ describe("Date Companion proactive value cache service", () => {
       evidenceReferences: []
     });
     expect(result.value).toBeUndefined();
+  });
+
+  it("R14 invalidates relationship home caches and pending claims; identical evidence in a new grant gets a new fingerprint", async () => {
+    const scope = { dateCompanionDatabase: dateDatabase, memoryDatabase, userId: "account_a", relationshipId: "relationship_1" };
+    // Durable authorized operation in flight; provider and contexts are controlled here.
+    dateDatabase.prepare(`INSERT INTO dc_memory_bridge_outbox
+      (id,user_id,relationship_id,interaction_id,idempotency_key,payload_digest,payload_json,
+       source_version,confirmation_fingerprint,status,requested_at,updated_at)
+      VALUES ('old-grant','account_a','relationship_1','interaction_1','old-key',?,'{}',2,?,'pending',?,?)`)
+      .run("b".repeat(64), "a".repeat(64), now, now);
+    const request = { accountId: "account_a", relationshipId: "relationship_1" };
+    const old = relationshipContext();
+    const selected = { ...old, evidence: old.evidence.map((e) => ({ ...e, authorizationRevision: "1".repeat(64) })) };
+    let context: DateCompanionProactiveValueContext = selected;
+    let block: Promise<void> | undefined;
+    const mock = provider({ generated: false });
+    const service = createDateCompanionProactiveValueService({
+      ...scope, now: () => now, provider: { ...mock.provider, generate: async (args) => {
+        if (block) await block;
+        return mock.generate(args);
+      } },
+      currentContextBuilder: () => ({ status: "ready", context: currentContext() }),
+      relationshipContextBuilder: () => ({ status: "ready", context })
+    });
+    const getHome = () => service.getPersonRelationship(request);
+    const getRecap = () => service.getCurrentInteraction({ accountId: request.accountId, interactionId: "interaction_1" });
+    const first = await getHome();
+    await getRecap();
+    expect((await getHome()).cacheHit).toBe(true);
+    context = { ...selected, evidence: selected.evidence.map((e) => ({ ...e, subjectVersion: 2 })) };
+    let release!: () => void;
+    block = new Promise<void>((resolve) => { release = resolve; });
+    const pending = getHome();
+    expect(dateDatabase.prepare("SELECT status FROM dc_proactive_value_cache WHERE scope='person_relationship' ORDER BY status").all())
+      .toEqual([{status:"fallback"}, {status:"processing"}]);
+
+    const {preview} = getDateCompanionWithdrawalPreview(scope);
+    expect(purgeDateCompanionRetainedMemory({...scope, previewVersion: preview.version})).toMatchObject({usageStopped:true});
+    release();
+    expect(await pending).toMatchObject({status:"unavailable",failureCode:"claim_lost",evidenceReferences:[]});
+    expect(dateDatabase.prepare("SELECT scope FROM dc_proactive_value_cache").all()).toEqual([{scope:"current_interaction"}]);
+    expect((await getRecap()).cacheHit).toBe(true);
+
+    block = undefined;
+    context = { ...selected, evidence: selected.evidence.map((e) => ({ ...e, authorizationRevision: "2".repeat(64) })) };
+    const fresh = await getHome();
+    expect(fresh.cacheHit).toBe(false);
+    expect(fresh.sourceFingerprint).not.toBe(first.sourceFingerprint);
   });
 
   it("keeps current-interaction and stable Person/relationship scopes separate", async () => {

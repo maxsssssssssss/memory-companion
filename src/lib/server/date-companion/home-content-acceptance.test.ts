@@ -194,6 +194,8 @@ async function seedAdmittedHomeInteraction(companionSourceCount = 1) {
     .find((item) => item.id === imported.interactionId)!;
   const batch = await getOrCreateDateCompanionSubjectSuggestionBatch({
     database: dateDatabase, userId: accountId, interactionId: imported.interactionId,
+    draftPreview: {version: interaction.version, itemIds: interaction.recapItems.map(i => i.id),
+      assignments: [{ speakerId: "admitted_self", role: "self" }, { speakerId: "admitted_companion", role: "companion" }]},
     provider: {
       model: "Qwen/Qwen3.6-27B",
       suggest: async (requested) => requested.map((source) => {

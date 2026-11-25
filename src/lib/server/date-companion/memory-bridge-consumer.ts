@@ -8,6 +8,7 @@ import { dateCompanionRetainedEvidenceDigest } from "@/lib/server/memory/retenti
 import type { MemoryWriteInput } from "@/lib/server/memory/types";
 import type { MemoryOwnerResolution } from "@/lib/server/memory/owner-attribution/types";
 import { DcConflictError } from "./errors";
+import { reviewedSpeakerText } from "./recap-speaker-text";
 import {
   createDateCompanionMemoryBridgeRepository,
   type DcMemoryBridgePayload
@@ -83,10 +84,8 @@ function loadConfirmedRecapEvidence(input: {
       ON r.id = e.recap_item_id AND r.user_id = e.user_id
     INNER JOIN dc_interactions i
       ON i.id = r.interaction_id AND i.user_id = r.user_id
-    LEFT JOIN dc_participant_assignments participant
-      ON participant.user_id = e.user_id
-      AND participant.interaction_id = i.id
-      AND participant.speaker_id = e.speaker_id
+    LEFT JOIN dc_evidence_speaker_reviews participant
+      ON participant.user_id = e.user_id AND participant.interaction_id = i.id AND participant.evidence_id = e.id
     WHERE e.user_id = ? AND i.id = ? AND r.disposition = 'kept'
     ORDER BY r.sort_order, r.id, e.start_seconds, e.source_segment_id, e.id
   `).all(input.userId, input.payload.interactionId) as Array<{
@@ -228,21 +227,24 @@ function buildAdmissionCandidates(input: {
   }
   return [...byRecap.entries()].map(([recapItemId, evidence]): AdmissionCandidate => {
     const first = evidence[0]!;
-    const text = normalizeText(first.userText ?? first.proposedText).slice(0, 4_000);
-    if (!text) throw new DcConflictError("memory_bridge_candidate_text_missing");
+    const rawText = normalizeText(first.userText ?? first.proposedText).slice(0, 4_000);
+    if (!rawText) throw new DcConflictError("memory_bridge_candidate_text_missing");
     if (evidence.some((item) =>
       item.recapKind !== first.recapKind
       || item.recordingDate !== first.recordingDate
       || item.confirmedAt !== first.confirmedAt
-      || normalizeText(item.userText ?? item.proposedText).slice(0, 4_000) !== text
+      || normalizeText(item.userText ?? item.proposedText).slice(0, 4_000) !== rawText
     )) throw new DcConflictError("memory_bridge_candidate_snapshot_conflict");
+    const text = first.userText !== null ? rawText : normalizeText(reviewedSpeakerText(input.accountId, first.proposedText,
+      evidence.map(item => ({ ...item, role: item.participantRole })))).slice(0, 4_000);
     const originKey = stableId(
       "date_companion_memory_origin",
       input.accountId,
       input.payload.relationshipId,
       input.payload.interactionId,
       input.payload.confirmationFingerprint,
-      recapItemId
+      recapItemId,
+      ...(input.payload.grantGeneration ? [String(input.payload.grantGeneration)] : [])
     );
     const memoryType = recapMemoryType(first.recapKind);
     const memoryId = stableId("memory", originKey);
@@ -506,6 +508,7 @@ function ensurePersonEvidence(input: {
   accountId: string;
   relationshipId: string;
   interactionId: string;
+  grantGeneration?: number;
   snapshot: {
     id: string;
     upload_id: string;
@@ -529,7 +532,13 @@ function ensurePersonEvidence(input: {
     input.snapshot.upload_id,
     input.snapshot.source_segment_id
   ) as { id: string; quote: string } | undefined;
-  if (existing && existing.id !== id) throw new DcConflictError("person_evidence_id_conflict");
+  if (existing && (existing.id !== id || existing.quote !== input.snapshot.quote)) {
+    throw new DcConflictError("person_evidence_id_conflict");
+  }
+  const priorLink = existing && input.database.prepare(`
+    SELECT MAX(independent_person_evidence) AS independent FROM person_evidence_dc_links
+    WHERE account_id = ? AND person_evidence_id = ?
+  `).get(input.accountId, id) as { independent: number | null } | undefined;
   input.database.prepare(`
     INSERT INTO person_evidence (
       id, account_id, upload_id, source_segment_id, quote, created_at, updated_at
@@ -547,18 +556,20 @@ function ensurePersonEvidence(input: {
   input.database.prepare(`
     INSERT INTO person_evidence_dc_links (
       id, account_id, person_evidence_id, dc_relationship_id,
-      dc_interaction_id, dc_evidence_snapshot_id, snapshot_digest, created_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      dc_interaction_id, dc_evidence_snapshot_id, snapshot_digest, created_at, independent_person_evidence
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(account_id, person_evidence_id, dc_evidence_snapshot_id) DO NOTHING
   `).run(
-    stableId("person_evidence_dc_link", input.accountId, id, input.snapshot.id),
+    stableId("person_evidence_dc_link", input.accountId, id, input.snapshot.id,
+      ...(input.grantGeneration ? [String(input.grantGeneration)] : [])),
     input.accountId,
     id,
     input.relationshipId,
     input.interactionId,
     input.snapshot.id,
     input.snapshot.content_digest,
-    input.now
+    input.now,
+    existing ? priorLink?.independent ?? 1 : 0
   );
   return id;
 }
@@ -703,7 +714,7 @@ function ensureConfirmedRelationship(input: {
     input.now
   );
   for (const evidenceId of [...new Set(input.evidenceIds)]) {
-    input.database.prepare(`
+    const inserted = input.database.prepare(`
       INSERT INTO person_relationship_evidence (
         id, account_id, relationship_id, evidence_id, created_at
       ) VALUES (?, ?, ?, ?, ?)
@@ -715,6 +726,21 @@ function ensureConfirmedRelationship(input: {
       evidenceId,
       input.now
     );
+    if (inserted.changes === 0) {
+      input.database.prepare(`
+        UPDATE person_evidence_dc_links SET independent_relationship_edge = 1
+        WHERE account_id = @account AND dc_relationship_id = @relationship
+          AND dc_interaction_id = @interaction AND person_evidence_id = @evidence
+          AND NOT EXISTS (
+            SELECT 1 FROM person_evidence_dc_links sibling
+            JOIN dc_person_relationship_links r ON r.account_id = sibling.account_id
+              AND r.dc_relationship_id = sibling.dc_relationship_id AND r.person_relationship_id = @personRelationship
+            WHERE sibling.account_id = @account AND sibling.person_evidence_id = @evidence
+              AND sibling.dc_interaction_id <> @interaction AND sibling.independent_relationship_edge = 0
+          )
+      `).run({ account: input.accountId, relationship: input.payload.relationshipId, interaction: input.payload.interactionId,
+        evidence: evidenceId, personRelationship: relationshipId });
+    }
   }
   input.database.prepare(`
     INSERT INTO person_relationship_admissions (
@@ -808,16 +834,12 @@ function addConfirmedSubject(input: {
 function persistFormalDateCompanionMemories(input: {
   database: Database.Database;
   accountId: string;
+  outboxId: string;
   payload: DcMemoryBridgePayload;
   recapEvidence: ConfirmedRecapEvidence[];
   candidates: AdmissionCandidate[];
   now: string;
 }) {
-  const tombstone = input.database.prepare(`
-    SELECT 1 FROM memory_upload_tombstones
-    WHERE user_id = ? AND upload_id = ?
-  `).get(input.accountId, input.payload.sourceUploadId);
-  if (tombstone) throw new DcConflictError("memory_bridge_source_deleted");
   const retainedBefore = input.database.prepare(`
     SELECT dc_relationship_id, dc_interaction_id, status
     FROM dc_retained_uploads WHERE user_id = ? AND upload_id = ?
@@ -855,6 +877,7 @@ function persistFormalDateCompanionMemories(input: {
     }
   }
   createMemoryRepository(input.database).replaceUploadMemories({
+    projection: "date_companion",
     userId: input.accountId,
     uploadId: input.payload.sourceUploadId,
     memories: admitted.map((candidate) => candidate.memory),
@@ -871,8 +894,11 @@ function persistFormalDateCompanionMemories(input: {
     FROM memory_evidence e
     INNER JOIN memory_items m ON m.id = e.memory_id
     WHERE m.user_id = ? AND e.upload_id = ? AND e.source_type = 'transcript'
+      AND e.id IN (SELECT value FROM json_each(?))
     ORDER BY e.id
-  `).all(input.accountId, input.payload.sourceUploadId) as Array<{
+  `).all(input.accountId, input.payload.sourceUploadId, JSON.stringify(
+    admitted.flatMap((candidate) => candidate.memory.evidence.map((evidence) => evidence.id))
+  )) as Array<{
     id: string;
     memory_id: string;
     upload_id: string;
@@ -948,12 +974,12 @@ function persistFormalDateCompanionMemories(input: {
   input.database.prepare(`
     INSERT INTO dc_retained_uploads (
       user_id, upload_id, dc_relationship_id, dc_interaction_id,
-      provenance_count, provenance_digest, status, captured_at, updated_at
-    ) VALUES (?, ?, ?, ?, ?, ?, 'active', ?, ?)
+      provenance_count, provenance_digest, status, captured_at, updated_at, grant_outbox_id
+    ) VALUES (?, ?, ?, ?, ?, ?, 'active', ?, ?, ?)
     ON CONFLICT(user_id, upload_id) DO UPDATE SET
       provenance_count = excluded.provenance_count,
       provenance_digest = excluded.provenance_digest,
-      status = 'active', updated_at = excluded.updated_at
+      status = 'active', updated_at = excluded.updated_at, grant_outbox_id = excluded.grant_outbox_id
   `).run(
     input.accountId,
     input.payload.sourceUploadId,
@@ -962,7 +988,8 @@ function persistFormalDateCompanionMemories(input: {
     provenanceRows.length,
     provenanceDigest,
     input.now,
-    input.now
+    input.now,
+    input.outboxId
   );
 
   // The immutable candidate receipt records the admitted candidate's historical
@@ -1124,6 +1151,12 @@ function applyBridgeToMemory(input: {
   }>;
 }) {
   return input.database.transaction(() => {
+    if (input.database.prepare(`
+      SELECT 1 FROM memory_upload_tombstones WHERE user_id = ? AND upload_id = ?
+    `).get(input.accountId, input.payload.sourceUploadId)) throw new DcConflictError("memory_bridge_source_deleted");
+    if (input.database.prepare(`
+      SELECT 1 FROM dc_memory_withdrawn_projections WHERE user_id = ? AND outbox_id = ?
+    `).get(input.accountId, input.outboxId)) throw new DcConflictError("memory_grant_withdrawn");
     const projectionKey = dateCompanionMemoryProjectionIdempotencyKey(input.idempotencyKey);
     const existingReceipt = input.database.prepare(`
       SELECT payload_digest FROM dc_memory_bridge_receipts
@@ -1155,6 +1188,7 @@ function applyBridgeToMemory(input: {
     const formalProjection = persistFormalDateCompanionMemories({
       database: input.database,
       accountId: input.accountId,
+      outboxId: input.outboxId,
       payload: input.payload,
       recapEvidence: input.recapEvidence,
       candidates: input.candidates,
@@ -1182,7 +1216,7 @@ function applyBridgeToMemory(input: {
         SELECT e.quote, p.content_digest
         FROM memory_evidence e
         INNER JOIN memory_items m ON m.id = e.memory_id
-        LEFT JOIN memory_evidence_provenance p
+        INNER JOIN memory_evidence_provenance p
           ON p.memory_evidence_id = e.id AND p.user_id = m.user_id
         WHERE m.user_id = ? AND e.upload_id = ? AND e.source_type = 'transcript'
           AND e.source_id = ?
@@ -1215,6 +1249,7 @@ function applyBridgeToMemory(input: {
         accountId: input.accountId,
         relationshipId: input.payload.relationshipId,
         interactionId: input.payload.interactionId,
+        grantGeneration: input.payload.grantGeneration,
         snapshot,
         now
       });
@@ -1476,44 +1511,47 @@ async function processClaim(input: {
   const { repository, claim } = input;
   if (!claim) return null;
   try {
-    const legacyProjectionReplay = isLegacyProjectionReplay({
-      memoryDatabase: input.memoryDatabase,
-      userId: claim.userId,
-      outboxId: claim.outboxId,
-      idempotencyKey: claim.idempotencyKey
-    });
-    revalidateDcClaim({
-      dateCompanionDatabase: input.dateCompanionDatabase,
-      userId: claim.userId,
-      outboxId: claim.outboxId,
-      claimToken: claim.claimToken,
-      payload: claim.payload,
-      payloadDigest: claim.payloadDigest,
-      allowConsumedRelationshipReview: legacyProjectionReplay,
-      evidence: claim.evidence
-    });
-    const recapEvidence = loadConfirmedRecapEvidence({
-      database: input.dateCompanionDatabase,
-      userId: claim.userId,
-      payload: claim.payload
-    });
-    const candidates = buildAdmissionCandidates({
-      accountId: claim.userId,
-      payload: claim.payload,
-      evidence: recapEvidence
-    });
-    const result = applyBridgeToMemory({
-      database: input.memoryDatabase,
-      accountId: claim.userId,
-      outboxId: claim.outboxId,
-      idempotencyKey: claim.idempotencyKey,
-      payloadDigest: claim.payloadDigest,
-      payload: claim.payload,
-      recapEvidence,
-      candidates,
-      legacyProjectionReplay,
-      evidence: claim.evidence
-    });
+    // The withdrawal writer takes the same Date lock before fencing Memory.
+    const result = input.dateCompanionDatabase.transaction(() => {
+      const legacyProjectionReplay = isLegacyProjectionReplay({
+        memoryDatabase: input.memoryDatabase,
+        userId: claim.userId,
+        outboxId: claim.outboxId,
+        idempotencyKey: claim.idempotencyKey
+      });
+      revalidateDcClaim({
+        dateCompanionDatabase: input.dateCompanionDatabase,
+        userId: claim.userId,
+        outboxId: claim.outboxId,
+        claimToken: claim.claimToken,
+        payload: claim.payload,
+        payloadDigest: claim.payloadDigest,
+        allowConsumedRelationshipReview: legacyProjectionReplay,
+        evidence: claim.evidence
+      });
+      const recapEvidence = loadConfirmedRecapEvidence({
+        database: input.dateCompanionDatabase,
+        userId: claim.userId,
+        payload: claim.payload
+      });
+      const candidates = buildAdmissionCandidates({
+        accountId: claim.userId,
+        payload: claim.payload,
+        evidence: recapEvidence
+      });
+      return applyBridgeToMemory({
+        database: input.memoryDatabase,
+        accountId: claim.userId,
+        outboxId: claim.outboxId,
+        idempotencyKey: claim.idempotencyKey,
+        payloadDigest: claim.payloadDigest,
+        payload: claim.payload,
+        recapEvidence,
+        candidates,
+        legacyProjectionReplay,
+        evidence: claim.evidence
+      });
+    }).immediate();
     await input.afterMemoryCommit?.();
     repository.complete({
       userId: claim.userId,

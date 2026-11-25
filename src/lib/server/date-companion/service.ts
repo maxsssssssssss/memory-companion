@@ -171,13 +171,54 @@ function resolveEvidence(
     }));
 }
 
+// An extracted task can also be a suggestion. Only file an agreement when
+// the cited utterance actually contains an undertaking.
+function statesAnAgreement(text: string) {
+  // A quoted first person belongs to the quoted speaker. Evaluate the carrier's
+  // own words separately; keep the original, unmodified text for every source.
+  const ownWords = text.replace(/「[^」]*」|『[^』]*』|“[^”]*”|"[^"]*"/gu, " ");
+  return ownWords.split(/[。；，,.;\n]|但(?:是)?|不过/u).some(clause => {
+    if (/不是(?:由)?我|^\s*(?:(?:他|她|对方|Ta)(?:说|答应|承诺)|我(?:转述|听说))/iu.test(clause)) return false;
+    if (/[？?]|(?:没(?:有)?|未(?:曾)?|不(?:是|算|代表|会|能|敢|愿|曾)?)(?:明确)?(?:答应|承诺|约定|保证|约好|说好)|能不能|会不会|是否|[吗么]\s*$|\b(?:might|maybe|could|didn't|did not)\b/iu.test(clause)) return false;
+    if (/答应|承诺|保证|约定|约好了?|说好了?|一言为定|就这么定|\b(?:I|we)\s+(?:promise|commit|agree)\b/iu.test(clause)) return true;
+    if (/可以|或许|也许|可能|建议|考虑|要不要|不一定|不确定/u.test(clause)) return false;
+    const undertaking = /(?:由我(?:们)?负责|我(?:们)?(?:(?:一定|肯定)?会|将|负责|来(?:给|把|订|买|寄|发|带|找|负责|准备|安排)|就(?:把|给|寄|发|去|来|带)))|\b(?:I|we)(?:'ll| will)\b/iu;
+    const assignedAction = /[^\s]我(?:来)?(?:订|买|寄|发|准备|安排|负责)\s*$/u;
+    const datedAction = /(?:明天|后天|今晚|下周|周[一二三四五六日天]|星期[一二三四五六日天])/u.test(clause)
+      && /我(?:们)?[^，。！？]{0,18}(?:发给|给你|寄出|带给|去接|预订|来接)/u.test(clause);
+    return undertaking.test(clause) || assignedAction.test(clause) || datedAction;
+  });
+}
+
+function classifyAgreement(text: string, evidence: DcImportRecapCandidate["evidence"], excerpt?: string) {
+  const quotes = evidence.map(item => item.quote);
+  const verifiedExcerpt = excerpt?.trim();
+  const groundedText = verifiedExcerpt && quotes.join("").includes(verifiedExcerpt)
+    ? verifiedExcerpt : quotes.join("\n");
+  const optionalSummary = /也?可以|不妨|要不要|(?:只是|提出|表示)(?:一个)?建议|\b(?:could|might|suggest)\b/iu.test(text);
+  if (!statesAnAgreement(groundedText) || (optionalSummary && !statesAnAgreement(text))) {
+    // The model can have asserted a commitment that the speaker never made.
+    return { kind: "moment" as const, proposedText: groundedText };
+  }
+  const condition = /前提|如果|只要|只有|要是|以.+为条件|(?:确认|收到|拿到|问到|取得|找到|核实)[^，。；]{0,12}(?:后|再|才)|provided that|\bon condition\b|\bif\b/iu;
+  const boundText = quotes.join("\n");
+  const conditions = boundText.split(/[。；，,.;\n]/u).map(part => part.trim()).filter(part => condition.test(part));
+  // A second, unrelated "之后" in a summary says nothing about this prerequisite.
+  // Prefer the verified passage (including its condition) over a lossy paraphrase.
+  if (conditions.some(part => !text.includes(part))) {
+    return { kind: "promise" as const, proposedText: conditions.every(part => groundedText.includes(part)) ? groundedText : boundText };
+  }
+  return { kind: "promise" as const, proposedText: text };
+}
+
 export function buildDateCompanionImportCandidates(payload: DayPayload): DcImportRecapCandidate[] {
   const segmentById = new Map(payload.segments.map((segment) => [segment.id, segment]));
   const candidates: DcImportRecapCandidate[] = [];
   const append = (
     kind: DcImportRecapCandidate["kind"],
     proposedText: string,
-    sourceSegmentIds: string[]
+    sourceSegmentIds: string[],
+    excerpt?: string
   ) => {
     const evidence = resolveEvidence(payload, segmentById, sourceSegmentIds);
     const text = proposedText.trim();
@@ -185,7 +226,8 @@ export function buildDateCompanionImportCandidates(payload: DayPayload): DcImpor
     // several unknown voices into one synthetic participant or a confirmable
     // long-term fact. The complete local transcript remains available.
     if (!evidence || !text || evidence.some((item) => !item.speakerId)) return;
-    candidates.push({ kind, proposedText: text, sortOrder: candidates.length, evidence });
+    const entry = kind === "promise" ? classifyAgreement(text, evidence, excerpt) : { kind, proposedText: text };
+    candidates.push({ ...entry, sortOrder: candidates.length, evidence });
   };
 
   for (const signal of payload.relationshipSignals.filter((item) => item.signalCategory === "positive")) {
@@ -203,7 +245,7 @@ export function buildDateCompanionImportCandidates(payload: DayPayload): DcImpor
   for (const item of payload.briefItems.filter(
     (brief) => brief.category === "commitment" || brief.category === "task"
   )) {
-    append("promise", item.body, item.sourceSegmentIds);
+    append("promise", item.body, item.sourceSegmentIds, item.transcriptExcerpt);
   }
   for (const item of payload.briefItems.filter((brief) => brief.category === "open_question")) {
     append("continue", item.body, item.sourceSegmentIds);

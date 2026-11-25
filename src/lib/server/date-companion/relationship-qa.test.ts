@@ -85,6 +85,24 @@ function view(interactions: DcInteractionDetail[]): DcRelationshipView {
 }
 
 describe("Date Companion relationship QA Evidence allowlist", () => {
+  it("admits the independently reviewed part of a mixed ASR group with its reviewed speaker", () => {
+    const record = interaction({ id: "mixed", uploadId: "rec", date: "2026-11-12",
+      segmentId: "separate", quote: "下单的事没有答应。", participantRole: "unresolved" });
+    const snapshot = record.recapItems[0].evidence[0];
+    snapshot.contentDigest = "a".repeat(64);
+    record.participants[0].reviewedSegments = [{ sourceSegmentId: "separate", contentDigest: snapshot.contentDigest, role: "self" }];
+    record.recapItems.push({ ...record.recapItems[0], id: "other", proposedText: "归属混合", displayedText: "归属混合",
+      evidence: [{ ...snapshot, id: "e2", sourceSegmentId: "mixed", quote: "两人交叠，无法署名。" }] });
+    const context = buildDateCompanionRelationshipQaContext(view([record]));
+    expect(context.eligibleSourceSegmentIds).toEqual(["separate"]);
+    expect(context.segments[0]).toMatchObject({ speaker: "我" });
+    expect(JSON.stringify(context)).not.toMatch(/归属混合|两人交叠/);
+    const combined = { ...record.recapItems[0], id: "combined", displayedText: "两段合并的概括",
+      evidence: [...record.recapItems[0].evidence, ...record.recapItems[1].evidence] };
+    expect(buildDateCompanionRelationshipQaContext(view([{...record,recapItems:[combined]}])).briefItems).toEqual([]);
+    snapshot.contentDigest = "b".repeat(64);
+    expect(buildDateCompanionRelationshipQaContext(view([record])).eligibleSourceSegmentIds).toEqual([]);
+  });
   it("includes an older confirmed interaction even when the latest interaction is different", () => {
     const context = buildDateCompanionRelationshipQaContext(view([
       interaction({

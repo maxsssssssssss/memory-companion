@@ -93,6 +93,7 @@ export function dateCompanionProactiveValueFingerprint(input: {
       sourceSegmentId: evidence.sourceSegmentId,
       recordingDate: evidence.recordingDate,
       contentDigest: evidence.contentDigest,
+      ...(evidence.authorizationRevision ? {authorizationRevision: evidence.authorizationRevision} : {}),
       origin: evidence.origin,
       subject: evidence.subject,
       subjectVersion: evidence.subjectVersion ?? null

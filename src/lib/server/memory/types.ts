@@ -121,6 +121,8 @@ export type RelevantMemoryQuery = {
 };
 
 export type ReplaceUploadMemoriesInput = {
+  /** Replace only this product's contribution when multiple products share an upload. */
+  projection?: "date_companion";
   userId: string;
   uploadId: string;
   memories: MemoryWriteInput[];

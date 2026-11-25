@@ -5,7 +5,7 @@ import {
   dateCompanionEvidenceDigest
 } from "./memory-bridge-digest";
 
-export const DATE_COMPANION_SCHEMA_VERSION = 13;
+export const DATE_COMPANION_SCHEMA_VERSION = 15;
 
 const DATE_COMPANION_SCHEMA_V1 = `
   CREATE TABLE dc_relationships (
@@ -614,6 +614,53 @@ const DATE_COMPANION_SCHEMA_V13 = `
   );
 `;
 
+// Keep the original ASR label, offsets, text and digest independent of human review.
+const DATE_COMPANION_SCHEMA_V14 = `
+  ALTER TABLE dc_participant_assignments
+    ADD COLUMN review_by_segment INTEGER NOT NULL DEFAULT 0 CHECK(review_by_segment IN (0,1));
+  CREATE TABLE dc_reviewed_speaker_segments (
+    user_id TEXT NOT NULL, interaction_id TEXT NOT NULL, speaker_id TEXT NOT NULL,
+    source_segment_id TEXT NOT NULL, content_digest TEXT NOT NULL CHECK(length(content_digest)=64),
+    role TEXT NOT NULL CHECK(role IN ('self','companion')),
+    confirmed_by TEXT NOT NULL, confirmed_at TEXT NOT NULL,
+    PRIMARY KEY(user_id, interaction_id, speaker_id, source_segment_id),
+    FOREIGN KEY(user_id, interaction_id, speaker_id)
+      REFERENCES dc_participant_assignments(user_id, interaction_id, speaker_id) ON DELETE CASCADE
+  );
+  CREATE VIEW dc_evidence_speaker_reviews AS
+    SELECT e.id AS evidence_id, e.user_id, r.interaction_id, e.speaker_id, e.source_segment_id,
+           CASE WHEN p.review_by_segment=1 THEN s.role ELSE p.role END AS role,
+           CASE WHEN p.review_by_segment=1 THEN s.confirmed_by ELSE p.confirmed_by END AS confirmed_by,
+           CASE WHEN p.review_by_segment=1 THEN s.confirmed_at ELSE p.confirmed_at END AS confirmed_at
+    FROM dc_evidence_snapshots e
+    JOIN dc_recap_items r ON e.recap_item_id=r.id AND e.user_id=r.user_id
+    JOIN dc_participant_assignments p ON p.user_id=e.user_id AND p.interaction_id=r.interaction_id AND p.speaker_id=e.speaker_id
+    LEFT JOIN dc_reviewed_speaker_segments s ON s.user_id=p.user_id AND s.interaction_id=p.interaction_id
+      AND s.speaker_id=p.speaker_id AND s.source_segment_id=e.source_segment_id AND s.content_digest=e.content_digest;
+`;
+
+// Keep withdrawn grant identities after removing their active outbox rows. Neither
+// table carries recording text or changes the shared permanent-upload tombstone.
+const DATE_COMPANION_SCHEMA_V15 = `
+  CREATE TABLE dc_memory_withdrawals (
+    id TEXT PRIMARY KEY, user_id TEXT NOT NULL, relationship_id TEXT NOT NULL,
+    preview_version TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+    UNIQUE(user_id, relationship_id, preview_version),
+    FOREIGN KEY(relationship_id, user_id) REFERENCES dc_relationships(id, user_id)
+  );
+  CREATE TABLE dc_memory_withdrawn_grants (
+    withdrawal_id TEXT NOT NULL REFERENCES dc_memory_withdrawals(id),
+    user_id TEXT NOT NULL, relationship_id TEXT NOT NULL, interaction_id TEXT NOT NULL,
+    upload_id TEXT NOT NULL, generation INTEGER NOT NULL CHECK(generation >= 1),
+    outbox_id TEXT NOT NULL UNIQUE, idempotency_key TEXT NOT NULL, payload_digest TEXT NOT NULL,
+    category TEXT NOT NULL CHECK(category IN ('retained','processing')),
+    status TEXT NOT NULL CHECK(status IN ('pending','completed','retryable_failed')),
+    attempt_count INTEGER NOT NULL DEFAULT 0, last_error_code TEXT,
+    PRIMARY KEY(user_id, interaction_id, generation)
+  );
+  CREATE INDEX idx_dc_withdrawn_grants_receipt ON dc_memory_withdrawn_grants(withdrawal_id);
+`;
+
 const MIGRATIONS = [
   { version: 1, sql: DATE_COMPANION_SCHEMA_V1 },
   { version: 2, sql: DATE_COMPANION_SCHEMA_V2 },
@@ -627,7 +674,9 @@ const MIGRATIONS = [
   { version: 10, sql: DATE_COMPANION_SCHEMA_V10 },
   { version: 11, sql: DATE_COMPANION_SCHEMA_V11 },
   { version: 12, sql: DATE_COMPANION_SCHEMA_V12 },
-  { version: 13, sql: DATE_COMPANION_SCHEMA_V13 }
+  { version: 13, sql: DATE_COMPANION_SCHEMA_V13 },
+  { version: 14, sql: DATE_COMPANION_SCHEMA_V14 },
+  { version: 15, sql: DATE_COMPANION_SCHEMA_V15 }
 ] as const;
 
 function backfillEvidenceProvenance(database: Database.Database) {

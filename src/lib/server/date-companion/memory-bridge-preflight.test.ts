@@ -77,6 +77,11 @@ function createVersionFiveDateCompanionDatabase(root: string) {
       confirmation_fingerprint TEXT,
       UNIQUE(id, user_id)
     );
+    CREATE TABLE dc_participant_assignments (
+      user_id TEXT NOT NULL, interaction_id TEXT NOT NULL, speaker_id TEXT NOT NULL,
+      role TEXT NOT NULL, confirmed_by TEXT, confirmed_at TEXT,
+      PRIMARY KEY (user_id, interaction_id, speaker_id)
+    );
     CREATE TABLE dc_recap_items (
       id TEXT PRIMARY KEY,
       user_id TEXT NOT NULL,
@@ -109,6 +114,7 @@ function createVersionEightMemoryDatabase(root: string) {
   const database = new Database(filePath);
   database.exec(`
     DROP TRIGGER IF EXISTS dc_memory_bridge_candidate_receipts_immutable;
+    DROP TABLE dc_memory_withdrawn_projections;
     DROP TABLE dc_memory_bridge_candidate_receipts;
     DROP TRIGGER IF EXISTS memory_daily_reflection_candidate_receipts_immutable;
     DROP TABLE memory_daily_reflection_candidate_revocations;

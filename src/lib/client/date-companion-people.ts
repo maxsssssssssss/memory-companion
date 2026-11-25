@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { z } from "zod";
+import { PERSON_MATERIAL_READ_TIMEOUT_MS, readPersonMaterialWithDeadline } from "./date-companion-read-deadline";
 
 const RecordIdSchema = z.string().trim().min(1).max(512).regex(/^[^\s]+$/u);
 const DateKeySchema = z.string().regex(/^\d{4}-\d{2}-\d{2}$/u);
@@ -48,6 +49,7 @@ const PersonTimelineResponseSchema = z.object({
     }).passthrough(),
     evidenceLinks: z.array(z.object({
       memoryEvidence: z.object({
+        id: RecordIdSchema.optional(),
         date: DateKeySchema
       }).passthrough(),
       personEvidence: PersonEvidenceSchema
@@ -64,6 +66,7 @@ const PersonTimelineResponseSchema = z.object({
 
 export type DateCompanionPersonArchiveSource = {
   id: string;
+  memoryEvidenceIds?: string[];
   uploadId: string;
   sourceSegmentId: string;
   quote: string;
@@ -96,7 +99,7 @@ export type DateCompanionPersonArchive = {
 
 export type DateCompanionPersonArchiveState =
   | { status: "idle" | "loading" }
-  | { status: "ready"; archive: DateCompanionPersonArchive }
+  | { status: "ready"; archive: DateCompanionPersonArchive; refresh?: "loading" | "error"; message?: string }
   | { status: "not_found" }
   | { status: "error"; message: string };
 
@@ -109,6 +112,7 @@ function uniqueSources(
     const key = `${source.uploadId}\u0000${source.sourceSegmentId}`;
     sources.set(key, {
       id: source.id,
+      ...(link.memoryEvidence.id ? { memoryEvidenceIds: [...new Set([...(sources.get(key)?.memoryEvidenceIds ?? []), link.memoryEvidence.id])].sort() } : {}),
       uploadId: source.uploadId,
       sourceSegmentId: source.sourceSegmentId,
       quote: source.quote,
@@ -128,7 +132,7 @@ export async function readDateCompanionPersonArchive(
     { method: "GET", cache: "no-store", signal: options.signal }
   );
   if (response.status === 404) throw new Error("person_not_found");
-  if (!response.ok) throw new Error(response.status === 401 ? "unauthenticated" : "person_archive_unavailable");
+  if (!response.ok) throw new Error(response.status === 401 ? "unauthenticated" : response.status === 403 ? "person_archive_forbidden" : "person_archive_unavailable");
   const parsed = PersonTimelineResponseSchema.safeParse(await response.json());
   if (
     !parsed.success
@@ -158,38 +162,46 @@ export async function readDateCompanionPersonArchive(
   };
 }
 
-export function useDateCompanionPersonArchive(personId: string | null): DateCompanionPersonArchiveState {
+export function useDateCompanionPersonArchive(personId: string | null, scope = "", revision = 0, timeoutMs = PERSON_MATERIAL_READ_TIMEOUT_MS): DateCompanionPersonArchiveState {
+  const requestKey = personId ? JSON.stringify([scope, personId]) : null;
   const [requestState, setRequestState] = useState<{
-    personId: string | null;
+    key: string | null;
     value: DateCompanionPersonArchiveState;
-  }>({ personId: null, value: { status: "idle" } });
+  }>({ key: null, value: { status: "idle" } });
   useEffect(() => {
     if (!personId) {
-      setRequestState({ personId: null, value: { status: "idle" } });
+      setRequestState({ key: null, value: { status: "idle" } });
       return;
     }
     const controller = new AbortController();
-    setRequestState({ personId, value: { status: "loading" } });
-    void readDateCompanionPersonArchive(personId, { signal: controller.signal })
+    setRequestState(current => current.key === requestKey && current.value.status === "ready"
+      ? { key: requestKey, value: { ...current.value, refresh: "loading", message: undefined } } :
+      { key: requestKey, value: { status: "loading" } });
+    void readPersonMaterialWithDeadline(signal => readDateCompanionPersonArchive(personId, { signal }), controller.signal, timeoutMs)
       .then((archive) => {
         if (controller.signal.aborted) return;
-        setRequestState((current) => current.personId === personId
-          ? { personId, value: { status: "ready", archive } }
+        setRequestState((current) => current.key === requestKey
+          ? { key: requestKey, value: { status: "ready", archive } }
           : current);
       })
       .catch((error: unknown) => {
         if (controller.signal.aborted) return;
-        setRequestState((current) => current.personId === personId
+        const unavailable = error instanceof Error && ["person_not_found", "unauthenticated", "person_archive_forbidden", "invalid_person_archive"].includes(error.message);
+        const message = error && typeof error === "object" && "name" in error && error.name === "TimeoutError"
+          ? "人物档案读取超时。" : "人物内容暂时没有读取成功，请稍后再试。";
+        setRequestState((current) => current.key === requestKey
           ? {
-              personId,
-              value: error instanceof Error && error.message === "person_not_found"
+              key: requestKey,
+              value: !unavailable && current.value.status === "ready"
+                ? { ...current.value, refresh: "error", message }
+                : error instanceof Error && error.message === "person_not_found"
                 ? { status: "not_found" }
-                : { status: "error", message: "人物内容暂时没有读取成功，请稍后再试。" }
+                : { status: "error", message }
             }
           : current);
       });
     return () => controller.abort();
-  }, [personId]);
-  if (requestState.personId !== personId) return personId ? { status: "loading" } : { status: "idle" };
+  }, [personId, requestKey, revision, timeoutMs]);
+  if (requestState.key !== requestKey) return personId ? { status: "loading" } : { status: "idle" };
   return requestState.value;
 }

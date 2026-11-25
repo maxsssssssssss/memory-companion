@@ -16,6 +16,7 @@ import {
   validateDateCompanionSubjectSuggestionConfirmation,
   type DcSubjectSuggestionConfirmation
 } from "./subject-suggestions";
+import { assertUploadCanBeAuthorized, getInteractionGrantGeneration } from "./memory-grant-ledger";
 
 const RelationshipTypeSchema = z.enum(["dating", "partner", "friend", "other"]);
 const SubjectSchema = z.enum(["self", "companion", "both", "unknown"]);
@@ -39,6 +40,7 @@ const BridgePayloadSchema = z.object({
   interactionId: z.string().min(1),
   sourceUploadId: z.string().min(1),
   sourceVersion: z.number().int().nonnegative(),
+  grantGeneration: z.number().int().min(2).optional(),
   confirmationFingerprint: z.string().min(1),
   relationshipEpoch: z.number().int().nonnegative().optional(),
   mapping: z.object({
@@ -489,6 +491,7 @@ function authorizeArchivedRelationshipReconfirmation(input: {
 
 function createFrozenOutbox(input: {
   database: Database.Database;
+  memoryDatabase?: Database.Database;
   userId: string;
   relationshipId: string;
   interactionId: string;
@@ -503,6 +506,7 @@ function createFrozenOutbox(input: {
     if (input.memoryAdmission) throw new DcConflictError("memory_retention_disabled");
     return null;
   }
+  if (input.memoryDatabase) assertUploadCanBeAuthorized(input.memoryDatabase, input.userId, input.sourceUploadId);
   const evidenceRows = verifiedKeptEvidence(input.database, input.userId, input.interactionId);
   const submitted = new Map<string, DcMemorySubject>();
   for (const selection of input.memoryAdmission?.selections ?? []) {
@@ -577,8 +581,14 @@ function createFrozenOutbox(input: {
     FROM dc_relationship_reconfirmation_authorizations
     WHERE user_id = ? AND relationship_id = ? AND status IN ('authorized', 'consumed')
   `).get(input.userId, input.relationshipId) as { epoch: number }).epoch;
+  const grantGeneration = getInteractionGrantGeneration(input.database, input.userId, input.interactionId);
+  if (grantGeneration > 1 && !input.memoryAdmission?.subjectSuggestionConfirmation) {
+    throw new DcConflictError("withdrawn_grant_requires_new_confirmation");
+  }
+  const generationKey = grantGeneration === 1 ? [] : [String(grantGeneration)];
   const payload = BridgePayloadSchema.parse({
     version: 1,
+    ...(grantGeneration > 1 ? { grantGeneration } : {}),
     userId: input.userId,
     relationshipId: input.relationshipId,
     interactionId: input.interactionId,
@@ -602,9 +612,10 @@ function createFrozenOutbox(input: {
     input.interactionId,
     input.confirmationFingerprint,
     String(payload.mapping?.version ?? input.memoryAdmission?.mappingVersion ?? 0),
-    String(relationshipEpoch)
+    String(relationshipEpoch),
+    ...generationKey
   );
-  const outboxId = stableId("dc_memory_outbox", input.userId, input.interactionId);
+  const outboxId = stableId("dc_memory_outbox", input.userId, input.interactionId, ...generationKey);
   const existing = input.database.prepare(`
     SELECT * FROM dc_memory_bridge_outbox WHERE user_id = ? AND interaction_id = ?
   `).get(input.userId, input.interactionId) as OutboxRow | undefined;
@@ -708,6 +719,7 @@ function createFrozenOutbox(input: {
 
 export function finalizeDateCompanionMemoryAdmission(input: {
   database: Database.Database;
+  memoryDatabase?: Database.Database;
   userId: string;
   relationshipId: string;
   interactionId: string;
@@ -916,7 +928,7 @@ export class DateCompanionMemoryBridgeRepository {
     requireRelationship(this.database, userId, relationshipId);
     const interactions = this.database.prepare(`
       SELECT i.id, i.source_upload_id, i.recording_date, i.source_state,
-             o.status, o.attempt_count, o.updated_at, o.last_error_code,
+             o.id AS grant_id, o.status, o.attempt_count, o.updated_at, o.last_error_code,
              SUM(CASE WHEN s.subject = 'unknown' THEN 1 ELSE 0 END) AS unknown_count,
              COUNT(s.id) AS selection_count
       FROM dc_interactions i
@@ -942,6 +954,7 @@ export class DateCompanionMemoryBridgeRepository {
           recordingDate: row.recording_date,
           sourceState: row.source_state,
           status: row.status ?? "not_queued",
+          ...(row.status === "retryable_failed" ? { retryGrantId: row.grant_id } : {}),
           attemptCount: Number(row.attempt_count ?? 0),
           selectionCount: Number(row.selection_count ?? 0),
           unknownCount: Number(row.unknown_count ?? 0),
@@ -956,6 +969,7 @@ export class DateCompanionMemoryBridgeRepository {
     userId: string;
     interactionId: string;
     mappingVersion: number;
+    retryGrantId?: string;
     selections?: DcMemoryAdmissionInput["selections"];
     subjectSuggestionConfirmation?: DcSubjectSuggestionConfirmation;
     relationshipReconfirmation?: {
@@ -990,10 +1004,31 @@ export class DateCompanionMemoryBridgeRepository {
       if (interaction.status !== "confirmed" || interaction.source_state === "explicitly_deleted") {
         throw new DcConflictError("interaction_not_syncable");
       }
+      if (input.memoryDatabase) assertUploadCanBeAuthorized(input.memoryDatabase, input.userId, interaction.source_upload_id);
       const existingOutbox = this.database.prepare(`
         SELECT * FROM dc_memory_bridge_outbox
         WHERE user_id = ? AND interaction_id = ?
       `).get(input.userId, input.interactionId) as OutboxRow | undefined;
+      if (input.retryGrantId) {
+        if (existingOutbox?.id !== input.retryGrantId || existingOutbox.mapping_version !== input.mappingVersion
+          || !["pending","completed","retryable_failed","processing"].includes(existingOutbox.status)
+          || input.selections || input.subjectSuggestionConfirmation || input.relationshipReconfirmation) {
+          throw new DcConflictError("memory_bridge_retry_stale");
+        }
+      } else if (getInteractionGrantGeneration(this.database, input.userId, interaction.id) > 1) {
+        if (!input.subjectSuggestionConfirmation || !input.selections) {
+          throw new DcConflictError("withdrawn_grant_requires_new_confirmation");
+        }
+        // Validate before even returning a current job: replaying a previous
+        // grant's request must not receive (or wake up) its replacement.
+        validateDateCompanionSubjectSuggestionConfirmation({
+          database: this.database, userId: input.userId, interactionId: interaction.id,
+          interactionVersion: interaction.version, mappingVersion: input.mappingVersion,
+          confirmation: input.subjectSuggestionConfirmation, selections: input.selections,
+          alreadySubmitted: existingOutbox?.status === "completed" || existingOutbox?.status === "pending" || existingOutbox?.status === "retryable_failed",
+          keptEvidenceSnapshotIds: verifiedKeptEvidence(this.database, input.userId, interaction.id).map(row => row.id)
+        });
+      }
       if (existingOutbox?.status === "completed" || existingOutbox?.status === "pending") {
         const existingPayload = BridgePayloadSchema.parse(JSON.parse(existingOutbox.payload_json));
         const requestedSelections = input.selections

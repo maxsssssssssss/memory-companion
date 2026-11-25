@@ -1,5 +1,5 @@
 import type {
-  DcParticipantRole,
+  DcSpeakerReviewMutation,
   DcRecapDisposition,
   DcRecapKind
 } from "@/lib/domain/date-companion-stage2";
@@ -34,10 +34,7 @@ export type DcImportInteractionInput = {
   recapCandidates: DcImportRecapCandidate[];
 };
 
-export type DcParticipantMutation = {
-  speakerId: string;
-  role: DcParticipantRole;
-};
+export type DcParticipantMutation = DcSpeakerReviewMutation;
 
 export type DcVoiceEnrollmentSnapshotInput = {
   reviewGroupId: string;

@@ -36,11 +36,11 @@ export class PreparationSources {
     return { relationship, interactions, promises: [] };
   }
 
-  private speakerRole(accountId: string, interactionId: string, speakerId?: string): "self" | "companion" | undefined {
+  private speakerRole(accountId: string, interactionId: string, sourceSegmentId: string, speakerId?: string): "self" | "companion" | undefined {
     if (!speakerId) return undefined;
-    const row = this.database.prepare(`SELECT role FROM dc_participant_assignments
-      WHERE user_id=? AND interaction_id=? AND speaker_id=? AND confirmed_at IS NOT NULL AND confirmed_by IS NOT NULL`)
-      .get(accountId, interactionId, speakerId) as { role: string } | undefined;
+    const row = this.database.prepare(`SELECT DISTINCT role FROM dc_evidence_speaker_reviews
+      WHERE user_id=? AND interaction_id=? AND source_segment_id=? AND speaker_id=? AND confirmed_at IS NOT NULL AND confirmed_by IS NOT NULL`)
+      .get(accountId, interactionId, sourceSegmentId, speakerId) as { role: string } | undefined;
     return row?.role === "self" || row?.role === "companion" ? row.role : undefined;
   }
 
@@ -79,7 +79,7 @@ export class PreparationSources {
         const digest = dateCompanionEvidenceDigest({ userId: accountId, ...evidence });
         const provenance = this.database.prepare(`SELECT e.provenance_version, e.source_kind, p.confirmed_by
           FROM dc_evidence_snapshots e JOIN dc_recap_items r ON r.id=e.recap_item_id AND r.user_id=e.user_id
-          JOIN dc_participant_assignments p ON p.user_id=e.user_id AND p.interaction_id=r.interaction_id AND p.speaker_id=e.speaker_id
+          JOIN dc_evidence_speaker_reviews p ON p.user_id=e.user_id AND p.interaction_id=r.interaction_id AND p.evidence_id=e.id
           WHERE e.user_id=? AND e.id=?`).get(accountId, evidence.id) as { provenance_version: number; source_kind: string; confirmed_by: string | null } | undefined;
         if (!source || source.uploadId !== evidence.uploadId || evidence.contentDigest !== digest
           || provenance?.provenance_version !== DC_EVIDENCE_PROVENANCE_VERSION
@@ -101,13 +101,13 @@ export class PreparationSources {
     const memoryDatabase = this.options.memoryDatabase ?? getMemoryDatabase();
     const input = { dateCompanionDatabase: this.database, memoryDatabase, accountId, relationshipId };
     const catalog = resolveDateCompanionPersonSourceCatalog(input);
-    if (catalog.status !== "ready") return [];
+    if (catalog.status !== "ready" && catalog.status !== "withdrawn") return [];
     const direct: PreparationSource[] = catalog.sources.map(source => ({
-      id: `retained:${source.evidenceSnapshotId}`, interactionId: source.interactionId,
+      id: retainedPreparationId(source.evidenceSnapshotId, source.authorizationRevision), interactionId: source.interactionId,
       recordingDate: source.recordingDate, quote: source.quote, origin: "direct_conversation", valid: true,
-      speakerRole: this.speakerRole(accountId, source.interactionId, source.speakerId),
+      speakerRole: this.speakerRole(accountId, source.interactionId, source.sourceSegmentId, source.speakerId),
       href: `/date-companion/a/recap?interaction=${encodeURIComponent(source.interactionId)}&segment=${encodeURIComponent(source.sourceSegmentId)}#full-transcript`,
-      fingerprint: stableBridgeDigest([catalog.mappingVersion, source, this.speakerRole(accountId, source.interactionId, source.speakerId)])
+      fingerprint: stableBridgeDigest([catalog.mappingVersion, source, this.speakerRole(accountId, source.interactionId, source.sourceSegmentId, source.speakerId)])
     }));
     // This existing resolver checks publication, receipt, revocation, subject and source origin.
     // It has a bounded recent-memory projection; the full direct conversation catalog above does not.
@@ -121,28 +121,52 @@ export class PreparationSources {
     const known = new Set(direct.map(source => source.id));
     const interactions = this.view(accountId, relationshipId).interactions;
     const selfSources: PreparationSource[] = expanded?.evidence.filter(source => source.origin === "direct_conversation" && source.evidenceId.startsWith("dc_snapshot:")).flatMap(source => {
-      const id = `retained:${source.evidenceId.slice("dc_snapshot:".length)}`;
+      const id = retainedPreparationId(source.evidenceId.slice("dc_snapshot:".length), source.authorizationRevision);
       const interaction = interactions.find(item => item.sourceUploadId === source.uploadId);
       if (known.has(id) || !interaction) return [];
       return [{ id, interactionId: interaction.id, recordingDate: source.recordingDate,
         quote: source.quote, origin: "direct_conversation" as const, valid: true,
-        speakerRole: this.speakerRole(accountId, interaction.id, source.speakerId),
+        speakerRole: this.speakerRole(accountId, interaction.id, source.sourceSegmentId, source.speakerId),
         href: `/date-companion/a/recap?interaction=${encodeURIComponent(interaction.id)}&segment=${encodeURIComponent(source.sourceSegmentId)}#full-transcript`,
-        fingerprint: stableBridgeDigest([catalog.mappingVersion, source, this.speakerRole(accountId, interaction.id, source.speakerId)]) }];
+        fingerprint: stableBridgeDigest([catalog.mappingVersion, source, this.speakerRole(accountId, interaction.id, source.sourceSegmentId, source.speakerId)]) }];
     }) ?? [];
     return [...direct, ...reflections, ...selfSources];
   }
 
+  locate(accountId: string, relationshipId: string, interactionIds: string[], query?: string, allowRetained = false) {
+    const phrase = query?.trim().toLowerCase();
+    if (query !== undefined && (!phrase || phrase.length > 120)) throw new DcValidationError("invalid_search_query");
+    const view = this.scopedView(accountId, relationshipId, interactionIds);
+    const temporary = this.canonicalSources(accountId, view);
+    const eligible = [...temporary, ...(allowRetained ? this.personSources(accountId, relationshipId, true) : [])];
+    const available = eligible.length;
+    if (!phrase || !available) return { available, matches: eligible };
+
+    // A saved recap can be found by its edited text or another eligible quote in the
+    // same item. Such a locator ranks behind a direct hit in the verbatim segment.
+    const byId = new Map(temporary.map(source => [source.id, source.quote]));
+    const associated = new Map<string, string>();
+    for (const interaction of view.interactions) {
+      for (const item of interaction.recapItems) {
+        const anchors = item.evidence.filter(e => byId.has(e.id));
+        const context = [item.displayedText, ...anchors.map(e => byId.get(e.id))].join("\n").toLowerCase();
+        for (const anchor of anchors) associated.set(anchor.id, context);
+      }
+    }
+    const terms = [...new Set(phrase.split(/[\s，、；,;]+/u).filter(Boolean))];
+    const ranked = eligible.map(source => {
+      const text = source.quote.toLowerCase();
+      const context = associated.get(source.id) ?? "";
+      const direct = terms.filter(term => text.includes(term)).length;
+      const hits = terms.filter(term => text.includes(term) || context.includes(term) || source.recordingDate.includes(term)).length;
+      return {source, exact:text.includes(phrase), direct, hits};
+    }).filter(row => row.hits > 0);
+    ranked.sort((a,b) => Number(b.exact) - Number(a.exact) || b.direct - a.direct || b.hits - a.hits);
+    return { available, matches: ranked.map(row => row.source) };
+  }
+
   search(accountId: string, relationshipId: string, interactionIds: string[], query: string, allowRetained = false): PreparationSource[] {
-    const text = query.trim();
-    if (!text || text.length > 120) throw new DcValidationError("invalid_search_query");
-    const matches = this.repository.search(accountId, relationshipId, text, 100);
-    const matchedIds = new Set(matches.flatMap(item => item.evidence.map(source => source.id)));
-    const temporary = this.temporary(accountId, relationshipId, interactionIds).filter(source => matchedIds.has(source.id)
-      || source.quote.toLocaleLowerCase().includes(text.toLocaleLowerCase()) || source.recordingDate.includes(text));
-    const retained = this.personSources(accountId, relationshipId, allowRetained)
-      .filter(source => source.quote.toLocaleLowerCase().includes(text.toLocaleLowerCase()));
-    return [...temporary, ...retained].slice(0, 30);
+    return this.locate(accountId, relationshipId, interactionIds, query, allowRetained).matches.slice(0, 30);
   }
 
   read(accountId: string, relationshipId: string, interactionIds: string[], sourceId: string, allowRetained = false): PreparationSource | null {
@@ -154,11 +178,15 @@ export class PreparationSources {
 
   promises(accountId: string, relationshipId: string, interactionIds: string[], allowRetained = false) {
     const sources = [...this.temporary(accountId, relationshipId, interactionIds), ...this.personSources(accountId, relationshipId, allowRetained)];
-    const byId = new Map(sources.map(source => [source.id.replace(/^retained:/u, ""), source]));
+    const byId = new Map(sources.map(source => [source.id.replace(/^retained:/u, "").split(":grant:")[0], source]));
     return this.view(accountId, relationshipId).promises.flatMap(promise => {
       const matched = promise.evidence.map(evidence => byId.get(evidence.id));
       if (matched.length === 0 || matched.some(source => !source)) return [];
       return [{ id: promise.id, text: promise.text, status: promise.status, version: promise.version, sources: matched as PreparationSource[] }];
     });
   }
+}
+
+function retainedPreparationId(snapshotId: string, authorizationRevision?: string) {
+  return authorizationRevision ? `retained:${snapshotId}:grant:${authorizationRevision}` : `retained:${snapshotId}`;
 }

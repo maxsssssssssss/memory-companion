@@ -159,4 +159,49 @@ describe("date-companion people client", () => {
       archive: { person: { id: "person_2", displayName: "周岚" } }
     }));
   });
+
+  it("keeps a verified archive during a same-scope reread and clears it as soon as the account changes", async () => {
+    let settle: (response: Response) => void = () => {};
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValueOnce(Response.json(responseBody))
+      .mockImplementation(() => new Promise<Response>(resolve => { settle = resolve; })));
+    const { result, rerender } = renderHook(({ scope, revision }) => useDateCompanionPersonArchive("person_1", scope, revision),
+      { initialProps: {scope:"account-A/relation-A",revision:0} });
+    await waitFor(() => expect(result.current.status).toBe("ready"));
+    rerender({scope:"account-A/relation-A",revision:1});
+    expect(result.current.status).toBe("ready");
+    const late = settle;
+    rerender({scope:"account-B/relation-B",revision:1});
+    expect(result.current.status).toBe("loading");
+    await act(async () => late(Response.json(responseBody)));
+    expect(result.current.status).toBe("loading");
+    await act(async () => settle(new Response(null, {status:404})));
+    expect(result.current.status).toBe("not_found");
+  });
+
+  it("times out an unresolved initial read, permits retry, and ignores the old late response", async () => {
+    let late!: (response: Response) => void;
+    vi.stubGlobal("fetch", vi.fn().mockImplementationOnce(() => new Promise<Response>(resolve => { late = resolve; }))
+      .mockResolvedValue(Response.json(responseBody)));
+    const { result, rerender } = renderHook(({ revision }) => useDateCompanionPersonArchive("person_1", "account-A", revision, 20),
+      { initialProps: { revision: 0 } });
+    await waitFor(() => expect(result.current).toMatchObject({ status: "error", message: expect.stringContaining("超时") }));
+    rerender({ revision: 1 });
+    await waitFor(() => expect(result.current.status).toBe("ready"));
+    await act(async () => late(Response.json({ ...responseBody, timeline: [] })));
+    expect(result.current).toMatchObject({ status: "ready", archive: { entries: [{ id: "memory_1" }] } });
+  });
+
+  it.each([401, 403, 404, "invalid"] as const)("keeps verified content through a transient reread failure but clears it on lost eligibility (%s)", async invalid => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValueOnce(Response.json(responseBody))
+      .mockResolvedValueOnce(new Response(null, { status: 503 }))
+      .mockResolvedValueOnce(invalid === "invalid" ? Response.json({ ...responseBody, person: { ...responseBody.person, id: "other" } }) : new Response(null, { status: invalid })));
+    const { result, rerender } = renderHook(({ revision }) => useDateCompanionPersonArchive("person_1", "account-A", revision),
+      { initialProps: { revision: 0 } });
+    await waitFor(() => expect(result.current.status).toBe("ready"));
+    rerender({ revision: 1 });
+    await waitFor(() => expect(result.current).toMatchObject({ status: "ready", refresh: "error", archive: { entries: [{ id: "memory_1" }] } }));
+    rerender({ revision: 2 });
+    await waitFor(() => expect(result.current.status).toBe(invalid === 404 ? "not_found" : "error"));
+    expect(result.current).not.toHaveProperty("archive");
+  });
 });

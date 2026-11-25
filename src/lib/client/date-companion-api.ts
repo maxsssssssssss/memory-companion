@@ -231,6 +231,7 @@ const MemoryReviewInteractionSchema = z.object({
   recordingDate: RecordingDateSchema,
   sourceState: z.enum(["available", "server_cleaned", "explicitly_deleted"]),
   status: z.union([MemoryBridgeStatusSchema, z.literal("not_queued")]),
+  retryGrantId: DcIdSchema.optional(),
   attemptCount: z.number().int().nonnegative(),
   selectionCount: z.number().int().nonnegative(),
   unknownCount: z.number().int().nonnegative(),
@@ -259,29 +260,63 @@ const RetainedSourceSchema = z.object({
 const PersonMemoriesResponseSchema = z.object({
   memories: z.array(z.object({
     subjectPersonIds: z.array(z.string().trim().min(1).max(512)).min(1),
+    sourceAttribution: z.object({
+      origin: z.enum(["direct_conversation", "user_reflection", "unknown"]),
+      statement: z.string().trim().min(1)
+    }).optional(),
     evidenceLinks: z.array(z.object({
       personEvidence: RetainedSourceSchema,
+      memoryEvidence: z.object({
+        date: RecordingDateSchema,
+        uploadId: z.string().min(1), sourceId: z.string().min(1), quote: z.string().trim().min(1)
+      }).optional(),
       contentDigest: z.string().length(64).regex(/^[a-f0-9]+$/u).optional()
     }).passthrough())
   }).passthrough())
 }).passthrough();
 const PERSON_MEMORY_RECORD_LIMIT = 200;
+const WithdrawalPreviewSchema = z.object({
+  version: z.string().min(1),
+  totalCount: z.number().int().nonnegative(),
+  retainedCount: z.number().int().nonnegative(),
+  processingCount: z.number().int().nonnegative()
+});
 const PurgeResponseSchema = z.object({
   purge: z.object({
     purgeId: z.string().trim().min(1).max(512),
+    previewVersion: z.string().min(1).optional(),
     status: z.string().trim().min(1),
     totalCount: z.number().int().nonnegative(),
+    retainedCount: z.number().int().nonnegative(),
+    processingCount: z.number().int().nonnegative(),
+    usageStopped: z.literal(true),
     completedCount: z.number().int().nonnegative(),
     failedCount: z.number().int().nonnegative(),
     retryable: z.boolean(),
     updatedAt: z.string().datetime()
   }).strict()
 }).strict();
+export type WithdrawalPreview = z.infer<typeof WithdrawalPreviewSchema>;
+export type WithdrawalReceipt = z.infer<typeof PurgeResponseSchema>["purge"];
+const WithdrawalImpactSchema = z.object({
+  preview: WithdrawalPreviewSchema,
+  pendingCleanup: PurgeResponseSchema.shape.purge.extend({ previewVersion: z.string().min(1) }).optional()
+});
+export type WithdrawalImpact = z.infer<typeof WithdrawalImpactSchema>;
+
+export function changedWithdrawalPreview(error: unknown): WithdrawalPreview | undefined {
+  if (!(error instanceof DateCompanionApiError) || error.status !== 409 || error.code !== "withdrawal_preview_stale") return;
+  const next = z.object({ preview: WithdrawalPreviewSchema }).safeParse(error.details);
+  return next.success ? next.data.preview : undefined;
+}
 
 export type DateCompanionRetainedSource = {
   uploadId: string;
   sourceSegmentId: string;
   quote: string;
+  recordingDate?: string;
+  sourceOrigin?: "direct_conversation" | "user_reflection" | "unknown";
+  sourceStatement?: string;
   contentDigest?: string;
   subjectPersonIds: string[];
 };
@@ -316,6 +351,7 @@ export type QaConversationMessage = {
 export type CurrentInteractionQaInput = {
   uploadId: string;
   question: string;
+  priorCitations?: PersonQaInput["priorCitations"];
   conversation?: QaConversationMessage[];
   segments: TranscriptSegment[];
   audioInsights: AudioInsight[];
@@ -335,6 +371,8 @@ export type RelationshipQaInput = {
 export type PersonQaInput = {
   personId: string;
   question: string;
+  scope?: { type: "date_companion_relationship"; relationshipId: string; mappingVersion: number; withdrawalVersion?: string };
+  priorCitations?: { sourceSegmentId: string; excerpt: string; uploadId?: string; revision?: string; authorizationRevision?: string }[];
   conversation?: QaConversationMessage[];
   signal?: AbortSignal;
 };
@@ -432,6 +470,7 @@ export interface DateCompanionApi {
   getPersonRetainedSources(personId: string, signal?: AbortSignal): Promise<DateCompanionRetainedSource[]>;
   syncInteractionMemory(interactionId: string, input: {
     mappingVersion: number;
+    retryGrantId?: string;
     subjectSuggestionConfirmation?: DcSubjectSuggestionConfirmation;
     selections?: Array<{ evidenceSnapshotId: string; subject: DateCompanionMemorySubject }>;
     relationshipReconfirmation?: DateCompanionRelationshipReconfirmationRequest;
@@ -442,7 +481,8 @@ export interface DateCompanionApi {
     retryable: boolean;
     review?: DateCompanionMemoryBridgeReview;
   } | null>;
-  purgeRetainedMemory(relationshipId: string, signal?: AbortSignal): Promise<z.infer<typeof PurgeResponseSchema>["purge"]>;
+  previewRetainedMemory(relationshipId: string, signal?: AbortSignal): Promise<WithdrawalImpact>;
+  purgeRetainedMemory(relationshipId: string, previewVersion: string, signal?: AbortSignal): Promise<WithdrawalReceipt>;
 }
 
 export class DateCompanionApiError extends Error {
@@ -1005,15 +1045,24 @@ export function createDateCompanionApi(fetcher: typeof fetch = fetch): DateCompa
       const bySource = new Map<string, DateCompanionRetainedSource>();
       const conflictingSources = new Set<string>();
       for (const memory of payload.memories) {
+        if (!memory.subjectPersonIds.includes(id)) continue;
         for (const link of memory.evidenceLinks) {
           const source = link.personEvidence;
           const key = `${source.uploadId}\u0000${source.sourceSegmentId}`;
+          const saved = link.memoryEvidence;
+          if (saved && (saved.uploadId !== source.uploadId || saved.sourceId !== source.sourceSegmentId ||
+              saved.quote.normalize("NFKC") !== source.quote.normalize("NFKC"))) {
+            conflictingSources.add(key);
+            continue;
+          }
           const existing = bySource.get(key);
           if (
             existing
             && (
               existing.quote !== source.quote
               || existing.contentDigest !== link.contentDigest
+              || existing.recordingDate !== saved?.date
+              || existing.sourceOrigin !== memory.sourceAttribution?.origin
             )
           ) {
             conflictingSources.add(key);
@@ -1023,6 +1072,8 @@ export function createDateCompanionApi(fetcher: typeof fetch = fetch): DateCompa
             uploadId: source.uploadId,
             sourceSegmentId: source.sourceSegmentId,
             quote: source.quote,
+            ...(saved ? { recordingDate: saved.date } : {}),
+            ...(memory.sourceAttribution ? { sourceOrigin: memory.sourceAttribution.origin, sourceStatement: memory.sourceAttribution.statement } : {}),
             ...(link.contentDigest ? { contentDigest: link.contentDigest } : {}),
             subjectPersonIds: [...new Set([...(existing?.subjectPersonIds ?? []), ...memory.subjectPersonIds])]
           });
@@ -1044,14 +1095,25 @@ export function createDateCompanionApi(fetcher: typeof fetch = fetch): DateCompa
       return (await parseJsonResponse(response, MemorySyncResponseSchema)).bridge;
     },
 
-    async purgeRetainedMemory(relationshipId, signal) {
+    async previewRetainedMemory(relationshipId, signal) {
+      const id = assertCompanionId(relationshipId, "invalid_relationship_id");
+      const response = await sameOrigin(`/api/date-companion/relationships/${encodeURIComponent(id)}/retained-memory`, { cache: "no-store", signal });
+      return await parseJsonResponse(response, WithdrawalImpactSchema);
+    },
+    async purgeRetainedMemory(relationshipId, previewVersion, signal) {
       const id = assertCompanionId(relationshipId, "invalid_relationship_id");
       const response = await sameOrigin(`/api/date-companion/relationships/${encodeURIComponent(id)}/retained-memory`, {
         method: "DELETE",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ confirmation: "purge_retained_memory" }),
+        body: JSON.stringify({ confirmation: "purge_retained_memory", previewVersion }),
         signal
       });
+      if (response.status === 503) {
+        const payload = await responsePayload(response);
+        const result = PurgeResponseSchema.passthrough().safeParse(payload);
+        if (result.success) return result.data.purge;
+        throw apiError(response, payload);
+      }
       return (await parseJsonResponse(response, PurgeResponseSchema)).purge;
     },
 
@@ -1066,6 +1128,8 @@ export function createDateCompanionApi(fetcher: typeof fetch = fetch): DateCompa
         body: JSON.stringify({
           uploadId,
           scope: "current",
+          caller: "date_companion_current",
+          priorCitations: input.priorCitations ?? [],
           question: input.question,
           ...(input.conversation && input.conversation.length > 0 ? { conversation: input.conversation } : {}),
           promptPresetId: "date",
@@ -1144,6 +1208,7 @@ export function createDateCompanionApi(fetcher: typeof fetch = fetch): DateCompa
           },
           body: JSON.stringify({
             question: input.question,
+            ...(input.scope ? { scope: input.scope, priorCitations: input.priorCitations ?? [] } : {}),
             ...(input.conversation && input.conversation.length > 0
               ? { conversation: input.conversation }
               : {})

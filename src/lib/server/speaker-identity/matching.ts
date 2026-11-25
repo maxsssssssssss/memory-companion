@@ -58,7 +58,7 @@ export function buildSpeakerIdentityCandidates(input: {
     });
 }
 
-export function stableUnknownSpeakerId(candidate: SpeakerIdentityCandidate) {
+export function stableUnknownSpeakerId(candidate: Pick<SpeakerIdentityCandidate, "uploadId" | "chunkId" | "localSpeaker">) {
   const digest = createHash("sha256")
     .update(`${candidate.uploadId}\u001f${candidate.chunkId}\u001f${candidate.localSpeaker}`)
     .digest("hex")

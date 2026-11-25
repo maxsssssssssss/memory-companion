@@ -88,6 +88,18 @@ describe("preparation source authorization", () => {
     expect(sources.read("source_user", first.relationshipId, [], source.id)).toBeNull();
   });
 
+  it("ranks multi-term matches inside the exact consent scope and excludes archived relationships of the same account", () => {
+    const user = "two_relationships", old = seed(user,"older");
+    db.prepare("UPDATE dc_relationships SET status='archived' WHERE id=?").run(old.relationshipId);
+    const active = seed(user,"current");
+    const matches = sources.locate(user,active.relationshipId,[active.interactionId],"不匹配 云南");
+    expect(matches).toMatchObject({available:2,matches:[{interactionId:active.interactionId,quote:"下次想去云南旅行"}]});
+    expect(sources.locate(user,active.relationshipId,[old.interactionId],"旅行")).toEqual({available:0,matches:[]});
+    const candidate = matches.matches[0];
+    expect(sources.read(user,active.relationshipId,[old.interactionId],candidate.id)).toBeNull();
+    expect(sources.locate(user,active.relationshipId,[active.interactionId],"不保留")).toEqual({available:2,matches:[]});
+  });
+
   it("returns existing Promise authority only when all its original sources remain authorized", () => {
     const { relationshipId, interactionId } = seed();
     expect(sources.promises("source_user", relationshipId, [])).toEqual([]);
@@ -133,7 +145,9 @@ describe("preparation source authorization", () => {
       kind:"mentioned",proposedText:"Ta喜欢旅行",sortOrder:0,evidence:[{uploadId:"retained_upload",sourceSegmentId:"retained_segment",startSeconds:0,endSeconds:4,speakerId:"ta",quote:"我喜欢在秋天旅行"}]
     }]});
     const draft = repo.getInteractionDetail(userId,relationshipId,imported.interactionId);
-    const batch = await getOrCreateDateCompanionSubjectSuggestionBatch({database:db,userId,interactionId:imported.interactionId,provider:{model:"Qwen/Qwen3.6-27B",suggest:async entries=>entries.map(entry=>({canonicalSourceKey:entry.canonicalSourceKey,proposedSubject:"companion" as const,confidence:1,reasonCode:"explicit_companion_reference" as const}))}});
+    const batch = await getOrCreateDateCompanionSubjectSuggestionBatch({database:db,userId,interactionId:imported.interactionId,
+      draftPreview:{version:0,itemIds:draft.recapItems.map(i=>i.id),assignments:[{speakerId:"ta",role:"companion"}]},
+      provider:{model:"Qwen/Qwen3.6-27B",suggest:async entries=>entries.map(entry=>({canonicalSourceKey:entry.canonicalSourceKey,proposedSubject:"companion" as const,confidence:1,reasonCode:"explicit_companion_reference" as const}))}});
     repo.updateRecap({userId,interactionId:imported.interactionId,version:0,assignments:[{speakerId:"ta",role:"companion"}],mutations:draft.recapItems.map(item=>({id:item.id,version:0,disposition:"kept"})),finalize:true,memoryAdmission:{mappingVersion,subjectSuggestionConfirmation:{batchId:batch.batchId,evidenceDigest:batch.evidenceDigest,proposalDigest:batch.proposalDigest,confirmationFingerprint:batch.confirmationFingerprint,confirmedVisibleSuggestions:true},selections:draft.recapItems.flatMap(item=>item.evidence.map(source=>({evidenceSnapshotId:source.id,subject:"companion" as const})))}});
     repo.markUploadSourceState(userId,"retained_upload","server_cleaned");
     await processDateCompanionMemoryBridgeInteraction({dateCompanionDatabase:db,memoryDatabase:memory,userId,interactionId:imported.interactionId});

@@ -49,6 +49,15 @@ describe("CompanionTranscript", () => {
     expect(highlightedLine).toHaveFocus();
   });
 
+  it("labels the saved excerpt search, chapters and filtered counts with the same scope", () => {
+    render(<CompanionTranscript readerTitle="已保存的来源片段" scope="saved" lines={lines} />);
+    expect(screen.getByRole("heading", {name: "已存片段"})).toBeVisible();
+    expect(screen.getByText("已存 2 段")).toBeVisible();
+    fireEvent.change(screen.getByRole("searchbox", {name: "搜索已保存的片段"}), {target: {value: "手冲"}});
+    expect(screen.getByText("匹配 1 / 已存 2 段")).toBeVisible();
+    expect(screen.queryByText("完整记录")).toBeNull();
+  });
+
   it("searches only the loaded transcript and reports the filtered count", () => {
     render(<CompanionTranscript lines={lines} />);
 
@@ -98,5 +107,26 @@ describe("CompanionTranscript", () => {
     expect(highlightedLine).toHaveAttribute("aria-current", "true");
     await waitFor(() => expect(scrollIntoView).toHaveBeenCalledWith({ behavior: "smooth", block: "center" }));
     expect(highlightedLine).toHaveFocus();
+  });
+
+  it("locates an insert's source only within its owned scroll port, without moving dialog ancestors", async () => {
+    const port = document.createElement("div");
+    Object.defineProperty(port, "clientHeight", { value: 400 });
+    port.getBoundingClientRect = () => ({ top: 100 } as DOMRect);
+    port.scrollTop = 80;
+    const before = HTMLElement.prototype.getBoundingClientRect;
+    HTMLElement.prototype.getBoundingClientRect = function () {
+      return this.dataset.segmentId === "segment-earlier" ? { top: 500, height: 80 } as DOMRect : before.call(this);
+    };
+    try {
+      const { rerender } = render(<CompanionTranscript readingScrollRef={{ current: port }} readerTitle="完整记录" highlightedSegmentId="segment-earlier" lines={lines} />);
+      const target = document.getElementById("transcript-segment-earlier");
+      await waitFor(() => expect(target).toHaveFocus());
+      expect(port.scrollTop).toBe(320);
+      expect(scrollIntoView).not.toHaveBeenCalled();
+      port.scrollTop = 120;
+      rerender(<CompanionTranscript readingScrollRef={{ current: port }} readerTitle="完整记录" highlightedSegmentId="segment-earlier" lines={[...lines]} />);
+      expect(port.scrollTop).toBe(120);
+    } finally { HTMLElement.prototype.getBoundingClientRect = before; }
   });
 });

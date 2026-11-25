@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from "crypto";
 import { transcriptSpeakerLabel } from "@/lib/domain/speaker-identity";
+import { QA_INSUFFICIENT_EVIDENCE_ANSWER as SAFE_UNCERTAINTY_ANSWER } from "@/lib/domain/qa-copy";
 import type {
   AudioInsight,
   BriefItem,
@@ -33,7 +34,7 @@ import {
   type QaExecutionDiagnosticsObserver
 } from "./qa-observability";
 import {
-  QaProviderStreamError
+  QaProviderStreamError, QaTurnError
 } from "./qa-provider";
 import {
   resolveQaLlmProvider,
@@ -50,6 +51,7 @@ import {
 import {
   createSentenceCommitManager,
   summarizeSentenceCommits,
+  textOutsideQaQuotes,
   type SentenceCommitEvidence,
   type SentenceCommitManager,
   type SentenceCommitReason,
@@ -109,6 +111,8 @@ export type AnswerQuestionWithAIInput = {
   scope?: QaScope;
   /** Server-only relationship Evidence scope; never accepted from browser QA context. */
   relationshipScope?: boolean;
+  /** Preserve source kind for the date-companion paper reader. */
+  includeCitationKind?: boolean;
   qaPromptInstruction?: string;
   settingsStore?: JsonStore;
   segments: TranscriptSegment[];
@@ -140,6 +144,10 @@ export type AnswerQuestionWithAIInput = {
   retrievalSourceSegmentIds?: readonly string[];
   /** Caller-owned fail-closed policy for a model/provider contract mismatch. */
   failClosedOnModelProviderMismatch?: boolean;
+  /** Avoid an implicit second generation or HTTP retry for an explicit user turn. */
+  requireExplicitRetry?: boolean;
+  /** Recheck a mutable evidence grant immediately before dispatch. */
+  assertSourceScope?: () => void;
   /** Evaluation-only Provider usage observer. It must never alter answer generation. */
   onProviderMetrics?: QaLlmProviderMetricsObserver;
   /**
@@ -258,7 +266,6 @@ const MAX_CONVERSATION_MESSAGES = 8;
 const MAX_CONVERSATION_TEXT_LENGTH = 1200;
 const MAX_QA_PROVIDER_ANSWER_CHARACTERS = 1200;
 const MAX_VOICE_PROVISIONAL_SENTENCES = 3;
-const SAFE_UNCERTAINTY_ANSWER = "没有找到足够证据确认这个信息。";
 const MIN_LIFECYCLE_TOPIC_OVERLAP = 2;
 const qaScopeLabels: Record<QaAnswerScope, string> = {
   current: "当天证据",
@@ -1343,7 +1350,7 @@ function scopeMetadataPrompt(scope: QaAnswerScope, evidence: EvidenceItem[]) {
 
 function citationIdsFromAnswer(answer: string, evidence: EvidenceItem[]) {
   const validIds = new Set(evidence.map((_, index) => `E${index + 1}`));
-  const citedIds = [...answer.matchAll(/\[E(\d+)\]/g)]
+  const citedIds = [...textOutsideQaQuotes(answer).matchAll(/\[E(\d+)\]/g)]
     .map((match) => `E${match[1]}`)
     .filter((id) => validIds.has(id));
 
@@ -1550,6 +1557,7 @@ function buildAnswerFromAI(
       startSeconds: item.startSeconds,
       endSeconds: item.endSeconds,
       excerpt: compactText(item.text, 220),
+      ...(input.includeCitationKind ? { evidenceKind: item.kind } : {}),
       sourceSegmentIds: item.sourceSegmentIds,
       ...memoryProjection(item)
     })),
@@ -2146,7 +2154,7 @@ export function qaSelectedEvidenceCitationValidityForEvaluation(
   const citationIds = citations.map((citation) => citation.id);
   if (new Set(citationIds).size !== citationIds.length) return false;
   const inlineCitationIds = [
-    ...answer.answer.matchAll(/\[(E\d+)\]/gu)
+    ...textOutsideQaQuotes(answer.answer).matchAll(/\[(E\d+)\]/gu)
   ].map((match) => match[1]!);
   if (
     inlineCitationIds.some(
@@ -2438,6 +2446,7 @@ export async function answerQuestionWithAI(input: AnswerQuestionWithAIInput): Pr
       resolveQaLlmProvider({
         settingsStore: input.settingsStore,
         providerId: input.llmProviderId,
+        ...(input.requireExplicitRetry ? { maxRetries: 0 } : {}),
         allowQwenInProduction: input.allowQwenInProduction
       }),
       getQaPromptPreference(input.settingsStore)
@@ -2471,6 +2480,7 @@ export async function answerQuestionWithAI(input: AnswerQuestionWithAIInput): Pr
     try {
       throwIfQaAborted(input.signal);
       notifyQaExecutionMilestone(input.onExecutionMilestone, "llm_started");
+      input.assertSourceScope?.();
       answerText = await llmProvider.answerText(
         systemPrompt,
         userPrompt,
@@ -2496,6 +2506,7 @@ export async function answerQuestionWithAI(input: AnswerQuestionWithAIInput): Pr
     return complete(finalized.answer, finalized.fallbackReason);
   } catch (error) {
     if (isQaAbort(error, input.signal)) throw qaAbortError(input.signal);
+    if (input.requireExplicitRetry) throw error;
     if (isQaModelProviderMismatchError(error)) {
       const mismatchedModel = (error as Error & { model?: unknown }).model;
       if (typeof mismatchedModel === "string" && mismatchedModel.trim()) {
@@ -2674,6 +2685,7 @@ export async function* answerQuestionStream(
       resolveQaLlmProvider({
         settingsStore: input.settingsStore,
         providerId: input.llmProviderId,
+        ...(input.requireExplicitRetry ? { maxRetries: 0 } : {}),
         allowQwenInProduction: input.allowQwenInProduction
       }),
       getQaPromptPreference(input.settingsStore)
@@ -2707,6 +2719,7 @@ export async function* answerQuestionStream(
     try {
       throwIfQaAborted(input.signal);
       notifyQaExecutionMilestone(input.onExecutionMilestone, "llm_started");
+      input.assertSourceScope?.();
       for await (const delta of llmProvider.answerTextStream(
         systemPrompt,
         userPrompt,
@@ -2818,6 +2831,13 @@ export async function* answerQuestionStream(
     );
     if (isQaAbort(streamError, input.signal)) {
       throw qaAbortError(input.signal);
+    }
+    if (input.requireExplicitRetry) {
+      if (streamError instanceof QaTurnError) throw streamError;
+      const refused = streamError instanceof QaProviderStreamError
+        ? streamError.code !== "incomplete_stream"
+        : typeof (streamError as { status?: unknown } | null)?.status === "number";
+      throw new QaTurnError(streamAttempted && !refused ? "qa_result_unconfirmed" : "qa_provider_failed");
     }
     source = "non_stream_fallback";
     fallbackReason ??= streamError instanceof QaProviderStreamError

@@ -1,6 +1,7 @@
 import { DcIdSchema } from "@/lib/domain/date-companion-stage2";
 import {
   getDateCompanionDatabase,
+  getDateCompanionWithdrawalPreview,
   purgeDateCompanionRetainedMemory
 } from "@/lib/server/date-companion";
 import {
@@ -14,12 +15,33 @@ import {
   privateMemoryResponse
 } from "@/lib/server/date-companion/memory-bridge-api";
 import { getMemoryDatabase } from "@/lib/server/memory";
+import { DcConflictError } from "@/lib/server/date-companion/errors";
 import { resolvePipelineExecutionMode } from "@/lib/server/queue/config";
 import { enqueueEmbeddingIndexJob } from "@/lib/server/queue/producer";
 import { resolveQaHybridRetrievalMode } from "@/lib/server/retrieval/hybrid/runtime-config";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+
+export async function GET(
+  request: Request,
+  { params }: { params: Promise<{ relationshipId: string }> }
+) {
+  const auth = await dateCompanionAuth(request);
+  if ("response" in auth) return privateMemoryResponse(auth.response);
+  const id = DcIdSchema.safeParse((await params).relationshipId);
+  if (!id.success) return privateMemoryJson({ error: "invalid_relationship_id" }, 400);
+  try {
+    return privateMemoryJson(getDateCompanionWithdrawalPreview({
+      dateCompanionDatabase: getDateCompanionDatabase(), memoryDatabase: getMemoryDatabase(),
+      userId: auth.authContext.user.id, relationshipId: id.data
+    }));
+  } catch (error) {
+    const response = dateCompanionErrorResponse(error);
+    if (response) return privateMemoryResponse(response);
+    throw error;
+  }
+}
 
 export async function DELETE(
   request: Request,
@@ -34,12 +56,21 @@ export async function DELETE(
   const body = DateCompanionRetainedMemoryPurgeRequestSchema.safeParse(raw.value);
   if (!body.success) return privateMemoryJson({ error: "purge_confirmation_required" }, 400);
   try {
-    const purge = purgeDateCompanionRetainedMemory({
+    const scope = {
       dateCompanionDatabase: getDateCompanionDatabase(),
       memoryDatabase: getMemoryDatabase(),
       userId: auth.authContext.user.id,
       relationshipId: id.data
-    });
+    };
+    let purge;
+    try {
+      purge = purgeDateCompanionRetainedMemory({ ...scope, previewVersion: body.data.previewVersion });
+    } catch (error) {
+      if (error instanceof DcConflictError && error.code === "withdrawal_preview_stale") {
+        return privateMemoryJson({ error: error.code, ...getDateCompanionWithdrawalPreview(scope) }, 409);
+      }
+      throw error;
+    }
     if (
       purge.completedCount > 0 &&
       resolvePipelineExecutionMode() === "queue" &&
@@ -48,7 +79,7 @@ export async function DELETE(
       await enqueueEmbeddingIndexJob({
         version: 1,
         userRef: auth.authContext.user.id,
-        reason: "upload_deleted"
+        reason: "manual"
       }).catch((error: unknown) => {
         console.warn(
           `[hybrid-index-worker] enqueue_failed reason=retained_memory_purge ` +

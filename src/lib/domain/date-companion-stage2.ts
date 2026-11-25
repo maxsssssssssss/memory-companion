@@ -94,9 +94,36 @@ export const DcEvidenceSnapshotSchema = z.object({
   message: "endSeconds must be greater than startSeconds"
 });
 
+export const DcReviewedSegmentSchema = z.object({
+  sourceSegmentId: z.string().min(1).max(512),
+  contentDigest: z.string().regex(/^[a-f0-9]{64}$/u),
+  role: DcResolvedParticipantRoleSchema
+}).strict();
+export type DcReviewedSegment = z.infer<typeof DcReviewedSegmentSchema>;
+
+const ReviewedSegmentsSchema = z.array(DcReviewedSegmentSchema).max(2_000);
+const ParticipantMutationSchema = z.object({
+  speakerId: z.string().min(1).max(512),
+  role: DcParticipantRoleSchema,
+  reviewedSegments: ReviewedSegmentsSchema.optional()
+}).strict().refine(a => !a.reviewedSegments || a.role === "unresolved", {
+  message: "Individual segments cannot establish a group identity"
+});
+export type DcSpeakerReviewMutation = z.infer<typeof ParticipantMutationSchema>;
+
+// An explicit draft preview carries review decisions, never source text or new grants.
+export const DcSubjectDraftPreviewSchema = z.object({
+  version: DcVersionSchema,
+  itemIds: z.array(DcIdSchema).min(1),
+  assignments: z.array(ParticipantMutationSchema).refine(choices => choices.every(choice =>
+    !choice.reviewedSegments || new Set(choice.reviewedSegments.map(segment => segment.sourceSegmentId)).size === choice.reviewedSegments.length))
+}).strict();
+export type DcSubjectDraftPreview = z.infer<typeof DcSubjectDraftPreviewSchema>;
+
 export const DcParticipantAssignmentSchema = z.object({
   speakerId: z.string().min(1).max(512),
   reviewGroupId: DcIdSchema.optional(),
+  reviewedSegments: ReviewedSegmentsSchema.optional(),
   audioSampleAvailable: z.literal(true).optional(),
   voiceEnrollmentEligible: z.literal(true).optional(),
   role: DcParticipantRoleSchema,
@@ -219,10 +246,7 @@ export const DcImportInteractionResponseSchema = z.object({
 
 export const DcUpdateParticipantsRequestSchema = z.object({
   version: DcVersionSchema,
-  assignments: z.array(z.object({
-    speakerId: z.string().min(1).max(512),
-    role: DcParticipantRoleSchema
-  }).strict()).min(1)
+  assignments: z.array(ParticipantMutationSchema).min(1)
 }).strict();
 
 export const DcRecapItemMutationSchema = z.object({
@@ -233,14 +257,12 @@ export const DcRecapItemMutationSchema = z.object({
 }).strict();
 export const DcUpdateRecapRequestSchema = z.object({
   version: DcVersionSchema,
-  assignments: z.array(z.object({
-    speakerId: z.string().min(1).max(512),
-    role: DcParticipantRoleSchema
-  }).strict()).min(1).optional(),
+  assignments: z.array(ParticipantMutationSchema).min(1).optional(),
   items: z.array(DcRecapItemMutationSchema).default([]),
   voiceEnrollmentIntents: z.array(z.object({
     speakerIds: z.array(z.string().trim().min(1).max(512)).min(1).max(16)
   }).strict()).max(1).optional(),
+  skipMemoryAdmission: z.literal(true).optional(),
   memoryAdmission: z.object({
     mappingVersion: z.number().int().positive(),
     subjectSuggestionConfirmation: DcSubjectSuggestionConfirmationSchema.optional(),
@@ -258,6 +280,8 @@ export const DcUpdateRecapRequestSchema = z.object({
   message: "Voice enrollment intents can only be submitted with final confirmation"
 }).refine((input) => input.finalize || input.memoryAdmission === undefined, {
   message: "Memory admission can only be submitted with final confirmation"
+}).refine((input) => !input.skipMemoryAdmission || (input.finalize && !input.memoryAdmission), {
+  message: "Skipping memory admission requires final confirmation without memory selections"
 });
 
 export const DcSubjectSuggestionSchema = z.object({

@@ -3,6 +3,8 @@ import type Database from "better-sqlite3";
 import { openMemoryDatabase } from "@/lib/server/memory/db";
 import { MEMORY_SCHEMA_VERSION, migrateMemorySchema } from "@/lib/server/memory/schema";
 import { createMemoryRepository } from "@/lib/server/memory/repository";
+import { createDailyReflectionMemoryPublicationRepository } from "@/lib/server/memory/daily-reflection-publication";
+import { validatePersonTranscriptEvidence } from "@/lib/server/person/evidence";
 import { captureRetainedMemoryEvidenceProvenance } from "@/lib/server/memory/retention-provenance";
 import { deleteMemoryUploadAndRefreshIndex } from "@/lib/server/memory/upload-deletion";
 import { createPersonMemoryRepository } from "@/lib/server/person/memory-repository";
@@ -19,7 +21,12 @@ import {
   requeueCompletedLegacyMemoryProjections,
   validateMemoryBridgePersonMapping
 } from "./memory-bridge-consumer";
-import { purgeDateCompanionRetainedMemory } from "./memory-bridge-purge";
+import { getDateCompanionWithdrawalPreview, purgeDateCompanionRetainedMemory } from "./memory-bridge-purge";
+import {
+  cleanupDateCompanionGrantProjection, fenceDateCompanionGrantProjection,
+  getFencedDateCompanionGrantCategory, hasDateCompanionGrantProjection
+} from "./memory-grant-projection";
+import * as grantProjection from "./memory-grant-projection";
 import { getOrCreateDateCompanionSubjectSuggestionBatch } from "./subject-suggestions";
 import { DATE_COMPANION_SCHEMA_VERSION } from "./schema";
 import {
@@ -290,11 +297,19 @@ describe("Memory-Date Companion bridge", () => {
     return { relationship, imported };
   }
 
-  async function subjectConfirmation(interactionId: string) {
+  async function subjectConfirmation(interactionId: string, keptIds?: string[]) {
+    const interaction = dcDatabase.prepare("SELECT status,version FROM dc_interactions WHERE user_id=? AND id=?")
+      .get("user_a", interactionId) as {status:string; version:number};
+    const items = dcDatabase.prepare("SELECT id FROM dc_recap_items WHERE user_id=? AND interaction_id=?")
+      .all("user_a",interactionId) as Array<{id:string}>;
     const batch = await getOrCreateDateCompanionSubjectSuggestionBatch({
       database: dcDatabase,
       userId: "user_a",
       interactionId,
+      draftPreview: interaction.status === "draft" ? {
+        version: interaction.version, itemIds: keptIds ?? items.map(i=>i.id),
+        assignments: [{speakerId:"speaker_0",role:"self"},{speakerId:"speaker_1",role:"companion"}]
+      } : undefined,
       provider: {
         model: "Qwen/Qwen3.6-27B",
         suggest: async (sources) => sources.map((source) => ({
@@ -413,8 +428,8 @@ describe("Memory-Date Companion bridge", () => {
     return { imported, item, relationship };
   }
 
-  async function completeRetainedBridge() {
-    seedPeople();
+  async function completeRetainedBridge(afterMemoryCommit?: () => void | Promise<void>, existingPeople = false) {
+    if (!existingPeople) seedPeople();
     seedMemory();
     const { relationship, imported } = importDraft();
     const bridge = createDateCompanionMemoryBridgeRepository(dcDatabase);
@@ -476,10 +491,140 @@ describe("Memory-Date Companion bridge", () => {
       dateCompanionDatabase: dcDatabase,
       memoryDatabase,
       userId: "user_a",
-      interactionId: imported.interactionId
+      interactionId: imported.interactionId,
+      afterMemoryCommit
     });
     return { relationship, imported, bridge };
   }
+
+  it("R14 fences person timeline, memories and relations before cleanup while preserving another product on the same upload", async () => {
+    const { imported, relationship } = await completeRetainedBridge();
+    const { id } = dcDatabase.prepare("SELECT id FROM dc_memory_bridge_outbox WHERE interaction_id=?")
+      .get(imported.interactionId) as { id: string };
+    const grant = { userId: "user_a", uploadId: "upload_1", relationshipId: relationship.id,
+      interactionId: imported.interactionId, outboxId: id, generation: 1 };
+    const memory = createMemoryRepository(memoryDatabase);
+    const person = createPersonMemoryRepository(memoryDatabase);
+    const query = { accountId: grant.userId, personId: "person_ta" };
+    const getCards = () => memory.getRelevantMemories({ userId: grant.userId, uploadId: grant.uploadId });
+    const original = getCards().find((card) => card.evidence.some((e) => e.sourceId === "segment_companion"))!;
+
+    // Same upload, canonical segment and quote, but an independently contributed card/ID.
+    const independent = {
+      ...original, id: "standalone_memory", title: "独立产品的复盘", summary: "独立产品的复盘",
+      evidence: [{ ...original.evidence[0]!, id: "standalone_evidence" }]
+    };
+    const transcript = await validatePersonTranscriptEvidence({
+      store: transcriptStore() as unknown as Pick<JsonStore, "read">,
+      authenticatedAccountId: grant.userId, accountId: grant.userId, uploadId: grant.uploadId,
+      sourceSegmentId: "segment_companion", quote: independent.evidence[0]!.quote
+    });
+    const reflection = createDailyReflectionMemoryPublicationRepository(memoryDatabase);
+    reflection.publish({
+      id: "reflection_publication", userId: grant.userId, uploadId: grant.uploadId,
+      reflectionId: "reflection", confirmationId: "confirmation", confirmationFingerprint: "fingerprint",
+      payloadDigest: "d".repeat(64), sourceOrigin: "user_reflection", now: NOW,
+      contentKind: "user_confirmed_derived_content", sourceSegments: [transcript.segment],
+      candidates: [{
+        candidateId: "reflection_candidate", operationKey: "reflection_operation",
+        status: "admitted", reasonCode: null, memory: independent,
+        ownerAttribution: {
+          version: 1, memoryId: independent.id, memoryType: independent.type, scope: "unknown",
+          owner: { type: "unknown", confidence: 0, source: "unknown" }, participants: [],
+          evidenceSegmentIds: [transcript.sourceSegmentId], observations: [], reasons: ["owner_not_applicable"]
+        },
+        subjectPersonId: "person_self", subjectEvidence: [transcript],
+        evidenceDigests: [{ memoryEvidenceId: "standalone_evidence",
+          sourceSegmentId: transcript.sourceSegmentId, contentDigest: "e".repeat(64) }]
+      }]
+    });
+    expect(getCards().map((card) => card.id)).toContain(original.id);
+    expect(getCards().map((card) => card.id)).not.toContain("standalone_memory");
+    expect(person.getPersonTimeline(query)?.timeline.find((entry) => entry.memory.id === original.id)?.sourceAttribution.origin)
+      .toBe("direct_conversation");
+    // The independently published source has its own explicit subject and receipt.
+    reflection.markPublished({ userId: grant.userId, reflectionId: "reflection", now: NOW });
+    expect(getCards().map((card) => card.id)).toEqual(expect.arrayContaining([original.id, "standalone_memory"]));
+    expect(person.getPersonTimeline(query)?.timeline.some((entry) => entry.memory.id === original.id)).toBe(true);
+    expect(hasDateCompanionGrantProjection(memoryDatabase, grant)).toBe(true);
+
+    // Fence alone, before the deferred/outbox-scoped receipt cleanup.
+    fenceDateCompanionGrantProjection(memoryDatabase, grant);
+    expect(getFencedDateCompanionGrantCategory(memoryDatabase, grant)).toBe("retained");
+    expect(getCards().map((card) => card.id)).toEqual(["standalone_memory"]);
+    expect(person.getPersonTimeline({ ...query, personId: "person_self" })?.timeline)
+      .toEqual([expect.objectContaining({ memory: expect.objectContaining({ id: "standalone_memory" }),
+        sourceAttribution: expect.objectContaining({ origin: "user_reflection" }) })]);
+    expect(person.getPersonMemories(query)?.memories.some((entry) => entry.memory.id === original.id)).toBe(false);
+    expect(person.getPersonTimeline(query)?.timeline.some((entry) => entry.memory.id === original.id)).toBe(false);
+    expect(memory.getMemoryRelations(grant.userId).some((edge) => [edge.sourceMemoryId, edge.targetMemoryId].includes(original.id))).toBe(false);
+    expect(memoryDatabase.prepare("SELECT 1 FROM person_evidence_dc_links WHERE account_id=?").get(grant.userId)).toBeUndefined();
+    expect(memoryDatabase.prepare("SELECT 1 FROM memory_upload_tombstones").get()).toBeUndefined();
+    expect(memoryDatabase.prepare("SELECT 1 FROM dc_memory_bridge_receipts WHERE dc_outbox_id=?").get(id)).toBeTruthy();
+    expect(hasDateCompanionGrantProjection(memoryDatabase, grant)).toBe(false);
+    cleanupDateCompanionGrantProjection(memoryDatabase, grant);
+    cleanupDateCompanionGrantProjection(memoryDatabase, grant);
+    expect(getCards().map((card) => card.id)).toEqual(["standalone_memory"]);
+  });
+
+  it("R14 preserves the same person's grant from another relationship and another account's card", async () => {
+    const other = await processSinglePromiseCandidate({ uploadId: "other_relationship_upload", segmentId: "other_segment",
+      quote: "我答应明天联系展览馆，确认想去看展的时间。" });
+    const memory = createMemoryRepository(memoryDatabase);
+    const original = memory.getRelevantMemories({ userId: "user_a", uploadId: "other_relationship_upload" })[0]!;
+    expect(original.evidence[0]!.sourceId).toBe("other_segment");
+    // Only one active DC relationship is allowed. Keep the previous one archived
+    // with the same pair of confirmed people, then create the current relationship.
+    dcDatabase.prepare("UPDATE dc_relationships SET status='archived' WHERE id=?").run(other.relationship.id);
+    const { relationship } = await completeRetainedBridge(undefined, true);
+    memory.replaceUploadMemories({ userId: "user_b", uploadId: "upload_1", memories: [{
+      ...original, id: "other_account_same_upload", evidence: [{ ...original.evidence[0]!,
+        id: "other_account_evidence", uploadId: "upload_1" }]
+    }] });
+    const scope = { dateCompanionDatabase: dcDatabase, memoryDatabase, userId: "user_a", relationshipId: relationship.id };
+    const {preview} = getDateCompanionWithdrawalPreview(scope);
+    expect(preview).toMatchObject({ totalCount: 1, retainedCount: 1 });
+    expect(purgeDateCompanionRetainedMemory({ ...scope, previewVersion: preview.version })).toMatchObject({ completedCount: 1 });
+    expect(memory.getRelevantMemories({ userId: "user_b" }).map((m) => m.id)).toEqual(["other_account_same_upload"]);
+    expect(memory.getRelevantMemories({ userId: "user_a" }).map((m) => m.id)).toEqual([original.id]);
+    expect(memoryDatabase.prepare("SELECT DISTINCT dc_relationship_id FROM person_evidence_dc_links").all())
+      .toEqual([{ dc_relationship_id: other.relationship.id }]);
+    expect(dcDatabase.prepare("SELECT status FROM dc_memory_bridge_outbox WHERE interaction_id=?")
+      .get(other.imported.interactionId)).toEqual({ status: "completed" });
+  });
+
+  it("R14 refuses a historical permanent upload tombstone even if a matching worker receipt survived", async () => {
+    await expect(completeRetainedBridge(() => {
+      throw new Error("simulated_missing_ack");
+    })).rejects.toThrow("simulated_missing_ack");
+    const original = memoryDatabase.prepare("SELECT dc_interaction_id AS interactionId FROM dc_memory_bridge_receipts")
+      .get() as { interactionId: string };
+    memoryDatabase.prepare(`INSERT INTO memory_upload_tombstones (user_id,upload_id,reason,deleted_at)
+      VALUES ('user_a','upload_1','upload_deleted',?)`).run(NOW);
+    await expect(processDateCompanionMemoryBridgeInteraction({
+      dateCompanionDatabase: dcDatabase, memoryDatabase, userId: "user_a", interactionId: original.interactionId
+    })).rejects.toThrow("memory_bridge_source_deleted");
+    expect(dcDatabase.prepare("SELECT status FROM dc_memory_bridge_outbox WHERE interaction_id=?").get(original.interactionId))
+      .toEqual({ status: "needs_review" });
+  });
+
+  it("R14 withdraws after a real Memory commit before the worker acknowledges the old lease", async () => {
+    let receipt;
+    await expect(completeRetainedBridge(() => {
+      const { relationship_id, status } = dcDatabase.prepare("SELECT relationship_id,status FROM dc_memory_bridge_outbox")
+        .get() as { relationship_id: string; status: string };
+      expect(status).toBe("processing");
+      const scope = { userId: "user_a", relationshipId: relationship_id, dateCompanionDatabase: dcDatabase, memoryDatabase };
+      const { preview } = getDateCompanionWithdrawalPreview(scope);
+      expect(preview.retainedCount).toBe(1);
+      receipt = purgeDateCompanionRetainedMemory({ ...scope, previewVersion: preview.version });
+    })).rejects.toThrow();
+    expect(receipt).toMatchObject({ usageStopped: true, completedCount: 1 });
+    expect(memoryDatabase.prepare("SELECT 1 FROM memory_evidence").get()).toBeUndefined();
+    expect(dcDatabase.prepare("SELECT 1 FROM dc_memory_bridge_outbox").get()).toBeUndefined();
+    expect(memoryDatabase.prepare("SELECT 1 FROM dc_memory_bridge_receipts").get()).toBeUndefined();
+    expect(dcDatabase.prepare("SELECT status FROM dc_interactions").get()).toEqual({ status: "confirmed" });
+  });
 
   async function prepareLegacyCompletedProjection() {
     seedPeople();
@@ -498,7 +643,7 @@ describe("Memory-Date Companion bridge", () => {
     const admittedItem = detail.recapItems.find((item) =>
       item.evidence.some((evidence) => evidence.sourceSegmentId === "segment_companion")
     )!;
-    const confirmation = await subjectConfirmation(imported.interactionId);
+    const confirmation = await subjectConfirmation(imported.interactionId, [admittedItem.id]);
     dcRepository.updateRecap({
       userId: "user_a",
       interactionId: imported.interactionId,
@@ -680,7 +825,7 @@ describe("Memory-Date Companion bridge", () => {
     const rejectedItem = detail.recapItems.find((item) =>
       item.evidence.some((evidence) => evidence.sourceSegmentId === "segment_formal_rejected")
     )!;
-    const confirmation = await subjectConfirmation(imported.interactionId);
+    const confirmation = await subjectConfirmation(imported.interactionId, [rejectedItem.id]);
     dcRepository.updateRecap({
       userId: "user_a",
       interactionId: imported.interactionId,
@@ -1209,7 +1354,8 @@ describe("Memory-Date Companion bridge", () => {
       DROP TABLE person_evidence_dc_links;
       DROP TABLE dc_retained_uploads;
       DROP TABLE memory_evidence_provenance;
-      DELETE FROM schema_migrations WHERE version = 9;
+      DROP TABLE dc_memory_withdrawn_projections;
+      DELETE FROM schema_migrations WHERE version IN (9, 15);
     `);
     migrateMemorySchema(memoryDatabase);
     expect(repository.getRelevantMemories({ userId: "user_a" })).toEqual(before);
@@ -1276,6 +1422,32 @@ describe("Memory-Date Companion bridge", () => {
     });
     expect(memoryDatabase.prepare("SELECT COUNT(*) AS count FROM memory_evidence_provenance").get())
       .toEqual({ count: 2 });
+  });
+
+  it("saves an explicitly recap-only confirmation without queuing memory under an enabled, mapped relationship", () => {
+    const { relationship, imported } = importDraft();
+    const bridge = createDateCompanionMemoryBridgeRepository(dcDatabase);
+    expect(bridge.getRetentionSetting("user_a").enabled).toBe(true);
+    const mapping = bridge.putPersonMapping({
+      userId:"user_a", relationshipId:relationship.id, selfPersonId:"person_self",
+      companionPersonId:"person_ta", relationshipType:"dating", expectedVersion:0
+    });
+    const detail = dcRepository.getInteractionDetail("user_a",relationship.id,imported.interactionId);
+    const confirmation = {
+      userId:"user_a", interactionId:imported.interactionId, version:0, finalize:true,
+      assignments:[{speakerId:"speaker_0", role:"self" as const},{speakerId:"speaker_1",role:"companion" as const}],
+      mutations:detail.recapItems.map(item => ({id:item.id,version:item.version,disposition:"kept" as const})),
+    };
+    const skip = {...confirmation,skipMemoryAdmission:true as const};
+    expect(() => dcRepository.updateRecap({...skip,memoryAdmission:{mappingVersion:mapping.version,selections:[]}}))
+      .toThrow("invalid_memory_admission_choice");
+    expect(dcRepository.updateRecap(skip)).toEqual({idempotent:false});
+    expect(dcRepository.updateRecap(skip)).toEqual({idempotent:true});
+    expect(bridge.getInteractionBridgeStatus("user_a",imported.interactionId)).toBeNull();
+    expect(dcRepository.getInteractionDetail("user_a",relationship.id,imported.interactionId).status).toBe("confirmed");
+    expect(() => dcRepository.updateRecap(confirmation)).toThrow("confirmation_payload_conflict");
+    expect(() => dcRepository.updateRecap({...confirmation,memoryAdmission:{mappingVersion:mapping.version,selections:[]}}))
+      .toThrow("confirmation_payload_conflict");
   });
 
   it("keeps an explicit opt-out fail-closed for Memory admission", () => {
@@ -1373,6 +1545,9 @@ describe("Memory-Date Companion bridge", () => {
     expect(bridge.getInteractionBridgeStatus("user_a", imported.interactionId))
       .toMatchObject({ status: "waiting_for_cleanup", attemptCount: 0 });
     expect(bridge.claimNext()).toBeNull();
+    // Turning off future grants leaves this already-submitted task and its
+    // eventual retained evidence available throughout the rest of the test.
+    bridge.putRetentionSetting({userId: "user_a", enabled: false, expectedVersion: 0});
 
     await captureRetainedMemoryEvidenceProvenance({
       database: memoryDatabase,
@@ -1467,37 +1642,131 @@ describe("Memory-Date Companion bridge", () => {
       recapCandidates: []
     });
 
-    const purged = purgeDateCompanionRetainedMemory({
+    const scope = {
       dateCompanionDatabase: dcDatabase,
       memoryDatabase,
       userId: "user_a",
       relationshipId: relationship.id
-    });
+    };
+    const {preview} = getDateCompanionWithdrawalPreview(scope);
+    expect(preview).toMatchObject({ retainedCount: 1, processingCount: 0, totalCount: 1 });
+    const purged = purgeDateCompanionRetainedMemory({ ...scope, previewVersion: preview.version });
     expect(purged).toMatchObject({
       status: "completed",
-      totalCount: 2,
-      completedCount: 2,
+      totalCount: 1,
+      completedCount: 1,
       failedCount: 0
     });
     expect(createMemoryRepository(memoryDatabase).getRelevantMemories({ userId: "user_a" }))
-      .toEqual([]);
+      .toContainEqual(expect.objectContaining({ id: "memory_unretained" }));
     expect(memoryDatabase.prepare(`
       SELECT upload_id FROM memory_upload_tombstones
       WHERE user_id = 'user_a' ORDER BY upload_id
-    `).all()).toEqual([
-      { upload_id: "upload_1" },
-      { upload_id: "upload_unretained" }
-    ]);
-    expect(memoryDatabase.prepare("SELECT COUNT(*) AS count FROM dc_memory_bridge_receipts").get())
-      .toEqual({ count: 0 });
+    `).all()).toEqual([]);
     expect(dcRepository.getRelationshipView("user_a", relationship.id).interactions)
       .toHaveLength(2);
-    expect(purgeDateCompanionRetainedMemory({
-      dateCompanionDatabase: dcDatabase,
-      memoryDatabase,
-      userId: "user_a",
-      relationshipId: relationship.id
-    })).toMatchObject({ status: "completed", completedCount: 2 });
+    expect(purgeDateCompanionRetainedMemory({ ...scope, previewVersion: preview.version })).toEqual(purged);
+  });
+
+  it("binds withdrawal to the preview, independently retires old grants and accepts a fresh explicit grant", async () => {
+    seedPeople();
+    const {relationship} = importDraft("user_a", "draft_only");
+    importDraft("user_b", "unrelated_account");
+    const scope = {dateCompanionDatabase: dcDatabase, memoryDatabase, userId: "user_a", relationshipId: relationship.id};
+    const bridge = createDateCompanionMemoryBridgeRepository(dcDatabase);
+    const mapping = bridge.putPersonMapping({
+      userId: "user_a", relationshipId: relationship.id, selfPersonId: "person_self",
+      companionPersonId: "person_ta", relationshipType: "dating", expectedVersion: 0
+    });
+    function saveOnce(uploadId: string) {
+      const {imported} = importDraft("user_a", uploadId);
+      const view = dcRepository.getInteractionDetail("user_a", relationship.id, imported.interactionId);
+      const keep = view.recapItems.find(item => item.kind === "mentioned")!;
+      dcRepository.updateRecap({
+        userId: "user_a", interactionId: imported.interactionId, version: 0, finalize: true, skipMemoryAdmission: true,
+        assignments: [{speakerId: "speaker_0", role: "self"}, {speakerId: "speaker_1", role: "companion"}],
+        mutations: view.recapItems.map(item => ({
+          id: item.id, version: 0, disposition: item.id === keep.id ? "kept" : "excluded"
+        }))
+      });
+      return {interactionId: imported.interactionId, selections: [{evidenceSnapshotId: keep.evidence[0].id, subject: "companion" as const}]};
+    }
+    const operations = {userId: "user_a", memoryDatabase, mappingVersion: mapping.version};
+    const onlyHere = saveOnce("only_here");
+    const classified = saveOnce("only_suggested");
+    await subjectConfirmation(classified.interactionId);
+    const first = saveOnce("withdraw_then_readmit");
+    const second = saveOnce("added_during_preview");
+    const getPreview = () => getDateCompanionWithdrawalPreview(scope).preview;
+    const withdraw = (version: string) => purgeDateCompanionRetainedMemory({...scope, previewVersion: version});
+    expect(getPreview()).toMatchObject({totalCount: 0});
+    expect(() => getDateCompanionWithdrawalPreview({...scope, userId: "user_b"})).toThrow("Relationship not found");
+    const originalProof = await subjectConfirmation(first.interactionId);
+    const oldRequest = {...operations, ...first, subjectSuggestionConfirmation: originalProof};
+    const original = bridge.queueInteractionSync(oldRequest)!;
+    const initial = getPreview();
+    expect(initial).toMatchObject({totalCount: 1, retainedCount: 0, processingCount: 1});
+    expect(dcDatabase.prepare("SELECT COUNT(*) AS n FROM dc_memory_withdrawals").get()).toEqual({n: 0});
+    const lateProof = await subjectConfirmation(second.interactionId);
+    bridge.queueInteractionSync({...operations, ...second, subjectSuggestionConfirmation: lateProof});
+    expect(() => withdraw(initial.version)).toThrow("withdrawal_preview_stale");
+    const current = getPreview();
+    expect(current).toMatchObject({totalCount: 2, retainedCount: 0, processingCount: 2});
+
+    // Reproduce a commit gap with the original grant already denied in Memory.
+    grantProjection.fenceDateCompanionGrantProjection(memoryDatabase, {
+      ...scope, uploadId: "withdraw_then_readmit", interactionId: first.interactionId,
+      generation: 1, outboxId: original.id, category: "processing"
+    });
+    expect(getPreview()).toEqual(current);
+    const cleanup = vi.spyOn(grantProjection, "cleanupDateCompanionGrantProjection")
+      .mockImplementationOnce(() => { throw new Error("isolated_cleanup_failure"); });
+    const removed = withdraw(current.version);
+    expect(removed).toMatchObject({usageStopped: true, totalCount: 2, completedCount: 1, failedCount: 1, retryable: true});
+    expect(getDateCompanionWithdrawalPreview(scope).pendingCleanup?.previewVersion).toBe(current.version);
+    expect(getPreview().totalCount).toBe(0);
+    expect(dcDatabase.prepare("SELECT upload_id FROM dc_memory_withdrawn_grants ORDER BY upload_id").all())
+      .toEqual([{upload_id: "added_during_preview"}, {upload_id: "withdraw_then_readmit"}]);
+    expect(memoryDatabase.prepare("SELECT COUNT(*) AS n FROM memory_upload_tombstones").get()).toEqual({n: 0});
+    expect(() => bridge.queueInteractionSync({...operations, interactionId: first.interactionId})).toThrow("withdrawn_grant_requires_new_confirmation");
+    expect(() => bridge.queueInteractionSync(oldRequest)).toThrow("subject_suggestion_evidence_stale");
+    const freshProof = await subjectConfirmation(first.interactionId);
+    expect(freshProof.batchId).not.toBe(originalProof.batchId);
+    const freshRequest = {...operations, ...first, subjectSuggestionConfirmation: freshProof};
+    const fresh = bridge.queueInteractionSync(freshRequest)!;
+    expect(fresh.id).not.toBe(original.id);
+    expect(fresh.idempotency_key).not.toBe(original.idempotency_key);
+    expect(bridge.queueInteractionSync(freshRequest)?.id).toBe(fresh.id);
+    bridge.putRetentionSetting({userId: "user_a", enabled: false, expectedVersion: 0});
+    expect(bridge.queueInteractionSync(freshRequest)?.id).toBe(fresh.id);
+    await expect(subjectConfirmation(onlyHere.interactionId)).rejects.toThrow("memory_retention_disabled");
+    dcDatabase.prepare("UPDATE dc_memory_bridge_outbox SET status='retryable_failed' WHERE id=?").run(fresh.id);
+    const review = bridge.getMemoryReview("user_a", relationship.id).interactions.find(i => i.interactionId === first.interactionId);
+    expect(review?.retryGrantId).toBe(fresh.id);
+    expect(() => bridge.queueInteractionSync({...operations, interactionId: first.interactionId, retryGrantId: original.id}))
+      .toThrow("memory_bridge_retry_stale");
+    expect(bridge.queueInteractionSync({...operations, interactionId: first.interactionId, retryGrantId: fresh.id})?.status).toBe("pending");
+    bridge.putRetentionSetting({userId: "user_a", enabled: true, expectedVersion: 1});
+    expect(() => bridge.queueInteractionSync(oldRequest)).toThrow("subject_suggestion_evidence_stale");
+    expect(() => bridge.queueInteractionSync({...operations, interactionId: first.interactionId})).toThrow("withdrawn_grant_requires_new_confirmation");
+    expect(getPreview().totalCount).toBe(1);
+    cleanup.mockRestore();
+    expect(withdraw(current.version)).toMatchObject({purgeId: removed.purgeId, completedCount: 2, failedCount: 0});
+    expect(getDateCompanionWithdrawalPreview(scope).pendingCleanup).toBeUndefined();
+    expect(getPreview().totalCount).toBe(1);
+    expect(dcRepository.getInteractionDetail("user_a", relationship.id, first.interactionId).recapItems[0].evidence[0].quote)
+      .toBe("我最近想去看展");
+
+    // First authorization of a previously local-only recording is still possible.
+    const firstEver = await subjectConfirmation(onlyHere.interactionId);
+    expect(bridge.queueInteractionSync({...operations, ...onlyHere, subjectSuggestionConfirmation: firstEver})?.status).toBe("pending");
+    memoryDatabase.prepare("INSERT INTO memory_upload_tombstones (user_id,upload_id,reason,deleted_at) VALUES (?,?,?,?)")
+      .run("user_a", "only_here", "upload_deleted", NOW);
+    expect(() => bridge.queueInteractionSync({...operations, ...onlyHere, subjectSuggestionConfirmation: firstEver})).toThrow("memory_bridge_source_deleted");
+    await expect(getOrCreateDateCompanionSubjectSuggestionBatch({
+      database: dcDatabase, memoryDatabase, userId: "user_a", interactionId: onlyHere.interactionId
+    })).rejects.toThrow("memory_bridge_source_deleted");
+    expect(dcDatabase.pragma("foreign_key_check")).toEqual([]);
   });
 
   it("admits edited kept recap content through formal Memory admission exactly once and leaves rejected or excluded content at zero", async () => {
@@ -1520,7 +1789,7 @@ describe("Memory-Date Companion bridge", () => {
     const admittedItem = itemBySegment.get("segment_formal_admitted")!;
     const rejectedItem = itemBySegment.get("segment_formal_rejected")!;
     const excludedItem = itemBySegment.get("segment_formal_excluded")!;
-    const confirmation = await subjectConfirmation(imported.interactionId);
+    const confirmation = await subjectConfirmation(imported.interactionId, [admittedItem.id, rejectedItem.id]);
 
     dcRepository.updateRecap({
       userId: "user_a",
@@ -1753,7 +2022,7 @@ describe("Memory-Date Companion bridge", () => {
     const admittedItem = detail.recapItems.find((item) =>
       item.evidence.some((evidence) => evidence.sourceSegmentId === "segment_formal_admitted")
     )!;
-    const confirmation = await subjectConfirmation(imported.interactionId);
+    const confirmation = await subjectConfirmation(imported.interactionId, [admittedItem.id]);
     dcRepository.updateRecap({
       userId: "user_a",
       interactionId: imported.interactionId,
@@ -2200,7 +2469,7 @@ describe("Memory-Date Companion bridge", () => {
     const admittedItem = detail.recapItems.find((item) =>
       item.evidence.some((evidence) => evidence.sourceSegmentId === "segment_companion")
     )!;
-    const confirmation = await subjectConfirmation(imported.interactionId);
+    const confirmation = await subjectConfirmation(imported.interactionId, [admittedItem.id]);
     dcRepository.updateRecap({
       userId: "user_a",
       interactionId: imported.interactionId,

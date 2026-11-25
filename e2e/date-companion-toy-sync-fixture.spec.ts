@@ -156,11 +156,11 @@ async function registerFixtureUser(baseURL: string, email: string) {
 
 async function login(page: Page, email: string) {
   await page.goto("/date-companion", { timeout: 20_000, waitUntil: "domcontentloaded" });
-  await expect(page.getByRole("heading", { name: "把重要的人和片段，轻轻放在这里。" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "登录，回到你的私人空间。" })).toBeVisible();
   await page.getByLabel("邮箱").fill(email);
   await page.getByLabel("密码").fill(password);
   await page.getByRole("button", { name: "登录" }).click();
-  await expect(page).toHaveURL(/\/date-companion\/modules$/u, { timeout: 20_000 });
+  await expect(page).toHaveURL("/", { timeout: 20_000 });
 }
 
 async function enterCompanionAndCreateRelationship(page: Page) {
@@ -184,7 +184,7 @@ async function enterCompanionAndCreateRelationship(page: Page) {
     reused: boolean;
   };
   expect(payload.reused).toBe(false);
-  await expect(page.getByRole("heading", { name: "今天，有什么值得留在心里？" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: /今天，有什么\s*值得留在心里？/u })).toBeVisible();
   return payload.relationship.id;
 }
 
@@ -514,11 +514,9 @@ async function assertNoLongTermMemory(input: { dataRoot: string; accountId: stri
   }
 }
 
-function assertRetentionMetadataOnly(input: {
+function assertNoRetentionProjection(input: {
   dataRoot: string;
   accountId: string;
-  relationshipId: string;
-  interactionId: string;
   uploadId: string;
 }) {
   const database = new Database(resolve(input.dataRoot, "memory.sqlite"), {
@@ -526,19 +524,12 @@ function assertRetentionMetadataOnly(input: {
     fileMustExist: true
   });
   try {
+    // Browser cleanup keeps the Date Companion draft. Only explicit authorization
+    // followed by the worker may create a retained Memory projection.
     expect(database.prepare(`
-      SELECT user_id, upload_id, dc_relationship_id, dc_interaction_id,
-             provenance_count, status
-      FROM dc_retained_uploads
+      SELECT COUNT(*) AS count FROM dc_retained_uploads
       WHERE user_id = ? AND upload_id = ?
-    `).get(input.accountId, input.uploadId)).toEqual({
-      user_id: input.accountId,
-      upload_id: input.uploadId,
-      dc_relationship_id: input.relationshipId,
-      dc_interaction_id: input.interactionId,
-      provenance_count: 0,
-      status: "active"
-    });
+    `).get(input.accountId, input.uploadId)).toEqual({ count: 0 });
     expect(database.prepare(`
       SELECT COUNT(*) AS count FROM memory_evidence_provenance
       WHERE user_id = ? AND upload_id = ?
@@ -650,30 +641,31 @@ test("Toy response loss survives page close and resumes the existing Date Compan
     progress(2, 13, "user explicitly established one relationship before selecting audio");
 
     await seedToyDirectory(page, fixturePath);
-    const uploadSummary = page.locator("summary").filter({ hasText: "上传这次相处的录音" }).first();
-    await expect(uploadSummary).toBeVisible();
-    await uploadSummary.click();
-    await expect(page.getByRole("heading", { name: "从玩偶选择这次相处" })).toBeVisible();
-    await page.getByRole("button", { name: "连接玩偶", exact: true }).click();
+    const toyDialog = page.getByRole("dialog", { name: "从玩偶选择录音" });
+    const toyTrigger = page.getByRole("button", { name: "连接玩偶", exact: true });
+    await expect(toyTrigger).toBeVisible();
+    await toyTrigger.click();
+    await expect(toyDialog.getByRole("heading", { name: "从玩偶选择这次相处" })).toBeVisible();
+    await toyDialog.getByRole("button", { name: "选择录音文件夹", exact: true }).click();
     await expect(page.getByText("已连接玩偶", { exact: true })).toBeVisible();
     await expect(page.getByText("发现 2 条录音", { exact: true })).toBeVisible();
     expect(await pickerCallCount(page)).toBe(1);
     progress(3, 13, "real OPFS DirectoryHandle scanned two recordings after one fixture picker gesture");
 
     await page.reload({ timeout: 20_000, waitUntil: "domcontentloaded" });
-    const restoredSummary = page.locator("summary").filter({ hasText: "上传这次相处的录音" }).first();
-    await restoredSummary.click();
+    await toyTrigger.click();
     await expect(page.getByText("已连接玩偶", { exact: true })).toBeVisible();
     await expect(page.getByText("发现 2 条录音", { exact: true })).toBeVisible();
     expect(await pickerCallCount(page)).toBe(1);
     progress(4, 13, "reload restored the granted handle without reopening a real directory picker");
 
-    const latestCard = page.locator("li").filter({ hasText: "latest.mp3" }).first();
+    const latestCard = toyDialog.locator("li").filter({ hasText: "latest.mp3" }).first();
     await expect(latestCard.getByText("最新录音", { exact: true })).toBeVisible();
     await latestCard.getByRole("button", { name: "选择这条录音", exact: true }).click();
-    await expect(page.getByText("已从玩偶带入 · 录音日期已自动填写", { exact: true })).toBeVisible();
+    await expect(toyDialog).not.toBeVisible();
+    await expect(page.getByRole("form", { name: "上传相处录音" }).getByText(/已从玩偶带入/u)).toBeVisible();
     await expect(page.getByText(expectedRecordingDate, { exact: true })).toBeVisible();
-    await expect(page.getByLabel("这次相处发生在")).toHaveCount(0);
+    await expect(page.locator('#home-date')).toHaveCount(0);
     progress(5, 13, "latest recording selected with its manifest date automatically applied");
 
     await page.getByRole("button", { name: "开始上传", exact: true }).click();
@@ -708,7 +700,7 @@ test("Toy response loss survives page close and resumes the existing Date Compan
       && response.request().method() === "DELETE"
     );
     await page.goto("/date-companion/a", { timeout: 20_000, waitUntil: "domcontentloaded" });
-    await expect(page.getByRole("heading", { name: "今天，有什么值得留在心里？" })).toBeVisible();
+    await expect(page.getByRole("heading", { name: /今天，有什么\s*值得留在心里？/u })).toBeVisible();
     const recoveredReceiptResponse = await recoveredReceiptResponsePromise;
     const recoveredReceipt = await recoveredReceiptResponse.json() as {
       ingestionReceipt: UploadReceipt["ingestionReceipt"];
@@ -790,11 +782,12 @@ test("Toy response loss survives page close and resumes the existing Date Compan
     });
     progress(8, 13, "existing cache -> relationship import -> browser-cache cleanup chain completed once");
 
-    const recapLink = page.getByRole("link", { name: /查看这次复盘/u }).first();
+    const recapLink = page.getByRole("link", { name: /查看录音复盘/u }).first();
     await expect(recapLink).toBeVisible();
     await recapLink.click();
     await expect(page).toHaveURL(/\/date-companion\/a\/recap(?:\?.*)?$/u, { timeout: 20_000 });
-    await expect(page.getByRole("heading", { name: "这次录音里的说话人" })).toBeVisible();
+    await page.locator("[data-book-recap] aside").getByRole("button", { name: "核对说话人", exact: true }).click();
+    await expect(page.getByRole("dialog", { name: "核对说话人" })).toBeVisible();
     expect(recapMutationCount).toBe(0);
     progress(9, 13, "browser stopped at the speaker confirmation gate without assigning me or Ta");
 
@@ -817,16 +810,14 @@ test("Toy response loss survives page close and resumes the existing Date Compan
     progress(11, 13, "browser-cache cleanup removed transient Upload and Job records while the minimal recovery receipt stayed canonical");
 
     await assertNoLongTermMemory({ dataRoot, accountId });
-    assertRetentionMetadataOnly({
+    assertNoRetentionProjection({
       dataRoot,
       accountId,
-      relationshipId,
-      interactionId: imported.interactionId,
       uploadId: receipt.uploadId
     });
     await assertNoDailyReflection({ dataRoot, accountId });
     expect(dailyReflectionRequestCount).toBe(0);
-    progress(12, 13, "long-term Memory and Daily Reflection stayed empty; only zero-provenance retention metadata remained");
+    progress(12, 13, "long-term Memory, its retention projection and Daily Reflection stayed empty before authorization");
 
     expect(audit.externalHttp).toEqual([]);
     expect(audit.externalWebSockets).toEqual([]);

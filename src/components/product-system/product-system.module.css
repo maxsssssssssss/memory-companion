@@ -199,6 +199,34 @@
 .accountMenu > button:disabled { cursor: wait; opacity: .62; }
 .accountError { padding: 9px 10px; border-radius: 10px; background: var(--db-danger-soft); color: var(--db-danger); font-size: 11px; line-height: 1.5; }
 
+/* Companion book edition only: retain ordinary disclosure navigation semantics. */
+.productSwitcherMenu[data-paper-menu],
+.accountMenu[data-paper-menu] {
+  --db-text: #5a4240;
+  --db-text-secondary: #795c58;
+  --db-text-muted: #8b716b;
+  --db-accent: #80534f;
+  --db-accent-soft: #f0e2db;
+  --db-surface-muted: #f0e9e1;
+  max-width: calc(100vw - 24px);
+  max-height: calc(100dvh - 112px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+  padding-block: 14px;
+  border: 1px solid #cdbcb0;
+  border-radius: 3px 5px 4px 2px;
+  background: linear-gradient(rgb(250 245 236 / 84%), rgb(250 245 236 / 84%)), url("/companion-home/fiber.webp") repeat 0 0 / 340px;
+  box-shadow: 0 2px 0 #e7dbcf, 0 4px 0 -1px #cdbcb0, 0 12px 28px rgb(76 51 43 / 17%);
+  transform-origin: top left;
+}
+.accountMenu[data-paper-menu] { transform-origin: top right; }
+.productSwitcherMenu[data-paper-menu="exiting"],
+.accountMenu[data-paper-menu="exiting"] { opacity: 0; pointer-events: none; }
+.productSwitcherMenu[data-paper-menu] > a,
+.productSwitcherMenu[data-paper-menu] .productSwitcherDisabled,
+.accountMenu[data-paper-menu] > button { border-radius: 3px; }
+
 .productState { display: grid; min-height: 112px; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; padding: 20px; gap: 14px; border: 1px solid var(--db-border); border-radius: var(--db-radius-card); background: var(--db-surface); color: var(--db-text); font-family: var(--db-font-ui); }
 .stateMark { width: 9px; height: 9px; border-radius: 50%; background: var(--db-accent); }
 .productState[data-tone="loading"] .stateMark { box-shadow: 0 0 0 6px var(--db-accent-soft); }

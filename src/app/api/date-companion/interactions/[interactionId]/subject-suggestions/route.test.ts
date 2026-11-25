@@ -4,6 +4,7 @@ const state = vi.hoisted(() => ({
   resolve: vi.fn(),
   status: vi.fn()
 }));
+vi.mock("@/lib/server/memory", () => ({ getMemoryDatabase: () => ({ database: "isolated-memory" }) }));
 
 vi.mock("@/lib/server/auth/request-context", () => ({
   requireAuthContext: vi.fn(async (request: Request) => {
@@ -129,5 +130,36 @@ describe("Date Companion Subject suggestion route", () => {
     ), { params: Promise.resolve({ interactionId: "interaction_1" }) });
     expect(response.status).toBe(404);
     await expect(response.json()).resolves.toEqual({ error: "date_companion_not_found" });
+  });
+
+  it("accepts a zero-byte POST stream for a saved recap and rejects malformed nonempty previews", async () => {
+    const url = "http://localhost/api/date-companion/interactions/interaction_1/subject-suggestions";
+    const params = { params: Promise.resolve({ interactionId: "interaction_1" }) };
+    const incoming = (body: BodyInit) => new Request(url, {
+      method: "POST", headers: { "x-test-user": "user_a" }, body
+    });
+    const empty = incoming(new Uint8Array(0));
+    expect(empty.body).not.toBeNull();
+    expect((await POST(empty, params)).status).toBe(200);
+    expect(state.resolve).toHaveBeenCalledWith(expect.objectContaining({draftPreview:undefined}));
+    for (const body of ["null", " ", "{"]) {
+      expect((await POST(incoming(body), params)).status).toBe(400);
+    }
+    expect(state.resolve).toHaveBeenCalledTimes(1);
+  });
+
+  it("reads scoped draft status without generating and refuses preview text or a missing scope", async () => {
+    const endpoint="http://localhost/api/date-companion/interactions/interaction_1/subject-suggestions";
+    const params={params:Promise.resolve({interactionId:"interaction_1"})};
+    const preview={version:0,itemIds:["recap_1"],assignments:[{speakerId:"s1",role:"companion"}]};
+    const post=(url:string,body?:unknown)=>POST(new Request(url,{method:"POST",
+      headers:{"x-test-user":"user_a","Content-Type":"application/json"},body:JSON.stringify(body)}),params);
+    expect((await post(endpoint+"?read=status",preview)).status).toBe(200);
+    expect(state.status).toHaveBeenCalledWith(expect.objectContaining({draftPreview:preview}));
+    expect((await post(endpoint+"?read=status")).status).toBe(400);
+    expect((await post(endpoint,{...preview,quote:"不能接收客户端原文"})).status).toBe(400);
+    expect(state.resolve).not.toHaveBeenCalled();
+    expect((await post(endpoint,preview)).status).toBe(200);
+    expect(state.resolve).toHaveBeenCalledWith(expect.objectContaining({draftPreview:preview}));
   });
 });

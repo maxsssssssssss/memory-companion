@@ -18,11 +18,9 @@ afterEach(async () => {
 });
 
 describe("date-companion SQLite schema", () => {
-  it("upgrades version 12 to 13 without altering any existing dating records or creating preparations or grants", () => {
+  it("upgrades version 12 through segment review without altering existing evidence, roles, preparations or grants", () => {
     const db = openDateCompanionDatabase({ filePath: ":memory:" });
     try {
-      // V13 is strictly additive. Removing its two tables and migration row reproduces V12.
-      db.exec("DROP TABLE dc_preparation_operations; DROP TABLE dc_preparations; DELETE FROM dc_schema_migrations WHERE version=13");
       const repo = new DateCompanionRepository(db);
       const userId = "migration-user", relationship = repo.createOrGetRelationship(userId).relationship;
       const upload = "migration-fixture", { interactionId } = repo.importInteraction({
@@ -33,8 +31,15 @@ describe("date-companion SQLite schema", () => {
       const item = repo.getInteractionDetail(userId, relationship.id, interactionId).recapItems[0];
       repo.updateRecap({ userId, interactionId, version: 0, assignments: [{ speakerId: "self", role: "self" }],
         mutations: [{ id: item.id, version: 0, disposition: "kept" }], finalize: true });
+      // Seed a saved meeting, then reproduce the V12 schema before reapplying migrations.
+      db.exec(`DROP VIEW dc_evidence_speaker_reviews; DROP TABLE dc_reviewed_speaker_segments;
+        ALTER TABLE dc_participant_assignments DROP COLUMN review_by_segment;
+        DROP TABLE dc_preparation_operations; DROP TABLE dc_preparations; DELETE FROM dc_schema_migrations WHERE version>=13;`);
       const tables = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'dc_%' AND name!='dc_schema_migrations' ORDER BY name").all() as { name: string }[];
-      const rows = () => tables.map(({name}) => [name, db.prepare(`SELECT * FROM "${name}"`).all()]);
+      const originalColumns = tables.map(({name}) => ({
+        name, columns: (db.pragma(`table_info("${name}")`) as Array<{name:string}>).map(c => c.name).join(",")
+      }));
+      const rows = () => originalColumns.map(({name,columns}) => [name, db.prepare(`SELECT ${columns} FROM "${name}"`).all()]);
       const before = rows();
       const migrations = db.prepare("SELECT * FROM dc_schema_migrations ORDER BY version").all();
       expect(migrations).toHaveLength(12);
@@ -45,7 +50,8 @@ describe("date-companion SQLite schema", () => {
       expect(rows()).toEqual(before);
       expect(db.prepare("SELECT * FROM dc_schema_migrations WHERE version<13 ORDER BY version").all()).toEqual(migrations);
       expect(db.prepare("SELECT COUNT(*) AS n FROM dc_schema_migrations WHERE version=13").get()).toEqual({n:1});
-      for (const table of ["dc_preparations", "dc_preparation_operations"])
+      expect(db.prepare("SELECT review_by_segment FROM dc_participant_assignments").get()).toEqual({review_by_segment:0});
+      for (const table of ["dc_preparations", "dc_preparation_operations","dc_reviewed_speaker_segments"])
         expect(db.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get()).toEqual({n:0});
       expect(db.pragma("foreign_key_check")).toEqual([]);
     } finally { db.close(); }
@@ -156,6 +162,10 @@ describe("date-companion SQLite schema", () => {
         quote TEXT NOT NULL, created_at TEXT NOT NULL,
         UNIQUE(id, user_id),
         UNIQUE(user_id, recap_item_id, upload_id, source_segment_id)
+      );
+      CREATE TABLE dc_participant_assignments (
+        user_id TEXT NOT NULL, interaction_id TEXT NOT NULL, speaker_id TEXT NOT NULL, role TEXT, confirmed_at TEXT, confirmed_by TEXT,
+        PRIMARY KEY(user_id,interaction_id,speaker_id)
       );
       INSERT INTO dc_relationships VALUES ('relationship_1', 'user_a', 'active');
       INSERT INTO dc_interactions VALUES (
@@ -299,7 +309,7 @@ describe("date-companion SQLite schema", () => {
         { version: 10 },
         { version: 11 },
         { version: 12 },
-        { version: 13 }
+        { version: 13 }, { version: 14 }
       ]);
       migrateDateCompanionSchema(database);
       expect(database.prepare(

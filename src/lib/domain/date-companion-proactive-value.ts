@@ -30,6 +30,7 @@ const DateCompanionProactiveEvidenceObjectSchema = z.object({
   speakerId: z.string().trim().min(1).max(512).optional(),
   quote: z.string().trim().min(1).max(4_000),
   contentDigest: z.string().length(64).regex(/^[a-f0-9]+$/u),
+  authorizationRevision: z.string().regex(/^[a-f0-9]{64}$/u).optional(),
   origin: DateCompanionProactiveEvidenceOriginSchema,
   subject: DcMemorySubjectSchema.extract(["self", "companion", "both"]),
   subjectVersion: z.number().int().positive().optional()

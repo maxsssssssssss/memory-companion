@@ -51,23 +51,34 @@ async function registerFixtureUser(baseURL: string, email: string) {
 
 async function login(page: Page, email: string) {
   await page.goto("/date-companion");
-  await expect(page.getByRole("heading", { name: "把重要的人和片段，轻轻放在这里。" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "欢迎回来" })).toBeVisible();
   await page.getByLabel("邮箱").fill(email);
   await page.getByLabel("密码").fill(password);
   await page.getByRole("button", { name: "登录" }).click();
-  await expect(page).toHaveURL(/\/date-companion\/modules$/u);
+  await expect(page).toHaveURL(/\/$/u);
+  await expect(page.getByRole("heading", { name: "选择一个空间" })).toBeVisible();
+}
+
+async function logout(page: Page) {
+  await page.getByRole("button", { name: /账号菜单/u }).click();
+  await page.getByRole("button", { name: "退出登录" }).click();
+  await expect(page.getByRole("heading", { name: "欢迎回来" })).toBeVisible();
+  await expect(page).toHaveURL(/\/date-companion$/u);
 }
 
 async function enterCompanion(page: Page) {
-  await page.getByRole("link", { name: /约会陪伴/u }).click();
+  const productCard = page.locator('a[data-product="date_companion"]');
+  await expect(productCard).toHaveAccessibleName(/约会陪伴/u);
+  await productCard.click();
   await expect(page).toHaveURL(/\/date-companion\/a$/u);
   const setupHeading = page.getByRole("heading", { name: "你想怎样称呼 Ta？" });
-  const homeHeading = page.getByRole("heading", { name: "今天，有什么值得留在心里？" });
+  const homeHeading = page.getByRole("heading", { name: /今天，有什么/u });
   await expect(setupHeading.or(homeHeading)).toBeVisible();
   if (await setupHeading.isVisible()) {
     await page.getByRole("button", { name: "开始记录这段关系" }).click();
   }
   await expect(homeHeading).toBeVisible();
+  await expect(page.locator("[data-book-home]")).toBeVisible();
 }
 
 function deterministicQaResponse(body: QaRequestBody) {
@@ -100,6 +111,7 @@ function deterministicQaResponse(body: QaRequestBody) {
           {
             id: "E1",
             title: "当前相处的文字片段",
+            evidenceKind: "raw",
             startSeconds: segment.startSeconds,
             endSeconds: segment.endSeconds,
             excerpt: segment.text,
@@ -211,7 +223,7 @@ test("real local fixture closes the current-interaction browser loop without ext
   await login(page, firstEmail);
   progress(2, 20, "real login reached module selection");
   await enterCompanion(page);
-  await expect(page.getByText("整理完成并找到真实来源后，这里才会出现值得回看的片段。")).toBeVisible();
+  await expect(page.getByRole("heading", { name: "还没有已保存的复盘" })).toBeVisible();
   await page.screenshot({ path: `${artifactDir}/phase-a-empty-home-1920x1080.png`, fullPage: true });
   await page.setViewportSize({ width: 2560, height: 1440 });
   await page.screenshot({ path: `${artifactDir}/phase-a-empty-home-2560x1440.png`, fullPage: true });
@@ -242,7 +254,8 @@ test("real local fixture closes the current-interaction browser loop without ext
   await expect(page.getByText("录音已收到").first()).toBeVisible();
   progress(5, 20, "real inline Pipeline entered the processing state");
 
-  await expect(page.getByRole("link", { name: /查看这次复盘/u }).first()).toBeVisible({ timeout: 120_000 });
+  const openRecap = page.getByRole("link", { name: /查看录音复盘/u }).first();
+  await expect(openRecap).toBeVisible({ timeout: 120_000 });
   const deleteResponse = await deleteResponsePromise;
   expect(deleteResponse.status()).toBe(200);
   expect(deletes).toEqual([
@@ -263,28 +276,32 @@ test("real local fixture closes the current-interaction browser loop without ext
   await page.screenshot({ path: `${artifactDir}/phase-a-ready-home.png`, fullPage: true });
   progress(7, 20, "ready home and cached transcript verified");
 
-  await page.getByRole("link", { name: /查看这次复盘/u }).first().click();
-  await expect(page.getByRole("heading", { name: "这次相处，已经整理好了" })).toBeVisible();
-  await page.locator("summary").filter({ hasText: /^未留下 \d+ 条$/u }).first().click();
-  const sourceSummary = page.locator("summary").filter({ hasText: "个真实来源" }).first();
-  const sourceDetails = sourceSummary.locator("xpath=..");
-  await expect(sourceDetails).toBeVisible();
-  await sourceSummary.click();
-  await expect(sourceDetails.getByRole("button", { name: "在文字稿中查看" })).toBeVisible();
+  await openRecap.click();
+  await expect(page).toHaveURL(new RegExp("/date-companion/a/recap\\?recording=" + uploadReceipt.uploadId, "u"));
+  const recap = page.getByRole("article", { name: "单次复盘" });
+  await expect(recap).toBeVisible();
+  const sourceEntry = recap.locator("[data-book-item]:visible").first();
+  await sourceEntry.locator("h4 button").click();
+  const transcriptLink = sourceEntry.locator("[data-source-segment]").first();
+  await expect(transcriptLink).toBeVisible();
   await page.screenshot({ path: `${artifactDir}/phase-a-recap-source-expanded.png`, fullPage: true });
   progress(8, 20, "recap rendered a real evidence source");
 
-  await sourceDetails.getByRole("button", { name: "在文字稿中查看" }).click();
+  await transcriptLink.click();
   const recapSourceSegmentId = new URL(page.url()).searchParams.get("segment");
   expect(recapSourceSegmentId).toBeTruthy();
   expect(segmentIds).toContain(recapSourceSegmentId);
-  await expect(page.locator(`[data-segment-id="${recapSourceSegmentId}"]`)).toHaveAttribute("aria-current", "true");
-  await expect(page.getByRole("heading", { name: "完整文字稿" })).toBeVisible();
+  const transcript = page.getByRole("dialog", { name: "完整文字稿" });
+  await expect(transcript.locator(`[data-segment-id="${recapSourceSegmentId}"]`)).toHaveAttribute("aria-current", "true");
+  await expect(transcript).toBeVisible();
   await page.screenshot({ path: `${artifactDir}/phase-a-transcript-located.png`, fullPage: true });
   progress(9, 20, "source URL and transcript highlight used the real segment id");
+  await transcript.getByRole("button", {name:/返回刚才的位置/u}).click();
+  await expect(transcript).not.toBeVisible();
+  await expect(transcriptLink).toBeFocused();
 
   await page.getByRole("button", { name: "问问这次相处" }).click();
-  await page.getByRole("textbox", { name: "针对这次相处提问" }).fill("这次相处记录了什么？");
+  await page.getByRole("textbox", { name: "你的问题" }).fill("这次相处记录了什么？");
   await page.getByRole("button", { name: "发送" }).click();
   await expect(page.getByText("这次相处里记录了一条可以回到文字稿核对的内容。")).toBeVisible();
   expect(qaRequests).toHaveLength(1);
@@ -297,37 +314,32 @@ test("real local fixture closes the current-interaction browser loop without ext
   const requestedSegmentIds = new Set(qaRequests[0].segments.map((segment) => segment.id));
   expect(requestedSegmentIds.size).toBeGreaterThan(0);
   expect([...requestedSegmentIds].every((segmentId) => segmentIds.includes(segmentId))).toBe(true);
-  const evidenceGroup = page.locator("[data-evidence-group]");
-  await evidenceGroup.locator(":scope > summary").click();
-  const firstEvidence = evidenceGroup.locator('[data-evidence-id="E1"]');
-  await firstEvidence.locator(":scope > summary").click();
-  await expect(firstEvidence.getByRole("link", { name: "在完整文字稿中查看" })).toHaveAttribute(
-    "href",
-    new RegExp(`segment=${encodeURIComponent(segmentIds[0])}`, "u")
-  );
+  const evidence = page.getByRole("region", {name:"回答依据"});
+  await evidence.getByRole("button", {name:/查看原话/u}).click();
+  await page.getByRole("button", {name:/查看完整文字稿/u}).click();
+  await expect(page.getByRole("heading", {name:"完整文字稿"})).toBeVisible();
+  await expect(page.locator('.qa-segment[data-target="true"]')).toContainText(qaRequests[0].segments[0].text);
   await page.screenshot({ path: `${artifactDir}/phase-a-qa-answer-source.png`, fullPage: true });
   progress(10, 20, "current/date QA request and deterministic NDJSON citation passed");
 
   const serverDayAfterDelete = await page.request.get(`/api/days/${uploadReceipt.uploadId}`);
   expect(serverDayAfterDelete.status()).toBe(404);
   await page.reload();
-  await expect(page.getByRole("heading", { name: "这次相处，已经整理好了" })).toBeVisible();
+  await expect(recap).toBeVisible();
   progress(11, 20, "reload restored the cleaned upload from the same-user browser cache");
 
-  await page.goto("/date-companion/modules");
-  await page.getByRole("button", { name: "退出" }).click();
-  await expect(page).toHaveURL(/\/date-companion$/u);
+  await logout(page);
   await login(page, firstEmail);
   await enterCompanion(page);
-  await expect(page.getByRole("link", { name: /查看这次复盘/u }).first()).toBeVisible();
+  await expect(openRecap).toBeVisible();
   progress(12, 20, "logout and real re-login restored the first user's local result");
 
   const secondUserId = await registerFixtureUser(baseURL, secondEmail);
-  await page.goto("/date-companion/modules");
-  await page.getByRole("button", { name: "退出" }).click();
+  await logout(page);
   await login(page, secondEmail);
   await enterCompanion(page);
-  await expect(page.getByText("整理完成并找到真实来源后，这里才会出现值得回看的片段。")).toBeVisible();
+  await expect(page.getByRole("heading", { name: "还没有已保存的复盘" })).toBeVisible();
+  await expect(openRecap).toHaveCount(0);
   const activeUserId = await page.evaluate(() => window.localStorage.getItem("daily-brief:active-user-id"));
   expect(activeUserId).toBe(secondUserId);
   expect(activeUserId).not.toBe(firstUserId);

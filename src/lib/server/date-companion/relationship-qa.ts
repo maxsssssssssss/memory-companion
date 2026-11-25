@@ -1,4 +1,5 @@
 import type { DcRecapKind, DcRelationshipView } from "@/lib/domain/date-companion-stage2";
+import { dateCompanionEvidenceSpeakerRole } from "@/lib/domain/date-companion-speaker";
 import {
   BriefItemSchema,
   TranscriptSegmentSchema,
@@ -74,6 +75,7 @@ export function buildDateCompanionRelationshipQaContext(
     recordingDate: string;
     sourceUploadId: string;
     sortOrder: number;
+    evidenceCount: number;
   }>();
 
   const interactions = [...view.interactions]
@@ -88,14 +90,6 @@ export function buildDateCompanionRelationshipQaContext(
     );
 
   for (const interaction of interactions) {
-    const participantRoleBySpeaker = new Map(
-      interaction.participants.flatMap((participant) =>
-        participant.confirmedAt && participant.role !== "unresolved"
-          ? [[participant.speakerId, participant.role] as const]
-          : []
-      )
-    );
-
     for (const recap of interaction.recapItems) {
       if (recap.disposition !== "kept") continue;
       recapById.set(recap.id, {
@@ -103,14 +97,13 @@ export function buildDateCompanionRelationshipQaContext(
         displayedText: recap.displayedText,
         recordingDate: interaction.recordingDate,
         sourceUploadId: interaction.sourceUploadId,
-        sortOrder: recap.sortOrder
+        sortOrder: recap.sortOrder,
+        evidenceCount: recap.evidence.length
       });
       const eligible = recap.evidence.flatMap((evidence): EligibleEvidence[] => {
         const sourceSegmentId = evidence.sourceSegmentId.trim();
         const quote = evidence.quote.replace(/\s+/gu, " ").trim();
-        const speakerRole = evidence.speakerId
-          ? participantRoleBySpeaker.get(evidence.speakerId)
-          : undefined;
+        const speakerRole = dateCompanionEvidenceSpeakerRole(interaction, evidence);
         if (
           !sourceSegmentId ||
           !quote ||
@@ -176,7 +169,8 @@ export function buildDateCompanionRelationshipQaContext(
       const evidence = (eligibleByRecap.get(recapItemId) ?? []).filter(
         (item) => unambiguousBySourceId.has(item.sourceSegmentId)
       );
-      if (evidence.length === 0) return [];
+      // A summary covers the whole kept item. Only verified single quotes survive partial admission.
+      if (!evidence.length || evidence.length !== recap.evidenceCount) return [];
       const startSeconds = Math.min(...evidence.map((item) => item.startSeconds));
       const endSeconds = Math.max(...evidence.map((item) => item.endSeconds));
       return [BriefItemSchema.parse({
