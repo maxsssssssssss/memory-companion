@@ -2,20 +2,20 @@
 
 import { useState } from "react";
 
-import { ProductPopover } from "./product-popover";
+import { ProductAccountPopover } from "./product-account-popover";
 import styles from "./product-system.module.css";
 
-function accountInitial(label: string) {
-  return label.trim().slice(0, 1).toUpperCase() || "我";
-}
+
 
 export function ProductAccountMenu({
   onLogout,
   showLabel = false,
+  paperMotion,
   userLabel
 }: Readonly<{
   onLogout: () => Promise<void> | void;
   showLabel?: boolean;
+  paperMotion?: boolean;
   userLabel: string;
 }>) {
   const [busy, setBusy] = useState(false);
@@ -33,26 +33,10 @@ export function ProductAccountMenu({
     }
   };
 
-  return (
-    <ProductPopover
-      className={styles.accountPopover}
-      label={`账号菜单，当前账号${userLabel}`}
-      panelClassName={styles.accountMenu}
-      trigger={(
-        <>
-          <span aria-hidden="true" className={styles.accountInitial}>{accountInitial(userLabel)}</span>
-          {showLabel ? <span className={styles.accountTriggerLabel}>{userLabel}</span> : null}
-          <span aria-hidden="true" className={styles.accountChevron}>⌄</span>
-        </>
-      )}
-      triggerClassName={styles.accountTrigger}
-    >
-      <p>账号</p>
-      <strong title={userLabel}>{userLabel}</strong>
-      {error ? <span className={styles.accountError} role="alert">{error}</span> : null}
-      <button disabled={busy} onClick={() => void logout()} type="button">
-        <span aria-live="polite">{busy ? "正在退出…" : "退出登录"}</span>
-      </button>
-    </ProductPopover>
-  );
+  return <ProductAccountPopover userLabel={userLabel} showLabel={showLabel} paperMotion={paperMotion}>
+    {error ? <span className={styles.accountError} role="alert">{error}</span> : null}
+    <button disabled={busy} onClick={() => void logout()} type="button">
+      <span aria-live="polite">{busy ? "正在退出…" : "退出登录"}</span>
+    </button>
+  </ProductAccountPopover>;
 }

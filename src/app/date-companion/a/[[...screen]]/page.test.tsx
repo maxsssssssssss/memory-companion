@@ -39,10 +39,57 @@ function restoreFlag(name: string, value: string | undefined) {
 
 describe("Date Companion screen page", () => {
   afterEach(() => {
+    vi.unstubAllEnvs();
     navigationMocks.notFound.mockClear();
     restoreFlag("DAILY_BRIEF_TOY_SYNC_ENABLED", originalSharedFlag);
     restoreFlag("DAILY_REFLECTION_TOY_SYNC_ENABLED", originalLegacyFlag);
     restoreFlag("DAILY_REFLECTION_UPLOAD_ENABLED", originalReflectionFlag);
+  });
+
+  it("accepts a recording deep link regardless of retired edition flags", async () => {
+    const page = (screen: string, view?: string) => DateCompanionScreenPage({
+      params:Promise.resolve({screen:[screen]}), searchParams:Promise.resolve({view,recording:"recording-1"})
+    });
+    vi.stubEnv("DAILY_BRIEF_RECAP_TRIAL", "");
+    expect((await page("recap", "book")).props.children.props.initialRecordingId).toBe("recording-1");
+    vi.stubEnv("DAILY_BRIEF_RECAP_TRIAL", "1");
+    expect((await page("recap")).props.children.props.initialRecordingId).toBe("recording-1");
+    expect((await page("recap", "classic")).props.children.props).toEqual((await page("recap", "book")).props.children.props);
+    expect((await page("people", "book")).props.children.props.initialRecordingId).toBeNull();
+  });
+  it("keeps discussion deep links and accepts both spellings of the records section", async () => {
+    const page = (view?: string, section?: string) => DateCompanionScreenPage({ params: Promise.resolve({ screen: ["prepare"] }),
+      searchParams: Promise.resolve({ view, section, preparation: "real-discussion", from: "book-home" }) });
+    for (const view of [undefined, "classic", "book"]) {
+      expect((await page(view)).props.children.props).toMatchObject({
+        initialDiscussionId: "real-discussion", showPreparationRecords: false
+      });
+    }
+    expect((await page("records")).props.children.props.showPreparationRecords).toBe(true);
+    expect((await page(undefined, "records")).props.children.props.showPreparationRecords).toBe(true);
+  });
+  it("passes the same scrapbook screen and person identity for bare and historical links", async () => {
+    const page = async (screen: string[], query: {view?: string; from?: string}) =>
+      (await DateCompanionScreenPage({params: Promise.resolve({screen}), searchParams: Promise.resolve(query)})).props.children.props;
+    vi.stubEnv("DAILY_BRIEF_RECAP_TRIAL", "1");
+    expect((await page(["people"], {})).screen).toBe("people");
+    expect(await page(["people"], {view:"classic",from:"book-home"})).toEqual(await page(["people"], {}));
+    expect(await page(["people", "person-A"], {view:"book"})).toMatchObject({screen:"person", initialPersonId:"person-A"});
+    expect(await page(["person"], {from:"book-home"})).toMatchObject({screen:"person", initialPersonId:null});
+    vi.stubEnv("DAILY_BRIEF_RECAP_TRIAL", "");
+    expect(await page(["person"], {view:"book"})).toEqual(await page(["person"], {}));
+  });
+  it("keeps an explicit new preparation draft distinct from the latest discussion on refresh", async () => {
+    const page = (query: { draft?: string; preparation?: string }) => DateCompanionScreenPage({ params: Promise.resolve({ screen: ["prepare"] }), searchParams: Promise.resolve({ view: "book", ...query }) });
+    expect((await page({ draft: "new" })).props.children.props.initialDiscussionId).toBeNull();
+    expect((await page({})).props.children.props.initialDiscussionId).toBeUndefined();
+    expect((await page({ draft: "new", preparation: "created-id" })).props.children.props.initialDiscussionId).toBe("created-id");
+  });
+  it("allows only local preparation return context on a recap", async () => {
+    const page = (returnTo: string) => DateCompanionScreenPage({ params: Promise.resolve({ screen: ["recap"] }), searchParams: Promise.resolve({ returnTo }) });
+    expect((await page("/date-companion/a/prepare?view=book&preparation=real-id")).props.children.props.preparationReturnTo)
+      .toBe("/date-companion/a/prepare?preparation=real-id");
+    expect((await page("https://example.com/date-companion/a/prepare")).props.children.props.preparationReturnTo).toBeNull();
   });
 
   it.each([

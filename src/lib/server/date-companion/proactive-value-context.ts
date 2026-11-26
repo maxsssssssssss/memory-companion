@@ -45,7 +45,8 @@ export function withDateCompanionHomeContext(input: {
     SELECT promise.id, promise.text, promise.status, promise.version,
            evidence.upload_id, evidence.source_segment_id, evidence.content_digest,
            evidence.id AS evidence_snapshot_id, evidence.start_seconds, evidence.end_seconds,
-           evidence.speaker_id, evidence.quote, interaction.recording_date, selection.subject
+           evidence.speaker_id, evidence.quote, interaction.recording_date, selection.subject,
+           o.idempotency_key AS grant_key, json_extract(o.payload_json, '$.grantGeneration') AS generation
     FROM dc_promises promise
     INNER JOIN dc_recap_items recap
       ON recap.id = promise.originating_recap_item_id AND recap.user_id = promise.user_id
@@ -56,6 +57,8 @@ export function withDateCompanionHomeContext(input: {
     LEFT JOIN dc_memory_subject_selections selection
       ON selection.evidence_snapshot_id = evidence.id AND selection.user_id = evidence.user_id
       AND selection.interaction_id = recap.interaction_id
+    LEFT JOIN dc_memory_bridge_outbox o ON o.user_id = interaction.user_id AND o.interaction_id = interaction.id
+      AND o.relationship_id = interaction.relationship_id AND o.status = 'completed'
     WHERE promise.user_id = ? AND promise.relationship_id = ?
       AND recap.disposition = 'kept' AND interaction.status = 'confirmed'
       AND interaction.source_state != 'explicitly_deleted'
@@ -65,6 +68,7 @@ export function withDateCompanionHomeContext(input: {
     upload_id: string; source_segment_id: string; content_digest: string | null;
     evidence_snapshot_id: string; start_seconds: number; end_seconds: number;
     speaker_id: string | null; quote: string; recording_date: string; subject: string | null;
+    grant_key: string | null; generation: number | null;
   }>;
   // A promise made by the user belongs to Self, not to the companion's Person.
   // Resolve it through the same canonical admission checks without widening that
@@ -73,6 +77,7 @@ export function withDateCompanionHomeContext(input: {
   const promiseKeys = new Set(rows.map((row) => sourceKey(row.upload_id, row.source_segment_id)));
   if (mappingIsTrusted(mapping)) {
     const selfEvidence = resolveTrustedPersonQaEvidence({
+      relationshipId: input.context.relationshipId,
       memoryDatabase: input.memoryDatabase,
       dateCompanionDatabase: input.dateCompanionDatabase,
       accountId: input.accountId,
@@ -98,6 +103,9 @@ export function withDateCompanionHomeContext(input: {
         uploadId: row.upload_id, sourceSegmentId: row.source_segment_id,
         recordingDate: row.recording_date, startSeconds: row.start_seconds, endSeconds: row.end_seconds,
         ...(row.speaker_id ? { speakerId: row.speaker_id } : {}),
+        ...(row.generation && row.generation > 1 && row.grant_key ? {
+          authorizationRevision: stableBridgeDigest([row.grant_key, digest, row.evidence_snapshot_id])
+        } : {}),
         quote: row.quote, contentDigest: digest, origin: "direct_conversation", subject: "self"
       });
     }
@@ -391,9 +399,8 @@ export function buildCurrentInteractionProactiveValueContext(input: {
       ON selection.evidence_snapshot_id = evidence.id
       AND selection.interaction_id = recap.interaction_id
       AND selection.user_id = evidence.user_id
-    LEFT JOIN dc_participant_assignments participant
-      ON participant.interaction_id = recap.interaction_id
-      AND participant.speaker_id = evidence.speaker_id
+    LEFT JOIN dc_evidence_speaker_reviews participant
+      ON participant.interaction_id = recap.interaction_id AND participant.evidence_id = evidence.id
       AND participant.user_id = evidence.user_id
     WHERE evidence.user_id = ? AND recap.interaction_id = ?
     ORDER BY evidence.upload_id, evidence.source_segment_id, evidence.id
@@ -544,7 +551,7 @@ export function buildPersonRelationshipProactiveValueContext(input: {
         accountId: input.accountId,
         relationshipId: input.relationshipId
       });
-  if (catalog.status !== "ready" || !catalog.companionPersonId || !catalog.mappingVersion) {
+  if ((catalog.status !== "ready" && catalog.status !== "withdrawn") || !catalog.companionPersonId || !catalog.mappingVersion) {
     return {
       status: catalog.status === "needs_review" ? "needs_review" : "unavailable",
       context: null
@@ -617,6 +624,7 @@ export function buildPersonRelationshipProactiveValueContext(input: {
           endSeconds: dateCompanionSource.endSeconds,
           ...(dateCompanionSource.speakerId ? { speakerId: dateCompanionSource.speakerId } : {}),
           quote: dateCompanionSource.quote,
+          ...(dateCompanionSource.authorizationRevision ? {authorizationRevision: dateCompanionSource.authorizationRevision} : {}),
           contentDigest: dateCompanionEvidenceDigest({
             userId: input.accountId,
             uploadId: dateCompanionSource.uploadId,

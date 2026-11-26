@@ -12,14 +12,19 @@ import {
 } from "@/lib/domain/date-companion";
 
 import { DateCompanionShell } from "./date-companion-shell";
+import { clearQaDrafts } from "./companion-qa-drafts";
 
 const routerMocks = vi.hoisted(() => ({
   push: vi.fn(),
-  replace: vi.fn()
+  replace: vi.fn(),
+  back: vi.fn(),
+  searchParams: null as URLSearchParams | null
 }));
 
 vi.mock("next/navigation", () => ({
-  useRouter: () => ({ push: routerMocks.push, replace: routerMocks.replace })
+  useRouter: () => ({ push: routerMocks.push, replace: routerMocks.replace, back:routerMocks.back }),
+  usePathname: () => window.location.pathname,
+  useSearchParams: () => routerMocks.searchParams
 }));
 
 vi.mock("@/lib/client/date-companion-session", () => ({
@@ -29,6 +34,16 @@ vi.mock("@/lib/client/date-companion-session", () => ({
 vi.mock("@/lib/client/date-companion-people", () => ({
   useDateCompanionPersonArchive: vi.fn()
 }));
+vi.mock("./companion-preparation-book", async (importOriginal) => {
+  const original = await importOriginal<typeof import("./companion-preparation-book")>();
+  return { ...original, CompanionPreparationBook: (props: import("./companion-preparation-book").CompanionPreparationBookProps) => {
+    if (props.session.auth.status !== "authenticated" || ["idle", "loading"].includes(props.session.relationshipState.status)) {
+      return <original.CompanionPreparationBook {...props} />;
+    }
+    const id = props.initialDiscussionId;
+    return <section data-testid="formal-book-preparation" data-target={id === null ? "new" : id === undefined ? "latest" : "existing"}>{id || "new discussion"}</section>;
+  } };
+});
 
 vi.mock("@/components/daily-reflection/daily-reflection-toy-sync", () => ({
   ToyAudioSync: ({ accountId }: { accountId: string }) => (
@@ -44,7 +59,11 @@ function makeSession(overrides: Partial<DateCompanionSessionValue> = {}): DateCo
     relationshipDetailsLoaded: true,
     detailReadState: { status: "idle" },
     ensureRelationshipDetailsLoaded: vi.fn(async () => undefined),
+    readSavedMeeting: vi.fn(async () => undefined),
+    readProcessingProgress: vi.fn(async () => undefined),
+    sourceSpeakerLabel: vi.fn(() => undefined),
     retryInteractionDetail: vi.fn(async () => undefined),
+    readRecordingForRecap: vi.fn(async () => false),
     auth: { status: "checking" },
     viewModel: emptyDateCompanionViewModel(),
     uploadState: { status: "idle" },
@@ -65,6 +84,7 @@ function makeSession(overrides: Partial<DateCompanionSessionValue> = {}): DateCo
     upload: vi.fn(async () => true),
     adoptToyIngestionReceipt: vi.fn(async () => null),
     retryRead: vi.fn(async () => undefined),
+    refreshRelationship: vi.fn(async () => undefined),
     createRelationship: vi.fn(async () => undefined),
     updateParticipants: vi.fn(async () => undefined),
     updateRecap: vi.fn(async () => undefined),
@@ -76,6 +96,9 @@ function makeSession(overrides: Partial<DateCompanionSessionValue> = {}): DateCo
     selectRelationshipInteraction: vi.fn(() => false),
     relationshipQaSources: vi.fn(() => []),
     personQaSources: vi.fn(() => []),
+    scopedPersonQaSources: vi.fn(() => []),
+    qaSourceDay: vi.fn(() => null),
+    recordingSpeakerReview: vi.fn(() => undefined),
     personQaAvailability: vi.fn(() => ({ enabled: false as const, message: "先确认人物设置。" })),
     currentInteractionQaAvailability: vi.fn(() => ({ enabled: false as const, message: "先打开一次完整记录。" })),
     activateQaMode: vi.fn(),
@@ -84,7 +107,9 @@ function makeSession(overrides: Partial<DateCompanionSessionValue> = {}): DateCo
     savePersonMapping: vi.fn(async () => undefined),
     setLongTermRetention: vi.fn(async () => undefined),
     syncInteractionMemory: vi.fn(async () => undefined),
-    purgeRetainedMemory: vi.fn(async () => undefined),
+    checkOpenQaCatalog: vi.fn(async () => undefined),
+    previewRetainedMemory: vi.fn(async () => ({preview: {version: "scope-v1", totalCount: 2, retainedCount: 1, processingCount: 1}})),
+    purgeRetainedMemory: vi.fn(async () => ({ purgeId: "w1", usageStopped: true as const, status: "completed", totalCount: 2, retainedCount: 1, processingCount: 1, completedCount: 2, failedCount: 0, retryable: false, updatedAt: "2026-11-24T12:00:00Z" })),
     ask: vi.fn(async () => null),
     askCurrentInteraction: vi.fn(async () => null),
     cancelQa: vi.fn(),
@@ -123,7 +148,7 @@ function viewModelWithInteraction(interaction: InteractionVM): DateCompanionView
   };
 }
 
-function readyMemoryBridgeState(personQaSources: SourceRefVM[] = []): DateCompanionMemoryBridgeState {
+function readyMemoryBridgeState(personQaSources: SourceRefVM[] = []): Extract<DateCompanionMemoryBridgeState, {status:"ready"}> {
   const personRecord = (id: string, displayName: string) => ({
     id,
     displayName,
@@ -152,25 +177,121 @@ function readyMemoryBridgeState(personQaSources: SourceRefVM[] = []): DateCompan
   };
 }
 
+const qaSource: SourceRefVM = {
+  id: "source-1", uploadId: "upload-1", segmentIds: ["segment-1"], recordingDate: "2026-08-04",
+  startSeconds: 10, endSeconds: 15, speakerId: "speaker_1", quote: "下次可以一起看电影。",
+  kind: "transcript", presentation: "direct_quote"
+};
+
+function confirmedQaMemory(sources: SourceRefVM[] = [qaSource]) {
+  const date = "2026-08-04T10:00:00.000Z";
+  return {
+    ...readyMemoryBridgeState(sources), qaCatalogStatus: "ready" as const,
+    selfBinding: {personId:"person-self",status:"active" as const,version:1,setAt:date,clearedAt:null,updatedAt:date}
+  };
+}
+
+function installDialogMethods() {
+    Object.defineProperties(HTMLDialogElement.prototype, {
+      showModal: {configurable:true, value(this: HTMLDialogElement) { this.open = true; }},
+      close: {configurable:true, value(this: HTMLDialogElement) { this.open = false; }}
+    });
+}
+
+function openQaSuggestions() {
+  const control = screen.getByRole("button", { name: "提问建议" });
+  if (control.getAttribute("aria-expanded") !== "true") fireEvent.click(control);
+}
+
 describe("DateCompanionShell", () => {
-  it.each(["home", "prepare"] as const)("opens %s without a recording, relationship form, or detail load", async (entryScreen) => {
+  it("offers a local retry when the current Ta cannot be identified during a person-page read failure", () => {
+    installDialogMethods();
+    const session=makeSession({auth:{status:"authenticated",user:{id:"user-1",email:"user@example.com"}},
+      relationshipState:{status:"ready",relationship:{id:"r1",participantState:"confirmed",version:1,displayName:"林澄"}},
+      memoryBridgeState:{status:"error",message:"暂时无法读取。"}});
+    mockedUseDateCompanionSession.mockReturnValue(session);
+    render(<DateCompanionShell entry="companion" screen="person" initialPersonId="person-ta"/>);
+    fireEvent.click(screen.getByRole("button",{name:"问问 Ta"}));
+    const paper=screen.getByRole("dialog");
+    expect(within(paper).queryByText(/另一位人物/)).toBeNull();
+    fireEvent.click(within(paper).getByRole("button",{name:"重新读取人物资料"}));
+    expect(session.ensureMemoryBridgeLoaded).toHaveBeenCalledWith(true);
+  });
+  it.each([false, true])("keeps a confirmed mapping after withdrawal and recognises a new pending grant (%s)", pending => {
+    const memory = readyMemoryBridgeState();
+    if (memory.status !== "ready") throw new Error("fixture");
+    mockedUseDateCompanionSession.mockReturnValue(makeSession({
+      auth: {status:"authenticated", user:{id:"user-1",email:"user@example.com"}},
+      relationshipState: {status:"ready", relationship:{id:"relationship-1", participantState:"confirmed", version:1,displayName:"林澄"}},
+      personQaAvailability: () => ({enabled:true,personId:"person-ta",mappingVersion:2}),
+      memoryBridgeState:{...memory,qaCatalogStatus:"withdrawn",review:{...memory.review,interactions:pending ? [{
+        interactionId:"i",sourceUploadId:"u",recordingDate:"2026-11-24",sourceState:"available",status:"pending",
+        attemptCount:0,selectionCount:1,unknownCount:0,updatedAt:null
+      }] : []}}
+    }));
+    installDialogMethods();
+    render(<DateCompanionShell entry="companion" screen="home"/>);
+    fireEvent.click(screen.getByRole("button", {name:"问问 Ta"}));
+    const drawer = screen.getByRole("dialog");
+    expect(within(drawer).getByText(pending ? /相关材料正在处理/ : /长期资料已撤回/)).toBeVisible();
+    expect(within(drawer).getByRole("textbox")).toBeDisabled();
+    expect(within(drawer).queryByRole("button", {name:/重新读取人物资料/})).toBeNull();
+  });
+  it("offers a home retry for a failed catalog read even if the saved recap list is empty", () => {
+    const memory = readyMemoryBridgeState();
+    if (memory.status !== "ready") throw new Error("fixture");
+    const session = makeSession({
+      auth: {status: "authenticated", user: {id: "user-1", email: "user@example.com"}},
+      relationshipState: {status: "ready", relationship: {id: "relationship-1", participantState: "confirmed", version: 1, displayName: "林澄"}},
+      personQaAvailability: () => ({enabled: true, personId: "person-ta", mappingVersion: 2}),
+      memoryBridgeState: {...memory, qaCatalogStatus: "unavailable"}
+    });
+    mockedUseDateCompanionSession.mockReturnValue(session);
+    render(<DateCompanionShell entry="companion" screen="home" />);
+    expect(screen.queryByText(/可以先完成一次相处复盘/)).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", {name: "重新读取相关内容"}));
+    expect(session.ensureMemoryBridgeLoaded).toHaveBeenCalledWith(true);
+  });
+  it("explains an unconfirmed relationship instead of claiming materials are empty", () => {
+    const memory=readyMemoryBridgeState();
+    if(memory.status!=="ready")throw new Error("fixture");
+    mockedUseDateCompanionSession.mockReturnValue(makeSession({
+      auth:{status:"authenticated",user:{id:"user-1",email:"user@example.com"}},
+      relationshipState:{status:"ready",relationship:{id:"relationship-1",participantState:"confirmed",version:1,displayName:"林澄"}},
+      memoryBridgeState:{...memory,mapping:null}
+    }));
+    render(<DateCompanionShell entry="companion" screen="home" />);
+    expect(screen.getAllByText("先确认这段关系中的“我”和“Ta”，再查看人物近况与见面准备。").length).toBeGreaterThan(0);
+    expect(screen.getByRole("link",{name:/核对人物身份/})).toHaveAttribute("href","/date-companion/a/people?section=manage#people-mapping-title");
+    expect(screen.queryByText("暂时没有可展示的人物近况。")).not.toBeInTheDocument();
+    expect(screen.queryByText("还没有适合放在这里的近况。")).not.toBeInTheDocument();
+  });
+  it.each(["home", "prepare"] as const)("handles first use of %s without loading any saved records", async (entryScreen) => {
     vi.stubGlobal("ResizeObserver", class { observe() {} disconnect() {} });
     vi.stubGlobal("fetch", vi.fn(async () => Response.json({ preparations: [], availableSources: [] })));
     const session = makeSession({ auth: { status: "authenticated", user: { id: "user-1", email: "user@example.com" } }, relationshipState: { status: "absent" }, relationshipDetailsLoaded: false });
     mockedUseDateCompanionSession.mockReturnValue(session);
     render(<DateCompanionShell entry="companion" screen={entryScreen} />);
-    await screen.findByText("从你现在想说的开始。");
-    expect(screen.getByRole("textbox", { name: "想聊点什么？" })).toBeInTheDocument();
+    if (entryScreen === "prepare") expect(screen.getByTestId("formal-book-preparation")).toBeInTheDocument();
+    else expect(screen.getByRole("heading", { name: "你想怎样称呼 Ta？" })).toBeInTheDocument();
     expect(session.ensureRelationshipDetailsLoaded).not.toHaveBeenCalled();
     expect(session.createRelationship).not.toHaveBeenCalled();
     expect(screen.queryByText("正在读取相处内容…")).not.toBeInTheDocument();
     if (entryScreen === "home") {
-      fireEvent.click(screen.getByRole("button", { name: "从相处录音开始" }));
-      expect(session.createRelationship).toHaveBeenCalledWith("Ta");
+      fireEvent.change(screen.getByLabelText("称呼（可选）"), { target: { value: "小满" } });
+      fireEvent.click(screen.getByRole("button", { name: /开始记录这段关系/u }));
+      expect(session.createRelationship).toHaveBeenCalledWith("小满");
     }
   });
 
   beforeEach(() => {
+    installDialogMethods();
+    Object.defineProperty(HTMLElement.prototype, "scrollIntoView", {configurable:true,value:vi.fn()});
+    vi.stubGlobal("scrollTo", vi.fn());
+    routerMocks.searchParams = null;
+    vi.stubGlobal("matchMedia", vi.fn().mockReturnValue({
+      matches: false, addEventListener: vi.fn(), removeEventListener: vi.fn(), addListener: vi.fn(), removeListener: vi.fn()
+    }));
     vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => {
       callback(0);
       return 1;
@@ -180,6 +301,7 @@ describe("DateCompanionShell", () => {
 
   afterEach(() => {
     cleanup();
+    clearQaDrafts("user-1");
     vi.clearAllMocks();
     vi.unstubAllGlobals();
   });
@@ -267,22 +389,22 @@ describe("DateCompanionShell", () => {
     await waitFor(() => expect(routerMocks.replace).toHaveBeenCalledWith("/"));
   });
 
-  it("logs out from module selection and replaces the route with login", async () => {
-    const logout = vi.fn(async () => undefined);
+  it("returns to a local business deep link after authentication", async () => {
     mockedUseDateCompanionSession.mockReturnValue(makeSession({
-      auth: {
-        status: "authenticated",
-        user: { id: "user-1", email: "user@example.com", name: "小满" }
-      },
-      logout
+      auth: { status: "authenticated", user: { id: "user-1", email: "user@example.com" } }
     }));
+    routerMocks.searchParams = new URLSearchParams({ returnTo: "/date-companion/a/recap?interaction=saved&segment=source#full-transcript" });
+    render(<DateCompanionShell entry="login" />);
+    await waitFor(() => expect(routerMocks.replace).toHaveBeenCalledWith("/date-companion/a/recap?interaction=saved&segment=source#full-transcript"));
+  });
 
-    render(<DateCompanionShell entry="modules" />);
-    fireEvent.click(screen.getByRole("button", { name: /账号菜单/u }));
-    fireEvent.click(screen.getByRole("button", { name: "退出登录" }));
-
-    await waitFor(() => expect(logout).toHaveBeenCalledTimes(1));
-    expect(routerMocks.replace).toHaveBeenCalledWith("/date-companion");
+  it("does not follow an external sign-in return address", async () => {
+    mockedUseDateCompanionSession.mockReturnValue(makeSession({
+      auth: { status: "authenticated", user: { id: "user-1", email: "user@example.com" } }
+    }));
+    routerMocks.searchParams = new URLSearchParams({ returnTo: "//example.com/date-companion/a" });
+    render(<DateCompanionShell entry="login" />);
+    await waitFor(() => expect(routerMocks.replace).toHaveBeenCalledWith("/"));
   });
 
   it("shows the current companion view and enables QA for a ready interaction", () => {
@@ -326,26 +448,28 @@ describe("DateCompanionShell", () => {
         serverCleanupStatus: "completed"
       },
       personQaAvailability: vi.fn(() => ({ enabled: true as const, personId: "person-ta", mappingVersion: 2 })),
+      memoryBridgeState: confirmedQaMemory(),
+      scopedPersonQaSources: () => [qaSource],
       ask
     }));
 
     render(<DateCompanionShell entry="companion" screen="home" />);
 
     expect(screen.getByRole("link", { name: "首页" })).toHaveAttribute("aria-current", "page");
-    expect(screen.getByText("约会陪伴 · 小林")).toBeInTheDocument();
-    expect(screen.getByRole("heading", { name: "你和 小林" })).toBeInTheDocument();
+    expect(screen.getByText("小林")).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: /今天，有什么/ })).toBeInTheDocument();
     expect(screen.queryByText("Ta 最近在准备考试")).not.toBeInTheDocument();
-    expect(screen.getByText("还没有适合放在这里的近况。")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "问问 Ta" }));
-    expect(screen.getByRole("textbox", { name: "向 Ta 的相处记录提问" })).toBeEnabled();
-    fireEvent.click(screen.getByRole("button", { name: /Ta 以前明确提到过哪些在意的事/u }));
+    expect(screen.getByRole("textbox", { name: "你的问题" })).toBeEnabled();
+    fireEvent.change(screen.getByRole("textbox", { name:"你的问题" }), {target:{value:"Ta 以前明确提到过哪些在意的事？"}});
     fireEvent.click(screen.getByRole("button", { name: "发送" }));
     expect(ask).toHaveBeenCalledWith("Ta 以前明确提到过哪些在意的事？");
   });
 
   it("exposes the shared account contract inside the Date Companion shell", async () => {
-    const logout = vi.fn(async () => undefined);
-    mockedUseDateCompanionSession.mockReturnValue(makeSession({
+    let finishLogout!: () => void;
+    const logout = vi.fn(() => new Promise<void>(resolve => { finishLogout = resolve; }));
+    const session = makeSession({
       auth: {
         status: "authenticated",
         user: { id: "user-1", email: "user@example.com", name: "小满" }
@@ -355,15 +479,193 @@ describe("DateCompanionShell", () => {
         status: "ready",
         relationship: { id: "relationship-1", displayName: "小林", participantState: "confirmed", version: 1 }
       }
+    });
+    const page = () => <DateCompanionShell dailyReflectionEnabled entry="companion" screen="recap" />;
+    window.history.replaceState(null,"","/date-companion/a/recap?recording=private-recording");
+    try {
+      mockedUseDateCompanionSession.mockReturnValue(session);
+      const { rerender } = render(page());
+      fireEvent.click(screen.getByRole("button", { name: /账号菜单/u }));
+      expect(screen.getByText("小满")).toBeVisible();
+      fireEvent.click(screen.getByRole("button", { name: "退出登录" }));
+
+      expect(logout).toHaveBeenCalledTimes(1);
+      mockedUseDateCompanionSession.mockReturnValue({...session, auth:{ status:"anonymous" }});
+      rerender(page());
+      expect(screen.getByRole("status")).toHaveTextContent("正在返回登录页");
+      await act(async () => finishLogout());
+      expect(routerMocks.replace.mock.calls).toEqual([["/date-companion"]]);
+    } finally {
+      window.history.replaceState(null,"","/");
+    }
+  });
+
+  it("shows a single detail reading sheet only after matching the requested book record", () => {
+    const interaction = { ...readyInteraction(), title: "河边的一天", detailLoaded: false, relationshipInteractionId: "meeting-a" };
+    const session = makeSession({
+      auth: { status: "authenticated", user: { id: "user-1", email: "user@example.com" } },
+      relationshipState: { status: "ready", relationship: { id: "relationship-1", displayName: "小林", participantState: "confirmed", version: 1 } },
+      selectRelationshipInteraction: vi.fn(() => true),
+      viewModel: viewModelWithInteraction(interaction),
+      detailReadState: { status: "loading" },
+    });
+    const page = (id:string) => <DateCompanionShell entry="companion" screen="recap" initialInteractionId={id}/>;
+    mockedUseDateCompanionSession.mockReturnValue(session);
+    const {container, rerender} = render(page("meeting-b"));
+    expect(container.querySelector("[data-book-detail-reading]")).toBeNull();
+    expect(screen.queryByText("河边的一天")).not.toBeInTheDocument();
+    rerender(page("meeting-a"));
+    const sheet = within(container.querySelector<HTMLElement>("[data-book-detail-reading]")!);
+    expect(sheet.getByRole("heading", {name:"河边的一天"})).toBeVisible();
+    expect(sheet.getByRole("status")).toHaveTextContent("正在读取相处内容");
+    expect(sheet.queryByRole("button")).toBeNull();
+    mockedUseDateCompanionSession.mockReturnValue({...session, detailReadState:{status:"error", interactionId:"meeting-a", message:"读取暂时失败，请重新读取。"}});
+    rerender(page("meeting-a"));
+    expect(sheet.getByRole("status")).toHaveTextContent("读取暂时失败");
+    fireEvent.click(sheet.getByRole("button", {name:"重新读取"}));
+    expect(session.retryInteractionDetail).toHaveBeenCalledTimes(1);
+    mockedUseDateCompanionSession.mockReturnValue({...session, detailReadState:{status:"error", interactionId:"meeting-a", targetUnavailable:true, message:"这段记录不存在，或已经无法访问。"}});
+    rerender(page("meeting-a"));
+    expect(sheet.queryByText("河边的一天")).not.toBeInTheDocument();
+    expect(sheet.getByRole("button", {name:"重新读取"})).toBeVisible();
+    mockedUseDateCompanionSession.mockReturnValue({...session, viewModel:viewModelWithInteraction({...interaction, detailLoaded:true})});
+    rerender(page("meeting-a"));
+    expect(container.querySelector("[data-book-detail-reading]")).toBeNull();
+    expect(container.querySelector("[data-book-recap]")).toBeInTheDocument();
+  });
+
+  it("keeps book recap navigation on its displayed record and returns to the book home", () => {
+    const interaction: InteractionVM = {
+      ...readyInteraction(),
+      relationshipInteractionId: "interaction-history",
+      persistenceStatus: "confirmed"
+    };
+    const viewModel = viewModelWithInteraction(interaction);
+    viewModel.currentInteraction = { ...readyInteraction(), id: "another-current-upload" };
+    mockedUseDateCompanionSession.mockReturnValue(makeSession({
+      auth: { status: "authenticated", user: { id: "user-1", email: "user@example.com" } },
+      viewModel,
+      relationshipState: {
+        status: "ready",
+        relationship: { id: "relationship-1", displayName: "小林", participantState: "confirmed", version: 1 }
+      }
     }));
 
-    render(<DateCompanionShell dailyReflectionEnabled entry="companion" screen="home" />);
-    fireEvent.click(screen.getByRole("button", { name: /账号菜单/u }));
-    expect(screen.getByText("小满")).toBeVisible();
-    fireEvent.click(screen.getByRole("button", { name: "退出登录" }));
+    render(<DateCompanionShell entry="companion" screen="recap" />);
 
-    await waitFor(() => expect(logout).toHaveBeenCalledTimes(1));
-    expect(routerMocks.replace).toHaveBeenCalledWith("/date-companion");
+    const nav = screen.getByRole("navigation", { name: "约会陪伴页面" });
+    expect(screen.getByRole("button", { name: /切换产品/u })).toHaveTextContent("Daily Brief");
+    expect(within(nav).getByRole("link", { name: "首页" })).toHaveAttribute("href", "/date-companion/a");
+    expect(within(nav).getByRole("link", { name: "准备" })).toHaveAttribute("href", "/date-companion/a/prepare");
+    expect(within(nav).getByRole("link", { name: "人物" })).toHaveAttribute("href", "/date-companion/a/people");
+    expect(within(nav).getByRole("link", { name: "复盘" })).toHaveAttribute("aria-current", "page");
+    expect(within(nav).getByRole("link", { name: "复盘" })).toHaveAttribute("href", "/date-companion/a/recap?interaction=interaction-history");
+    expect(screen.queryByRole("link", { name: "切回旧版" })).not.toBeInTheDocument();
+  });
+
+  it.each(["home", "prepare", "recap"] as const)("opens the sole verified person's canonical book directly from %s", (entryScreen) => {
+    const memory = readyMemoryBridgeState();
+    if (memory.status !== "ready") throw new Error("fixture");
+    const date = "2026-08-04T10:00:00.000Z";
+    const session = makeSession({
+      auth: { status: "authenticated", user: { id: "user-1", email: "user@example.com" } },
+      relationshipState: { status: "ready", relationship: { id: "relationship-1", displayName: "林澄", participantState: "confirmed", version: 1 } },
+      memoryBridgeState: { ...memory, selfBinding: { personId: "person-self", status: "active", version: 1, setAt: date, clearedAt: null, updatedAt: date } }
+    });
+    mockedUseDateCompanionSession.mockReturnValue(session);
+    const page = <DateCompanionShell entry="companion" screen={entryScreen} />;
+    const { rerender } = render(page);
+    expect(screen.getByRole("link", { name: /^人物$/ })).toHaveAttribute("href", "/date-companion/a/people/person-ta");
+
+    // More than one confirmed person must keep the directory choice available.
+    mockedUseDateCompanionSession.mockReturnValue({ ...session, memoryBridgeState: {
+      ...memory, selfBinding: session.memoryBridgeState.status === "ready" ? session.memoryBridgeState.selfBinding : null,
+      people: [...memory.people, { ...memory.people[1], id: "person-other", displayName: "另一位" }]
+    } });
+    rerender(<DateCompanionShell entry="companion" screen={entryScreen} />);
+    expect(screen.getByRole("link", { name: /^人物$/ })).toHaveAttribute("href", "/date-companion/a/people");
+
+    // Losing verified identity must also remove the direct target immediately.
+    mockedUseDateCompanionSession.mockReturnValue({ ...session, memoryBridgeState: memory });
+    rerender(<DateCompanionShell entry="companion" screen={entryScreen} />);
+    expect(screen.getByRole("link", { name: /^人物$/ })).toHaveAttribute("href", "/date-companion/a/people");
+  });
+
+  it("keeps a resolved sole-person alias mounted instead of replacing its route", () => {
+    vi.stubGlobal("matchMedia", vi.fn().mockReturnValue({ matches: false, addEventListener: vi.fn(), removeEventListener: vi.fn(), addListener: vi.fn(), removeListener: vi.fn() }));
+    const memory = readyMemoryBridgeState();
+    if (memory.status !== "ready") throw new Error("fixture");
+    const date = "2026-08-04T10:00:00.000Z";
+    const session = makeSession({
+      auth: { status: "authenticated", user: { id: "user-1", email: "user@example.com" } },
+      relationshipState: { status: "ready", relationship: { id: "relationship-1", displayName: "林澄", participantState: "confirmed", version: 1 } },
+      memoryBridgeState: { ...memory, selfBinding: { personId: "person-self", status: "active", version: 1, setAt: date, clearedAt: null, updatedAt: date } }
+    });
+    mockedUseDateCompanionSession.mockReturnValue(session);
+    const { container, rerender } = render(<DateCompanionShell entry="companion" screen="people" />);
+    const board = container.querySelector(".scrap-board");
+    expect(board).not.toBeNull();
+    expect(screen.getByRole("heading", { name: "林澄", level: 1 })).toBeInTheDocument();
+    mockedUseDateCompanionPersonArchive.mockReturnValue({ status: "ready", archive: { person: memory.people[1], entries: [] } });
+    rerender(<DateCompanionShell entry="companion" screen="people" />);
+    expect(container.querySelector(".scrap-board")).toBe(board);
+    expect(routerMocks.replace).not.toHaveBeenCalled();
+  });
+
+  it("restores shared menu focus in the default book shell", () => {
+    mockedUseDateCompanionSession.mockReturnValue(makeSession({
+      auth: { status: "authenticated", user: { id: "user-1", email: "user@example.com" } },
+      relationshipState: {
+        status: "ready",
+        relationship: { id: "relationship-1", displayName: "小林", participantState: "confirmed", version: 1 }
+      }
+    }));
+    render(<DateCompanionShell entry="companion" screen="home" />);
+    expect(screen.getByRole("link", { name: "首页" })).toHaveAttribute("href", "/date-companion/a");
+    expect(screen.getByRole("button", { name: /切换产品/u })).toHaveTextContent("Daily Brief");
+    for (const name of [/切换产品/u, /账号菜单/u]) {
+      const trigger = screen.getByRole("button", { name });
+      trigger.focus();
+      fireEvent.click(trigger);
+      expect(trigger).toHaveAttribute("aria-expanded", "true");
+      fireEvent.keyDown(document, { key: "Escape" });
+      expect(trigger).toHaveAttribute("aria-expanded", "false");
+      expect(trigger).toHaveFocus();
+    }
+    expect(screen.getByRole("link", { name: "首页" })).toHaveAttribute("href", "/date-companion/a");
+  });
+  it("uses the real book shell for a new preparation without creating a relationship", () => {
+    const session = makeSession({ auth: { status: "authenticated", user: { id: "book-user", email: "book@example.test" } }, relationshipState: { status: "absent" } });
+    mockedUseDateCompanionSession.mockReturnValue(session);
+    render(<DateCompanionShell entry="companion" screen="prepare" initialDiscussionId="actual-id" />);
+    expect(screen.getByTestId("formal-book-preparation")).toHaveTextContent("actual-id");
+    expect(screen.getByRole("button", { name: /切换产品/u })).toHaveTextContent("Daily Brief");
+    expect(screen.queryByRole("link", { name: "切回旧版" })).not.toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "准备" })).toHaveAttribute("aria-current", "page");
+    expect(session.createRelationship).not.toHaveBeenCalled();
+  });
+  it("shows the discussion recovery status while account and relationship are still being read", () => {
+    mockedUseDateCompanionSession.mockReturnValue(makeSession());
+    const props = { entry: "companion", screen: "prepare", initialDiscussionId: "existing" } as const;
+    const { rerender } = render(<DateCompanionShell {...props} />);
+    const opening = screen.getByRole("status");
+    expect(opening).toHaveTextContent("正在恢复这次讨论");
+    expect(screen.getByRole("heading", { name: "这次想记得的事" })).toBeInTheDocument();
+    mockedUseDateCompanionSession.mockReturnValue(makeSession({ auth: { status: "authenticated", user: { id: "a", email: "a@example.test" } }, relationshipState: { status: "loading" } }));
+    rerender(<DateCompanionShell {...props} />);
+    expect(screen.getByRole("status")).toBe(opening);
+    expect(screen.queryByRole("textbox")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("formal-book-preparation")).not.toBeInTheDocument();
+  });
+  it("passes an intentional new draft from live query state without replacing a newly bound real ID", () => {
+    mockedUseDateCompanionSession.mockReturnValue(makeSession({ auth: { status: "authenticated", user: { id: "book-user", email: "book@example.test" } }, relationshipState: { status: "absent" } }));
+    routerMocks.searchParams = new URLSearchParams("view=book&draft=new");
+    const { rerender } = render(<DateCompanionShell entry="companion" screen="prepare" initialDiscussionId="stale-server-id" />);
+    expect(screen.getByTestId("formal-book-preparation")).toHaveAttribute("data-target", "new");
+    routerMocks.searchParams = new URLSearchParams("view=book&draft=new&preparation=created-id");
+    rerender(<DateCompanionShell entry="companion" screen="prepare" initialDiscussionId="stale-server-id" />);
+    expect(screen.getByTestId("formal-book-preparation")).toHaveAttribute("data-target", "existing");
+    expect(screen.getByTestId("formal-book-preparation")).toHaveTextContent("created-id");
   });
 
   it("keeps Toy Sync hidden by default and resets the upload form when the authenticated account changes", () => {
@@ -387,13 +689,16 @@ describe("DateCompanionShell", () => {
     expect(screen.queryByTestId("date-companion-toy-sync")).not.toBeInTheDocument();
 
     rerender(<DateCompanionShell entry="companion" screen="home" toySyncEnabled />);
+    fireEvent.click(screen.getByRole("button", {name:"连接玩偶"}));
     expect(screen.getByTestId("date-companion-toy-sync")).toHaveTextContent("account-toy");
+    fireEvent.click(screen.getByRole("button", {name:"关闭连接玩偶"}));
+    fireEvent.click(screen.getByRole("button", {name:"上传这次相处的录音"}));
     expect(screen.getByRole("form", { name: "上传相处录音" })).toBeInTheDocument();
 
     const firstAccountFile = new File(["audio"], "first-account.wav", {
       type: "audio/wav"
     });
-    fireEvent.change(screen.getByLabelText(/选择一段完整录音/u), {
+    fireEvent.change(screen.getByLabelText(/选择录音文件/u), {
       target: { files: [firstAccountFile] }
     });
     expect(screen.getByText("first-account.wav")).toBeInTheDocument();
@@ -407,6 +712,7 @@ describe("DateCompanionShell", () => {
     }));
     rerender(<DateCompanionShell entry="companion" screen="home" toySyncEnabled />);
 
+    fireEvent.click(screen.getByRole("button", {name:"连接玩偶"}));
     expect(screen.getByTestId("date-companion-toy-sync")).toHaveTextContent("account-other");
     expect(screen.queryByText("first-account.wav")).not.toBeInTheDocument();
   });
@@ -418,6 +724,7 @@ describe("DateCompanionShell", () => {
         status: "ready",
         relationship: { id: "relationship-1", displayName: "Ta", participantState: "confirmed", version: 1 }
       },
+      memoryBridgeState: {...readyMemoryBridgeState(), mapping:null},
       personQaAvailability: vi.fn(() => ({
         enabled: false as const,
         message: "先在“人物与长期保留”中确认“我”和“Ta”，再来提问。"
@@ -427,8 +734,8 @@ describe("DateCompanionShell", () => {
     render(<DateCompanionShell entry="companion" screen="home" />);
     fireEvent.click(screen.getByRole("button", { name: "问问 Ta" }));
 
-    expect(screen.getByText("先在“人物与长期保留”中确认“我”和“Ta”，再来提问。")).toBeInTheDocument();
-    expect(screen.getByRole("textbox", { name: "向 Ta 的相处记录提问" })).toBeDisabled();
+    expect(screen.getByText(/到「人物」打开「核对我和 Ta」/u)).toBeInTheDocument();
+    expect(screen.getByRole("textbox", { name: "你的问题" })).toBeDisabled();
   });
 
   it("keeps proactive inference out of the Person record while reusing its editable QA suggestion", async () => {
@@ -484,11 +791,13 @@ describe("DateCompanionShell", () => {
         status: "ready",
         relationship: { id: "relationship-1", displayName: "Ta", participantState: "confirmed", version: 1 }
       },
-      memoryBridgeState: readyMemoryBridgeState([retainedSource]),
+      memoryBridgeState: confirmedQaMemory([retainedSource]),
+      scopedPersonQaSources: () => [retainedSource],
       personQaAvailability: vi.fn(() => ({ enabled: true as const, personId: "person-ta", mappingVersion: 2 })),
       personQaSources: vi.fn(() => [retainedSource])
     }));
 
+    mockedUseDateCompanionPersonArchive.mockReturnValue({status:"ready", archive:{person:confirmedQaMemory().people[1],entries:[]}});
     render(<DateCompanionShell entry="companion" screen="person" />);
 
     expect(screen.getByRole("heading", { name: "林澄", level: 1 })).toBeInTheDocument();
@@ -503,8 +812,9 @@ describe("DateCompanionShell", () => {
       expect.objectContaining({ method: "GET", credentials: "same-origin" })
     );
     fireEvent.click(screen.getByRole("button", { name: "问问 Ta" }));
+    openQaSuggestions();
     fireEvent.click(screen.getByRole("button", { name: "Ta 之前还在哪些时刻提到过类似感受？" }));
-    expect(screen.getByRole("textbox", { name: "向 Ta 的相处记录提问" })).toHaveValue(
+    expect(screen.getByRole("textbox", { name: "你的问题" })).toHaveValue(
       "Ta 之前还在哪些时刻提到过类似感受？"
     );
   });
@@ -538,9 +848,14 @@ describe("DateCompanionShell", () => {
       }))
     };
     let resolveRefresh!: (value: Response) => void;
-    const fetcher = vi.fn()
-      .mockResolvedValueOnce(new Response(JSON.stringify(generated), { status: 200 }))
+    const readProactiveValue = vi.fn()
+      .mockResolvedValueOnce(Response.json(generated))
       .mockImplementationOnce(() => new Promise<Response>((resolve) => { resolveRefresh = resolve; }));
+    const fetcher = vi.fn(async (path: string) => {
+      if (path === "/api/date-companion/preparations") return Response.json({preparations:[]});
+      expect(path).toBe("/api/date-companion/relationships/relationship-1/proactive-value");
+      return readProactiveValue();
+    });
     vi.stubGlobal("fetch", fetcher);
     const model = emptyDateCompanionViewModel();
     model.person.promises = [{
@@ -559,7 +874,7 @@ describe("DateCompanionShell", () => {
       auth: { status: "authenticated", user: { id: "user-1", email: "user@example.com" } },
       viewModel: model,
       relationshipState: { status: "ready", relationship: { id: "relationship-1", displayName: "小林", participantState: "confirmed", version: 1 } },
-      memoryBridgeState: readyMemoryBridgeState(personQaSources()), personQaSources, selectCachedInteraction,
+      memoryBridgeState: confirmedQaMemory(personQaSources()), personQaSources, scopedPersonQaSources: personQaSources, selectCachedInteraction,
       personQaAvailability: vi.fn(() => selfOnly ? { enabled: false as const, message: "还没有可用于人物提问的内容。" }
         : { enabled: true as const, personId: "person-ta", mappingVersion: 2 })
     });
@@ -569,16 +884,16 @@ describe("DateCompanionShell", () => {
     if (!selfOnly) expect(screen.getByText("Ta 想去看上次聊到的展览。")).toBeInTheDocument();
     expect(screen.queryByText(rawItem.displayedText)).not.toBeInTheDocument();
     expect(personQaSources()).toEqual(selfOnly ? [] : [taSource]);
-    const preparation = screen.getByRole("region", { name: "下次见面前的首页建议" });
+    const preparation = screen.getByRole("region", { name: "下次见面前" });
     fireEvent.click(within(preparation).getByText("查看原话"));
     fireEvent.click(within(preparation).getByRole("button", { name: "在完整文字稿中查看" }));
-    expect(selectCachedInteraction).toHaveBeenCalledWith("upload-1");
-    expect(routerMocks.push).toHaveBeenCalledWith("/date-companion/a/recap?segment=segment-self#full-transcript");
+    expect(routerMocks.push).toHaveBeenCalledWith("/date-companion/a/recap?recording=upload-1&segment=segment-self#full-transcript");
     if (!selfOnly) {
       fireEvent.click(screen.getByRole("button", { name: "问问 Ta" }));
       const question = "关于「Ta 想去看上次聊到的展览。」，当时具体说了什么？";
+      openQaSuggestions();
       fireEvent.click(screen.getByRole("button", { name: question }));
-      expect(screen.getByRole("textbox", { name: "向 Ta 的相处记录提问" })).toHaveValue(question);
+      expect(screen.getByRole("textbox", { name: "你的问题" })).toHaveValue(question);
       expect(screen.queryByRole("button", { name: /关于「查一下展览的开放时间/u })).not.toBeInTheDocument();
     }
 
@@ -588,10 +903,10 @@ describe("DateCompanionShell", () => {
     });
     rerender(<DateCompanionShell entry="companion" screen="home" />);
     expect(screen.queryByText("查一下展览的开放时间。")).not.toBeInTheDocument();
-    await waitFor(() => expect(fetcher).toHaveBeenCalledTimes(2));
-    expect(screen.getByText("正在整理见面前值得留意的事…")).toBeInTheDocument();
+    await waitFor(() => expect(readProactiveValue).toHaveBeenCalledTimes(2));
+    expect(screen.getByText("正在读取人物近况与见面准备…")).toBeInTheDocument();
     await act(async () => resolveRefresh(new Response(JSON.stringify(generated), { status: 200 })));
-    expect(screen.getByText("见面前的建议暂时未能整理，请稍后再看。")).toBeInTheDocument();
+    expect(screen.getByText("原有依据已经变更或无法核对，请重新读取。")).toBeInTheDocument();
     expect(screen.queryByText("查一下展览的开放时间。")).not.toBeInTheDocument();
     expect(screen.queryByText(rawItem.displayedText)).not.toBeInTheDocument();
   });
@@ -611,7 +926,7 @@ describe("DateCompanionShell", () => {
 
     render(<DateCompanionShell entry="companion" initialPersonId={initialPersonId} screen="person" />);
     expect(screen.getByRole("heading", { name: "没有找到这位人物" })).toBeVisible();
-    expect(mockedUseDateCompanionPersonArchive).toHaveBeenCalledWith(null);
+    expect(mockedUseDateCompanionPersonArchive).toHaveBeenCalledWith(null, expect.any(String), 0);
   });
 
   it("restores a confirmed recap from the URL and loads its current-interaction observation", async () => {
@@ -743,15 +1058,18 @@ describe("DateCompanionShell", () => {
         screen="recap"
       />
     );
-    expect(screen.getByRole("heading", { name: "这次相处的复盘已完成" })).toBeInTheDocument();
-    await waitFor(() => expect(screen.getByText("这次你们都给下次相处留了一个自然入口。")).toBeInTheDocument());
+    expect(screen.getByRole("heading", { name: "本次复盘已完成" })).toBeInTheDocument();
+    fireEvent.click(await screen.findByRole("button", {name:"原话线索"}));
+    expect(screen.getByText("这次你们都给下次相处留了一个自然入口。")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", {name:"关闭原话线索"}));
     expect(fetcher).toHaveBeenCalledWith(
       "/api/date-companion/interactions/interaction-1/proactive-value",
       expect.objectContaining({ method: "GET", credentials: "same-origin" })
     );
     fireEvent.click(screen.getByRole("button", { name: "问问这次相处" }));
+    openQaSuggestions();
     fireEvent.click(screen.getByRole("button", { name: "这次提到的下次计划是什么？" }));
-    expect(screen.getByRole("textbox", { name: "针对这次相处提问" })).toHaveValue(
+    expect(screen.getByRole("textbox", { name: "你的问题" })).toHaveValue(
       "这次提到的下次计划是什么？"
     );
   });
@@ -809,9 +1127,12 @@ describe("DateCompanionShell", () => {
 
     render(<DateCompanionShell entry="companion" screen="recap" />);
     expect(document.querySelector('main[data-screen="recap"]')).toBeInTheDocument();
-    expect(screen.getByRole("region", { name: "这次相处详情" })).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "Ta" }));
-    fireEvent.click(screen.getByRole("radio", { name: /记住这段声音/u }));
+    expect(screen.getByRole("article", { name: "单次复盘" })).toBeInTheDocument();
+    fireEvent.click(screen.getAllByRole("button", {name:/^核对说话人$/u})[0]);
+    const speakers=screen.getByRole("dialog", {name:"核对说话人"});
+    fireEvent.click(within(speakers).getByRole("button", {name:"Ta"}));
+    fireEvent.click(within(speakers).getByRole("checkbox", { name: /记住这段声音/u }));
+    fireEvent.click(within(speakers).getByRole("button", {name:"返回复盘"}));
     fireEvent.click(screen.getByRole("button", { name: "完成本次复盘" }));
 
     await waitFor(() => expect(finalizeRecap).toHaveBeenCalledWith(
@@ -821,9 +1142,7 @@ describe("DateCompanionShell", () => {
       [{ id: "moment-1", version: 2, disposition: "kept" }],
       [{ speakerIds: ["speaker_1"] }]
     ));
-    expect(routerMocks.replace).toHaveBeenCalledWith(
-      "/date-companion/a/recap?interaction=interaction-1"
-    );
+    expect(routerMocks.replace).not.toHaveBeenCalled();
     expect(updateParticipants).not.toHaveBeenCalled();
   });
 
@@ -853,6 +1172,47 @@ describe("DateCompanionShell", () => {
     );
     await waitFor(() => expect(selectRelationshipInteraction).toHaveBeenLastCalledWith("interaction-missing"));
     expect(routerMocks.replace).toHaveBeenCalledWith("/date-companion/a");
+  });
+
+  it("opens the saved recap for an old recording link after raw upload cleanup", () => {
+    const model = emptyDateCompanionViewModel();
+    const saved: InteractionVM = {
+      ...readyInteraction(), id: "upload-cleaned", sourceUploadId: "upload-cleaned",
+      relationshipInteractionId: "meeting-saved", persistenceStatus: "confirmed", sourceState: "server_cleaned"
+    };
+    model.recap.history = [saved];
+    const session = makeSession({
+      auth: {status:"authenticated", user:{id:"user-1", email:"user@example.com"}},
+      relationshipState: {status:"ready", relationship:{id:"relationship-1",participantState:"confirmed",version:1}},
+      viewModel: model, selectRelationshipInteraction: vi.fn(() => true)
+    });
+    mockedUseDateCompanionSession.mockReturnValue(session);
+    const page = () => <DateCompanionShell entry="companion" screen="recap" initialRecordingId="upload-cleaned" />;
+    const { rerender } = render(page());
+    expect(session.selectRelationshipInteraction).toHaveBeenCalledWith("meeting-saved");
+    expect(session.readRecordingForRecap).not.toHaveBeenCalled();
+    mockedUseDateCompanionSession.mockReturnValue({...session, viewModel:{...model,recap:{...model.recap,interaction:saved}}});
+    rerender(page());
+    expect(screen.getByRole("article", {name:"单次复盘"})).toBeVisible();
+    expect(routerMocks.replace).not.toHaveBeenCalled();
+  });
+
+  it.each([false, true])("uses the owned-upload endpoint for a recording outside readable history (%s)", async expired => {
+    const model = emptyDateCompanionViewModel();
+    if (expired) model.recap.history = [{
+      ...readyInteraction(), sourceUploadId: "upload-1", relationshipInteractionId:"deleted-meeting",
+      persistenceStatus:"confirmed",sourceState:"explicitly_deleted"
+    }];
+    const session = makeSession({
+      auth: {status:"authenticated",user:{id:"user-1",email:"user@example.com"}},
+      relationshipState: {status:"ready",relationship:{id:"relationship-1",participantState:"confirmed",version:1}},
+      viewModel: model
+    });
+    mockedUseDateCompanionSession.mockReturnValue(session);
+    render(<DateCompanionShell entry="companion" screen="recap" initialRecordingId="upload-1" />);
+    expect(session.readRecordingForRecap).toHaveBeenCalledWith("upload-1", expect.any(AbortSignal));
+    expect(session.selectRelationshipInteraction).not.toHaveBeenCalled();
+    await waitFor(() => expect(routerMocks.replace).toHaveBeenCalledWith("/date-companion/a"));
   });
 
   it("keeps an evidence-only historical recap read-only while Person-scoped QA remains available", () => {
@@ -898,9 +1258,12 @@ describe("DateCompanionShell", () => {
       },
       currentInteractionQaAvailability: vi.fn(() => ({
         enabled: false as const,
-        message: "这台设备没有保存这次相处的完整文字稿，仍可以使用“问问 Ta”回看已确认内容。"
+        reason: "missing_local_transcript" as const,
+        message: "这台设备没有这场录音的完整文字稿，暂时无法针对这场提问。"
       })),
       personQaAvailability: vi.fn(() => ({ enabled: true as const, personId: "person-ta", mappingVersion: 2 })),
+      memoryBridgeState: confirmedQaMemory(),
+      scopedPersonQaSources: () => [qaSource],
       selectRelationshipInteraction: vi.fn(() => true)
     }));
 
@@ -908,15 +1271,16 @@ describe("DateCompanionShell", () => {
       <DateCompanionShell entry="companion" initialInteractionId="interaction-history" screen="recap" />
     );
 
-    expect(screen.getByText("一起认真聊了很久。")).toBeInTheDocument();
+    expect(screen.getByRole("heading", {name:"本次复盘已完成"})).toBeInTheDocument();
+    expect(screen.getByRole("button", {name:"已保存的来源片段"})).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "确认并留下这次相处" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "在文字稿中查看" })).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "问问这次相处" }));
-    expect(screen.getByRole("textbox", { name: "针对这次相处提问" })).toBeDisabled();
-    expect(screen.getByText(/这台设备没有保存这次相处的完整文字稿/u)).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "关闭" }));
+    expect(screen.getByRole("textbox", { name: "你的问题" })).toBeDisabled();
+    expect(screen.getByText(/这台设备没有这场录音的完整文字稿/u)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "关闭问答" }));
     fireEvent.click(screen.getByRole("button", { name: "问问 Ta" }));
-    expect(screen.getByRole("textbox", { name: "向 Ta 的相处记录提问" })).toBeEnabled();
+    expect(screen.getByRole("textbox", { name: "你的问题" })).toBeEnabled();
   });
 
   it("shows both explicit QA entries on a ready recap and routes each drawer to its own session mode", () => {
@@ -933,6 +1297,8 @@ describe("DateCompanionShell", () => {
       },
       currentInteractionQaAvailability: vi.fn(() => ({ enabled: true as const, uploadId: "upload-1" })),
       personQaAvailability: vi.fn(() => ({ enabled: true as const, personId: "person-ta", mappingVersion: 2 })),
+      memoryBridgeState: confirmedQaMemory(),
+      scopedPersonQaSources: () => [qaSource],
       activateQaMode,
       askCurrentInteraction,
       ask
@@ -945,53 +1311,48 @@ describe("DateCompanionShell", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "问问这次相处" }));
     expect(activateQaMode).toHaveBeenCalledWith("current-interaction");
-    fireEvent.change(screen.getByRole("textbox", { name: "针对这次相处提问" }), {
+    fireEvent.change(screen.getByRole("textbox", { name: "你的问题" }), {
       target: { value: "这次聊了什么？" }
     });
     fireEvent.click(screen.getByRole("button", { name: "发送" }));
     expect(askCurrentInteraction).toHaveBeenCalledWith("这次聊了什么？");
-    fireEvent.click(screen.getByRole("button", { name: "关闭" }));
+    fireEvent.click(screen.getByRole("button", { name: "关闭问答" }));
 
     fireEvent.click(screen.getByRole("button", { name: "问问 Ta" }));
     expect(activateQaMode).toHaveBeenCalledWith("person");
-    fireEvent.change(screen.getByRole("textbox", { name: "向 Ta 的相处记录提问" }), {
+    fireEvent.change(screen.getByRole("textbox", { name: "你的问题" }), {
       target: { value: "Ta 以前说过什么？" }
     });
     fireEvent.click(screen.getByRole("button", { name: "发送" }));
     expect(ask).toHaveBeenCalledWith("Ta 以前说过什么？");
   });
 
-  it("keeps a failed QA question retryable without exposing an internal stream code", () => {
+  it("keeps a failed QA question retryable without exposing an internal stream code", async () => {
     const interaction = readyInteraction();
-    mockedUseDateCompanionSession.mockReturnValue(makeSession({
-      auth: {
-        status: "authenticated",
-        user: { id: "user-1", email: "user@example.com" }
-      },
+    const question = "Ta 这次最在意什么？";
+    const ask = vi.fn(() => new Promise<null>(() => {}));
+    const session = makeSession({
+      auth: { status: "authenticated", user: { id: "user-1", email: "user@example.com" } },
       viewModel: viewModelWithInteraction(interaction),
-      relationshipState: {
-        status: "ready",
-        relationship: { id: "relationship-1", participantState: "confirmed", version: 1 }
-      },
-      uploadState: {
-        status: "ready",
-        uploadId: interaction.id,
-        cacheStatus: "saved",
-        serverCleanupStatus: "completed"
-      },
-      qaState: {
-        status: "failed",
-        question: "Ta 这次最在意什么？",
-        message: "qa_stream_failed"
-      }
-    }));
-
-    render(<DateCompanionShell entry="companion" screen="home" />);
+      relationshipState: { status: "ready", relationship: { id: "relationship-1", participantState: "confirmed", version: 1 } },
+      memoryBridgeState: confirmedQaMemory(),
+      personQaAvailability: () => ({ enabled:true,personId:"person-ta",mappingVersion:2 }),
+      scopedPersonQaSources: () => [qaSource],
+      ask
+    });
+    mockedUseDateCompanionSession.mockReturnValue(session);
+    const { rerender } = render(<DateCompanionShell entry="companion" screen="home" />);
     fireEvent.click(screen.getByRole("button", { name: "问问 Ta" }));
-
-    expect(screen.getByRole("alert")).toHaveTextContent("回答服务暂时没有完成这次提问，请重新发送。");
+    const input=screen.getByRole("textbox", {name:"你的问题"});
+    fireEvent.change(input, {target:{value:question}});
+    fireEvent.click(screen.getByRole("button", {name:"发送"}));
+    mockedUseDateCompanionSession.mockReturnValue({...session,qaState:{status:"failed",question,message:"qa_stream_failed"}});
+    rerender(<DateCompanionShell entry="companion" screen="home" />);
+    const retry=await screen.findByRole("button", {name:"重试这次回答"});
+    expect(screen.getByText("这次回答未能生成。")).toBeVisible();
     expect(screen.queryByText("qa_stream_failed")).not.toBeInTheDocument();
-    expect(screen.getByRole("textbox", { name: "向 Ta 的相处记录提问" })).toHaveValue("Ta 这次最在意什么？");
+    fireEvent.click(retry);
+    expect(ask.mock.calls).toEqual([[question],[question]]);
   });
 
   it("keeps a ready recap CTA and exposes a retryable warning when local caching fails but server data remains", () => {
@@ -1018,14 +1379,11 @@ describe("DateCompanionShell", () => {
       retryRead
     }));
 
-    const { container } = render(<DateCompanionShell entry="companion" screen="home" />);
+    render(<DateCompanionShell entry="companion" screen="home" />);
 
-    const details = container.querySelector("details");
-    expect(details).not.toHaveAttribute("open");
-    const retryButton = screen.getByRole("button", { name: "重新读取" });
-    expect(retryButton.closest('[role="alert"]')).toHaveTextContent(cacheMessage);
-    const recapLinks = screen.getAllByRole("link", { name: /查看这次复盘/ });
-    expect(recapLinks.some((link) => !details?.contains(link))).toBe(true);
+    const retryButton = screen.getByRole("button", { name: "重新读取结果" });
+    expect(screen.getByRole("alert")).toHaveTextContent(cacheMessage);
+    expect(screen.getByRole("link", { name: /查看录音复盘/ })).toBeVisible();
     expect(screen.queryByRole("button", { name: /查看详情/ })).not.toBeInTheDocument();
 
     fireEvent.click(retryButton);
@@ -1057,10 +1415,10 @@ describe("DateCompanionShell", () => {
 
     render(<DateCompanionShell entry="companion" screen="home" />);
 
-    expect(screen.getAllByRole("link", { name: /查看这次复盘/u }).length).toBeGreaterThan(0);
+    expect(screen.getAllByRole("link", { name: /查看录音复盘/u }).length).toBeGreaterThan(0);
     const warning = screen.getAllByRole("alert").find((candidate) => candidate.textContent?.includes("服务器原结果尚未清理"));
     expect(warning).toBeDefined();
-    fireEvent.click(screen.getByRole("button", { name: "重新读取" }));
+    fireEvent.click(screen.getByRole("button", { name: "重新读取结果" }));
     expect(retryRead).toHaveBeenCalledTimes(1);
   });
 

@@ -19,7 +19,6 @@ import {
 } from "@/lib/server/date-companion";
 import { deleteDateCompanionAudioStaging } from "@/lib/server/date-companion/audio-staging";
 import {
-  captureRetainedMemoryEvidenceProvenance,
   getMemoryDatabase,
   hasRetainedMemoryProvenance
 } from "@/lib/server/memory";
@@ -144,11 +143,6 @@ export async function DELETE(
     authContext.user.id,
     uploadId
   );
-  const retainRelationshipMemory = Boolean(
-    isBrowserCacheCleanup
-    && relationshipInteraction
-    && dateCompanionRepository.getMemoryRetentionSetting?.(authContext.user.id).enabled
-  );
   const upload = await authContext.store.read<StoredUpload>("uploads", uploadId);
   if (isDailyReflectionUploadRecord(upload)) {
     return NextResponse.json({ error: "upload_not_found" }, { status: 404 });
@@ -218,15 +212,6 @@ export async function DELETE(
       if (isBrowserCacheCleanup) {
         if (!relationshipInteraction) {
           return NextResponse.json({ error: "upload_not_found" }, { status: 404 });
-        }
-        if (
-          retainRelationshipMemory
-          && !hasRetainedMemoryProvenance(getMemoryDatabase(), authContext.user.id, uploadId)
-        ) {
-          return NextResponse.json(
-            { error: "memory_provenance_required", retryable: true },
-            { status: 503 }
-          );
         }
         const markedServerCleaned = dateCompanionRepository.markUploadSourceState(
           authContext.user.id,
@@ -317,35 +302,15 @@ export async function DELETE(
   let relationshipSnapshotRetained = false;
   let relationshipInteractionDeleted = false;
   let retainedMemoryEvidence = false;
-  if (retainRelationshipMemory && relationshipInteraction) {
+  if (isBrowserCacheCleanup && relationshipInteraction) {
+    // Local source cleanup can happen before a first grant or after withdrawal.
+    // Only the authorized bridge projects saved evidence when the worker runs.
     try {
-      const memoryDatabase = getMemoryDatabase();
-      if (!hasRetainedMemoryProvenance(memoryDatabase, authContext.user.id, uploadId)) {
-        await captureRetainedMemoryEvidenceProvenance({
-          database: memoryDatabase,
-          store: authContext.store,
-          userId: authContext.user.id,
-          uploadId,
-          relationshipId: dateCompanionRepository.getInteractionRelationshipId(
-            authContext.user.id,
-            relationshipInteraction.interactionId
-          ),
-          interactionId: relationshipInteraction.interactionId
-        });
-      }
-      retainedMemoryEvidence = true;
-    } catch (error) {
-      console.error(
-        "[memory-retention] provenance capture failed before cleanup.",
-        error instanceof Error ? error.message : "unknown_error"
-      );
-      return NextResponse.json(
-        { error: "memory_provenance_required", deleted: false, retryable: true },
-        { status: 503 }
-      );
+      retainedMemoryEvidence = hasRetainedMemoryProvenance(getMemoryDatabase(), authContext.user.id, uploadId);
+    } catch {
+      return NextResponse.json({ error: "memory_provenance_required", deleted: false, retryable: true }, { status: 503 });
     }
-  }
-  if (!retainedMemoryEvidence) {
+  } else {
     try {
       await deleteMemoryUploadAndRefreshIndex({
         userId: authContext.user.id,

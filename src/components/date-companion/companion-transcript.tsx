@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type RefObject } from "react";
 
 import type { TranscriptLineVM } from "@/lib/domain/date-companion";
 
@@ -18,9 +18,13 @@ type CompanionTranscriptProps = {
   chapters?: TranscriptChapterPresentation[];
   highlightedSegmentId?: string | null;
   lines: TranscriptLineVM[];
+  readerTitle?: string;
+  scope?: "full" | "saved";
+  /** A reading insert owns its scroll port; locating evidence must not scroll its dialog or page. */
+  readingScrollRef?: RefObject<HTMLElement | null>;
 };
 
-function formatTimestamp(seconds: number) {
+export function formatTimestamp(seconds: number) {
   const wholeSeconds = Math.max(0, Math.floor(seconds));
   const hours = Math.floor(wholeSeconds / 3600);
   const minutes = Math.floor((wholeSeconds % 3600) / 60);
@@ -36,10 +40,13 @@ function normalizedSpeakerLabel(line: TranscriptLineVM, speakerOrder: Map<string
   return `说话人 ${speakerOrder.get(line.speakerId) ?? 1}`;
 }
 
-export function CompanionTranscript({ chapters = [], highlightedSegmentId, lines }: CompanionTranscriptProps) {
-  const [expanded, setExpanded] = useState(() => Boolean(highlightedSegmentId));
+export function CompanionTranscript({ chapters = [], highlightedSegmentId, lines, readerTitle, scope = "full", readingScrollRef }: CompanionTranscriptProps) {
+  const saved = scope === "saved";
+  const searchLabel = saved ? "搜索已保存的片段" : "搜索完整文字稿";
+  const [expanded, setExpanded] = useState(() => Boolean(readerTitle || highlightedSegmentId));
   const [query, setQuery] = useState("");
   const lineElements = useRef(new Map<string, HTMLLIElement>());
+  const focusedReaderTarget = useRef<string | null>(null);
   const normalizedQuery = query.trim().toLocaleLowerCase("zh-CN");
 
   const sortedLines = useMemo(
@@ -64,7 +71,7 @@ export function CompanionTranscript({ chapters = [], highlightedSegmentId, lines
     if (chapters.length === 0) {
       return [{
         id: "full-transcript",
-        title: "完整记录",
+        title: saved ? "已存片段" : "完整记录",
         startSeconds: sortedLines[0]?.startSeconds ?? 0,
         endSeconds: sortedLines.at(-1)?.endSeconds ?? 0,
         lines: visibleLines
@@ -94,7 +101,7 @@ export function CompanionTranscript({ chapters = [], highlightedSegmentId, lines
       });
     }
     return result;
-  }, [chapters, sortedLines, visibleLines]);
+  }, [chapters, sortedLines, visibleLines, saved]);
 
   useEffect(() => {
     if (!highlightedSegmentId) return;
@@ -106,14 +113,25 @@ export function CompanionTranscript({ chapters = [], highlightedSegmentId, lines
     if (!expanded || !highlightedSegmentId) return;
     const element = lineElements.current.get(highlightedSegmentId);
     if (!element) return;
-    element.scrollIntoView({ behavior: "smooth", block: "center" });
+    if (readerTitle && focusedReaderTarget.current === highlightedSegmentId) return;
+    if (readerTitle) focusedReaderTarget.current = highlightedSegmentId;
+    const readingPort = readingScrollRef?.current;
+    if (readingPort) {
+      const line = element.getBoundingClientRect();
+      const port = readingPort.getBoundingClientRect();
+      // Locate once in the final-size port. scrollIntoView also
+      // scrolls overflow:hidden ancestors and used to clip the insert header.
+      readingPort.scrollTop += line.top - port.top - Math.max(62, (readingPort.clientHeight - line.height) / 2);
+    } else {
+      element.scrollIntoView({ behavior: readerTitle || window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ? "instant" : "smooth", block: "center" });
+    }
     element.focus({ preventScroll: true });
-  }, [expanded, highlightedSegmentId, visibleLines]);
+  }, [expanded, highlightedSegmentId, visibleLines, readerTitle, readingScrollRef]);
 
   return (
     <section className={`${styles.contentPanel} ${styles.transcriptPanel}`} id="full-transcript" aria-labelledby="transcript-title">
-      <h2 id="transcript-title">完整文字稿</h2>
-      <p className={styles.contentIntro}>
+      <h2 id="transcript-title">{readerTitle ?? "完整文字稿"}</h2>
+      {!readerTitle && <><p className={styles.contentIntro}>
         {expanded
           ? "来源会定位到真实文字片段。当前原始音频不会在这里播放。"
           : `默认收起 · 共 ${sortedLines.length} 条文字片段`}
@@ -124,7 +142,7 @@ export function CompanionTranscript({ chapters = [], highlightedSegmentId, lines
         className={styles.secondaryButton}
         onClick={() => setExpanded((current) => !current)}
         type="button"
-      >{expanded ? "收起完整文字稿" : "展开完整文字稿"}</button>
+      >{expanded ? "收起完整文字稿" : "展开完整文字稿"}</button></>}
 
       {expanded ? (
         <div id="full-transcript-content">
@@ -136,16 +154,16 @@ export function CompanionTranscript({ chapters = [], highlightedSegmentId, lines
             <>
               <div className={styles.transcriptToolbar}>
                 <input
-                  aria-label="搜索完整文字稿"
+                  aria-label={searchLabel}
                   className={styles.transcriptSearch}
                   onChange={(event) => setQuery(event.target.value)}
-                  placeholder="在这次相处的文字稿里搜索"
+                  placeholder={saved ? searchLabel : "在这次相处的文字稿里搜索"}
                   type="search"
                   value={query}
                 />
-                <span className={styles.transcriptCount}>{visibleLines.length} / {sortedLines.length} 条</span>
+                <span className={styles.transcriptCount}>{saved ? normalizedQuery ? `匹配 ${visibleLines.length} / 已存 ${sortedLines.length} 段` : `已存 ${sortedLines.length} 段` : `${visibleLines.length} / ${sortedLines.length} 条`}</span>
               </div>
-              <div className={styles.transcriptScroll} tabIndex={0} aria-label="完整文字稿内容">
+              <div className={styles.transcriptScroll} tabIndex={0} aria-label={saved ? "已保存的来源片段内容" : "完整文字稿内容"}>
                 {visibleLines.length === 0 ? <p className={styles.transcriptNoResult}>没有找到匹配的片段</p> : null}
                 {visibleChapters.map((chapter) => chapter.lines.length > 0 ? (
                   <section className={styles.chapter} key={chapter.id}>

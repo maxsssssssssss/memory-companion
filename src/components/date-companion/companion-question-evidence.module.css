@@ -1,0 +1,30 @@
+.note {
+  margin: 14px 0 10px;
+  padding: 12px 0 4px;
+  border-top: 1px solid #d9c7bf;
+  color: #72564e;
+  font: 14px/1.75 "Microsoft YaHei UI", "PingFang SC", system-ui, sans-serif;
+}
+.note p { margin: 0 0 3px; color: #5a4240; font-weight: 500; }
+.note > span { display: block; }
+.note button, .savedSource button {
+  display: inline-flex;
+  align-items: center;
+  min-height: 44px;
+  padding: 4px 0;
+  border: 0;
+  background: transparent;
+  color: #795248;
+  font: inherit;
+  cursor: pointer;
+  text-decoration: underline;
+  text-decoration-color: #b59a8f;
+  text-underline-offset: 5px;
+}
+.note button:focus-visible, .savedSource button:focus-visible { outline: 2px solid #895f66; outline-offset: 3px; }
+.savedSource { color: #5a4240; font: 15px/1.8 "Microsoft YaHei UI", "PingFang SC", system-ui, sans-serif; }
+.savedSource p { margin: 5px 0 7px; overflow-wrap: anywhere; }
+.savedSource small { color: #765b57; font: 13px/1.7 "Microsoft YaHei UI", "PingFang SC", system-ui, sans-serif; }
+@media (hover:hover) and (pointer:fine) {
+  .note button:hover, .savedSource button:hover { color: #49342f; text-decoration-color: currentColor; }
+}

@@ -1,9 +1,10 @@
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { DateCompanionMemoryBridgeState } from "@/lib/domain/date-companion";
 
 import { CompanionPeople } from "./companion-people";
+import { DateCompanionApiError } from "@/lib/client/date-companion-api";
 
 const now = "2026-08-11T10:00:00.000Z";
 const person = (id: string, displayName: string, updatedAt = now) => ({
@@ -74,7 +75,8 @@ function renderPeople(state: DateCompanionMemoryBridgeState = readyState()) {
     onCreatePerson: vi.fn(async () => undefined),
     onSaveMapping: vi.fn(async () => undefined),
     onSetRetention: vi.fn(async () => undefined),
-    onPurge: vi.fn(async () => undefined),
+    onPreviewWithdrawal: vi.fn(async () => ({preview: {version: "scope-v1", totalCount: 2, retainedCount: 1, processingCount: 1}})),
+    onPurge: vi.fn(async (_version: string) => ({ purgeId: "w1", usageStopped: true as const, status: "completed", totalCount: 2, retainedCount: 1, processingCount: 1, completedCount: 2, failedCount: 0, retryable: false, updatedAt: "2026-11-24T12:00:00Z" })),
     onRetry: vi.fn(async () => undefined),
     onRefresh: vi.fn(async () => undefined)
   };
@@ -83,6 +85,7 @@ function renderPeople(state: DateCompanionMemoryBridgeState = readyState()) {
 }
 
 describe("CompanionPeople", () => {
+  afterEach(() => { window.history.replaceState(null,"",window.location.pathname); });
   beforeEach(() => {
     vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => {
       callback(0);
@@ -91,55 +94,26 @@ describe("CompanionPeople", () => {
     HTMLElement.prototype.scrollIntoView = vi.fn();
   });
 
-  it("presents an account-scoped directory, excludes self, and links confirmed people", () => {
-    renderPeople();
-
-    expect(screen.getByRole("heading", { name: "人物", level: 1 })).toBeInTheDocument();
-    expect(screen.queryByRole("link", { name: /^我/u })).not.toBeInTheDocument();
-    expect(screen.getByRole("link", { name: /林澄/u })).toHaveAttribute("href", "/date-companion/a/people/person_companion");
-    expect(screen.getByRole("link", { name: /周岚/u })).toHaveAttribute("href", "/date-companion/a/people/person_other");
-    expect(screen.getByText("当前 Ta")).toBeVisible();
-    expect(screen.getByText(/最近相关记录/u)).toBeVisible();
-    expect(screen.queryByText(/关系评分|亲密度|匹配度/u)).not.toBeInTheDocument();
-  });
-
-  it("uses the latest retained current-person record and ignores cancelled or deleted records", () => {
-    const state = readyState();
-    const retained = state.review.interactions[0];
-    state.review.interactions = [
-      retained,
-      { ...retained, interactionId: "interaction_cancelled", recordingDate: "2026-08-12", status: "cancelled" },
-      { ...retained, interactionId: "interaction_deleted", recordingDate: "2026-08-13", sourceState: "explicitly_deleted" }
-    ];
-
-    renderPeople(state);
-
-    const currentPerson = screen.getByRole("link", { name: /林澄/u });
-    expect(within(currentPerson).getByText("最近相关记录 · 2026 年 8 月 10 日")).toBeVisible();
-    expect(within(currentPerson).queryByText(/8 月 12 日|8 月 13 日/u)).not.toBeInTheDocument();
-  });
-
-  it("searches only confirmed names and gives a quiet no-result state", () => {
-    renderPeople();
-    const search = screen.getByRole("searchbox", { name: "搜索人物" });
-    fireEvent.change(search, { target: { value: "周" } });
-    expect(screen.getByRole("link", { name: /周岚/u })).toBeVisible();
-    expect(screen.queryByRole("link", { name: /林澄/u })).not.toBeInTheDocument();
-
-    fireEvent.change(search, { target: { value: "不存在" } });
-    expect(screen.getByRole("heading", { name: "没有找到“不存在”" })).toBeVisible();
-    expect(screen.getByText("换一个称呼试试；未确认的人物不会出现在这里。")).toBeVisible();
+  it("opens and focuses the actual mapping form when reached from the home review link", async () => {
+    window.history.replaceState(null,"","/date-companion/a/people?from=book-home#people-mapping-title");
+    renderPeople(readyState(false));
+    const heading=screen.getByRole("heading",{name:"确认当前这段关系"});
+    await waitFor(()=>expect(heading).toHaveFocus());
+    expect(heading.closest("details")).toHaveAttribute("open");
+    expect(screen.getByLabelText("我")).toBeVisible();
+    expect(screen.getByLabelText("Ta")).toBeVisible();
+    expect(screen.getByRole("link",{name:"返回首页"})).toBeVisible();
   });
 
   it("keeps relationship metadata user-selected and rejects self as Ta", async () => {
     const state = readyState(false);
     state.people = [person("person_self", "林澄"), person("person_companion", "林澄")];
     const actions = renderPeople(state);
-    fireEvent.click(screen.getByText("数据与隐私"));
 
     const relationship = screen.getByLabelText("由你选择的关系") as HTMLSelectElement;
     expect(relationship.value).toBe("");
-    expect(screen.getAllByText(/同名人物/u)).toHaveLength(6);
+    expect(within(screen.getByLabelText("我")).getAllByText(/同名人物/u)).toHaveLength(2);
+    expect(within(screen.getByLabelText("Ta")).getAllByText(/同名人物/u)).toHaveLength(2);
 
     fireEvent.change(screen.getByLabelText("我"), { target: { value: "person_self" } });
     fireEvent.change(screen.getByLabelText("Ta"), { target: { value: "person_self" } });
@@ -158,24 +132,41 @@ describe("CompanionPeople", () => {
 
   it("keeps retention and destructive purge separate with an explicit dialog", async () => {
     const actions = renderPeople();
-    fireEvent.click(screen.getByText("数据与隐私"));
 
     fireEvent.click(screen.getByRole("switch", { name: "已开启" }));
     await waitFor(() => expect(actions.onSetRetention).toHaveBeenCalledWith(false));
     expect(actions.onPurge).not.toHaveBeenCalled();
 
-    fireEvent.click(screen.getByRole("button", { name: "查看删除影响" }));
-    const dialog = screen.getByRole("dialog", { name: "删除当前关系的长期内容？" });
-    expect(within(dialog).getByText(/人物设置与原始复盘仍会保留/u)).toBeVisible();
-    fireEvent.click(within(dialog).getByRole("button", { name: "确认删除长期内容" }));
-    await waitFor(() => expect(actions.onPurge).toHaveBeenCalledTimes(1));
+    fireEvent.click(screen.getByRole("button", { name: "查看撤回影响" }));
+    const dialog = screen.getByRole("dialog", { name: "撤回这段关系的长期资料？" });
+    expect(await within(dialog).findByText(/共 2 场 · 已纳入 1 场 · 仅在处理 1 场/u)).toBeVisible();
+    fireEvent.click(within(dialog).getByRole("button", { name: "取消" }));
+    expect(actions.onPurge).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "查看撤回影响" }));
+    fireEvent.click(await screen.findByRole("button", { name: "确认撤回长期资料" }));
+    await waitFor(() => expect(actions.onPurge).toHaveBeenCalledWith("scope-v1"));
+  });
+
+  it("asks for a new confirmation after a scope change and retries only the stopped generation", async () => {
+    const actions = renderPeople();
+    actions.onPurge.mockRejectedValueOnce(new DateCompanionApiError({status: 409, code: "withdrawal_preview_stale",
+      details: {preview: {version:"scope-v2", totalCount:3, retainedCount:2, processingCount:1}}}));
+    actions.onPurge.mockResolvedValueOnce({purgeId:"w2", usageStopped:true, status:"partial_failed", totalCount:3,
+      retainedCount:2, processingCount:1, completedCount:2, failedCount:1, retryable:true, updatedAt:now});
+    fireEvent.click(screen.getByRole("button", {name:"查看撤回影响"}));
+    fireEvent.click(await screen.findByRole("button", {name:"确认撤回长期资料"}));
+    expect(await screen.findByText(/共 3 场 · 已纳入 2 场/)).toBeVisible();
+    expect(actions.onPurge.mock.calls).toEqual([["scope-v1"]]);
+    fireEvent.click(screen.getByRole("button", {name:"确认撤回长期资料"}));
+    expect(await screen.findByText(/3 场资料已停止长期使用。已清理 2 场/)).toBeVisible();
+    fireEvent.click(screen.getByRole("button", {name:"重试上次清理"}));
+    await waitFor(() => expect(actions.onPurge.mock.calls).toEqual([["scope-v1"], ["scope-v2"], ["scope-v2"]]));
   });
 
   it("keeps retryable processing in the trust area and invokes only its explicit retry", async () => {
     const actions = renderPeople();
-    fireEvent.click(screen.getByText("数据与隐私"));
     expect(screen.getByText("整理未完成，可重试")).toBeVisible();
-    fireEvent.click(screen.getByRole("button", { name: "重新整理" }));
+    fireEvent.click(screen.getByRole("button", { name: /重新整理 · .*年/ }));
     await waitFor(() => expect(actions.onRetry).toHaveBeenCalledWith("interaction_1"));
   });
 
@@ -183,7 +174,8 @@ describe("CompanionPeople", () => {
     const props = {
       mutationState: { status: "idle" as const },
       onCreatePerson: async () => undefined,
-      onPurge: async () => undefined,
+      onPreviewWithdrawal: async () => ({preview: {version: "scope-v1", totalCount: 2, retainedCount: 1, processingCount: 1}}),
+      onPurge: async () => ({ purgeId: "w1", usageStopped: true as const, status: "completed", totalCount: 2, retainedCount: 1, processingCount: 1, completedCount: 2, failedCount: 0, retryable: false, updatedAt: "2026-11-24T12:00:00Z" }),
       onRefresh: async () => undefined,
       onRetry: async () => undefined,
       onSaveMapping: async () => undefined,
@@ -198,7 +190,8 @@ describe("CompanionPeople", () => {
     const empty = readyState(false);
     empty.people = [];
     rerender(<CompanionPeople {...props} state={empty} />);
-    expect(screen.getByRole("heading", { name: "还没有已确认的人物" })).toBeVisible();
-    expect(screen.getByText(/系统不会根据名字或对话自动创建/u)).toBeVisible();
+    expect(screen.getByRole("heading", { name: "确认当前这段关系" })).toBeVisible();
+    expect(screen.getByLabelText("我")).toHaveValue("");
+    expect(screen.getByRole("button", { name: "新增并确认" })).toBeDisabled();
   });
 });

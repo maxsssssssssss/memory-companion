@@ -9,6 +9,7 @@ import {
   type AnswerQuestionStreamInput
 } from "@/lib/server/retrieval/ai-qa";
 import type { QaAnswerStreamEvent } from "@/lib/server/retrieval/qa-streaming";
+import { QaTurnError } from "./qa-provider";
 
 type FinalQaStreamEvent = Extract<QaAnswerStreamEvent, { type: "final" }>;
 
@@ -87,6 +88,7 @@ export function createTextQaBrowserStream(options: TextQaBrowserStreamOptions) {
                 continue;
               }
               ensureMetadata();
+              options.input.assertSourceScope?.();
               browserSentenceSequence += 1;
               safeEnqueue(controller, {
                 type: "sentence",
@@ -102,6 +104,7 @@ export function createTextQaBrowserStream(options: TextQaBrowserStreamOptions) {
             if (event.type === "final") {
               ensureMetadata();
               await options.onFinal?.(event);
+              options.input.assertSourceScope?.();
               safeEnqueue(controller, {
                 type: "final",
                 answer: event.answer,
@@ -128,18 +131,23 @@ export function createTextQaBrowserStream(options: TextQaBrowserStreamOptions) {
             });
             safeEnqueue(controller, { type: "complete", status: "failed" });
           }
-        } catch {
+        } catch (error) {
           if (!cancelled) {
             ensureMetadata();
             safeEnqueue(controller, {
               type: "error",
-              code: "qa_stream_failed",
+              code: error instanceof QaTurnError ? error.code : "qa_stream_failed",
               recoverable: true
             });
             safeEnqueue(controller, { type: "complete", status: "failed" });
           }
         } finally {
-          if (!cancelled) controller.close();
+          if (!cancelled) {
+            controller.close();
+            // A revoked grant can stop us while the provider is paused at a
+            // yield. Release its iterator/transport as well as the browser pipe.
+            try { await iterator?.return?.(); } catch { /* the terminal event already owns this turn */ }
+          }
         }
       })();
     },

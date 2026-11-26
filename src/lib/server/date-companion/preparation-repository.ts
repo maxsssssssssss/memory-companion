@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import type Database from "better-sqlite3";
 import type { PreparationView, PreparationSource, PreparationReviewLink } from "@/lib/domain/date-companion-preparation";
+import { missingSuggestionTurn, unansweredSuggestionFailure } from "@/lib/domain/date-companion-preparation";
 import { DcConflictError, DcNotFoundError, DcVersionConflictError, DcValidationError } from "./errors";
 import { PreparationSources } from "./preparation-sources";
 type State = PreparationView & {
@@ -65,6 +66,23 @@ export class PreparationRepository {
       }
     }
     state.reviewLink ??= null;
+    // Older scope writes erased the generation status. A later retry could also have
+    // been interrupted by a scope change without adding a message. Check the task so
+    // recovering a known failure never revives that newer attempt.
+    if (state.generationStatus === "idle" && !state.generationId && state.taskId && state.events.at(-1)?.kind === "scope_changed") {
+      const failure = unansweredSuggestionFailure(state);
+      if (failure) {
+        const scopeEdits = state.events.length - failure.event.ordinal - 1;
+        const task = this.database.prepare(`
+          SELECT 1 FROM agent_tasks WHERE id=? AND account_id=? AND resource_id=? AND status<>'cancelled'
+            AND created_at<? AND json_extract(scope_json, '$.version')=?
+        `).get(state.taskId, accountId, id, failure.event.createdAt, state.version - scopeEdits);
+        if (task) {
+          state.generationStatus = "failed";
+          state.generationMessage = failure.event.text;
+        }
+      }
+    }
     return state;
   }
   get(accountId: string, id: string): PreparationView {
@@ -201,6 +219,16 @@ export class PreparationRepository {
       throw new DcConflictError("operation_key_reused");
     return JSON.parse(row.result_json);
   }
+  /** Read an account-owned operation without rerunning its mutation or generation. */
+  operation(accountId: string, key: string) {
+    const row = this.database.prepare("SELECT result_json FROM dc_preparation_operations WHERE user_id=? AND operation_key=?")
+      .get(accountId, key) as { result_json: string } | undefined;
+    if (!row) return null;
+    const { id } = JSON.parse(row.result_json) as Receipt;
+    const record = this.database.prepare("SELECT deleted FROM dc_preparations WHERE id=? AND user_id=?")
+      .get(id, accountId) as { deleted: number } | undefined;
+    return record ? { id, deleted: record.deleted === 1 } : null;
+  }
   private record(accountId: string, key: string, request: unknown, result: Receipt) {
     this.database.prepare("INSERT INTO dc_preparation_operations(user_id,operation_key,request_hash,result_json)VALUES(?,?,?,?)").run(accountId, key, hash(request), JSON.stringify(result));
   }
@@ -247,7 +275,6 @@ export class PreparationRepository {
       const state = this.state(accountId, id);
       if (state.version !== input.expectedVersion)
         throw new DcVersionConflictError(state.version);
-      const generationId = randomUUID(), taskId = hash([accountId, id, input.operationKey]);
       if (input.revokeHistory) {
         this.unlinkReview(state);
         state.interactionIds = [];
@@ -297,22 +324,35 @@ export class PreparationRepository {
       state.messages.push({
         id: event.id, meetingId: state.currentMeetingId, role: "user", text: input.text, kind: input.kind, createdAt: event.createdAt, sources: [], origin: "user_reflection"
       });
-      state.version++;
-      state.updatedAt = now();
-      state.status = "active";
-      state.generationStatus = "running";
-      delete state.generationMessage;
-      state.generationId = generationId;
-      state.taskId = taskId;
       if (newEncounter || !state.intent || input.kind === "correction" || input.kind === "feedback")
         state.intent = input.text;
-      this.write(accountId, state);
-      const result = {
-        id, generationId, taskId, version: state.version
-      };
-      this.record(accountId, input.operationKey, request, result);
-      return result;
+      return this.startGeneration(accountId, state, input.operationKey, request);
     }).immediate();
+  }
+  retry(accountId: string, id: string, input: { operationKey: string; expectedVersion: number; retryMessageId: string }) {
+    return this.database.transaction(() => {
+      const request = { operation: "retry", id, ...input };
+      const prior = this.receipt(accountId, input.operationKey, request);
+      if (prior) return { ...prior, replayed: true };
+      const state = this.state(accountId, id);
+      if (state.version !== input.expectedVersion) throw new DcVersionConflictError(state.version);
+      if (missingSuggestionTurn(state)?.id !== input.retryMessageId)
+        throw new DcConflictError("preparation_retry_unavailable");
+      return { ...this.startGeneration(accountId, state, input.operationKey, request), replayed: false };
+    }).immediate();
+  }
+  private startGeneration(accountId: string, state: State, operationKey: string, request: unknown) {
+    state.version++;
+    state.updatedAt = now();
+    state.status = "active";
+    state.generationStatus = "running";
+    delete state.generationMessage;
+    state.generationId = randomUUID();
+    state.taskId = hash([accountId, state.id, operationKey]);
+    this.write(accountId, state);
+    const result = { id: state.id, generationId: state.generationId, taskId: state.taskId, version: state.version };
+    this.record(accountId, operationKey, request, result);
+    return result;
   }
   assertGeneration(accountId: string, id: string, generationId: string, version: number) {
     const state = this.state(accountId, id);
@@ -377,7 +417,7 @@ export class PreparationRepository {
       return this.get(accountId, id);
     }).immediate();
   }
-  fail(accountId: string, id: string, generationId: string, version: number, message: string) {
+  fail(accountId: string, id: string, generationId: string, version: number, message: string, failureCode?: "missing_suggestions") {
     this.database.transaction(() => {
       let state: State;
       try {
@@ -390,7 +430,9 @@ export class PreparationRepository {
       state.generationMessage = message;
       state.updatedAt = now();
       delete state.generationId;
-      this.event(state, "generation_stopped", message);
+      const last = state.messages.at(-1);
+      this.event(state, "generation_stopped", message, failureCode && last?.role === "user"
+        ? { failureCode, messageId: last.id } : {});
       this.write(accountId, state);
     }).immediate();
   }
@@ -450,9 +492,11 @@ export class PreparationRepository {
         throw new DcValidationError("invalid_preparation_operation");
       state.version++;
       state.updatedAt = now();
-      state.generationStatus = "idle";
+      if (input.kind !== "scope" || !missingSuggestionTurn(state)) {
+        state.generationStatus = "idle";
+        delete state.generationMessage;
+      }
       delete state.generationId;
-      delete state.generationMessage;
       this.write(accountId, state);
       this.record(accountId, input.operationKey, request, { id });
       return this.get(accountId, id);

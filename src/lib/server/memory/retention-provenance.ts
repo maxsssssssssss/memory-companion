@@ -195,6 +195,6 @@ export function hasRetainedMemoryProvenance(
 ) {
   return Boolean(database.prepare(`
     SELECT 1 FROM dc_retained_uploads
-    WHERE user_id = ? AND upload_id = ? AND status = 'active'
+    WHERE user_id = ? AND upload_id = ? AND status = 'active' AND provenance_count > 0
   `).get(userId, uploadId));
 }

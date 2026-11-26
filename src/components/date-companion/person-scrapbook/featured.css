@@ -1,0 +1,111 @@
+/* Pieces are separate DOM regions. Only their decorative fibres and backings rotate. */
+.scrap-feature {
+  --scrap-song: Georgia, "STZhongsong", "Songti SC", "STSong", "SimSun", serif;
+  --scrap-ink:#4d312b; --scrap-rose:#834b45; --scrap-rule:#cbb1a2;
+  --grain:url('./assets/cotton-grain.webp'); --deckle:url('./assets/deckle.svg');
+  color:var(--scrap-ink); font-family:var(--scrap-song); line-break:strict;
+  max-width:1570px; margin-inline:auto;
+}
+.scrap-feature :is(h1,h2,p) {margin:0;overflow-wrap:anywhere;}
+.scrap-board {
+  display:grid; grid-template-columns:minmax(0, 35fr) minmax(0, 65fr);
+  grid-template-areas:"portrait lead" "shared meeting"; align-items:start;
+  position:relative; isolation:isolate; padding:clamp(12px,1.5vw,24px) 1.2% 0;
+}
+.scrap-board::before {
+  content:""; position:absolute; pointer-events:none; z-index:4; right:0; top:-2.6vw;
+  width:clamp(175px,19vw,305px); aspect-ratio:1.58;
+  background:url('./assets/pressed-berries.svg') right top / contain no-repeat;
+  opacity:.77;
+}
+.scrap-portrait {grid-area:portrait;min-width:0;position:relative;z-index:2;}
+.scrap-identity {display:flex;align-items:center;gap:.65em 1.15em;flex-wrap:wrap;padding:0 4% 0 10%;}
+.scrap-identity h1 {font-size:clamp(49px,5.65vw,91px);line-height:1.18;font-weight:500;letter-spacing:.035em;color:#53372f;max-width:100%;}
+.scrap-current {font:400 clamp(15px,1.35vw,21px)/1.5 var(--scrap-song);color:#fff9f3;background:#99695f;border-radius:4px;padding:3px 12px;white-space:nowrap;}
+.scrap-identity h1[data-long-name="true"] {font-size:clamp(32px,3.1vw,50px);line-height:1.32;}
+.scrap-name-aside {display:block;margin-top:.28em;font-size:clamp(16px,1.35vw,22px);line-height:1.5;letter-spacing:normal;}
+.scrap-sheet {position:relative;isolation:isolate;min-width:0;filter:drop-shadow(0 2px 1px #73503a29) drop-shadow(0 9px 7px #78584226);}
+.scrap-sheet::before,.scrap-sheet::after,.scrap-landscape span {
+  content:"";position:absolute;inset:0;pointer-events:none;mask:var(--deckle) center / 100% 100% no-repeat;
+}
+.scrap-sheet::before {z-index:-2;inset:7px 1px -4px 4px;transform:rotate(var(--back-angle,-.45deg));background:var(--grain) 0 0 / 250px, #e8d7c9;}
+.scrap-sheet::after {z-index:-1;transform:rotate(var(--face-angle,0deg));background:var(--grain) 0 0 / 260px, var(--face,#faf2e7);}
+.scrap-landscape {
+  width:100%;aspect-ratio:1.46;margin:clamp(21px,2.1vw,35px) 0 0;
+  --face:#f7eadd;--face-angle:-2.3deg;--back-angle:-3.1deg;
+}
+.scrap-landscape span {
+  inset:2px 2px 4px;transform:rotate(var(--face-angle));background-image:var(--grain),url('./assets/lake-wash.webp');
+  background-size:240px,auto 147%;background-repeat:repeat,no-repeat;background-position:0 0,16% bottom;background-blend-mode:multiply;
+}
+.scrap-lead {
+  grid-area:lead;align-self:start;z-index:1;margin:clamp(22px,2.7vw,45px) 3.6% 0 -1.3%;
+  padding:clamp(41px,4.35vw,68px) clamp(25px,3.3vw,55px) clamp(46px,4.9vw,80px);
+  min-height:clamp(260px,23.4vw,375px);--face:linear-gradient(112deg,#f0d2c8,#f3d9cc 64%,#eccdc1);--face-angle:.95deg;--back-angle:2.2deg;
+}
+.scrap-lead::after {mask-image:url("./assets/rose-note-edge.svg");inset:-7px -1px -6px -1px;transform:none;}
+.scrap-lead::before {inset:19px -9px 1px 12px;transform:rotate(1.65deg);background:var(--grain) 0 0 / 250px,linear-gradient(175deg,#f3e2d7 65%,#ddc4b3 80%,#f6e6d7 95%);}
+.scrap-meeting::after {mask-image:url("./assets/meeting-leaf-edge.svg");inset:-6px -2px -4px;transform:none;}
+.scrap-lead h2 {font-size:clamp(31px,3.04vw,49px);line-height:1.46;font-weight:600;letter-spacing:.014em;margin:clamp(15px,1.5vw,25px) 0 clamp(16px,1.6vw,27px);text-wrap:pretty;}
+.scrap-tape {display:inline-flex;align-items:center;color:#69483e;font-size:clamp(18px,1.55vw,25px);line-height:1.34;font-weight:500;gap:.64em;}
+.scrap-tape::before {content:"";height:1.05em;width:2px;background:#ac7a6e;}
+.scrap-byline {display:flex;align-items:center;gap:clamp(10px,1.45vw,25px);flex-wrap:wrap;color:#755448;}
+.scrap-feature time {font:400 clamp(16px,1.36vw,22px)/1.5 Georgia,var(--scrap-song);font-variant-numeric:lining-nums tabular-nums;letter-spacing:.035em;}
+.scrap-byline time {display:inline-flex;align-items:center;gap:clamp(10px,1.45vw,25px);}
+.scrap-byline time::after {content:"";width:1px;height:1em;background:#b69384;}
+.scrap-feature :is(.scrap-action,.scrap-all) {display:inline-flex;align-items:center;justify-content:flex-start;gap:.45em;min-height:44px;padding:3px 1px;font:500 clamp(16px,1.42vw,23px)/1.55 var(--scrap-song);color:var(--scrap-rose);text-decoration:underline;text-decoration-thickness:1px;text-underline-offset:.23em;}
+.scrap-byline .scrap-action span {display:none;}
+.scrap-feature button:focus-visible {outline:2px solid #784d55;outline-offset:4px;border-radius:2px;}
+.scrap-meeting {
+  grid-area:meeting;z-index:3;margin:clamp(-80px,-5.4vw,-32px) 0 0 7%;padding:clamp(27px,2.5vw,43px) clamp(28px,3.4vw,55px) clamp(45px,4.15vw,67px);
+  --face:linear-gradient(110deg,#fff7eb,#f8ecdd);--face-angle:1deg;--back-angle:1.18deg;
+}
+.scrap-meeting-head {display:flex;justify-content:space-between;align-items:center;gap:8px 20px;flex-wrap:wrap;}
+.scrap-meeting .scrap-date {padding:2px .72em 3px;background:var(--grain) 0 0 / 255px,#f6e9da;box-shadow:0 1px 2px #77574238;transform:translateY(-.35em);}
+.scrap-meeting h2 {font-size:clamp(30px,2.75vw,45px);line-height:1.36;margin:13px 0 7px;font-weight:600;}
+.scrap-meeting p {font-size:clamp(18px,1.56vw,25px);line-height:1.72;max-width:39em;}
+.scrap-meeting .scrap-action {margin-top:9px;}
+.scrap-shared {grid-area:shared;z-index:2;align-self:center;width:115%;margin:10px 0 clamp(10px,1.2vw,20px);padding:clamp(22px,2vw,34px) clamp(24px,3.2vw,52px);--face:linear-gradient(100deg,#fbf1e5,#f6e7dc);--face-angle:-.65deg;--back-angle:-1.05deg;}
+.scrap-shared p {font-size:clamp(21px,1.95vw,32px);line-height:1.52;margin:9px 0 5px;}
+.scrap-board[data-has-lead="false"] {grid-template-areas:"portrait meeting" "shared .";}
+.scrap-board[data-has-lead="false"] .scrap-meeting {align-self:center;margin:10px 1% 10px 6%;}
+.scrap-board .scrap-empty {grid-area:1/2/2/3;align-self:center;margin:20px 5%;}
+.scrap-board[data-has-lead="false"][data-has-meeting="false"]::before {opacity:.28;}
+.scrap-end {border-top:1px solid var(--scrap-rule);margin:clamp(32px,3.1vw,50px) 1.7% 0;padding-top:5px;}
+.scrap-feature .scrap-all {text-decoration:none;font-size:clamp(19px,1.65vw,26px);}
+@media(hover:hover) and (pointer:fine) {
+  .scrap-feature .scrap-action:hover,.scrap-all:hover {color:#60352f;text-decoration-thickness:2px;}
+}
+@media(hover:hover) and (pointer:fine) and (prefers-reduced-motion:no-preference) {
+  .scrap-sheet::before,.scrap-feature button span {transition:transform .18s ease-out;}
+  .scrap-sheet:has(.scrap-action:hover)::before {transform:translateY(2px) rotate(var(--back-angle));}
+  .scrap-feature button:hover span {transform:translateX(2px);}
+}
+@media(min-width:761px) and (max-width:1180px) {
+  .scrap-board {grid-template-columns:minmax(0,36fr) minmax(0,64fr);}
+  .scrap-meeting {margin-block-start:-20px;margin-left:5%;}
+  .scrap-shared {width:109%;}
+  .scrap-lead {margin-right:1%;padding:35px 28px 40px;}
+}
+@media(max-width:760px) {
+  .scrap-board {display:flex;flex-direction:column;padding:7px 4px 0;gap:23px;}
+  .scrap-board::before {width:99px;right:0;top:-12px;opacity:.42;}
+  .scrap-portrait {width:100%;}
+  .scrap-identity {padding-left:8px;padding-right:42px;gap:.6em;}
+  .scrap-identity h1 {font-size:clamp(38px,11vw,61px);}
+  .scrap-current {font-size:15px;}
+  .scrap-landscape {width:clamp(140px,62%,315px);margin:12px 0 0 7px;aspect-ratio:2.25;--face-angle:-1.3deg;}
+  .scrap-lead,.scrap-meeting,.scrap-shared,.scrap-board[data-has-lead="false"] .scrap-meeting {margin:0;min-height:0;width:100%;align-self:stretch;}
+  .scrap-lead {padding:25px 22px 19px;--face-angle:.35deg;--back-angle:.95deg;}
+  .scrap-lead::after {mask-image:var(--deckle);inset:0;}
+  .scrap-lead::before {inset:4px -2px -2px 3px;transform:rotate(.9deg);}
+  .scrap-lead h2 {font-size:clamp(25px,6.8vw,37px);line-height:1.47;margin:13px 0 8px;}
+  .scrap-meeting {padding:20px 21px 17px;--face-angle:.45deg;}
+  .scrap-meeting .scrap-date {transform:none;}
+  .scrap-meeting h2 {font-size:27px;}
+  .scrap-meeting p {font-size:18px;}
+  .scrap-shared {padding:18px 20px 13px;align-self:flex-start;width:95%;}
+  .scrap-shared p {font-size:21px;}
+  .scrap-feature .scrap-end {margin:26px 4px 0;}
+  .scrap-board .scrap-empty {align-self:flex-start;margin:0 8px;}
+}

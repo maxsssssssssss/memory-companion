@@ -19,6 +19,7 @@ export const DateCompanionPersonMappingRequestSchema = z.object({
 
 export const DateCompanionMemorySyncRequestSchema = z.object({
   mappingVersion: z.number().int().positive(),
+  retryGrantId: DcIdSchema.optional(),
   subjectSuggestionConfirmation: DcSubjectSuggestionConfirmationSchema.optional(),
   relationshipReconfirmation: z.object({
     action: z.literal("reconfirm_archived_relationship"),
@@ -29,6 +30,9 @@ export const DateCompanionMemorySyncRequestSchema = z.object({
     subject: z.enum(["self", "companion", "both", "unknown"])
   }).strict()).max(2_000).optional()
 }).strict().refine(
+  (input) => !input.retryGrantId || !(input.selections || input.subjectSuggestionConfirmation || input.relationshipReconfirmation),
+  { message: "Retry references the existing grant only" }
+).refine(
   (input) => input.selections === undefined || input.subjectSuggestionConfirmation !== undefined,
   { message: "Subject suggestion confirmation is required with selections" }
 ).refine(
@@ -38,7 +42,8 @@ export const DateCompanionMemorySyncRequestSchema = z.object({
 );
 
 export const DateCompanionRetainedMemoryPurgeRequestSchema = z.object({
-  confirmation: z.literal("purge_retained_memory")
+  confirmation: z.literal("purge_retained_memory"),
+  previewVersion: z.string().regex(/^[a-f0-9]{64}$/u)
 }).strict();
 
 export const DATE_COMPANION_MEMORY_PRIVATE_HEADERS = {

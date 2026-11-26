@@ -1038,7 +1038,10 @@ describe("answerQuestionWithAI", () => {
     expect(request.messages[1].content).toContain("张三负责推动方案");
   });
 
-  it("still rejects model-classified memory answers when citations are missing", async () => {
+  it.each([
+    "你今天重点讨论了客户预算。",
+    "原话是「客户预算的图例编号是 [E1]。」"
+  ])("still rejects model-classified memory answers without an external citation: %s", async (text) => {
     getOpenAIClientRuntimeConfigMock.mockResolvedValue({ openRouterApiKey: "custom_key" });
     getQaModelPreferenceMock.mockResolvedValue("openai/gpt-5-mini");
     createOpenAIClientMock.mockReturnValue({
@@ -1054,7 +1057,7 @@ describe("answerQuestionWithAI", () => {
           message: {
             content: JSON.stringify({
               mode: "memory_answer",
-              answer: "你今天重点讨论了客户预算。",
+              answer: text,
               citationIds: []
             })
           }

@@ -1,6 +1,6 @@
 import type Database from "better-sqlite3";
 
-export const MEMORY_SCHEMA_VERSION = 14;
+export const MEMORY_SCHEMA_VERSION = 15;
 
 const MEMORY_SCHEMA_V1 = `
   CREATE TABLE memory_items (
@@ -1202,7 +1202,24 @@ const MIGRATIONS = [
   { version: 11, sql: MEMORY_SCHEMA_V11 },
   { version: 12, sql: MEMORY_SCHEMA_V12 },
   { version: 13, sql: MEMORY_SCHEMA_V13 },
-  { version: 14, sql: MEMORY_SCHEMA_V14 }
+  { version: 14, sql: MEMORY_SCHEMA_V14 },
+  { version: 15, sql: `
+    ALTER TABLE dc_retained_uploads ADD COLUMN grant_outbox_id TEXT;
+    ALTER TABLE person_evidence_dc_links ADD COLUMN independent_person_evidence INTEGER NOT NULL DEFAULT 0
+      CHECK (independent_person_evidence IN (0, 1));
+    ALTER TABLE person_evidence_dc_links ADD COLUMN independent_relationship_edge INTEGER NOT NULL DEFAULT 0
+      CHECK (independent_relationship_edge IN (0, 1));
+    CREATE TABLE dc_memory_withdrawn_projections (
+      user_id TEXT NOT NULL,
+      relationship_id TEXT NOT NULL,
+      interaction_id TEXT NOT NULL,
+      upload_id TEXT NOT NULL,
+      outbox_id TEXT NOT NULL,
+      generation INTEGER NOT NULL CHECK (generation > 0),
+      category TEXT NOT NULL CHECK (category IN ('retained', 'processing')),
+      PRIMARY KEY (user_id, outbox_id)
+    );
+  ` }
 ] as const;
 
 export function migrateMemorySchema(database: Database.Database) {

@@ -25,6 +25,7 @@ import type {
 import type { DateCompanionRelationshipPersonSource } from "@/lib/domain/date-companion-person-source";
 import type { TranscriptSegment } from "@/lib/domain/types";
 import {
+  dateCompanionEvidenceSpeakerRole,
   dateCompanionParticipantKey,
   dateCompanionParticipantLabel
 } from "@/lib/domain/date-companion-speaker";
@@ -384,6 +385,14 @@ function buildChapters(payload: DayPayload, segmentById: Map<string, TranscriptS
   }];
 }
 
+export function dateCompanionProcessingError(message: string | undefined) {
+  // The job contract uses processing_failed for each stage, including older saved jobs.
+  if (message && /^chunked transcription incomplete: \d+ chunk\(s\) failed$/u.test(message)) {
+    return "这段录音未能完整转成文字，暂时无法查看复盘。";
+  }
+  return message;
+}
+
 function interactionFromPayload(payload: DayPayload): InteractionVM {
   const status = payload.job?.status ?? payload.upload.status;
   return {
@@ -395,7 +404,7 @@ function interactionFromPayload(payload: DayPayload): InteractionVM {
     durationSeconds: payload.upload.durationSeconds,
     status: status === "ready" ? "ready" : status === "failed" ? "failed" : "processing",
     progress: payload.job?.progress,
-    errorMessage: payload.job?.errorMessage,
+    errorMessage: dateCompanionProcessingError(payload.job?.errorMessage),
     transcript: sortedTranscript(payload)
   };
 }
@@ -434,6 +443,7 @@ export function buildDateCompanionViewModel(payload: DayPayload): DateCompanionV
     },
     recap: {
       interaction,
+      history: [],
       items: recapItems,
       participants,
       chapters
@@ -492,6 +502,7 @@ function evidenceSource(
     speakerId: relationshipSource?.speakerId ?? evidence.speakerId,
     quote: relationshipSource?.quote ?? evidence.quote,
     contentDigest: relationshipSource?.contentDigest ?? evidence.contentDigest,
+    ...(relationshipSource?.authorizationRevision ? { authorizationRevision: relationshipSource.authorizationRevision } : {}),
     kind: "transcript",
     presentation: "direct_quote",
     canOpenTranscript: options.hasLocalDay?.(uploadId) === true,
@@ -518,6 +529,15 @@ function persistentRecapItem(
   };
 }
 
+function savedMeetingExcerpt(record: DcInteractionRead): string | null {
+  if (record.status !== "confirmed" || record.sourceState === "explicitly_deleted" || !("recapItems" in record)) return null;
+  const excerpt = record.recapItems.filter(item => item.disposition === "kept" && item.displayedText.trim() &&
+    item.evidence.some(source => source.uploadId === record.sourceUploadId && source.quote.trim()))
+    .sort((a, b) => Number(Boolean(b.userText)) - Number(Boolean(a.userText))
+      || a.sortOrder - b.sortOrder || a.id.localeCompare(b.id))[0];
+  return excerpt?.displayedText ?? null;
+}
+
 function persistentInteraction(
   interaction: DcInteractionRead,
   options: DateCompanionRelationshipAdapterOptions
@@ -540,11 +560,6 @@ function persistentInteraction(
     version: interaction.version,
     ...(interaction.memoryBridge ? { memoryBridge: interaction.memoryBridge } : {})
   };
-}
-
-function assignmentRole(interaction: DcInteractionRead, speakerId: string | undefined) {
-  if (!speakerId) return "unresolved" as const;
-  return interaction.participants.find((assignment) => assignment.speakerId === speakerId)?.role ?? "unresolved";
 }
 
 function normalizedEvidenceText(value: string) {
@@ -585,7 +600,7 @@ function subjectEligible(kind: DcRecapItem["kind"], subject: DateCompanionMemory
   return subject === "companion" || subject === "both";
 }
 
-function isLongTermEligible(
+export function isLongTermEligible(
   interaction: DcInteractionRead,
   item: DcRecapItem,
   options: DateCompanionRelationshipAdapterOptions
@@ -596,8 +611,8 @@ function isLongTermEligible(
     item.disposition !== "kept" ||
     item.evidence.length === 0
   ) return false;
-  const roles = item.evidence.map((evidence) => assignmentRole(interaction, evidence.speakerId));
-  if (roles.some((role) => role === "unresolved")) return false;
+  const roles = item.evidence.map((evidence) => dateCompanionEvidenceSpeakerRole(interaction, evidence));
+  if (roles.some((role) => !role)) return false;
   if (item.kind === "mentioned" && !roles.every((role) => role === "companion")) return false;
   if (item.kind === "promise" && !roles.every((role) => role === "self")) return false;
   return item.evidence.every((evidence) =>
@@ -634,7 +649,7 @@ function participantReviews(
   const bySpeaker = new Map(existing.map((participant) => [participant.speakerId, participant]));
   const groups = new Map<string, DcInteractionDetail["participants"]>();
   for (const assignment of interaction.participants) {
-    const groupId = assignment.reviewGroupId ?? assignment.speakerId;
+    const groupId = assignment.reviewedSegments === undefined ? assignment.reviewGroupId ?? assignment.speakerId : assignment.speakerId;
     const group = groups.get(groupId) ?? [];
     group.push(assignment);
     groups.set(groupId, group);
@@ -677,6 +692,7 @@ function participantReviews(
     return {
       speakerId: groupId,
       memberSpeakerIds,
+      ...(assignments[0].reviewedSegments !== undefined ? { reviewedSegments: assignments[0].reviewedSegments } : {}),
       ...(audioSpeakerId ? { audioSpeakerId } : {}),
       ...(voiceEnrollmentEligible ? { voiceEnrollmentEligible: true as const } : {}),
       displayLabel: local?.displayLabel ?? "说话人",
@@ -706,7 +722,7 @@ export function applyDateCompanionRelationshipView(
 ): DateCompanionViewModel {
   const confirmed = [...view.interactions]
     .filter((interaction) =>
-      interaction.status === "confirmed" &&
+      interaction.relationshipId === view.relationship.id && interaction.sourceState !== "explicitly_deleted" && interaction.status === "confirmed" &&
       dateCompanionReadRecapItems(interaction).some((item) => isLongTermEligible(interaction, item, options))
     )
     .sort((left, right) => left.recordingDate.localeCompare(right.recordingDate) || left.id.localeCompare(right.id));
@@ -734,6 +750,19 @@ export function applyDateCompanionRelationshipView(
       )
     );
   const openPromises = promises.filter((promise) => promise.status === "open");
+  // The home leaf follows the last confirmation, including a backdated meeting.
+  // Confirmation is independent of admitting its contents to long-term memory.
+  const lastSaved = view.interactions
+    .filter(record => record.relationshipId === view.relationship.id &&
+      record.status === "confirmed" && record.sourceState !== "explicitly_deleted")
+    .sort((a, b) => (b.confirmedAt ?? b.updatedAt).localeCompare(a.confirmedAt ?? a.updatedAt)
+      || b.id.localeCompare(a.id))[0];
+  // The record directory contains meeting metadata, never material for Person QA or preparation.
+  const recapHistory = view.interactions.filter((record) => record.relationshipId === view.relationship.id && record.status === "confirmed" &&
+    record.sourceState !== "explicitly_deleted" && (!("recapItems" in record) ||
+      record.recapItems.some(item => item.disposition === "kept" && item.evidence.length > 0)))
+    .sort((left, right) => left.recordingDate.localeCompare(right.recordingDate) || left.id.localeCompare(right.id))
+    .map(record => ({ ...persistentInteraction(record, {}), savedExcerpt: savedMeetingExcerpt(record) }));
   const currentUploadId = current.currentInteraction?.sourceUploadId ?? current.currentInteraction?.id;
   const importedCurrent = currentUploadId
     ? view.interactions.find((interaction) => interaction.sourceUploadId === currentUploadId)
@@ -788,6 +817,7 @@ export function applyDateCompanionRelationshipView(
     currentInteraction,
     home: {
       ...current.home,
+      lastSaved: lastSaved ? { interaction: persistentInteraction(lastSaved, {}), summary: savedMeetingExcerpt(lastSaved) } : null,
       preparePreview: prepareItems.at(-1) ?? null,
       participantNotice: unresolved ? "这次相处中的人物还没有全部核对" : null
     },
@@ -795,6 +825,7 @@ export function applyDateCompanionRelationshipView(
       remembered: mentioned,
       recent: mentioned.slice(-3),
       relationship: moments,
+      conversationTopics: continuations,
       promises,
       interactions: confirmed.map((interaction) => persistentInteraction(interaction, options)),
       observation: moments.at(-1) ?? null,
@@ -803,6 +834,7 @@ export function applyDateCompanionRelationshipView(
     recap: {
       ...current.recap,
       interaction: recapInteraction,
+      history: recapHistory,
       items: currentRecapItems,
       participants: currentParticipants,
       chapters: recapTarget && recapTarget.id !== importedCurrent?.id

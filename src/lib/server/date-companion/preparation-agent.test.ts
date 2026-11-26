@@ -1,6 +1,7 @@
 // @vitest-environment node
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type Database from "better-sqlite3";
+import { missingSuggestionTurn, type PreparationSource } from "@/lib/domain/date-companion-preparation";
 import { openDateCompanionDatabase } from "./db";
 import { DateCompanionRepository } from "./repository";
 import { dateCompanionEvidenceDigest } from "./memory-bridge-digest";
@@ -37,12 +38,12 @@ function setup(decide: (input: AgentDecisionInput) => AgentDecision | Promise<Ag
     db, service, observations, decision
   };
 }
-function seed(db: Database.Database) {
+function seed(db: Database.Database, upload = "synthetic-upload", quote = "我想去云南旅行") {
   const repo = new DateCompanionRepository(db), relationship = repo.createOrGetRelationship("alice").relationship;
   const imported = repo.importInteraction({
-    userId: "alice", relationshipId: relationship.id, sourceUploadId: "synthetic-upload", recordingDate: "2026-11-01", originalName: "synthetic.wav", participants: [{ speakerId: "ta" }], recapCandidates: [{
+    userId: "alice", relationshipId: relationship.id, sourceUploadId: upload, recordingDate: "2026-11-01", originalName: "synthetic.wav", participants: [{ speakerId: "ta" }], recapCandidates: [{
         kind: "mentioned", proposedText: "聊过旅行", sortOrder: 0, evidence: [{
-            uploadId: "synthetic-upload", sourceSegmentId: "synthetic-travel", startSeconds: 0, endSeconds: 3, speakerId: "ta", quote: "我想去云南旅行"
+            uploadId: upload, sourceSegmentId: upload === "synthetic-upload" ? "synthetic-travel" : upload + "-travel", startSeconds: 0, endSeconds: 3, speakerId: "ta", quote
           }]
       }]
   });
@@ -55,6 +56,173 @@ function seed(db: Database.Database) {
   return detail.id;
 }
 describe("date companion preparation business runtime", () => {
+  // A catalogue can contain several snapshots of one utterance, as in S02T.
+  function printReview(db: Database.Database) {
+    const repo = new DateCompanionRepository(db);
+    const relationshipId = repo.createOrGetRelationship("alice").relationship.id;
+    const uploadId = "print-review";
+    const quotes = ["样片先暂缓。", "当时还没有送审，得先核实版权。", "新的看样地址没有确认。"];
+    const {interactionId} = repo.importInteraction({userId:"alice",relationshipId,sourceUploadId:uploadId,
+      recordingDate:"2026-11-12",originalName:"样片",participants:[{speakerId:"ta"}],
+      recapCandidates:quotes.map((quote,i) => ({kind:"mentioned",proposedText:quote,sortOrder:i,
+        evidence:[{uploadId,sourceSegmentId:"print-"+i,startSeconds:5*i,endSeconds:5*i+4,speakerId:"ta",quote}]}))});
+    const detail=repo.getInteractionDetail("alice",relationshipId,interactionId);
+    repo.updateRecap({userId:"alice",interactionId,version:0,assignments:[{speakerId:"ta",role:"companion"}],
+      mutations:detail.recapItems.map(item=>({id:item.id,version:0,disposition:"kept"})),finalize:true});
+    return {interactionId, first: detail.recapItems[0].evidence[0].id, quotes};
+  }
+  it("reads direct evidence for an explicit fact in an unfiltered directory and keeps an explicitly requested other segment separate", async () => {
+    let first = "";
+    const {service,db} = setup(input => {
+      if (!input.results.length) return {tool:"list_review_sources",args:{scope:"selected"}};
+      if (!input.results.some(r => r.tool === "read_source" && (r.value as {sources:PreparationSource[]}).sources[0].id === first))
+        return {tool:"read_source",args:{sourceId:first}};
+      // Frozen weak response from an older observation; this citation alone only proves postponement.
+      return answer("记录只说了暂缓，没有提及是否送审。",["可以问问对方这周想先看哪一张。"],[first]);
+    });
+    const record = printReview(db); first = record.first;
+    const view = await service.create("alice",{operationKey:"list-explicit-fact",text:"请看选中的资料，样片是否送审？请指出依据，再给我一条开场。",interactionIds:[record.interactionId]});
+    const result = service.get("alice",view.id);
+    expect(result.generationStatus).toBe("idle");
+    expect(result.messages.at(-1)?.text).toContain(record.quotes[1]);
+    expect(result.messages.at(-1)?.text).not.toContain("没有提及");
+    expect(result.messages.at(-1)?.sources.map(s=>s.quote)).toEqual([record.quotes[1],record.quotes[0]]);
+    expect(result.items.map(i=>i.text)).toEqual(["可以问问对方这周想先看哪一张。"]);
+    expect(service.store.listTasks("alice",view.id)[0].actions.map(a=>a.tool)).toEqual(["list_review_sources","read_source","read_source","respond"]);
+  });
+  it("finishes an exact quote request if the provider keeps returning the identical successful locator", async () => {
+    const {service,db} = setup(() => ({tool:"list_review_sources",args:{scope:"selected",query:"送审"}}));
+    const record = printReview(db);
+    const view = await service.create("alice",{operationKey:"repeat-matched-lookup", text:"请在所选复盘里找“送审”，告诉我原话怎么说。", interactionIds:[record.interactionId]});
+    const result = service.get("alice",view.id);
+    expect(result.messages.map(m=>m.role)).toEqual(["user","assistant"]);
+    expect(result.messages.at(-1)?.text).toContain(record.quotes[1]);
+    expect(result.messages.at(-1)?.sources).toMatchObject([{speakerRole:"companion",quote:record.quotes[1]}]);
+    expect(result.items).toEqual([]);
+    expect(result.generationStatus).toBe("idle");
+    expect(service.store.listTasks("alice",view.id)[0].actions.map(a=>a.tool)).toEqual(["list_review_sources","read_source","respond"]);
+  });
+  it("preserves the model's discussion of multiple facts and binds all the authorized reads", async () => {
+    const reply = "样片和地址要分开核对，这次交流还提到了版权条件。";
+    const {service,db} = setup(input => {
+      if (!input.results.length) return {tool:"list_review_sources",args:{scope:"selected"}};
+      const reads = input.results.filter(r=>r.tool==="read_source").flatMap(r=>(r.value as {sources:PreparationSource[]}).sources);
+      expect(reads.map(s=>s.quote)).toEqual(["当时还没有送审，得先核实版权。","新的看样地址没有确认。"]);
+      return answer(reply,[],[reads[0].id]);
+    });
+    const record=printReview(db);
+    const view=await service.create("alice",{operationKey:"multiple-facts",text:"样片是否送审？新地址是否确认？请结合依据分析两件事。",interactionIds:[record.interactionId]});
+    expect(view.generationStatus).toBe("idle");
+    expect(view.messages.at(-1)).toMatchObject({text:reply,sources:[{quote:record.quotes[1]},{quote:record.quotes[2]}]});
+  });
+  it("keeps inherited dependencies on advice but binds a verbatim-only handoff to this turn's read", async () => {
+    let first="";
+    const {service,db}=setup(input=>{
+      if (input.task.goal.includes("找“送审”")) return {tool:"list_review_sources",args:{scope:"selected",query:"送审"}};
+      if (!input.results.length) return {tool:"list_review_sources",args:{scope:"selected"}};
+      if (!input.results.some(r=>r.tool==="read_source")) return {tool:"read_source",args:{sourceId:first}};
+      return answer("提到过暂缓。",["可以先问问近况。"],[first]);
+    });
+    const record=printReview(db);first=record.first;
+    const firstTurn=await service.create("alice",{operationKey:"before-repeat",text:"看看之前留下什么",interactionIds:[record.interactionId]});
+    const second=await service.turn("alice",firstTurn.id,{operationKey:"repeat-original",expectedVersion:firstTurn.version,text:"在资料里找“送审”，告诉我原话。"});
+    expect(second.generationStatus).toBe("idle");
+    expect(second.items[0].sources.map(s=>s.quote)).toEqual([record.quotes[0]]);
+    expect(second.messages.at(-1)?.sources.map(s=>s.quote)).toEqual([record.quotes[1]]);
+  });
+  it.each([true,false])("reads a ranked topic hit before accepting a no-evidence reply (explicit source list %s)", async explicitList => {
+    const {service, db} = setup(input => {
+      if (!input.results.length) return {tool:"search_records", args:{query:"不存在的话题 云南"}};
+      if (input.results.length === 1) {
+        expect(input.results[0].value).toMatchObject({lookup:"topic_match"});
+        expect(JSON.stringify(input.results)).not.toContain("我想去云南旅行");
+        return explicitList ? answer("没找到记录。") : {tool:"respond",args:{reply:"没找到记录。",suggestions:[]}};
+      }
+      const read = input.results.at(-1)!;
+      expect(read.tool).toBe("read_source");
+      const source = (read.value as {sources:{id:string; quote:string}[]}).sources[0];
+      return answer(source.quote, ["可以问问对方想看哪里的风景。"], [source.id]);
+    });
+    const interactionId = seed(db);
+    const view = await service.create("alice", {operationKey:"keyword-hit", text:"请读刚勾选复盘里的云南原话。", interactionIds:[interactionId]});
+    const saved = service.get("alice",view.id);
+    expect(saved).toMatchObject({generationStatus:"idle", allowRetained:false, reviewLink:null, interactionIds:[interactionId]});
+    expect(saved.messages.at(-1)).toMatchObject({text:"我想去云南旅行",sources:[{interactionId, speakerRole:"companion"}]});
+    expect(saved.items[0].status).toBe("suggested");
+    const revoked = service.mutate("alice",view.id,{operationKey:"uncheck",expectedVersion:view.version,kind:"scope",interactionIds:[],allowRetained:false});
+    expect(revoked.messages.at(-1)?.sources[0]).toMatchObject({valid:false,quote:""});
+  });
+
+  it("never substitutes an earlier keyword hit for a later empty query", async () => {
+    const {service,db} = setup(input => {
+      if (!input.results.length) return {tool:"list_review_sources",args:{query:"旅行"}};
+      if (input.results.length === 1) return {tool:"list_review_sources",args:{query:"秋葵"}};
+      expect(input.results.at(-1)?.value).toMatchObject({lookup:"no_match",sources:[]});
+      return answer("没有匹配秋葵的片段。");
+    });
+    const interactionId = seed(db);
+    const view = await service.create("alice",{operationKey:"refine",text:"请看看旅行那次有没有提到秋葵。",interactionIds:[interactionId]});
+    expect(view.generationStatus).toBe("idle");
+    expect(view.messages.at(-1)?.sources).toEqual([]);
+  });
+
+  it("keeps selected and linked review listings independent, and a listing alone does not read text", async () => {
+    let selected: string, linked: string;
+    const {service, db} = setup(input => {
+      if (input.task.goal === "建讨论") return answer("好了。");
+      const step = input.results.length;
+      if (step === 0) return {tool:"list_review_sources",args:{}};
+      if (step === 1) {
+        expect(input.results[0].value).toMatchObject({lookup:"listed",sources:[{interactionId:linked}]});
+        return {tool:"list_review_sources", args:{scope:"selected"}};
+      }
+      expect(input.results[1].value).toMatchObject({lookup:"listed",sources:[{interactionId:selected}]});
+      expect(JSON.stringify(input.results)).not.toContain("我想去云南旅行");
+      return answer("可以从勾选的资料或关联复盘中核对。");
+    });
+    selected = seed(db); linked = seed(db,"another-upload");
+    let view = await service.create("alice",{operationKey:"before-link",text:"建讨论",interactionIds:[selected]});
+    view = service.mutate("alice",view.id,{operationKey:"link-other",expectedVersion:view.version,kind:"link_review",interactionId:linked});
+    view = await service.turn("alice",view.id,{operationKey:"list",expectedVersion:view.version,text:"我现在可以查哪几份材料？"});
+    expect(view.generationStatus).toBe("idle");
+    expect(view.messages.at(-1)?.sources).toEqual([]);
+  });
+
+  it("distinguishes no keyword match, a readable scoped directory, and no eligible materials", async () => {
+    const {service, db} = setup(input => {
+      if (!input.results.length) return {tool:"list_review_sources",args:{query:"另一个话题"}};
+      if (input.task.goal === "未选资料") {
+        expect(input.results[0].value).toMatchObject({lookup:"no_material",sources:[]});
+        return answer("当前范围内没有可用的片段。");
+      }
+      if (input.results.length === 1) {
+        expect(input.results[0].value).toMatchObject({lookup:"no_match",sources:[]});
+        return {tool:"list_review_sources",args:{}};
+      }
+      expect(input.results[1].value).toMatchObject({lookup:"listed",sources:[{origin:"direct_conversation"}]});
+      return answer("这一话题没有匹配；已选的复盘里还有可以核对的片段。");
+    });
+    const interactionId = seed(db);
+    for (const [key,ids] of [["未选资料",[]],["查选中复盘",[interactionId]]] as const) {
+      const view = await service.create("alice",{operationKey:key,text:key,interactionIds:ids});
+      expect(view.generationStatus).toBe("idle");
+      expect(view.messages.at(-1)?.sources).toEqual([]);
+    }
+  });
+
+  it.each(["locate","read"] as const)("preserves a material %s failure instead of publishing a false empty or a duplicate turn", async failure => {
+    const {service,db} = setup(input => {
+      if (!input.results.length) return {tool:"list_review_sources",args:{query:"旅行"}};
+      return answer("没找到。");
+    });
+    const interactionId = seed(db);
+    vi.spyOn(service.sources, failure).mockImplementationOnce(() => {throw Error("controlled local read error");});
+    const view = await service.create("alice",{operationKey:"read-error",text:"请核对原话",interactionIds:[interactionId]});
+    expect(view.generationStatus).toBe("failed");
+    expect(view.generationMessage).toContain("读取复盘资料失败");
+    expect(view.messages.map(m=>m.role)).toEqual(["user"]);
+    expect(view.events.filter(e=>e.kind==="generation_stopped")).toHaveLength(1);
+  });
   it("can broaden an empty linked-review query without exposing quotes before read_source", async () => {
     const {service, db, observations} = setup(input => {
       if (input.task.goal === "先留一条准备") return answer("", ["找个轻松的机会聊聊。"]) ;
@@ -333,9 +501,178 @@ describe("date companion preparation business runtime", () => {
     expect(view.messages).toHaveLength(1);
     expect(view.items).toEqual([]);
   });
+
+  it.each([null, "record", { id: "record" }])("rejects malformed respond.sourceIds instead of treating it as empty (%j)", async malformed => {
+    const { service } = setup(() => ({ tool: "respond", args: { reply: "可以先聊聊近况。", suggestions: [], sourceIds: malformed } }));
+    const view = await service.create("alice", { operationKey: "malformed", text: "先聊聊近况" });
+    expect(view.generationStatus).toBe("failed");
+    expect(view.messages.map(m => m.role)).toEqual(["user"]);
+    expect(view.events.filter(e => e.kind === "generation_stopped")).toHaveLength(1);
+  });
+
+  it("only accepts a missing source list when no read or inherited evidence was used", async () => {
+    const noIds = { tool: "respond", args: { reply: "可以挑一件最近的开心事。", suggestions: ["随口说一件开心的小事。"] } };
+    const { service, db } = setup(input => {
+      if (!input.task.goal.includes("原话")) return noIds;
+      if (!input.results.length) return {tool: "search_records", args: {query: "旅行"}};
+      const ref = (input.results[0].value as { sources: { id: string }[] }).sources[0];
+      if (input.results.length === 1) return {tool: "read_source", args: {sourceId: ref.id}};
+      return input.task.goal.includes("列出来源") ? answer("这次聊到了旅行。", ["聊聊旅行。"], [ref.id]) : noIds;
+    });
+    const recordId = seed(db);
+    const noEvidence = await service.create("alice", {operationKey: "no-read", text: "先给一条轻松的建议"});
+    expect(noEvidence.generationStatus).toBe("idle");
+    expect(noEvidence.items[0].sources).toEqual([]);
+    const read = await service.create("alice", {operationKey: "read", text: "请看原话", interactionIds: [recordId]});
+    expect(read.generationStatus).toBe("failed");
+    expect(read.items).toEqual([]);
+    let inherited = await service.create("alice", {operationKey: "cited", text: "请看原话并列出来源", interactionIds: [recordId]});
+    expect(inherited.items[0].sources[0].quote).toBe("我想去云南旅行");
+    inherited = await service.turn("alice", inherited.id, {operationKey: "follow", expectedVersion: inherited.version, text: "接着说"});
+    expect(inherited.generationStatus).toBe("failed");
+    expect(inherited.items).toHaveLength(1);
+    expect(inherited.messages.at(-1)?.role).toBe("user");
+  });
 });
 
 describe("date companion feedback and requested suggestions", () => {
+  const opener = "对了，你最近那本画册做到哪一步了？";
+  const cleanRequest = "下次见林岑，我想自然地问问画册的近况。给我一条可以直接说的开场白。";
+  const followupRequest = cleanRequest.slice(1) + String.fromCharCode(96);
+  const shortRequest = "帮我想一句可以直接问Ta的话。";
+
+  it("publishes a verified recorded opener as an original quote without requiring an actionable suggestion", async () => {
+    const quote = "嗨，路上顺利吗？";
+    const { service, db, observations } = setup(input => {
+      if (!input.results.length) return { tool: "list_review_sources", args: { scope: "selected" } };
+      const { id } = (input.results[0].value as { sources: { id: string }[] }).sources[0];
+      if (input.results.length === 1) return { tool: "read_source", args: { sourceId: id } };
+      return answer("Ta 的原话是“" + quote + "”", [], [id]);
+    });
+    const id = seed(db, "opening-record", quote);
+    const view = await service.create("alice", {
+      operationKey: "recorded-opener", interactionIds: [id], text: "给我找出上次录音里 Ta 说的开场白原话。"
+    });
+    const saved = service.get("alice", view.id);
+    expect(saved.generationStatus).toBe("idle");
+    expect(saved.items).toEqual([]);
+    expect(saved.messages.at(-1)).toMatchObject({ role: "assistant", sources: [{ interactionId: id, quote }] });
+    expect(observations).toHaveLength(3);
+  });
+
+  const sameRequestInNewAndExistingDiscussions = [cleanRequest, followupRequest, shortRequest]
+    .flatMap(text => [false, true].map(afterChat => ({ text, afterChat })));
+  const withMeetingContext = [
+    "下次见面", "下次见面，", "下次见面时", "下回聊天", "等下次见面时", "明天", "下次我们见面",
+    "等我们见面之前", "明天见面：", "下次见面的时候"
+  ].map(context => context + "请帮我写一句开场白。");
+  const otherRequests = [
+    ...withMeetingContext,
+    "别太正式，帮我写一句见面时能直接说的话。", "来一个能直接采用的建议。", "写一句自然的开场白。", "有没有一句能直接用的开场白？",
+    "能不能帮我拟一句问 Ta 画册近况的话？", "帮我想一句可以直接问她的话。", "下次见面的时候你能帮我想一句能直接说的开场白吗？",
+    "林岑昨天说请给一句开场白，我觉得他有点紧张。现在帮我写一句我能直接问他的话。",
+    "林岑说『请给一句开场白』，现在请帮我写一句新的开场白。",
+    "下次见面再帮我写一句自然的开场白。",
+    "林岑昨天说想要一句开场白，所以我也想请你给我一句能直接问 Ta 的话。", "先核对录音的原话，再给我一句可以直接问 Ta 的话。"
+  ].map(text => ({ text, afterChat: false }));
+  it.each([...sameRequestInNewAndExistingDiscussions, ...otherRequests])(
+    "repairs a prose-only answer to an explicit request within the turn (after chat=$afterChat): $text", async ({ text, afterChat }) => {
+      const {service,observations,db}=setup(input=>{
+        if (input.task.goal !== text) return answer("可以，慢慢说。");
+        if (!input.results.some(r=>r.tool==="respond" && r.status==="failed")) return answer(opener);
+        expect(input.tools.map(t=>t.name)).toEqual(["respond"]);
+        return answer("可以这样问：“"+opener+"”",[opener]);
+      });
+      let view: Awaited<ReturnType<typeof service.create>>;
+      if (afterChat) {
+        view=await service.create("alice",{operationKey:"earlier",text:"我想聊聊。"});
+        view=await service.turn("alice",view.id,{operationKey:"earlier-2",expectedVersion:view.version,text:"嗯，再聊聊感觉。"});
+        view=await service.turn("alice",view.id,{operationKey:"opener",expectedVersion:view.version,text});
+      } else view=await service.create("alice",{operationKey:"opener",text});
+      expect(view.generationStatus).toBe("idle");
+      expect(view.items.map(item=>[item.text,item.status])).toEqual([[opener,"suggested"]]);
+      expect(view.messages.at(-1)).toMatchObject({role:"assistant",text:""});
+      expect(view.messages.filter(m=>m.text===text)).toHaveLength(1);
+      expect(observations.filter(i=>i.task.goal===text)).toHaveLength(2);
+      expect(db.prepare("SELECT COUNT(*) AS n FROM agent_calls").get()).toEqual({n:observations.length});
+      expect(service.get("alice",view.id)).toEqual(view);
+    });
+
+  it("stops a second completed prose-only response, without publishing a reply or replaying the user operation", async()=>{
+    const {service,observations}=setup(()=>answer(opener));
+    const request={operationKey:"empty-twice",text:cleanRequest};
+    const view=await service.create("alice",request);
+    expect(view.generationStatus).toBe("failed");
+    expect(view.generationMessage).toContain("建议");
+    expect(view.messages.map(m=>m.role)).toEqual(["user"]);
+    expect(view.items).toEqual([]);
+    expect((await service.create("alice",request)).messages).toEqual(view.messages);
+    expect(observations).toHaveLength(2);
+  });
+
+  it.each([
+    {wait:{kind:"feedback",message:"对了，你最近那本画册做到哪一步了？"}},
+    {finish:"已经准备好了。"},
+    {tool:"read_progress",args:{offset:0}}
+  ] as AgentDecision[])("bounds the correction to one publishing attempt if the model switches action",async next=>{
+    const {service,observations}=setup(input=>input.results.length ? next : answer(opener));
+    const view=await service.create("alice",{operationKey:"switch",text:cleanRequest});
+    expect(view.generationStatus).toBe("failed");
+    expect(missingSuggestionTurn(view)?.id).toBe(view.messages[0].id);
+    expect(view.messages.map(m=>m.role)).toEqual(["user"]);
+    expect(view.items).toHaveLength(0);
+    expect(observations).toHaveLength(2);
+  });
+
+  it("keeps an unconfirmed correction distinct from an invalid source and never resends either",async()=>{
+    for(const unknown of [true,false]) {
+      const {service,observations}=setup(input=>{
+        if(!input.results.length)return answer(opener);
+        if(unknown)throw new Error("controlled_disconnect");
+        return answer("",[opener],["not-a-read-source"]);
+      });
+      const view=await service.create("alice",{operationKey:"failure",text:cleanRequest});
+      expect(view.generationStatus).toBe("failed");
+      expect(view.items).toEqual([]);
+      expect(view.messages.map(m=>m.role)).toEqual(["user"]);
+      if(unknown) {
+        expect(view.generationMessage).toContain("没有收到完整结果");
+        expect(missingSuggestionTurn(view)?.id).toBe(view.messages[0].id);
+      } else {
+        expect(view.generationMessage).toContain("资料未通过核对");
+        expect(missingSuggestionTurn(view)).toBeUndefined();
+      }
+      expect(observations).toHaveLength(2);
+    }
+  });
+
+  it("lets a genuine discussion ask for clarification, but a feedback-only action cannot publish an explicit opener as chat",async()=>{
+    const {service}=setup(()=>({wait:{kind:"feedback",message:opener}}));
+    const explicit=await service.create("alice",{operationKey:"explicit-wait",text:cleanRequest});
+    expect(explicit.generationStatus).toBe("failed");
+    expect(missingSuggestionTurn(explicit)?.id).toBe(explicit.messages[0].id);
+    const discussion=await service.create("alice",{operationKey:"discussion-wait",text:"我还没想好和她聊什么。"});
+    expect(discussion.generationStatus).toBe("idle");
+    expect(discussion.messages.at(-1)?.text).toBe(opener);
+  });
+
+  it.each([
+    "我有点在意上次聊画册的感觉，先聊聊。", "不给建议，只查他说的原话。", "先不要给我一条开场白。", "请只核对上次对方说的「给我一句开场白」，他当时语气如何？", "我想听听你对这条开场白的看法。", "若材料够，再给我一句开场白。",
+    "林岑昨天说请给一句开场白，我觉得他有点紧张。", "她问：帮我写一句能直接问 Ta 的话。他是不是有点紧张？", "林岑昨天说，请给我一句开场白，我觉得他有点紧张。",
+    "她让我给一句开场白，我当时愣住了。", "给我解释一下这句开场白的语气。", "她问我你能帮我想一句开场白吗，我还在想。",
+    "想不出一句自然的开场白，我有点紧张。", "准备开场白让我很紧张，我想跟你聊聊。", "给我一句开场白，还是别给建议了。",
+    "林岑说，下次见面，请给一句开场白。我还在想这件事。", "下次我们见面她也许会让我给一句开场白。",
+    "明天见面先不用给建议。", "下次见面别给我开场白。", "下次见面先不用给我开场白。", "下次见面他请我写一句开场白，我有点紧张。",
+    "给我写一句开场白，不过我改主意了，下次见面先不用给我开场白。", "我问林岑怎么说，他说：明天见面，请给我写一句开场白。",
+    "林岑说：下次见面，请帮我写一句开场白。我听着有点意外。", "如果资料够，下回聊天前请给我一句开场白。"
+  ])(
+    "allows a discussion without a card or repair: %s",async text=>{
+      const {service,observations}=setup(()=>answer("我们可以继续聊这件事。"));
+      const view=await service.create("alice",{operationKey:"talk",text});
+      expect(view.generationStatus).toBe("idle");
+      expect(view.items).toEqual([]);
+      expect(observations).toHaveLength(1);
+    });
   const firstIntent = "2026-11-06 下午要见 Ta，想在海边找个安静的地方。";
   const feedback = "上次没有聊旅行。我觉得 Ta 那天工作很累，我们后来只是安静地散了会儿步。请根据这次实际情况调整一个下次见面的小建议，别替我留下。";
   const earlierPlan = "如果氛围合适，轻轻问一句海边散步的事。";
@@ -428,6 +765,25 @@ describe("date companion feedback and requested suggestions", () => {
     };
     return payload.tools.find(tool => tool.name === "respond")?.parameters.properties.suggestions.maxItems;
   }
+
+  it.each([
+    ["下次见面日期还没有定。请给三条各自独立、可以留下的准备便笺：先听近况、随口聊一件开心的小事、最后表达感谢。每条一句，别把安排写成已经说定。", 3],
+    ["给两条，各写一句。", 2],
+    ["每条一句，请给两条。", 2],
+    ["只给一条。", 1],
+    ["请给两句开场白。", 2],
+    ["请给三条准备建议，改成只给一条。", 1],
+  ] as const)("keeps the turn total distinct from the length of each suggestion: %s", async (text, count) => {
+    const options = ["先听听近况。", "说一件开心的小事。", "表达感谢。"].slice(0, count);
+    const { service, observations } = setup(() => answer("", options));
+    const request = { operationKey: "quantity", text };
+    const view = await service.create("alice", request);
+    expect(wireSuggestionLimit(observations[0])).toBe(count);
+    expect(view.generationStatus).toBe("idle");
+    expect(view.items.map(item => item.text)).toEqual(options);
+    expect((await service.create("alice", request)).messages).toEqual(view.messages);
+    expect(observations).toHaveLength(1);
+  });
 
   it("rejects the earlier two-action feedback response to a single-suggestion request before publishing or retrying", async () => {
     const badReply = "明天下午如果 Ta 工作也比较累，可以选一个不费力、随时能停下来的地方，比如找个安静的咖啡馆坐一会儿，或者附近有树荫的河边/公园慢慢走。";

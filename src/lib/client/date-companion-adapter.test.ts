@@ -254,6 +254,78 @@ function relationshipViewFixture(): DcRelationshipView {
 }
 
 describe("date-companion adapter", () => {
+  it("chooses the last saved home recap by confirmation time and stable ID within the current relationship", () => {
+    const view = relationshipViewFixture();
+    const base = view.interactions[0];
+    view.interactions = [
+      { ...base, id: "older_confirmation", recordingDate: "2026-08-30" },
+      { ...base, id: "saved_a", recordingDate: "2026-08-01", confirmedAt: "2026-08-05T11:00:00.000Z", memoryBridge: undefined },
+      { ...base, id: "saved_b", recordingDate: "2026-08-02", confirmedAt: "2026-08-05T11:00:00.000Z", memoryBridge: undefined },
+      { ...base, id: "draft", status: "draft", confirmedAt: undefined, updatedAt: "2026-08-09T11:00:00.000Z" },
+      { ...base, id: "deleted", sourceState: "explicitly_deleted", confirmedAt: "2026-08-09T11:00:00.000Z" },
+      { ...base, id: "other_relationship", relationshipId: "relationship_other", confirmedAt: "2026-08-09T11:00:00.000Z" }
+    ];
+    const home = applyDateCompanionRelationshipView(emptyDateCompanionViewModel(), view).home;
+    expect(home.lastSaved?.interaction.relationshipInteractionId).toBe("saved_b");
+    expect(home.lastSaved?.interaction.recordingDate).toBe("2026-08-02");
+    // Legacy confirmations without confirmedAt still have a deterministic updatedAt fallback.
+    view.interactions.push({ ...base, id: "legacy_saved", confirmedAt: undefined, updatedAt: "2026-08-06T11:00:00.000Z" });
+    expect(applyDateCompanionRelationshipView(emptyDateCompanionViewModel(), view).home.lastSaved?.interaction.relationshipInteractionId)
+      .toBe("legacy_saved");
+  });
+
+  it("uses a retained edited displayedText with evidence from that exact home recording", () => {
+    const view = relationshipViewFixture();
+    const record = view.interactions[0];
+    const base = record.recapItems[0];
+    record.recapItems = [
+      { ...base, id: "unchanged", displayedText: "原来的摘要", sortOrder: 0 },
+      { ...base, id: "removed", displayedText: "已移除的修改", userText: "已移除的修改", disposition: "excluded", sortOrder: 1 },
+      { ...base, id: "foreign_source", displayedText: "别场的修改", userText: "别场的修改", sortOrder: 2,
+        evidence: base.evidence.map(source => ({ ...source, uploadId: "another_upload" })) },
+      { ...base, id: "empty", displayedText: " ", userText: " ", sortOrder: 3 },
+      { ...base, id: "edited", displayedText: "用户最终留下的新措辞", userText: "用户最终留下的新措辞", sortOrder: 4 }
+    ];
+    const home = applyDateCompanionRelationshipView(emptyDateCompanionViewModel(), view).home;
+    expect(home.lastSaved?.interaction).toMatchObject({
+      relationshipInteractionId: record.id, sourceUploadId: record.sourceUploadId, recordingDate: record.recordingDate
+    });
+    expect(home.lastSaved?.summary).toBe("用户最终留下的新措辞");
+  });
+
+  it("keeps each history excerpt attached to its own meeting, independent of long-term selection and confirmation order", () => {
+    const view = relationshipViewFixture();
+    const base = view.interactions[0];
+    const edited = (text: string) => [{ ...base.recapItems[0], userText: text, displayedText: text }];
+    view.interactions = [
+      { ...base, id: "earlier", recordingDate: "2026-08-01", recapItems: edited("第一场的修改"), memoryBridge: undefined },
+      { ...base, id: "latest", recordingDate: "2026-08-08", recapItems: edited("第二场的修改"), memoryBridge: undefined },
+      { ...base, id: "other-relation", relationshipId: "elsewhere", recapItems: edited("其他关系") }
+    ];
+    const vm = applyDateCompanionRelationshipView(emptyDateCompanionViewModel(), view);
+    expect(vm.recap.history.map(m => [m.relationshipInteractionId, m.savedExcerpt])).toEqual([
+      ["earlier", "第一场的修改"], ["latest", "第二场的修改"]
+    ]);
+    expect(vm.person.remembered).toEqual([]);
+  });
+
+  it("keeps the newest saved meeting link when no eligible excerpt remains and shows empty only without saved meetings", () => {
+    const view = relationshipViewFixture();
+    const base = view.interactions[0];
+    view.interactions.push({
+      ...base, id: "saved_without_excerpt", sourceUploadId: "new_upload", originalName: "新的见面.m4a",
+      confirmedAt: "2026-08-06T11:00:00.000Z", memoryBridge: undefined,
+      recapItems: base.recapItems.map(item => ({ ...item, disposition: "excluded" }))
+    });
+    const home = applyDateCompanionRelationshipView(emptyDateCompanionViewModel(), view).home;
+    expect(home.lastSaved?.interaction).toMatchObject({
+      relationshipInteractionId: "saved_without_excerpt", sourceUploadId: "new_upload"
+    });
+    expect(home.lastSaved?.summary).toBeNull();
+    view.interactions = view.interactions.map(record => ({ ...record, status: "draft", confirmedAt: undefined }));
+    expect(applyDateCompanionRelationshipView(emptyDateCompanionViewModel(), view).home.lastSaved).toBeNull();
+  });
+
   it("builds a single-interaction, evidence-backed read model", () => {
     const viewModel = buildDateCompanionViewModel(payloadFixture());
 
@@ -650,9 +722,22 @@ describe("date-companion adapter", () => {
     );
 
     expect(viewModel.person.interactions).toEqual([]);
+    expect(viewModel.recap.history).toEqual([]);
     expect(viewModel.person.remembered).toEqual([]);
     expect(viewModel.person.relationship).toEqual([]);
     expect(viewModel.prepare.items).toEqual([]);
+  });
+
+  it("lists confirmed meeting metadata for reopening without admitting it into long-term uses", () => {
+    const view = relationshipViewFixture();
+    view.interactions[0].memoryBridge = undefined;
+    const model = applyDateCompanionRelationshipView(emptyDateCompanionViewModel(), view);
+    expect(model.recap.history).toHaveLength(1);
+    expect(model.recap.history[0]).toMatchObject({relationshipInteractionId:"interaction_1", transcript:[]});
+    expect(model.person.interactions).toHaveLength(0);
+    expect(model.prepare.items).toHaveLength(0);
+    view.interactions[0].status = "draft";
+    expect(applyDateCompanionRelationshipView(emptyDateCompanionViewModel(), view).recap.history).toHaveLength(0);
   });
 
   it("marks relationship search evidence as evidence-only when this browser has no matching DayPayload", () => {

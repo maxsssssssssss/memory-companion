@@ -11,6 +11,7 @@ import {
   DcRelationshipSummarySchema,
   DcSearchResultSchema,
   type DcEvidenceSnapshot,
+  type DcReviewedSegment,
   type DcInteractionDetail,
   type DcInteractionSummary,
   type DcPromiseStatus,
@@ -51,6 +52,8 @@ import {
   type DcMemoryAdmissionInput
 } from "./memory-bridge-repository";
 import { dateCompanionEvidenceDigest } from "./memory-bridge-digest";
+import { displayedPromiseText, displayedRecapText } from "./recap-speaker-text";
+import { assertUploadCanBeAuthorized, getInteractionGrantGeneration } from "./memory-grant-ledger";
 
 type RelationshipRow = {
   id: string;
@@ -78,6 +81,7 @@ type InteractionRow = {
 };
 
 type ParticipantRow = {
+  review_by_segment: 0 | 1;
   speaker_id: string;
   role: "self" | "companion" | "unresolved";
   confirmed_at: string | null;
@@ -248,9 +252,14 @@ function recapConfirmationFingerprint(input: {
   mutations: DcRecapMutation[];
   voiceEnrollmentIntents?: DcVoiceEnrollmentIntent[];
   memoryAdmission?: DcMemoryAdmissionInput;
+  skipMemoryAdmission?: true;
 }) {
   const assignments = (input.assignments ?? [])
-    .map((assignment) => ({ speakerId: assignment.speakerId, role: assignment.role }))
+    .map(({ speakerId, role, reviewedSegments }) => ({
+      speakerId, role,
+      ...(reviewedSegments ? { reviewedSegments: [...reviewedSegments].sort((a, b) =>
+        a.sourceSegmentId.localeCompare(b.sourceSegmentId)).map(s => [s.sourceSegmentId, s.contentDigest, s.role]) } : {})
+    }))
     .sort((left, right) => left.speakerId.localeCompare(right.speakerId));
   const mutations = input.mutations
     .map((mutation) => {
@@ -283,7 +292,9 @@ function recapConfirmationFingerprint(input: {
       assignments,
       mutations,
       voiceEnrollmentIntents,
-      memoryAdmission
+      memoryAdmission,
+      // Omit for legacy requests so their previously stored fingerprints still match.
+      ...(input.skipMemoryAdmission ? { skipMemoryAdmission: true } : {})
     }))
     .digest("hex");
 }
@@ -353,7 +364,7 @@ export class DateCompanionRepository {
         )
       : undefined;
     const participantRows = this.database.prepare(`
-      SELECT p.speaker_id, p.role, p.confirmed_at, p.continuity_key,
+      SELECT p.speaker_id, p.role, p.confirmed_at, p.continuity_key, p.review_by_segment,
               EXISTS(
                SELECT 1
                FROM dc_participant_audio_samples a
@@ -411,18 +422,40 @@ export class DateCompanionRepository {
         members.forEach((speakerId) => eligibleSpeakerIds.add(speakerId));
       }
     }
+    const reviewedRows = participantRows.some(p => p.review_by_segment) ? this.database.prepare(`
+      SELECT DISTINCT s.speaker_id, s.source_segment_id AS sourceSegmentId, s.content_digest AS contentDigest,
+             s.role, e.upload_id, e.start_seconds, e.end_seconds, e.quote, e.speaker_id AS raw_speaker, e.content_digest AS raw_digest
+      FROM dc_reviewed_speaker_segments s
+      JOIN dc_interactions i ON i.id=s.interaction_id AND i.user_id=s.user_id
+      JOIN dc_evidence_snapshots e ON e.user_id=s.user_id AND e.upload_id=i.source_upload_id AND e.source_segment_id=s.source_segment_id
+      WHERE s.user_id=? AND s.interaction_id=? ORDER BY s.source_segment_id
+    `).all(userId, row.id) as (DcReviewedSegment & Pick<EvidenceRow,"speaker_id"|"upload_id"|"start_seconds"|"end_seconds"|"quote">
+      & { raw_digest: string | null; raw_speaker: string | null })[] : [];
+    const changedSegments = new Set<string>();
+    const reviewed = new Map<string, typeof reviewedRows[number]>();
+    for (const entry of reviewedRows) {
+      if (entry.speaker_id !== entry.raw_speaker || entry.contentDigest !== entry.raw_digest || entry.contentDigest !== dateCompanionEvidenceDigest({
+        userId, uploadId:entry.upload_id, sourceSegmentId:entry.sourceSegmentId,
+        startSeconds:entry.start_seconds, endSeconds:entry.end_seconds, speakerId:entry.raw_speaker, quote:entry.quote
+      })) changedSegments.add(entry.sourceSegmentId);
+      reviewed.set(entry.sourceSegmentId, entry);
+    }
     const participants = participantRows.map((participant) => ({
       speakerId: participant.speaker_id,
-      ...(participant.continuity_key ? {
+      ...(participant.review_by_segment ? { reviewedSegments: [...reviewed.values()].filter(s =>
+        s.speaker_id === participant.speaker_id && !changedSegments.has(s.sourceSegmentId))
+        .map(({ sourceSegmentId, contentDigest, role }) => ({ sourceSegmentId, contentDigest, role })) } : {}),
+      ...(participant.continuity_key && !participant.review_by_segment ? {
         reviewGroupId: participantReviewGroupId(row.id, participant.continuity_key)
       } : {}),
       ...(participant.audio_sample_available === 1 ? { audioSampleAvailable: true as const } : {}),
-      ...(eligibleSpeakerIds.has(participant.speaker_id)
+      ...(!participant.review_by_segment && eligibleSpeakerIds.has(participant.speaker_id)
         ? { voiceEnrollmentEligible: true as const }
         : {}),
       role: participant.role,
       ...(participant.confirmed_at ? { confirmedAt: participant.confirmed_at } : {}),
       ...(row.status === "draft"
+        && !participant.review_by_segment
         && !participant.confirmed_at
         && participant.suggested_role
         && participant.suggestion_source
@@ -448,7 +481,7 @@ export class DateCompanionRepository {
       kind: item.kind,
       proposedText: item.proposed_text,
       ...(item.user_text ? { userText: item.user_text } : {}),
-      displayedText: item.user_text ?? item.proposed_text,
+      displayedText: displayedRecapText(this.database, userId, item.id, item.proposed_text, item.user_text),
       disposition: item.disposition,
       version: item.version,
       sortOrder: item.sort_order,
@@ -553,17 +586,16 @@ export class DateCompanionRepository {
       ORDER BY recording_date DESC, created_at DESC, id
     `).all(relationshipId, userId, scope) as InteractionRow[];
     const promiseRows = this.database.prepare(`
-      SELECT id, relationship_id, originating_recap_item_id, text, status, version,
-             resolved_at, created_at, updated_at
-      FROM dc_promises
-      WHERE relationship_id = ? AND user_id = ?
-      ORDER BY CASE status WHEN 'open' THEN 0 ELSE 1 END, updated_at DESC, id
-    `).all(relationshipId, userId) as PromiseRow[];
+      SELECT p.*, r.proposed_text, r.user_text FROM dc_promises p
+      JOIN dc_recap_items r ON r.id=p.originating_recap_item_id AND r.user_id=p.user_id
+      WHERE p.relationship_id = ? AND p.user_id = ?
+      ORDER BY CASE p.status WHEN 'open' THEN 0 ELSE 1 END, p.updated_at DESC, p.id
+    `).all(relationshipId, userId) as Array<PromiseRow & Pick<RecapRow, "user_text" | "proposed_text">>;
     const promises = promiseRows.map((item) => DcPromiseSchema.parse({
       id: item.id,
       relationshipId: item.relationship_id,
       originatingRecapItemId: item.originating_recap_item_id,
-      text: item.text,
+      text: displayedPromiseText(this.database, userId, item.originating_recap_item_id, item.text, item.proposed_text, item.user_text),
       status: item.status,
       version: item.version,
       ...(item.resolved_at ? { resolvedAt: item.resolved_at } : {}),
@@ -858,6 +890,42 @@ export class DateCompanionRepository {
     return run();
   }
 
+  private saveSpeakerReview(userId: string, interactionId: string, assignment: DcParticipantMutation, now: string) {
+    const { speakerId, role, reviewedSegments } = assignment;
+    const previous = this.database.prepare(`SELECT review_by_segment FROM dc_participant_assignments
+      WHERE user_id=? AND interaction_id=? AND speaker_id=?`).get(userId, interactionId, speakerId) as { review_by_segment: number } | undefined;
+    if (!previous) throw new DcValidationError("invalid_speaker_id");
+    // An older group-only client cannot overwrite an explicitly split draft.
+    if (!reviewedSegments && previous.review_by_segment) throw new DcConflictError("individual_speaker_review_required");
+    const confirmed = role !== "unresolved";
+    if (reviewedSegments && (confirmed || new Set(reviewedSegments.map(s => s.sourceSegmentId)).size !== reviewedSegments.length)) {
+      throw new DcValidationError("invalid_segment_review");
+    }
+    this.database.prepare(`UPDATE dc_participant_assignments SET review_by_segment=?, role=?, confirmed_by=?, confirmed_at=?
+      WHERE user_id=? AND interaction_id=? AND speaker_id=?`).run(
+        reviewedSegments ? 1 : 0, role, confirmed ? userId : null, confirmed ? now : null, userId, interactionId, speakerId
+      );
+    if (!reviewedSegments) return;
+    this.database.prepare(`DELETE FROM dc_reviewed_speaker_segments WHERE user_id=? AND interaction_id=? AND speaker_id=?`)
+      .run(userId, interactionId, speakerId);
+    const snapshots = this.database.prepare(`SELECT DISTINCT e.upload_id, e.source_segment_id, e.start_seconds, e.end_seconds,
+      e.speaker_id, e.quote, e.content_digest FROM dc_evidence_snapshots e
+      JOIN dc_recap_items r ON r.id=e.recap_item_id AND r.user_id=e.user_id
+      JOIN dc_interactions i ON i.id=r.interaction_id AND i.user_id=r.user_id AND i.source_upload_id=e.upload_id
+      WHERE e.user_id=? AND r.interaction_id=? AND e.speaker_id=? AND e.source_segment_id=?`);
+    const insert = this.database.prepare(`INSERT INTO dc_reviewed_speaker_segments
+      (user_id,interaction_id,speaker_id,source_segment_id,content_digest,role,confirmed_by,confirmed_at) VALUES (?,?,?,?,?,?,?,?)`);
+    for (const segment of reviewedSegments) {
+      const rows = snapshots.all(userId, interactionId, speakerId, segment.sourceSegmentId) as EvidenceRow[];
+      const row = rows[0];
+      if (rows.length !== 1 || row.content_digest !== segment.contentDigest || row.content_digest !== dateCompanionEvidenceDigest({
+        userId, uploadId: row.upload_id, sourceSegmentId: row.source_segment_id, startSeconds: row.start_seconds,
+        endSeconds: row.end_seconds, speakerId, quote: row.quote
+      })) throw new DcValidationError("segment_review_evidence_mismatch");
+      insert.run(userId, interactionId, speakerId, segment.sourceSegmentId, segment.contentDigest, segment.role, userId, now);
+    }
+  }
+
   updateParticipants(input: {
     userId: string;
     interactionId: string;
@@ -877,28 +945,8 @@ export class DateCompanionRepository {
       }
 
       const now = new Date().toISOString();
-      const findSpeaker = this.database.prepare(`
-        SELECT 1 FROM dc_participant_assignments
-        WHERE interaction_id = ? AND speaker_id = ? AND user_id = ?
-      `);
-      const updateSpeaker = this.database.prepare(`
-        UPDATE dc_participant_assignments
-        SET role = ?, confirmed_by = ?, confirmed_at = ?
-        WHERE interaction_id = ? AND speaker_id = ? AND user_id = ?
-      `);
       for (const assignment of input.assignments) {
-        if (!findSpeaker.get(input.interactionId, assignment.speakerId, input.userId)) {
-          throw new DcValidationError("invalid_speaker_id");
-        }
-        const confirmed = assignment.role !== "unresolved";
-        updateSpeaker.run(
-          assignment.role,
-          confirmed ? input.userId : null,
-          confirmed ? now : null,
-          input.interactionId,
-          assignment.speakerId,
-          input.userId
-        );
+        this.saveSpeakerReview(input.userId, input.interactionId, assignment, now);
       }
       const update = this.database.prepare(`
         UPDATE dc_interactions
@@ -1006,17 +1054,22 @@ export class DateCompanionRepository {
 
   updateRecap(input: {
     userId: string;
+    memoryDatabase?: Database.Database;
     interactionId: string;
     version: number;
     assignments?: DcParticipantMutation[];
     mutations: DcRecapMutation[];
     voiceEnrollmentIntents?: DcVoiceEnrollmentIntent[];
     memoryAdmission?: DcMemoryAdmissionInput;
+    skipMemoryAdmission?: true;
     voiceEnrollmentEnabled?: boolean;
     finalize: boolean;
   }) {
     const run = this.database.transaction(() => {
       const interaction = this.requireInteraction(input.userId, input.interactionId);
+      if (input.skipMemoryAdmission && (!input.finalize || input.memoryAdmission)) {
+        throw new DcValidationError("invalid_memory_admission_choice");
+      }
       const confirmationFingerprint = input.finalize
         ? recapConfirmationFingerprint({
             ...input,
@@ -1025,6 +1078,12 @@ export class DateCompanionRepository {
           })
         : null;
       if (interaction.status === "confirmed") {
+        if (input.finalize && !input.skipMemoryAdmission) {
+          if (getInteractionGrantGeneration(this.database, input.userId, input.interactionId) > 1) {
+            throw new DcConflictError("withdrawn_grant_requires_new_confirmation");
+          }
+          if (input.memoryDatabase) assertUploadCanBeAuthorized(input.memoryDatabase, input.userId, interaction.source_upload_id);
+        }
         if (
           input.finalize
           && interaction.confirmation_fingerprint !== null
@@ -1085,21 +1144,8 @@ export class DateCompanionRepository {
         ) {
           throw new DcValidationError("participant_assignment_set_mismatch");
         }
-        const updateSpeaker = this.database.prepare(`
-          UPDATE dc_participant_assignments
-          SET role = ?, confirmed_by = ?, confirmed_at = ?
-          WHERE interaction_id = ? AND speaker_id = ? AND user_id = ?
-        `);
         for (const assignment of assignments) {
-          const confirmed = assignment.role !== "unresolved";
-          updateSpeaker.run(
-            assignment.role,
-            confirmed ? input.userId : null,
-            confirmed ? now : null,
-            input.interactionId,
-            assignment.speakerId,
-            input.userId
-          );
+          this.saveSpeakerReview(input.userId, input.interactionId, assignment, now);
         }
 
         const continuityRows = this.database.prepare(`
@@ -1209,10 +1255,8 @@ export class DateCompanionRepository {
         const evidenceRoles = this.database.prepare(`
           SELECT e.speaker_id, p.role
           FROM dc_evidence_snapshots e
-          LEFT JOIN dc_participant_assignments p
-            ON p.user_id = e.user_id
-           AND p.interaction_id = ?
-           AND p.speaker_id = e.speaker_id
+          LEFT JOIN dc_evidence_speaker_reviews p
+            ON p.user_id = e.user_id AND p.interaction_id = ? AND p.evidence_id = e.id
           WHERE e.recap_item_id = ? AND e.user_id = ?
           ORDER BY e.start_seconds, e.source_segment_id
         `);
@@ -1343,16 +1387,19 @@ export class DateCompanionRepository {
             now
           );
         }
-        finalizeDateCompanionMemoryAdmission({
-          database: this.database,
-          userId: input.userId,
-          relationshipId: interaction.relationship_id,
-          interactionId: input.interactionId,
-          sourceUploadId: interaction.source_upload_id,
-          sourceVersion: input.version + 1,
-          confirmationFingerprint: confirmationFingerprint as string,
-          memoryAdmission: input.memoryAdmission
-        });
+        if (!input.skipMemoryAdmission) {
+          finalizeDateCompanionMemoryAdmission({
+            database: this.database,
+            memoryDatabase: input.memoryDatabase,
+            userId: input.userId,
+            relationshipId: interaction.relationship_id,
+            interactionId: input.interactionId,
+            sourceUploadId: interaction.source_upload_id,
+            sourceVersion: input.version + 1,
+            confirmationFingerprint: confirmationFingerprint as string,
+            memoryAdmission: input.memoryAdmission
+          });
+        }
       }
 
       const update = this.database.prepare(`
@@ -1800,7 +1847,7 @@ export class DateCompanionRepository {
       recapItemId: row.id,
       interactionId: row.interaction_id,
       kind: row.kind,
-      text: row.user_text ?? row.proposed_text,
+      text: displayedRecapText(this.database, userId, row.id, row.proposed_text, row.user_text),
       recordingDate: row.recording_date,
       evidence: this.evidenceForRecap(userId, row.id)
     }));
@@ -1895,7 +1942,7 @@ export class DateCompanionRepository {
       recapItemId: row.id,
       interactionId: row.interaction_id,
       kind: row.kind,
-      text: row.user_text ?? row.proposed_text,
+      text: displayedRecapText(this.database, userId, row.id, row.proposed_text, row.user_text),
       recordingDate: row.recording_date,
       evidence: this.evidenceForRecap(userId, row.id).filter((evidence) =>
         eligibleSet.has(evidence.id)
@@ -1910,6 +1957,16 @@ export class DateCompanionRepository {
       WHERE user_id = ? AND source_upload_id = ?
     `).run(new Date().toISOString(), userId, sourceUploadId);
     return result.changes > 0;
+  }
+
+  getSegmentReviewVersionByUpload(userId: string, sourceUploadId: string) {
+    return this.database.prepare(`
+      SELECT i.id AS interactionId, i.relationship_id AS relationshipId, i.version
+      FROM dc_interactions i WHERE i.user_id=? AND i.source_upload_id=? AND EXISTS (
+        SELECT 1 FROM dc_participant_assignments p
+        WHERE p.user_id=i.user_id AND p.interaction_id=i.id AND p.review_by_segment=1
+      )
+    `).get(userId, sourceUploadId) as { interactionId: string; relationshipId: string; version: number } | undefined;
   }
 
   hasInteractionForUpload(userId: string, sourceUploadId: string) {

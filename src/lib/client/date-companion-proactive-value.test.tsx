@@ -13,6 +13,7 @@ import {
   presentDateCompanionHomeContent,
   presentDateCompanionProactiveValue,
   useDateCompanionProactiveValue,
+  type HomeMaterialRead,
   type DateCompanionProactiveValueClient,
   type DateCompanionProactiveValueTarget
 } from "./date-companion-proactive-value";
@@ -125,6 +126,35 @@ function homeSources() {
 }
 
 describe("Date Companion proactive-value client", () => {
+  it("keeps an eligible home response on remount and withdraws it on invalidation", async () => {
+    const read: HomeMaterialRead = { current: null };
+    const requests: Array<(data: DateCompanionProactiveValueResponse) => void> = [];
+    const client: DateCompanionProactiveValueClient = { getCurrentInteraction: vi.fn(),
+      getPersonRelationship: () => new Promise(resolve => requests.push(resolve)) };
+    const target: DateCompanionProactiveValueTarget = { scope:"person_relationship", accountId:"account-1",
+      relationshipId:"relationship_1", personId:"person_ta", mappingVersion:3, sourceRevision:"first" };
+    const first = renderHook(() => useDateCompanionProactiveValue(target,client,0,read));
+    await act(async () => requests[0](homeResponse()));
+    first.unmount();
+
+    const back = renderHook(({identity}) => useDateCompanionProactiveValue(identity,client,0,read), {initialProps:{identity:target}});
+    expect(back.result.current).toMatchObject({status:"ready", refresh:"reading", response:homeResponse()});
+    back.rerender({identity:{...target,sourceRevision:"revoked"}});
+    expect(back.result.current.status).toBe("loading");
+    expect(read.current).toBeNull();
+    await act(async () => requests[1](homeResponse()));
+    expect(back.result.current.status).toBe("loading");
+
+    await act(async () => requests[2](homeResponse()));
+    back.unmount();
+    const again = renderHook(() => useDateCompanionProactiveValue({...target,sourceRevision:"revoked"},client,0,read));
+    expect(again.result.current.status).toBe("ready");
+    await act(async () => requests[3]({...homeResponse(), status:"processing", value:undefined, sourceFingerprint:undefined, evidenceReferences:[]}));
+    expect(again.result.current.status).toBe("loading");
+    expect(read.current).toBeNull();
+    again.unmount();
+  });
+
   it("uses strict same-origin GET routes and rejects unexpected response fields", async () => {
     const fetcher = vi
       .fn()
@@ -173,6 +203,21 @@ describe("Date Companion proactive-value client", () => {
 });
 
 describe("useDateCompanionProactiveValue", () => {
+  it("rereads the same relationship after a failed request without changing its identity", async () => {
+    const client: DateCompanionProactiveValueClient = {
+      getCurrentInteraction:vi.fn(),
+      getPersonRelationship:vi.fn().mockRejectedValueOnce(new Error("unavailable")).mockResolvedValue(homeResponse())
+    };
+    const target: DateCompanionProactiveValueTarget = {scope:"person_relationship",accountId:"account-a",
+      relationshipId:"relationship_1",personId:"person_ta",mappingVersion:3,sourceRevision:"same-sources"};
+    const {result,rerender}=renderHook(({revision})=>useDateCompanionProactiveValue(target,client,revision),{initialProps:{revision:0}});
+    await waitFor(()=>expect(result.current.status).toBe("unavailable"));
+    rerender({revision:1});
+    await waitFor(()=>expect(result.current.status).toBe("ready"));
+    expect(client.getPersonRelationship).toHaveBeenCalledTimes(2);
+    expect(vi.mocked(client.getPersonRelationship).mock.calls.map(call=>call[0])).toEqual(["relationship_1","relationship_1"]);
+    expect(client.getCurrentInteraction).not.toHaveBeenCalled();
+  });
   it("aborts an old interaction request and never exposes its late result", async () => {
     const requests: Array<{
       interactionId: string;
@@ -430,6 +475,37 @@ describe("presentDateCompanionProactiveValue", () => {
 });
 
 describe("presentDateCompanionHomeContent", () => {
+  it("uses a short topic only when this item's own admitted words support it", () => {
+    const current = homeResponse();
+    if (!current.value || !("home" in current.value)) throw new Error("expected home material");
+    const about = current.value.home.about[0];
+    const followUp = current.value.home.beforeMeeting[0];
+    about.text = "Ta 在做一本蓝色的小册子。";
+    about.kind = "recent_update";
+    const quote = "我在为朋友做一本蓝色的小册子。";
+    current.evidenceReferences[0].quote = quote;
+    const sources = [source({quote, memorySubject: "companion"})];
+    followUp.text = "聊聊蓝色小册子的进展。";
+    const questions = () => homeAboutSuggestedQuestions(current, sources, "concise");
+    const unchanged = () => [`关于「${about.text}」，当时具体说了什么？`];
+    expect(questions()).toEqual(unchanged()); // follow-up belongs to a different segment
+    followUp.evidenceIds = about.evidenceIds;
+    current.value.evidenceIds = about.evidenceIds;
+    current.evidenceReferences = current.evidenceReferences.slice(0, 1);
+    expect(questions()).toEqual(["关于蓝色小册子，当时怎么说？"]);
+    followUp.text = "聊聊封面尺寸的进展。";
+    expect(questions()).toEqual(unchanged());
+    followUp.text = "聊聊蓝色小册子的进展。";
+    about.text = "Ta 还没有确定要不要做蓝色小册子。";
+    expect(questions()).toEqual(unchanged());
+    expect(homeAboutSuggestedQuestions(current, [], "concise")).toEqual([]);
+    about.kind = "shared_moment";
+    about.text = "我们一起做了铜版试印，把纸张摊在桌上。";
+    current.evidenceReferences[0].subject = "both";
+    current.evidenceReferences[0].quote = about.text;
+    sources[0] = source({quote: about.text, memorySubject: "both"});
+    expect(questions()).toEqual(["关于铜版试印，当时怎么说？"]);
+  });
   it("resolves each generated item from its own canonical Evidence without replacing Evidence with generated text", () => {
     const presentation = presentDateCompanionHomeContent(homeResponse(), homeSources());
     expect(presentation?.about[0]).toMatchObject({
@@ -481,9 +557,24 @@ describe("presentDateCompanionHomeContent", () => {
     expect(presentDateCompanionHomeContent({ ...homeResponse(), status: "fallback" }, homeSources())).toBeNull();
   });
 
+  it.each([["needs_review", "qualification"], ["source_changed", "sources"], ["fallback_invalid", "generation"]])(
+    "preserves the real failure reason when %s arrives before the server can identify a person", async (failureCode, reason) => {
+      const target: DateCompanionProactiveValueTarget = { scope:"person_relationship", accountId:"account",
+        relationshipId:"relationship_1", personId:"person_ta", mappingVersion:3, sourceRevision:"initial" };
+      const client: DateCompanionProactiveValueClient = { getCurrentInteraction: vi.fn(),
+        getPersonRelationship: vi.fn().mockResolvedValue({
+          schemaVersion: 2, scope: "person_relationship", relationshipId: target.relationshipId,
+          status: "unavailable", mappingVersion: null, evidenceReferences: [], cacheHit: false, failureCode
+        }) };
+      const {result} = renderHook(() => useDateCompanionProactiveValue(target, client));
+      await waitFor(() => expect(result.current).toEqual({ status: "unavailable", reason }));
+    }
+  );
+
   it.each([
     { quote: "原话已修改。" }, { recordingDate: "2026-08-17" }, { contentDigest: "f".repeat(64) },
-    { memorySubject: "self" as const }, { memorySubject: undefined }, { speakerId: "speaker_other" }, { uploadId: "other_account_upload" }
+    { memorySubject: "self" as const }, { memorySubject: undefined }, { speakerId: "speaker_other" }, { uploadId: "other_account_upload" },
+    { sourceOrigin: "user_reflection" as const }, { timeKnown: false }
   ])("hides home content on canonical source drift: %j", (changes) => {
     const sources = homeSources();
     sources[1] = { ...sources[1], ...changes };

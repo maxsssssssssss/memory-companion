@@ -1,6 +1,7 @@
 import type Database from "better-sqlite3";
 import { deletePersonEvidenceByUpload } from "@/lib/server/person/repository";
 import { consolidateMemories } from "./deduplication";
+import { isIndependentDateEvidence } from "./projection-visibility";
 import { calculateImportance, combineImportanceReasons } from "./importance";
 import { detectMemoryRelations } from "./relations";
 import { deduplicateMemoryEvidence } from "./evidence-deduplication";
@@ -342,7 +343,8 @@ function incomingMemory(userId: string, input: NormalizedMemoryWriteInput): Memo
 
 function buildManagedIndex(
   memories: MemoryItem[],
-  ownerObservations: PersistedMemoryOwnerObservation[] = []
+  ownerObservations: PersistedMemoryOwnerObservation[] = [],
+  dateEvidence: ReadonlySet<string> = new Set()
 ) {
   let duplicateEvidenceRemoved = 0;
   const onEvidenceDedup = (removed: number) => {
@@ -358,6 +360,9 @@ function buildManagedIndex(
     });
   const consolidated = consolidateMemories(reset, onEvidenceDedup, {
     canMerge: (primary, incoming) =>
+      !incoming.evidence.some((a) => primary.evidence.some((b) =>
+        a.uploadId === b.uploadId && dateEvidence.has(a.id) !== dateEvidence.has(b.id)
+      )) &&
       memoryOwnerMergeCompatible(
         primary.type,
         ownerMetadata(primary),
@@ -481,6 +486,16 @@ export function createMemoryRepository(database: Database.Database): MemoryRepos
     `).all(userId) as Array<{ upload_id: string }>).map((row) => row.upload_id));
   }
 
+  function dateCompanionEvidenceIds(userId: string) {
+    const rows = database.prepare(`
+      SELECT memory_evidence_id FROM memory_evidence_provenance
+      WHERE user_id = ? AND origin = 'date_companion_retention'
+        AND NOT EXISTS (SELECT 1 FROM memory_daily_reflection_evidence_provenance r
+          WHERE r.memory_evidence_id = memory_evidence_provenance.memory_evidence_id)
+    `).all(userId) as Array<{ memory_evidence_id: string }>;
+    return new Set(rows.map((row) => row.memory_evidence_id));
+  }
+
   function hiddenDailyReflectionMemoryIds(userId: string) {
     return new Set((database.prepare(`
       SELECT DISTINCT evidence.memory_id
@@ -489,17 +504,19 @@ export function createMemoryRepository(database: Database.Database): MemoryRepos
         ON publication.user_id = ?
         AND publication.upload_id = evidence.upload_id
         AND publication.status <> 'published'
+      WHERE NOT ${isIndependentDateEvidence("evidence")}
     `).all(userId) as Array<{ memory_id: string }>).map((row) => row.memory_id));
   }
 
   function buildVisibilityAwareManagedIndex(
     userId: string,
     memories: MemoryItem[],
-    ownerObservations: PersistedMemoryOwnerObservation[]
+    ownerObservations: PersistedMemoryOwnerObservation[],
+    dateEvidence = dateCompanionEvidenceIds(userId)
   ) {
     const hiddenUploads = hiddenDailyReflectionUploadIds(userId);
     const hiddenMemories = memories.filter((memory) =>
-      memory.evidence.some((evidence) => hiddenUploads.has(evidence.uploadId))
+      memory.evidence.some((evidence) => !dateEvidence.has(evidence.id) && hiddenUploads.has(evidence.uploadId))
     );
     const hiddenMemoryIds = new Set(hiddenMemories.map((memory) => memory.id));
     const visibleMemories = memories.filter((memory) => !hiddenMemoryIds.has(memory.id));
@@ -509,7 +526,7 @@ export function createMemoryRepository(database: Database.Database): MemoryRepos
     const hiddenOwnerObservations = ownerObservations.filter(
       (observation) => hiddenMemoryIds.has(observation.memoryId)
     );
-    const visible = buildManagedIndex(visibleMemories, visibleOwnerObservations);
+    const visible = buildManagedIndex(visibleMemories, visibleOwnerObservations, dateEvidence);
     let hiddenDuplicateEvidenceRemoved = 0;
     const isolatedHiddenMemories = hiddenMemories.map((memory) =>
       recalculateMemory(memory, {
@@ -739,11 +756,20 @@ export function createMemoryRepository(database: Database.Database): MemoryRepos
 
     const existing = loadUserMemories(userId);
     const existingOwnerObservations = loadUserOwnerObservations(userId);
+    const dateEvidence = dateCompanionEvidenceIds(userId);
+    const isDateProjection = input.projection === "date_companion";
+    const isReplaced = (evidence: MemoryEvidence) =>
+      evidence.uploadId === uploadId && dateEvidence.has(evidence.id) === isDateProjection;
     const remaining = existing
-      .map((memory) => ({
-        ...memory,
-        evidence: memory.evidence.filter((item) => item.uploadId !== uploadId)
-      }))
+      .map((memory) => {
+        const evidence = memory.evidence.filter((item) => !isReplaced(item));
+        // An older consolidated card can use the withdrawn contribution's
+        // summary. Rebuild its text from surviving evidence in that case.
+        const survivor = isDateProjection && evidence.length < memory.evidence.length && evidence[0];
+        return survivor
+          ? { ...memory, title: survivor.quote.slice(0, 500), summary: survivor.quote, evidence }
+          : { ...memory, evidence };
+      })
       .filter((memory) => memory.evidence.length > 0)
       .map((memory) => recalculateMemory(memory));
     const incoming = sanitized.memories.map((memory) => incomingMemory(userId, memory));
@@ -765,14 +791,22 @@ export function createMemoryRepository(database: Database.Database): MemoryRepos
       return observation ? [observation] : [];
     });
     const remainingIds = new Set(remaining.map((memory) => memory.id));
-    const remainingOwnerObservations = existingOwnerObservations.filter(
-      (observation) => observation.uploadId !== uploadId && remainingIds.has(observation.memoryId)
+    const remainingUploadOwners = new Set(remaining
+      .filter((memory) => memory.evidence.some((item) => item.uploadId === uploadId))
+      .map((memory) => memory.id));
+    const remainingOwnerObservations = existingOwnerObservations.filter((observation) =>
+      remainingIds.has(observation.memoryId) &&
+      (observation.uploadId !== uploadId || remainingUploadOwners.has(observation.memoryId))
     );
+    if (isDateProjection) {
+      for (const memory of incoming) for (const evidence of memory.evidence) dateEvidence.add(evidence.id);
+    }
     const beforeConsolidation = remaining.length + incoming.length;
     const managed = buildVisibilityAwareManagedIndex(
       userId,
       [...remaining, ...incoming],
-      [...remainingOwnerObservations, ...incomingOwnerObservations]
+      [...remainingOwnerObservations, ...incomingOwnerObservations],
+      dateEvidence
     );
     writeUserIndex(userId, managed.memories, managed.relations, managed.ownerObservations);
     const duplicateEvidenceRemoved = sanitized.duplicateEvidenceRemoved + managed.duplicateEvidenceRemoved;
@@ -802,6 +836,7 @@ export function createMemoryRepository(database: Database.Database): MemoryRepos
         AND reflection_publication.upload_id = hidden_evidence.upload_id
         AND reflection_publication.status <> 'published'
       WHERE hidden_evidence.memory_id = memory_items.id
+        AND NOT ${isIndependentDateEvidence("hidden_evidence")}
     )`);
 
     if (query.startDate || query.endDate) {
@@ -841,8 +876,9 @@ export function createMemoryRepository(database: Database.Database): MemoryRepos
       LIMIT ?
     `).all(...parameters) as MemoryItemRow[];
     const hiddenReflectionUploads = hiddenDailyReflectionUploadIds(userId);
+    const dateEvidence = dateCompanionEvidenceIds(userId);
     const evidenceFilter = (evidence: MemoryEvidence) =>
-      !hiddenReflectionUploads.has(evidence.uploadId) &&
+      (!hiddenReflectionUploads.has(evidence.uploadId) || dateEvidence.has(evidence.id)) &&
       (!query.startDate || evidence.date >= query.startDate) &&
       (!query.endDate || evidence.date <= query.endDate) &&
       (!query.uploadId || evidence.uploadId === query.uploadId);
@@ -955,6 +991,7 @@ export function createMemoryRepository(database: Database.Database): MemoryRepos
             AND source_publication.upload_id = source_evidence.upload_id
             AND source_publication.status <> 'published'
           WHERE source_evidence.memory_id = source.id
+            AND NOT ${isIndependentDateEvidence("source_evidence")}
         )
         AND NOT EXISTS (
           SELECT 1
@@ -964,6 +1001,7 @@ export function createMemoryRepository(database: Database.Database): MemoryRepos
             AND target_publication.upload_id = target_evidence.upload_id
             AND target_publication.status <> 'published'
           WHERE target_evidence.memory_id = target.id
+            AND NOT ${isIndependentDateEvidence("target_evidence")}
         )
       ORDER BY memory_relations.created_at, memory_relations.id
     `).all(userId, userId) as MemoryRelationRow[];
@@ -979,11 +1017,12 @@ export function createMemoryRepository(database: Database.Database): MemoryRepos
         const relatedId = relation.sourceMemoryId === memoryId ? relation.targetMemoryId : relation.sourceMemoryId;
         const row = selectItemById.get(userId, relatedId) as MemoryItemRow | undefined;
         const hiddenReflectionUploads = hiddenDailyReflectionUploadIds(userId);
+        const dateEvidence = dateCompanionEvidenceIds(userId);
         return row ? [{
           relation,
           memory: memoriesFromRows(
             [row],
-            (evidence) => !hiddenReflectionUploads.has(evidence.uploadId)
+            (evidence) => !hiddenReflectionUploads.has(evidence.uploadId) || dateEvidence.has(evidence.id)
           )[0]
         }] : [];
       });

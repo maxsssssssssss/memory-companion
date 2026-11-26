@@ -17,7 +17,10 @@ export async function GET(request: Request) {
   if ("response" in auth)
     return auth.response;
   try {
-    return json(getPreparationAgentService().list(auth.authContext.user.id));
+    const operationKey = new URL(request.url).searchParams.get("operationKey");
+    return json(operationKey !== null
+      ? getPreparationAgentService().operation(auth.authContext.user.id, operationKey)
+      : getPreparationAgentService().list(auth.authContext.user.id));
   }
   catch (error) {
     return failure(error);

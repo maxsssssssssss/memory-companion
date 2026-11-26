@@ -1021,6 +1021,7 @@ describe("DateCompanionRepository", () => {
       mutations: [{ id: draft.recapItem.id, version: 0, disposition: "kept" }],
       voiceEnrollmentIntents: [{ speakerIds: ["partner_raw"] }],
       voiceEnrollmentEnabled: true,
+      skipMemoryAdmission: true,
       finalize: true
     });
     expect(repository.getRelationshipView("user_voice", draft.relationship.id)

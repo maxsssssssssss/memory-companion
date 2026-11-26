@@ -62,6 +62,29 @@ describe("Date Companion Subject suggestion client", () => {
     );
   });
 
+  it("does not dispatch classification when a cancelled status read returns idle", async () => {
+    const controller = new AbortController();
+    let finishRead!: (value: Response) => void;
+    const fetchMock = vi.fn((_input: RequestInfo | URL, init?: RequestInit) => {
+      if (init?.method === "GET") return new Promise<Response>(resolve => { finishRead = resolve; });
+      return Promise.resolve(Response.json({ batch }));
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const work = loadDateCompanionSubjectSuggestions({
+      interactionId: batch.interactionId,
+      interactionVersion: batch.interactionVersion,
+      mappingVersion: batch.mappingVersion,
+      signal: controller.signal
+    });
+    expect(fetchMock.mock.calls.map(([, init]) => init?.method)).toEqual(["GET"]);
+    controller.abort();
+    // A response may already be available to the adapter when the booklet closes.
+    finishRead(Response.json({ status: "idle", interactionId: batch.interactionId,
+      interactionVersion: batch.interactionVersion, mappingVersion: batch.mappingVersion, evidenceDigest: batch.evidenceDigest }));
+    await expect(work).rejects.toMatchObject({ name: "AbortError" });
+    expect(fetchMock.mock.calls.map(([, init]) => init?.method)).toEqual(["GET"]);
+  });
+
   it("retries an initial temporary status failure and reuses the persisted batch without POST", async () => {
     let reads = 0;
     const fetchMock = vi.fn(async (_input: string | URL | Request, _init?: RequestInit) => {

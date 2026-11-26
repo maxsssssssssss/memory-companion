@@ -28,11 +28,19 @@ export type DateCompanionProactiveValueTarget =
       sourceRevision: string;
     };
 
+type UnavailableReason = "access" | "sources" | "processing" | "generation" | "qualification";
+
+function unavailableReason(code?: string): UnavailableReason | undefined {
+  if (code === "source_changed" || code === "source_unavailable") return "sources";
+  if (code === "needs_review") return "qualification";
+  if (code === "invalid_provider_result" || code === "provider_error" || code === "fallback_invalid") return "generation";
+}
+
 export type DateCompanionProactiveValueLoadState =
   | { status: "idle" }
   | { status: "loading" }
-  | { status: "ready"; response: DateCompanionProactiveValueResponse }
-  | { status: "unavailable" };
+  | { status: "ready"; response: DateCompanionProactiveValueResponse; refresh?: "reading" | "failed" }
+  | { status: "unavailable"; reason?: UnavailableReason };
 
 export type DateCompanionProactiveValuePresentation = {
   fingerprint: string;
@@ -50,8 +58,10 @@ export type DateCompanionHomeContentPresentation = {
 };
 
 export type DateCompanionHomeContentState =
-  | { status: "ready"; content: DateCompanionHomeContentPresentation }
-  | { status: "empty" | "loading" | "unavailable" };
+  | { status: "ready"; content: DateCompanionHomeContentPresentation; refresh?: "reading" | "failed" }
+  | { status: "empty"; note?: string }
+  | { status: "loading" }
+  | { status: "unavailable"; reason?: UnavailableReason };
 
 export type DateCompanionProactiveValueClient = {
   getCurrentInteraction(
@@ -62,6 +72,11 @@ export type DateCompanionProactiveValueClient = {
     relationshipId: string,
     signal?: AbortSignal
   ): Promise<DateCompanionProactiveValueResponse>;
+};
+
+// Lives in the signed-in product layout, for a single confirmed relationship.
+export type HomeMaterialRead = {
+  current: { key: string; response: DateCompanionProactiveValueResponse } | null;
 };
 
 export const DATE_COMPANION_PROACTIVE_POLL_INTERVAL_MS = 1_500;
@@ -163,7 +178,8 @@ function responseMatchesTarget(
   if (response.scope !== target.scope || response.relationshipId !== target.relationshipId) return false;
   if (target.scope === "current_interaction") {
     if (response.interactionId !== target.interactionId || response.personId !== undefined) return false;
-  } else if (response.personId !== target.personId || response.interactionId !== undefined) {
+  } else if ((response.personId !== target.personId && !(response.status === "unavailable" && response.personId === undefined))
+    || response.interactionId !== undefined) {
     return false;
   }
   if (response.status === "processing") {
@@ -204,7 +220,9 @@ function waitForNextPoll(signal: AbortSignal) {
 
 export function useDateCompanionProactiveValue(
   target: DateCompanionProactiveValueTarget | null,
-  client?: DateCompanionProactiveValueClient
+  client?: DateCompanionProactiveValueClient,
+  requestRevision = 0,
+  lastHomeRead?: HomeMaterialRead | null
 ): DateCompanionProactiveValueLoadState {
   const [defaultClient] = useState(() => createDateCompanionProactiveValueClient());
   const activeClient = client ?? defaultClient;
@@ -241,11 +259,18 @@ export function useDateCompanionProactiveValue(
 
   useEffect(() => {
     if (!target || !key) {
+      if (lastHomeRead) lastHomeRead.current = null;
       setResult({ key: null, state: { status: "idle" } });
       return;
     }
     const controller = new AbortController();
-    setResult({ key, state: { status: "loading" } });
+    const matching = lastHomeRead?.current?.key === key ? lastHomeRead.current.response : null;
+    if (lastHomeRead && !matching) lastHomeRead.current = null;
+    setResult({ key, state: matching ? { status: "ready", response: matching, refresh: "reading" } : { status: "loading" } });
+    function unavailable(reason?: UnavailableReason) {
+      if (lastHomeRead) lastHomeRead.current = null;
+      setResult({ key, state: { status: "unavailable", reason } });
+    }
     const request = () => target.scope === "current_interaction"
       ? activeClient.getCurrentInteraction(target.interactionId, controller.signal)
       : activeClient.getPersonRelationship(target.relationshipId, controller.signal);
@@ -254,35 +279,50 @@ export function useDateCompanionProactiveValue(
         const response = await request();
         if (controller.signal.aborted) return;
         if (!responseMatchesTarget(response, target)) {
-          setResult({ key, state: { status: "unavailable" } });
+          unavailable("sources");
           return;
         }
         if (response.status === "processing") {
+          // The server has explicitly withheld Evidence while processing.
+          if (lastHomeRead?.current) {
+            lastHomeRead.current = null;
+            setResult({ key, state: { status: "loading" } });
+          }
           if (attempt === DATE_COMPANION_PROACTIVE_MAX_POLL_ATTEMPTS) {
-            setResult({ key, state: { status: "unavailable" } });
+            unavailable("processing");
             return;
           }
           await waitForNextPoll(controller.signal);
           continue;
         }
         if (response.status === "unavailable") {
-          setResult({ key, state: { status: "unavailable" } });
+          unavailable(unavailableReason(response.failureCode));
           return;
         }
+        if (lastHomeRead) lastHomeRead.current = response.status === "ready" && response.value && "home" in response.value
+          ? { key, response } : null;
         setResult({ key, state: { status: "ready", response } });
         return;
       }
     };
     void load().catch((error: unknown) => {
       if (!controller.signal.aborted && !isAbortError(error)) {
-        setResult({ key, state: { status: "unavailable" } });
+        const temporaryFailure = error instanceof TypeError || error instanceof DateCompanionApiError && error.status >= 500;
+        if (temporaryFailure && lastHomeRead?.current?.key === key) {
+          setResult({ key, state: { status: "ready", response: lastHomeRead.current.response, refresh: "failed" } });
+        } else {
+          unavailable(error instanceof DateCompanionApiError && [401,403,404].includes(error.status) ? "access" : undefined);
+        }
       }
     });
     return () => controller.abort();
-  }, [activeClient, key]); // target identity is fully represented by key.
+  }, [activeClient, key, requestRevision, lastHomeRead]); // key includes identity, mapping version, source revision and day.
 
   if (!key) return { status: "idle" };
-  return result.key === key ? result.state : { status: "loading" };
+  if (result.key === key) return result.state;
+  return lastHomeRead?.current?.key === key
+    ? { status: "ready", response: lastHomeRead.current.response, refresh: "reading" }
+    : { status: "loading" };
 }
 
 function normalizedText(value: string) {
@@ -305,7 +345,9 @@ export function dateCompanionProactiveSourceRevision(
         source.speakerId ?? null,
         normalizedText(source.quote),
         source.contentDigest ?? null,
-        source.memorySubject ?? null
+        source.memorySubject ?? null,
+        source.sourceOrigin ?? null,
+        source.timeKnown ?? true
       ]));
     }
   }
@@ -332,9 +374,10 @@ function sourceMatchesReference(
   ) return false;
   if (
     reference.startSeconds !== undefined
-    && (source.startSeconds !== reference.startSeconds || source.endSeconds !== reference.endSeconds)
+    && (source.timeKnown === false || source.startSeconds !== reference.startSeconds || source.endSeconds !== reference.endSeconds)
   ) return false;
-  return reference.speakerId === undefined || source.speakerId === reference.speakerId;
+  return (!source.sourceOrigin || source.sourceOrigin === reference.origin)
+    && (reference.speakerId === undefined || source.speakerId === reference.speakerId);
 }
 
 function canonicalSourceResolver(
@@ -360,6 +403,8 @@ function canonicalSourceResolver(
       const canonicalReference = reference!;
       const key = sourceKey(canonicalReference.uploadId, canonicalReference.sourceSegmentId);
       const canonicalCandidates = sourcesByKey.get(key) ?? [];
+      const declaredOrigins = new Set(canonicalCandidates.flatMap(source => source.sourceOrigin ? [source.sourceOrigin] : []));
+      if (declaredOrigins.size > 1) return null;
       const canonicalSignatures = new Set(canonicalCandidates.map((source) => JSON.stringify([
         source.recordingDate,
         source.startSeconds,
@@ -381,7 +426,7 @@ function canonicalSourceResolver(
         || left.id.localeCompare(right.id)
       );
       resolved.push(requireSubjectMatch
-        ? { ...candidates[0], segmentIds: [canonicalReference.sourceSegmentId] }
+        ? { ...candidates[0], sourceOrigin: canonicalReference.origin, segmentIds: [canonicalReference.sourceSegmentId] }
         : candidates[0]);
       seen.add(key);
     }
@@ -445,9 +490,32 @@ export function proactiveSuggestedQuestions(
   return presentation?.suggestedQuestions.slice(0, 2) ?? [];
 }
 
+function aboutQuestionTopic(
+  item: DateCompanionHomeContentPresentation["about"][number],
+  beforeMeeting: DateCompanionHomeContent["home"]["beforeMeeting"]
+) {
+  // Leave qualified statements intact rather than turning a condition or a
+  // negation into an apparent topic that the speaker already agreed upon.
+  if (/不|没|未|无|或|可能|也许|好像|如果|除非|暂|只|待定|据说|听说|但|尚|取消|避免/u.test(item.text)) return;
+  const matching = beforeMeeting.find(entry => entry.kind === "follow_up"
+    && entry.evidenceIds.length === item.evidenceIds.length
+    && entry.evidenceIds.every(id => item.evidenceIds.includes(id)));
+  const namedTopic = matching && /^聊聊([^，。！？；：]{2,24}?)(?:的进展|的进度)?[。！]?$/u.exec(matching.text)?.[1];
+  const sharedTopic = item.kind === "shared_moment"
+    && /^(?:我们|你们)一起(?:完成了|做了|聊到了|提到了)([^，。！？；：]{2,24})[，。！]/u.exec(item.text)?.[1];
+  // The follow-up and the shared-moment template only nominate a phrase.
+  // Both the original item and its own admitted sources must contain it.
+  const comparable = (text: string) => text.replace(/\s+/gu, "").replace(/色的/gu, "色");
+  for (const topic of [namedTopic, sharedTopic]) {
+    if (topic && comparable(item.text).includes(comparable(topic))
+      && item.sources.some(source => comparable(source.quote).includes(comparable(topic)))) return topic;
+  }
+}
+
 export function homeAboutSuggestedQuestions(
   response: DateCompanionProactiveValueResponse,
-  personQaSources: SourceRefVM[]
+  personQaSources: SourceRefVM[],
+  style: "quoted" | "concise" = "quoted"
 ) {
   const parsed = DateCompanionProactiveValueResponseSchema.safeParse(response);
   if (!parsed.success || !parsed.data.value || !("home" in parsed.data.value)) return [];
@@ -461,5 +529,9 @@ export function homeAboutSuggestedQuestions(
       evidenceIds: [...new Set(about.flatMap((item) => item.evidenceIds))]
     }
   }, personQaSources);
-  return presentation?.about.slice(0, 2).map((item) => `关于「${item.text}」，当时具体说了什么？`) ?? [];
+  const beforeMeeting = parsed.data.value.home.beforeMeeting;
+  return presentation?.about.slice(0, 2).map(item => {
+    const topic = style === "concise" && aboutQuestionTopic(item, beforeMeeting);
+    return topic ? `关于${topic}，当时怎么说？` : `关于「${item.text}」，当时具体说了什么？`;
+  }) ?? [];
 }

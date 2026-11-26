@@ -5,6 +5,7 @@ import {
   type DateCompanionScreen
 } from "@/components/date-companion/date-companion-shell";
 import styles from "@/components/date-companion/date-companion.module.css";
+import { preparationDiscussionFromQuery, safePreparationReturnTo } from "@/lib/domain/date-companion-book-navigation";
 import {
   isDailyReflectionUploadEnabled,
   isToySyncEnabled
@@ -16,8 +17,14 @@ type DateCompanionScreenPageProps = {
   params: Promise<{ screen?: string[] }>;
   searchParams: Promise<{
     view?: string | string[];
+    from?: string | string[];
+    section?: string | string[];
     interaction?: string | string[];
+    recording?: string | string[];
     segment?: string | string[];
+    preparation?: string | string[];
+    draft?: string | string[];
+    returnTo?: string | string[];
   }>;
 };
 
@@ -43,10 +50,13 @@ export default async function DateCompanionScreenPage({ params, searchParams }: 
         entry="companion"
         dailyReflectionEnabled={isDailyReflectionUploadEnabled()}
         initialInteractionId={initialInteractionId}
+        initialDiscussionId={screen === "prepare" ? preparationDiscussionFromQuery(query.preparation, query.draft) : undefined}
+        preparationReturnTo={screen === "recap" ? safePreparationReturnTo(query.returnTo) : null}
+        initialRecordingId={screen === "recap" && !initialInteractionId && typeof query.recording === "string" ? query.recording.trim() || null : null}
         initialPersonId={initialPersonId}
         initialSegmentId={initialSegmentId}
         screen={screen}
-        showPreparationRecords={screen === "prepare" && query.view === "records"}
+        showPreparationRecords={screen === "prepare" && (query.section === "records" || query.view === "records")}
         toySyncEnabled={isToySyncEnabled()}
       />
     </div>

@@ -154,6 +154,36 @@ function runtimeFixture(options: {
 }
 
 describe("DailyReflectionToySync", () => {
+  it("shows the optional complete paper only during real checking, then exposes the actual unsupported state", async () => {
+    const fixture = runtimeFixture({ supported: false });
+    let resolve!: (state: ToySyncState) => void;
+    vi.mocked(fixture.runtime.persistence.loadState).mockReturnValue(new Promise(done => { resolve = done; }));
+    render(<ToyAudioSync accountId="account-1" destination="date_companion" relationshipId="relationship-1" mode="select" runtime={fixture.runtime} paperLoading />);
+    expect(document.querySelector('[data-toy-sync-state="checking"]')).not.toBeNull();
+    expect(document.querySelector("[data-toy-loading]")).not.toBeNull();
+    expect(screen.getAllByText("正在检查是否连接过玩偶…")).toHaveLength(1);
+    await act(async () => resolve(createEmptyToySyncState()));
+    expect(await screen.findByText("当前浏览器暂不支持连接玩偶。")).toBeInTheDocument();
+    expect(document.querySelector("[data-toy-loading]")).toBeNull();
+  });
+  it("starts the picker within the original click, and a paper scan does not select or upload", async () => {
+    let complete!: () => void;
+    const original = directoryHandle();
+    const fixture = runtimeFixture({ selectedHandle: { ...original,
+      async *entries() { await new Promise<void>(resolve => { complete = resolve; }); yield* original.entries(); }
+    } }), onSelect = vi.fn();
+    render(<ToyAudioSync accountId="account-1" destination="date_companion" relationshipId="relationship-1" mode="select" runtime={fixture.runtime} paperLoading onSelect={onSelect} />);
+    const connect = await screen.findByRole("button", { name: "选择录音文件夹" });
+    fireEvent.click(connect);
+    expect(fixture.runtime.pickDirectory).toHaveBeenCalledOnce();
+    await screen.findByText("正在检查新的录音…");
+    expect(document.querySelector("[data-toy-loading]")).not.toBeNull();
+    expect(onSelect).not.toHaveBeenCalled();
+    await act(async () => complete());
+    expect(await screen.findByText("发现 2 条录音")).toBeInTheDocument();
+    expect(document.querySelector("[data-toy-loading]")).toBeNull();
+    expect(onSelect).not.toHaveBeenCalled();
+  });
   it("connects on a user gesture, finds the newest recording, allows a date edit, and uploads once", async () => {
     const fixture = runtimeFixture();
     const onUpload = vi.fn(async (
@@ -483,7 +513,7 @@ describe("DailyReflectionToySync", () => {
       />
     );
 
-    fireEvent.click(await screen.findByRole("button", { name: "连接玩偶" }));
+    fireEvent.click(await screen.findByRole("button", { name: "选择录音文件夹" }));
     const latestCard = (await screen.findByText("latest.wav")).closest("li")!;
     fireEvent.click(within(latestCard).getByRole("button", { name: "选择这条录音" }));
 
@@ -539,7 +569,7 @@ describe("DailyReflectionToySync", () => {
       />
     );
 
-    fireEvent.click(await screen.findByRole("button", { name: "连接玩偶" }));
+    fireEvent.click(await screen.findByRole("button", { name: "选择录音文件夹" }));
     const latestCard = (await screen.findByText("latest.wav")).closest("li")!;
     fireEvent.click(within(latestCard).getByRole("button", { name: "选择这条录音" }));
     const selection = onSelect.mock.calls[0]![0];
@@ -581,7 +611,7 @@ describe("DailyReflectionToySync", () => {
         runtime={fixture.runtime}
       />
     );
-    fireEvent.click(await screen.findByRole("button", { name: "连接玩偶" }));
+    fireEvent.click(await screen.findByRole("button", { name: "选择录音文件夹" }));
     const latestCard = (await screen.findByText("latest.wav")).closest("li")!;
     fireEvent.click(within(latestCard).getByRole("button", { name: "选择这条录音" }));
     const selection = onSelect.mock.calls[0]![0];
@@ -629,7 +659,7 @@ describe("DailyReflectionToySync", () => {
         runtime={fixture.runtime}
       />
     );
-    fireEvent.click(await screen.findByRole("button", { name: "连接玩偶" }));
+    fireEvent.click(await screen.findByRole("button", { name: "选择录音文件夹" }));
     const latestCard = (await screen.findByText("latest.wav")).closest("li")!;
     fireEvent.click(within(latestCard).getByRole("button", { name: "选择这条录音" }));
     const selection = onSelect.mock.calls[0]![0];
@@ -685,7 +715,7 @@ describe("DailyReflectionToySync", () => {
         runtime={fixture.runtime}
       />
     );
-    fireEvent.click(await screen.findByRole("button", { name: "连接玩偶" }));
+    fireEvent.click(await screen.findByRole("button", { name: "选择录音文件夹" }));
     const latestCard = (await screen.findByText("latest.wav")).closest("li")!;
     fireEvent.click(within(latestCard).getByRole("button", { name: "选择这条录音" }));
     const selection = onSelect.mock.calls[0]![0];
@@ -730,7 +760,7 @@ describe("DailyReflectionToySync", () => {
       />
     );
 
-    expect(await screen.findByRole("button", { name: "连接玩偶" })).toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: "选择录音文件夹" })).toBeInTheDocument();
     await waitFor(() => expect(fixture.getState("account-1", "date_companion").records)
       .toEqual(expect.arrayContaining([expect.objectContaining({
         operationKey: operation.operationKey,
@@ -753,7 +783,7 @@ describe("DailyReflectionToySync", () => {
         runtime={fixture.runtime}
       />
     );
-    fireEvent.click(await screen.findByRole("button", { name: "连接玩偶" }));
+    fireEvent.click(await screen.findByRole("button", { name: "选择录音文件夹" }));
     const latestCard = (await screen.findByText("latest.wav")).closest("li")!;
     fireEvent.click(within(latestCard).getByRole("button", { name: "选择这条录音" }));
     let attempt: ToySyncUploadAttempt | null = null;
@@ -836,7 +866,7 @@ describe("DailyReflectionToySync", () => {
         runtime={fixture.runtime}
       />
     );
-    fireEvent.click(await screen.findByRole("button", { name: "连接玩偶" }));
+    fireEvent.click(await screen.findByRole("button", { name: "选择录音文件夹" }));
     const latestCard = (await screen.findByText("latest.wav")).closest("li")!;
     fireEvent.click(within(latestCard).getByRole("button", { name: "选择这条录音" }));
     const firstSelection = onSelect.mock.calls[0]![0];

@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
 
+import { QA_INSUFFICIENT_EVIDENCE_ANSWER as SAFE_UNCERTAINTY_ANSWER } from "@/lib/domain/qa-copy";
 import {
   AudioUploadSchema,
   type QuestionAnswer,
@@ -56,6 +57,8 @@ export type PersonRelationshipQaContext = {
 };
 
 type EvidenceIntent = "all" | "changes" | "commitments";
+const commitmentLanguage = /答应|承诺|许诺|保证|promise|commitment/iu;
+const commitmentDenial = /(?:没(?:有)?|未(?:曾)?|不(?:曾)?|并非)(?:明确|正式|作出|做出|作过|作|做)?(?:答应|承诺|许诺|保证)|(?:never|not|didn['’]t|couldn['’]t)\s+(?:explicitly\s+)?(?:promise|commit)/iu;
 
 const PERSON_QA_PROMPT_INSTRUCTION = [
   "这是显式 personId 限定的 Person-scoped Relationship QA。",
@@ -63,7 +66,6 @@ const PERSON_QA_PROMPT_INSTRUCTION = [
   "不得把账号用户、所选 Person 或录音中的说话人猜成‘我’、‘你’或‘Ta’。没有明确的 self Person 映射时，不得生成‘你答应了’、‘Ta 答应了’之类角色归属；证据不能明确角色时返回 unsupported。",
   "承诺只能陈述原始证据中明确出现的 promisor 和 promisee，最近变化只能陈述所提供 transition 证据支持的变化。"
 ].join("\n");
-const SAFE_UNCERTAINTY_ANSWER = "没有找到足够证据确认这个信息。";
 
 export function personRelationshipQaSafeUncertaintyAnswer(
   input: Pick<AnswerQuestionWithAIInput, "uploadId" | "question">
@@ -224,7 +226,7 @@ function evidenceIntent(
   ) {
     return "changes";
   }
-  if (/答应|承诺|许诺|保证|promise|commitment/iu.test(context)) {
+  if (commitmentLanguage.test(context)) {
     return "commitments";
   }
   return "all";
@@ -406,10 +408,12 @@ export async function buildPersonRelationshipQaContext(input: {
   conversation: readonly QaConversationMessage[];
   settingsStore: Pick<JsonStore, "read">;
   trustedEvidenceResolver?: TrustedPersonQaEvidenceResolver;
+  admitsEvidence?: (evidence: PersonEvidence) => boolean;
 }): Promise<PersonRelationshipQaContext> {
+  const person = input.sourceContext.person;
   if (
     !input.sourceContext.known ||
-    !input.sourceContext.person
+    !person
   ) {
     const blockedByUnavailableSelfRole = requiresUnavailableSelfPersonMapping(
       input.question,
@@ -423,16 +427,18 @@ export async function buildPersonRelationshipQaContext(input: {
     };
   }
 
-  const evidence = unambiguousEvidence(
-    input.sourceContext.person.accountId,
-    selectedEvidence(
-      input.sourceContext,
-      evidenceIntent(input.question, input.conversation)
-    )
-  );
+  const intent = evidenceIntent(input.question, input.conversation);
+  const { admitsEvidence } = input;
+  const primary = selectedEvidence(input.sourceContext, intent)
+    .filter(item => item.accountId === person.accountId && (!admitsEvidence || admitsEvidence(item)));
+  // In a scoped relationship, retained transcript evidence can record a
+  // promise (or an explicit refusal) without creating a PersonCommitment.
+  const verbatim = intent === "commitments" && admitsEvidence ? selectedEvidence(input.sourceContext, "all")
+    .filter(item => admitsEvidence(item) && commitmentLanguage.test(item.quote)) : [];
+  const evidence = unambiguousEvidence(person.accountId, [...primary, ...verbatim]);
   const trusted = input.trustedEvidenceResolver?.({
-    accountId: input.sourceContext.person.accountId,
-    personId: input.sourceContext.person.id,
+    accountId: person.accountId,
+    personId: person.id,
     evidence
   }) ?? {
     segments: [],
@@ -457,7 +463,7 @@ export async function buildPersonRelationshipQaContext(input: {
     segment
   ]));
   const conflictingKeys = new Set(trusted.conflictingEvidenceKeys);
-  const segments = evidence.flatMap((item): TranscriptSegment[] => {
+  let segments = evidence.flatMap((item): TranscriptSegment[] => {
     const key = personQaEvidenceKey(item.uploadId, item.sourceSegmentId);
     if (conflictingKeys.has(key)) return [];
     const liveUpload = segmentsByUpload.get(item.uploadId.trim());
@@ -505,6 +511,15 @@ export async function buildPersonRelationshipQaContext(input: {
     left.id.localeCompare(right.id)
   );
 
+  if (verbatim.length && primary.length) {
+    const primaryKeys = new Set(primary.map(item => personQaEvidenceKey(item.uploadId, item.sourceSegmentId)));
+    const isPrimary = (segment: TranscriptSegment) => primaryKeys.has(personQaEvidenceKey(segment.uploadId, segment.id));
+    if (segments.some(isPrimary)) {
+      const asksAboutDenial = commitmentDenial.test(input.question);
+      segments = segments.filter(segment => isPrimary(segment) || (asksAboutDenial && commitmentDenial.test(segment.text)));
+    }
+  }
+
   return {
     segments,
     eligibleSourceSegmentIds: segments.map((segment) => segment.id),
@@ -521,6 +536,7 @@ export async function buildPersonRelationshipQaInput(input: {
   settingsStore: JsonStore;
   sourceContext: PersonRelationshipQaSourceContext;
   trustedEvidenceResolver?: TrustedPersonQaEvidenceResolver;
+  admitsEvidence?: (evidence: PersonEvidence) => boolean;
 }): Promise<AnswerQuestionWithAIInput> {
   const sourcePerson = input.sourceContext.person;
   const context = sourcePerson && (

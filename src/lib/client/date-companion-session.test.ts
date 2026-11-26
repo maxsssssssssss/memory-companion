@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { parseDayPayload, type DayPayload } from "@/lib/domain/day-payload";
 import type { ToyIngestionReceipt } from "@/lib/domain/date-companion";
 import type { DcRelationshipView } from "@/lib/domain/date-companion-stage2";
+import { QA_INSUFFICIENT_EVIDENCE_ANSWER } from "@/lib/domain/qa-copy";
 import type { QuestionAnswer } from "@/lib/domain/types";
 
 import {
@@ -53,7 +54,7 @@ function answer(id: string, uploadId = "relationship_1"): QuestionAnswer {
     id,
     uploadId,
     question: `question ${id}`,
-    answer: `answer ${id}`,
+    answer: uploadId.startsWith("person_") ? QA_INSUFFICIENT_EVIDENCE_ANSWER : `answer ${id}`,
     citedSegmentIds: [],
     citations: [],
     createdAt: "2026-08-04T12:00:00.000Z"
@@ -253,7 +254,8 @@ function fakeApi(overrides: Partial<DateCompanionApi> = {}): DateCompanionApi {
     }),
     getPersonRetainedSources: async () => [],
     syncInteractionMemory: async () => null,
-    purgeRetainedMemory: async () => ({ purgeId: "purge_1", status: "completed", totalCount: 0, completedCount: 0, failedCount: 0, retryable: false, updatedAt: "2026-08-04T10:00:00.000Z" }),
+    previewRetainedMemory: async () => ({preview: {version: "scope-v1", totalCount: 2, retainedCount: 1, processingCount: 1}}),
+    purgeRetainedMemory: async () => ({ purgeId: "w1", usageStopped: true as const, status: "completed", totalCount: 2, retainedCount: 1, processingCount: 1, completedCount: 2, failedCount: 0, retryable: false, updatedAt: "2026-11-24T12:00:00Z" }),
     ...overrides
   };
 }
@@ -327,7 +329,7 @@ function readyPersonSourceCatalog(overrides: Partial<{
 }
 
 function personQaHistoryKey(input: { userId?: string; personId?: string; mappingVersion?: number } = {}) {
-  return `daily-brief:${input.userId ?? "user_1"}:date-companion:person-qa:relationship_1:${input.personId ?? "person_ta"}:mapping-${input.mappingVersion ?? 3}:v1`;
+  return `daily-brief:${input.userId ?? "user_1"}:date-companion:person-qa:relationship_1:${input.personId ?? "person_ta"}:mapping-${input.mappingVersion ?? 3}:v2`;
 }
 
 function memoryCache(initial: Record<string, DayPayload> = {}, initialHistory: QuestionAnswer[] = []) {
@@ -369,6 +371,74 @@ beforeEach(() => {
 });
 
 describe("DateCompanionSessionController", () => {
+  it("does not use a group label for a different segment, changed local line, or changed source time", async () => {
+    const view = confirmedPersonCatalogView();
+    const record = view.interactions[0], original = record.recapItems[0].evidence[0];
+    original.contentDigest = "a".repeat(64);
+    record.participants = [{speakerId: original.speakerId!, role: "unresolved", reviewedSegments: [
+      {sourceSegmentId: original.sourceSegmentId, contentDigest: original.contentDigest, role: "companion"}
+    ]}];
+    const controller = new DateCompanionSessionController({api: fakeApi({getRelationshipView: async () => view,
+      getRelationshipSummary: async () => ({...view, interactions: view.interactions.map(({recapItems, ...rest}) =>
+        ({...rest, promiseRecapItems: recapItems.filter(item => item.kind === "promise")}))})}),
+      cache: memoryCache().cache, storage: window.localStorage});
+    await controller.initialize();
+    await controller.ensureRelationshipDetailsLoaded();
+    const source = {...original, segmentIds: [original.sourceSegmentId]};
+    expect(controller.sourceSpeakerLabel(source, "小夏")).toBe("小夏");
+    for (const change of [{segmentIds: ["other"]}, {speakerId: "other"}, {quote: "更换的原句"},
+      {endSeconds: source.endSeconds + 1}, {segmentIds: [original.sourceSegmentId, "other"]}]) {
+      expect(controller.sourceSpeakerLabel({...source, ...change}, "小夏")).toBeUndefined();
+    }
+    controller.dispose();
+  });
+  it("signs the recording's own confirmed role and falls back to Ta without a verified name", async () => {
+    const view = relationshipView(["upload_a", "upload_b", "upload_gone"]);
+    view.relationship.displayName = "关系备注";
+    const stamp = view.relationship.createdAt;
+    const speakerId = "local_speaker_1";
+    view.interactions[0].participants = [
+      {speakerId, role: "companion", confirmedAt: stamp}, {speakerId: "local_speaker_2", role: "self"}
+    ];
+    view.interactions[1].participants = [{speakerId, role: "self", confirmedAt: stamp}];
+    view.interactions[2].participants = [{speakerId, role: "companion", confirmedAt: stamp}];
+    view.interactions[2].sourceState = "explicitly_deleted";
+    const controller = new DateCompanionSessionController({
+      api: fakeApi({getRelationshipView: async () => view}), cache: memoryCache().cache, storage: window.localStorage
+    });
+    await controller.initialize();
+    expect(controller.sourceSpeakerLabel({uploadId: "upload_a", speakerId}, "小夏")).toBe("小夏");
+    expect(controller.sourceSpeakerLabel({uploadId: "upload_a", speakerId}, null)).toBe("Ta");
+    expect(controller.sourceSpeakerLabel({uploadId: "upload_b", speakerId}, "小夏")).toBe("我");
+    expect(controller.sourceSpeakerLabel({uploadId: "upload_a", speakerId: "local_speaker_2"}, "小夏")).toBeUndefined();
+    expect(controller.sourceSpeakerLabel({uploadId: "upload_gone", speakerId}, "小夏")).toBeUndefined();
+    controller.dispose();
+  });
+
+  it("bounds person detail reads without losing confirmed summary, then retries without accepting the old receipt", async () => {
+    const full = confirmedPersonCatalogView();
+    const summary = { ...full, interactions: full.interactions.map(({ recapItems, ...metadata }) => ({
+      ...metadata, promiseRecapItems: recapItems.filter(item => item.kind === "promise")
+    })) };
+    let late!: (view: DcRelationshipView) => void;
+    const getRelationshipView = vi.fn().mockImplementationOnce(() => new Promise<DcRelationshipView>(resolve => { late = resolve; }))
+      .mockResolvedValue(full);
+    const controller = new DateCompanionSessionController({ api: fakeApi({ getRelationshipSummary: async () => summary, getRelationshipView }),
+      cache: memoryCache().cache, storage: window.localStorage });
+    await controller.initialize();
+    await controller.ensureRelationshipDetailsLoaded({ timeoutMs: 20 });
+    expect(controller.getSnapshot().detailReadState).toMatchObject({ status: "error", message: expect.stringContaining("超时") });
+    expect(controller.getSnapshot().viewModel.recap.history).toHaveLength(1);
+    expect(controller.getSnapshot().relationshipDetailsLoaded).toBe(false);
+    await controller.ensureRelationshipDetailsLoaded({ timeoutMs: 20 });
+    expect(controller.getSnapshot().relationshipDetailsLoaded).toBe(true);
+    late({ ...full, interactions: [] });
+    await Promise.resolve();
+    expect(controller.getSnapshot().viewModel.recap.history).toHaveLength(1);
+    expect(getRelationshipView).toHaveBeenCalledTimes(2);
+    controller.dispose();
+  });
+
   it("loads summary first, joins one selected detail read, and fetches the full view only on demand", async () => {
     const full = relationshipView(["upload_1", "upload_2"]);
     full.interactions.forEach((item) => { item.status = "confirmed"; });
@@ -449,7 +519,9 @@ describe("DateCompanionSessionController", () => {
     await controller.initialize();
     controller.selectRelationshipInteraction("interaction_1");
     await controller.retryInteractionDetail();
-    expect(controller.getSnapshot().detailReadState.status).toBe("error");
+    expect(controller.getSnapshot().detailReadState).toMatchObject({
+      status: "error", interactionId: "interaction_1", targetUnavailable: true
+    });
     expect(controller.getSnapshot().viewModel.recap.interaction?.detailLoaded).toBe(false);
     expect(controller.getSnapshot().relationshipDetailsLoaded).toBe(false);
   });
@@ -648,6 +720,22 @@ describe("DateCompanionSessionController", () => {
     expect(controller.selectRelationshipInteraction("interaction_draft")).toBe(false);
     expect(controller.getSnapshot().viewModel.recap.interaction).toBeNull();
     expect(controller.selectRelationshipInteraction("interaction_other_user")).toBe(false);
+  });
+
+  it("reads an owned ready day without importing a new draft, and ignores a cancelled recording switch", async () => {
+    const getDay = vi.fn(async (id: string) => payload(id));
+    const api = fakeApi({getDay, getRelationshipView:async () => relationshipView(["upload_imported"])});
+    const controller = new DateCompanionSessionController({api, cache:memoryCache().cache, storage:window.localStorage});
+    await controller.initialize();
+    const request = new AbortController();
+    expect(await controller.readRecordingForRecap("upload_readonly", request.signal)).toBe(true);
+    expect(controller.getSnapshot().viewModel.recap.interaction).toMatchObject({id:"upload_readonly"});
+    expect(controller.getSnapshot().viewModel.recap.interaction?.relationshipInteractionId).toBeUndefined();
+    const pending = controller.readRecordingForRecap("upload_second", request.signal);
+    request.abort();
+    expect(await pending).toBe(false);
+    expect(controller.getSnapshot().viewModel.recap.interaction?.id).toBe("upload_readonly");
+    controller.dispose();
   });
 
   it("can initialize again after the immediate effect cleanup used by React Strict Mode", async () => {
@@ -1514,6 +1602,28 @@ describe("DateCompanionSessionController", () => {
     expect(cleanup).not.toHaveBeenCalled();
   });
 
+  it("keeps a failed transcription readable on the receipt and recap, including after rereading", async () => {
+    const day = payload("upload_1", "failed");
+    day.job!.errorMessage = "chunked transcription incomplete: 1 chunk(s) failed";
+    const upload = vi.fn(fakeApi().upload);
+    const pollDay = vi.fn(async () => day);
+    const controller = new DateCompanionSessionController({
+      api: fakeApi({ upload, pollDay }), cache: memoryCache().cache, storage: window.localStorage
+    });
+    await controller.initialize();
+    await controller.upload(new File(["audio"], "upload_1.m4a", { type: "audio/mp4" }), day.upload.recordingDate);
+    const copy = "这段录音未能完整转成文字，暂时无法查看复盘。";
+    expect(controller.getSnapshot().uploadState).toMatchObject({ status: "failed", failureStage: "processing", message: copy });
+    expect(controller.getSnapshot().viewModel.currentInteraction).toMatchObject({
+      fileName: "upload_1.m4a", recordingDate: day.upload.recordingDate, errorMessage: copy
+    });
+    await controller.retryRead();
+    expect(controller.getSnapshot().uploadState).toMatchObject({ status: "failed", message: copy });
+    expect(upload).toHaveBeenCalledTimes(1);
+    expect(pollDay).toHaveBeenCalledTimes(2);
+    expect(day.job!.errorMessage).toBe("chunked transcription incomplete: 1 chunk(s) failed");
+  });
+
   it("returns true for a structured failed receipt because the server retained the upload", async () => {
     const onServerAccepted = vi.fn(async () => undefined);
     const controller = new DateCompanionSessionController({
@@ -1877,6 +1987,45 @@ describe("DateCompanionSessionController", () => {
       displayName: "小满"
     });
   });
+  it("reads a relationship created by the first preparation send without creating it again", async () => {
+    const view = relationshipView();
+    const listRelationships = vi.fn().mockResolvedValueOnce([]).mockResolvedValue([view.relationship]);
+    const createRelationship = vi.fn();
+    const controller = new DateCompanionSessionController({
+      api: fakeApi({ listRelationships, createRelationship, getRelationshipView: async () => view }),
+      cache: memoryCache().cache,
+      storage: window.localStorage
+    });
+    await controller.initialize();
+    expect(controller.getSnapshot().relationshipState.status).toBe("absent");
+    await controller.refreshRelationship();
+    expect(controller.getSnapshot().relationshipState).toMatchObject({ status: "ready", relationship: { id: view.relationship.id } });
+    expect(createRelationship).not.toHaveBeenCalled();
+    expect(listRelationships).toHaveBeenCalledTimes(2);
+    controller.dispose();
+  });
+
+  it("drops the previous person's catalog and history when refresh discovers another active relationship", async () => {
+    let view = relationshipView(["first-record"]);
+    const listConfirmedPeople = vi.fn(async () => []);
+    const controller = new DateCompanionSessionController({
+      api: fakeApi({ listRelationships: async () => [view.relationship], getRelationshipView: async () => view, listConfirmedPeople }),
+      cache: memoryCache().cache, storage: window.localStorage
+    });
+    await controller.initialize();
+    await controller.ensureMemoryBridgeLoaded();
+    expect(controller.getSnapshot().memoryBridgeState.status).toBe("ready");
+    const firstReads = listConfirmedPeople.mock.calls.length;
+    view = relationshipView();
+    view.relationship.id = "another-relationship";
+    await controller.refreshRelationship();
+    expect(controller.getSnapshot()).toMatchObject({ relationshipState: {status:"ready", relationship:{id:"another-relationship"}},
+      searchState: {status:"idle"}, memoryBridgeState: {status:"idle"}, qaHistory: [], currentQaHistory: [] });
+    expect(controller.getSnapshot().viewModel.recap.history).toEqual([]);
+    await controller.ensureMemoryBridgeLoaded();
+    expect(listConfirmedPeople.mock.calls.length).toBe(firstReads + 1);
+    controller.dispose();
+  });
 
   it("sends versioned participant, recap, finalize and promise mutations and adopts server views", async () => {
     const view = relationshipView(["upload_1"]);
@@ -1943,6 +2092,7 @@ describe("DateCompanionSessionController", () => {
       ],
       items: [{ id: "recap_1", version: 5, disposition: "kept" }],
       voiceEnrollmentIntents: [{ speakerIds: ["speaker_1"] }],
+      skipMemoryAdmission: true,
       finalize: true
     }, expect.any(AbortSignal));
     expect(updateRecap).toHaveBeenNthCalledWith(3, "interaction_1", {
@@ -1952,10 +2102,42 @@ describe("DateCompanionSessionController", () => {
         { speakerId: "speaker_1", role: "companion" }
       ],
       items: [{ id: "recap_1", version: 6, disposition: "kept" }],
+      skipMemoryAdmission: true,
       finalize: true
     }, expect.any(AbortSignal));
     expect(patchPromise).toHaveBeenCalledWith("promise_1", { version: 5, status: "done" }, expect.any(AbortSignal));
     expect(controller.getSnapshot().mutationState).toEqual({ status: "idle" });
+  });
+
+  it("reconciles a failed promise intent with fresh admission and version, without repeating an acknowledged write", async () => {
+    const view = confirmedPersonCatalogView();
+    const interaction = view.interactions[0];
+    interaction.participants[0].role = "self";
+    const item = interaction.recapItems[0];
+    item.kind = "promise";
+    view.promises = [{ id: "verified-promise", relationshipId: view.relationship.id, originatingRecapItemId: item.id,
+      text: "去之前把路线发过去。", status: "open", version: 4, evidence: item.evidence,
+      createdAt: PERSON_QA_NOW, updatedAt: PERSON_QA_NOW }];
+    const patchPromise = vi.fn<DateCompanionApi["patchPromise"]>(async (_id, input) => {
+      view.promises[0] = { ...view.promises[0], status: input.status, version: input.version + 1 };
+      return view;
+    });
+    const controller = new DateCompanionSessionController({
+      api: fakeApi(validPersonQaApi({ getRelationshipView: async () => view, patchPromise,
+        getPersonRetainedSources: async personId => personId === "person_self" ? [{ uploadId: interaction.sourceUploadId,
+          sourceSegmentId: item.evidence[0].sourceSegmentId, quote: item.evidence[0].quote, subjectPersonIds: [personId] }] : [] })),
+      cache: memoryCache().cache, storage: window.localStorage
+    });
+    await controller.initialize();
+    await controller.ensureMemoryBridgeLoaded();
+    await controller.updatePromise("verified-promise", 1, "done", { reconcile: true });
+    expect(patchPromise).toHaveBeenCalledWith("verified-promise", { version: 4, status: "done" }, expect.any(AbortSignal));
+    await controller.updatePromise("verified-promise", 1, "done", { reconcile: true });
+    expect(patchPromise).toHaveBeenCalledTimes(1);
+    item.disposition = "excluded";
+    await expect(controller.updatePromise("verified-promise", 5, "open", { reconcile: true })).rejects.toThrow();
+    expect(patchPromise).toHaveBeenCalledTimes(1);
+    controller.dispose();
   });
 
   it("does not expose technical version-conflict codes in mutation errors", async () => {
@@ -2308,7 +2490,9 @@ describe("DateCompanionSessionController", () => {
     });
 
     await controller.initialize();
-    await expect(controller.askCurrentInteraction("这次聊了什么？")).resolves.toEqual(completedAnswer);
+    const saved = await controller.askCurrentInteraction("这次聊了什么？");
+    expect(saved).toMatchObject(completedAnswer);
+    expect(saved?.citations?.[0].sourceBindings?.[0]).toMatchObject({ uploadId: "upload_1", segmentId: "segment_current", revision: expect.stringMatching(/^[a-f0-9]{64}$/) });
 
     expect(streamCurrentInteractionQa).toHaveBeenCalledTimes(1);
     expect(streamPersonQa).not.toHaveBeenCalled();
@@ -2318,8 +2502,54 @@ describe("DateCompanionSessionController", () => {
       qaState: { status: "idle" },
       qaHistory: []
     });
-    expect(controller.getSnapshot().currentQaHistory).toEqual([completedAnswer]);
-    expect(cacheState.history()).toEqual([completedAnswer]);
+    expect(controller.getSnapshot().currentQaHistory).toEqual([saved]);
+    expect(cacheState.history()).toEqual([saved]);
+  });
+
+  it("preserves changed-source history but excludes it from the actual next-question request", async () => {
+    const local = payload("upload_1", "ready");
+    local.segments = [{ id: "segment_current", uploadId: "upload_1", startSeconds: 1, endSeconds: 4,
+      speaker: "speaker_1", text: "现在保存的原话是下周去书店。", confidence: 0.9, sceneLabels: ["unknown"], valueLabels: [] }];
+    const stale = { ...answer("before_source_change", "upload_1"), citedSegmentIds: ["segment_current"], citations: [{
+      id: "E1", title: "speaker_1 的原始转写", startSeconds: 1, endSeconds: 4,
+      excerpt: "旧的原话说周末一起看电影。", sourceSegmentIds: ["segment_current"]
+    }] };
+    const unavailable = { ...answer("unavailable_source", "upload_1"), citedSegmentIds: ["missing_segment"] };
+    const derived = { ...answer("supported_summary", "upload_1"), citedSegmentIds: ["segment_current"], citations: [{
+      id: "E1", title: "下次安排", startSeconds: 1, endSeconds: 4, excerpt: "约好下周去书店。",
+      sourceSegmentIds: ["segment_current"], contentKind: "user_confirmed_derived_content" as const
+    }] };
+    const partlyStale = { ...stale, id: "mixed_history", citations: [
+      { ...stale.citations[0], excerpt: local.segments[0].text }, stale.citations[0]
+    ] };
+    const history = [stale, unavailable, derived, partlyStale];
+    const cacheState = memoryCache({ upload_1: local }, history);
+    window.localStorage.setItem("daily-brief:user_1:date-companion:session", JSON.stringify({
+      version: 1, currentUploadId: "upload_1", cleanupConfirmed: true,
+      receipt: { uploadId: "upload_1", jobId: "job_1", status: "uploaded" }
+    }));
+    const cleanedView = relationshipView(["upload_1"]);
+    cleanedView.interactions[0].sourceState = "server_cleaned";
+    const received = vi.fn();
+    const fresh = { ...answer("fresh_answer", "upload_1"), answer: QA_INSUFFICIENT_EVIDENCE_ANSWER };
+    const controller = new DateCompanionSessionController({
+      api: fakeApi({ getRelationshipView: async () => cleanedView,
+        async *streamCurrentInteractionQa(input) {
+          received(input);
+          yield { type: "final", answer: fresh, source: "provider_stream" };
+          yield { type: "complete", status: "completed" };
+        } }), cache: cacheState.cache, storage: window.localStorage
+    });
+    await controller.initialize();
+    expect(controller.getSnapshot().currentQaHistory).toEqual(history);
+    await controller.askCurrentInteraction("根据现在的原话重新核对");
+    expect(received).toHaveBeenCalledWith(expect.objectContaining({
+      uploadId: "upload_1", segments: local.segments,
+      priorCitations: []
+    }));
+    expect(cacheState.history()).toEqual([...history, fresh]);
+    expect(controller.getSnapshot().currentQaHistory).toEqual([...history, fresh]);
+    controller.dispose();
   });
 
   it("does not commit an invalid citation or incomplete current-interaction stream", async () => {
@@ -2386,12 +2616,189 @@ describe("DateCompanionSessionController", () => {
     expect(controller.selectRelationshipInteraction("interaction_1")).toBe(true);
     await controller.ensureMemoryBridgeLoaded();
 
-    expect(controller.currentInteractionQaAvailability()).toMatchObject({ enabled: false });
+    expect(controller.currentInteractionQaAvailability()).toMatchObject({
+      enabled: false, reason: "missing_local_transcript",
+      message: "这台设备没有这场录音的完整文字稿，暂时无法针对这场提问。"
+    });
     expect(controller.personQaAvailability()).toMatchObject({ enabled: true, personId: "person_ta" });
     await expect(controller.askCurrentInteraction("只问这一次")).resolves.toBeNull();
     expect(streamCurrentInteractionQa).not.toHaveBeenCalled();
     expect(controller.getSnapshot().currentQaState).toMatchObject({ status: "failed" });
     expect(controller.personQaAvailability()).toMatchObject({ enabled: true });
+  });
+
+  it("asks and restores the displayed historical recap without replacing the active recording", async () => {
+    const view = relationshipView(["upload_old", "upload_new"]);
+    view.interactions[0] = { ...view.interactions[0], status: "confirmed", confirmedAt: PERSON_QA_NOW, sourceState: "server_cleaned" };
+    view.interactions[1].sourceState = "server_cleaned";
+    const oldAnswer = answer("old_history", "upload_old");
+    const newAnswer = answer("new_history", "upload_new");
+    const result = { ...answer("old_followup", "upload_old"), answer: QA_INSUFFICIENT_EVIDENCE_ANSWER };
+    const cacheState = memoryCache({ upload_old: payload("upload_old"), upload_new: payload("upload_new") }, [oldAnswer, newAnswer]);
+    window.localStorage.setItem("daily-brief:user_1:date-companion:session", JSON.stringify({
+      version: 1, currentUploadId: "upload_new", cleanupConfirmed: true,
+      receipt: { uploadId: "upload_new", jobId: "job_new", status: "uploaded" }
+    }));
+    const stream = vi.fn(async function* (input: Parameters<DateCompanionApi["streamCurrentInteractionQa"]>[0]) {
+      expect(input.uploadId).toBe("upload_old");
+      expect(input.conversation).toBeUndefined();
+      expect(input.priorCitations).toEqual([]);
+      yield { type: "final" as const, answer: result, source: "provider_stream" as const };
+      yield { type: "complete" as const, status: "completed" as const };
+    });
+    const controller = new DateCompanionSessionController({
+      api: fakeApi({ getRelationshipView: async () => view, streamCurrentInteractionQa: stream }),
+      cache: cacheState.cache, storage: window.localStorage
+    });
+    await controller.initialize();
+    expect(controller.getSnapshot().currentQaHistory).toEqual([newAnswer]);
+    expect(controller.selectRelationshipInteraction("interaction_1")).toBe(true);
+    expect(controller.currentInteractionQaAvailability()).toEqual({ enabled: true, uploadId: "upload_old" });
+    expect(controller.getSnapshot().currentQaHistory).toEqual([oldAnswer]);
+    await expect(controller.askCurrentInteraction("只问旧的一场")).resolves.toEqual(result);
+    expect(controller.getSnapshot().currentQaHistory).toEqual([oldAnswer, result]);
+    expect(controller.getSnapshot().viewModel.currentInteraction?.sourceUploadId).toBe("upload_new");
+    expect(controller.getSnapshot().uploadState).toMatchObject({ status: "ready", uploadId: "upload_new" });
+    controller.selectRelationshipInteraction(null);
+    expect(controller.getSnapshot().currentQaHistory).toEqual([newAnswer]);
+    expect(controller.getSnapshot().currentQaState).toEqual({ status: "idle" });
+    controller.dispose();
+  });
+
+  it("keeps the displayed historical question scope when another recording finishes processing", async () => {
+    const view = relationshipView(["upload_old", "upload_new"]);
+    view.interactions[0] = { ...view.interactions[0], status: "confirmed", confirmedAt: PERSON_QA_NOW, sourceState: "server_cleaned" };
+    view.interactions[1].sourceState = "server_cleaned";
+    const oldAnswer = answer("old_history", "upload_old");
+    const newAnswer = answer("new_history", "upload_new");
+    let finish!: (value: DayPayload) => void;
+    const waiting = new Promise<DayPayload>(resolve => { finish = resolve; });
+    let pollSignal: AbortSignal | undefined;
+    const controller = new DateCompanionSessionController({
+      api: fakeApi({
+        getRelationshipView: async () => view,
+        upload: async () => ({ uploadId: "upload_new", jobId: "job_new", status: "uploaded" }),
+        pollDay: async (_uploadId, options) => {
+          pollSignal = options?.signal;
+          options?.onPayload?.(payload("upload_new", "processing"));
+          const ready = await waiting;
+          options?.onPayload?.(ready);
+          return ready;
+        }
+      }),
+      cache: memoryCache({ upload_old: payload("upload_old") }, [oldAnswer, newAnswer]).cache,
+      storage: window.localStorage
+    });
+    await controller.initialize();
+    const uploading = controller.upload(new File(["audio"], "new.wav"), "2026-08-05");
+    await vi.waitFor(() => expect(controller.getSnapshot().uploadState.status).toBe("processing"));
+    controller.selectRelationshipInteraction("interaction_1");
+    expect(controller.getSnapshot().currentQaHistory).toEqual([oldAnswer]);
+    expect(pollSignal?.aborted).toBe(false);
+    finish(payload("upload_new"));
+    await uploading;
+    expect(controller.getSnapshot().uploadState).toMatchObject({ status: "ready", uploadId: "upload_new" });
+    expect(controller.getSnapshot().viewModel.recap.interaction?.sourceUploadId).toBe("upload_old");
+    expect(controller.currentInteractionQaAvailability()).toEqual({ enabled: true, uploadId: "upload_old" });
+    expect(controller.getSnapshot().currentQaHistory).toEqual([oldAnswer]);
+    controller.dispose();
+  });
+
+  it.each(["transcript", "attribution", "eligibility"] as const)(
+    "withdraws an in-flight recording answer on same-upload %s change and isolates the next request", async change => {
+      const id = "upload_old";
+      const local = payload(id);
+      local.segments = [{ id: "s1", uploadId: id, text: "周六去旧书店。", speaker: "speaker_1",
+        startSeconds: 1, endSeconds: 3, confidence: 1, sceneLabels: ["unknown"], valueLabels: [] }];
+      const view = relationshipView([id, "upload_new"]);
+      view.interactions[0] = {...view.interactions[0], status: "confirmed", confirmedAt: PERSON_QA_NOW,
+        sourceState: "server_cleaned", participants: [{speakerId: "speaker_1", role: "companion"}]};
+      view.interactions[1].sourceState = "server_cleaned";
+      const cached = memoryCache({upload_old: local, upload_new: payload("upload_new")});
+      window.localStorage.setItem("daily-brief:user_1:date-companion:session", JSON.stringify({
+        version: 1, currentUploadId: "upload_new", cleanupConfirmed: true,
+        receipt: {uploadId: "upload_new", jobId: "job_new", status: "uploaded"}
+      }));
+      let release!: () => void;
+      const waiting = new Promise<void>(resolve => { release = resolve; });
+      let oldSignal: AbortSignal | undefined;
+      const next = {...answer("new_answer", id), answer: QA_INSUFFICIENT_EVIDENCE_ANSWER};
+      const controller = new DateCompanionSessionController({
+        api: fakeApi({getRelationshipView: async () => view,
+          async *streamCurrentInteractionQa(input) {
+            if (input.question === "第一次提问") {
+              oldSignal = input.signal;
+              yield {type: "sentence", sequence: 0, groundingValidated: true,
+                text: "旧资料中的回答。", citedSegmentIds: ["s1"], supportIds: ["E1"]};
+              yield {type: "final", answer: {...next, id: "old_uncommitted"}, source: "provider_stream"};
+              await waiting;
+            } else {
+              yield {type: "final", answer: next, source: "provider_stream"};
+            }
+            yield {type: "complete", status: "completed"};
+          }}), cache: cached.cache, storage: window.localStorage
+      });
+      await controller.initialize();
+      expect(controller.selectRelationshipInteraction("interaction_1")).toBe(true);
+      const pending = controller.askCurrentInteraction("第一次提问");
+      await vi.waitFor(() => expect(controller.getSnapshot().currentQaState).toMatchObject({committedText: "旧资料中的回答。"}));
+      if (change === "transcript") {
+        cached.days.set(id, {...local, segments: [{...local.segments[0], text: "周六没有去旧书店。"}]});
+      } else if (change === "attribution") {
+        view.interactions[0].participants = [{speakerId: "speaker_1", role: "self"}];
+      } else {
+        cached.days.delete(id);
+      }
+      await controller.refreshRelationship();
+      expect(oldSignal?.aborted).toBe(true);
+      expect(controller.getSnapshot().currentQaState).toMatchObject({status: "failed", outcome: "ineligible"});
+      expect(cached.history()).toEqual([]);
+      if (change === "eligibility") cached.days.set(id, local);
+      await expect(controller.askCurrentInteraction("在新资料中提问")).resolves.toEqual(next);
+      release();
+      await expect(pending).resolves.toBeNull();
+      expect(controller.getSnapshot().currentQaState).toEqual({status: "complete", answer: next});
+      expect(cached.history()).toEqual([next]);
+      controller.dispose();
+    }
+  );
+
+  it("cancels an in-flight question when the displayed recap changes and ignores its late response", async () => {
+    const view = relationshipView(["upload_old", "upload_new"]);
+    view.interactions[0] = { ...view.interactions[0], status: "confirmed", confirmedAt: PERSON_QA_NOW, sourceState: "server_cleaned" };
+    view.interactions[1].sourceState = "server_cleaned";
+    const oldAnswer = answer("old_history", "upload_old");
+    const cacheState = memoryCache({ upload_old: payload("upload_old"), upload_new: payload("upload_new") }, [oldAnswer]);
+    window.localStorage.setItem("daily-brief:user_1:date-companion:session", JSON.stringify({
+      version: 1, currentUploadId: "upload_new", cleanupConfirmed: true,
+      receipt: { uploadId: "upload_new", jobId: "job_new", status: "uploaded" }
+    }));
+    let release!: () => void;
+    const waiting = new Promise<void>(resolve => { release = resolve; });
+    let questionSignal: AbortSignal | undefined;
+    const controller = new DateCompanionSessionController({
+      api: fakeApi({
+        getRelationshipView: async () => view,
+        async *streamCurrentInteractionQa(input) {
+          questionSignal = input.signal;
+          await waiting;
+          yield { type: "final", answer: answer("late_new", "upload_new"), source: "provider_stream" };
+          yield { type: "complete", status: "completed" };
+        }
+      }),
+      cache: cacheState.cache, storage: window.localStorage
+    });
+    await controller.initialize();
+    const pending = controller.askCurrentInteraction("新的一场还在回答");
+    await vi.waitFor(() => expect(questionSignal).toBeInstanceOf(AbortSignal));
+    controller.selectRelationshipInteraction("interaction_1");
+    expect(questionSignal?.aborted).toBe(true);
+    release();
+    await expect(pending).resolves.toBeNull();
+    expect(controller.getSnapshot().currentQaHistory).toEqual([oldAnswer]);
+    expect(controller.getSnapshot().currentQaState).toEqual({ status: "idle" });
+    expect(cacheState.history()).toEqual([oldAnswer]);
+    controller.dispose();
   });
 
   it("aborts the old stream and isolates history when switching from current interaction to Person mode", async () => {
@@ -2427,7 +2834,7 @@ describe("DateCompanionSessionController", () => {
 
     await controller.initialize();
     const pendingCurrent = controller.askCurrentInteraction("还在回答的当前问题");
-    await vi.waitFor(() => expect(controller.getSnapshot().currentQaState.status).toBe("streaming"));
+    await vi.waitFor(() => expect(currentSignal).toBeInstanceOf(AbortSignal));
 
     controller.activateQaMode("person");
     expect(currentSignal?.aborted).toBe(true);
@@ -2443,9 +2850,10 @@ describe("DateCompanionSessionController", () => {
     expect(controller.getSnapshot().qaHistory).toEqual([personAnswer]);
   });
 
-  it("commits QA history only after final completion and sends at most four prior turns", async () => {
+  it("keeps old person-wide history on disk but sends no unverified prior answer prose into the current relationship", async () => {
     const priorHistory = [1, 2, 3, 4, 5].map((index) => answer(`prior_${index}`, "person_ta"));
-    window.localStorage.setItem(personQaHistoryKey(), JSON.stringify(priorHistory));
+    const legacyKey = personQaHistoryKey().replace(/v2$/, "v1");
+    window.localStorage.setItem(legacyKey, JSON.stringify(priorHistory));
     const cacheState = memoryCache({ upload_1: payload() });
     let conversationLength = 0;
     const completedAnswer = answer("new_answer", "person_ta");
@@ -2454,6 +2862,8 @@ describe("DateCompanionSessionController", () => {
       getRelationshipView: async () => relationshipView(["upload_1"]),
       async *streamPersonQa(input) {
         expect(input.personId).toBe("person_ta");
+        expect(input.scope).toEqual({ type: "date_companion_relationship", relationshipId: "relationship_1", mappingVersion: 3 });
+        expect(input.priorCitations).toEqual([]);
         conversationLength = input.conversation?.length ?? 0;
         yield { type: "meta", version: 1, streamId: "11111111-1111-4111-8111-111111111111" };
         yield { type: "final", answer: completedAnswer, source: "provider_stream" };
@@ -2473,11 +2883,55 @@ describe("DateCompanionSessionController", () => {
     const result = await controller.ask("这次聊了什么？");
 
     expect(result).toEqual(completedAnswer);
-    expect(conversationLength).toBe(8);
+    expect(conversationLength).toBe(0);
     expect(cacheState.history()).toEqual([]);
     expect(relationshipQaCalled).not.toHaveBeenCalled();
-    expect(controller.getSnapshot().qaHistory).toHaveLength(6);
-    expect(JSON.parse(window.localStorage.getItem(personQaHistoryKey()) ?? "[]")).toHaveLength(6);
+    expect(controller.getSnapshot().qaHistory).toEqual([completedAnswer]);
+    expect(JSON.parse(window.localStorage.getItem(personQaHistoryKey()) ?? "[]")).toEqual([completedAnswer]);
+    expect(JSON.parse(window.localStorage.getItem(legacyKey)!)).toEqual(priorHistory);
+  });
+
+  it("binds even an uncited answer to the withdrawal version and fences a fresh request with it", async () => {
+    const first = "00000000-0000-4000-8000-000000000001", second = "00000000-0000-4000-8000-000000000002";
+    let withdrawalVersion = first;
+    const scopes: unknown[] = [];
+    const api = fakeApi(validPersonQaApi({
+      getPersonSourceCatalog: async () => ({...readyPersonSourceCatalog(), withdrawalVersion}),
+      async *streamPersonQa(input) {
+        scopes.push(input.scope);
+        yield {type:"meta", version:1, streamId:first};
+        yield {type:"final", answer:answer("empty-result","person_ta"), source:"provider_stream"};
+        yield {type:"complete",status:"completed"};
+      }
+    }));
+    const controller = new DateCompanionSessionController({api, cache:memoryCache().cache, storage:window.localStorage});
+    await controller.initialize();
+    await controller.ensureMemoryBridgeLoaded();
+    const result = await controller.ask("有无依据");
+    expect(result?.relationshipWithdrawalVersion).toBe(first);
+    expect(scopes).toEqual([expect.objectContaining({withdrawalVersion:first})]);
+    withdrawalVersion = second;
+    await controller.checkOpenQaCatalog(new AbortController().signal);
+    expect(controller.getSnapshot().qaHistory).toEqual([]);
+    expect(controller.getSnapshot().qaWithheldHistoryCount).toBe(1);
+    controller.dispose();
+  });
+
+  it("retains canonical uncertainty but withholds factual personal history without supporting evidence", async () => {
+    const safe = answer("no_evidence", "person_ta");
+    const legacy = { ...safe, id: "different-authorization", relationshipWithdrawalVersion: "00000000-0000-4000-8000-000000000003" };
+    const unsafe = { ...answer("unproven_history", "person_ta"), answer: "一段没有依据的人物判断。" };
+    window.localStorage.setItem(personQaHistoryKey(), JSON.stringify([unsafe, legacy, safe]));
+    const controller = new DateCompanionSessionController({
+      api: fakeApi(validPersonQaApi({ getRelationshipView: async () => relationshipView(["upload_1"]) })),
+      cache: memoryCache({ upload_1: payload() }).cache, storage: window.localStorage
+    });
+    await controller.initialize();
+    await controller.ensureMemoryBridgeLoaded(true);
+    expect(controller.getSnapshot().qaHistory).toEqual([safe]);
+    expect(controller.getSnapshot().qaWithheldHistoryCount).toBe(2);
+    expect(JSON.parse(window.localStorage.getItem(personQaHistoryKey())!)).toEqual([unsafe, legacy, safe]);
+    controller.dispose();
   });
 
   it("does not save an error-only QA stream as a completed answer", async () => {
@@ -2499,7 +2953,7 @@ describe("DateCompanionSessionController", () => {
     expect(controller.getSnapshot().qaState).toMatchObject({ status: "failed" });
   });
 
-  it("answers from a server Evidence snapshot when this browser has no DayPayload", async () => {
+  it("does not accept unscoped retained Person evidence without admission to this relationship", async () => {
     const serverView = relationshipView(["upload_old"]);
     serverView.interactions[0] = {
       ...serverView.interactions[0],
@@ -2586,7 +3040,9 @@ describe("DateCompanionSessionController", () => {
         canOpenTranscript: false
       })
     ]);
-    await expect(controller.ask("Ta 以前想去哪里？")).resolves.toEqual(completedAnswer);
+    expect(controller.scopedPersonQaSources()).toEqual([]);
+    await expect(controller.ask("Ta 以前想去哪里？")).resolves.toBeNull();
+    expect(controller.getSnapshot().qaHistory).toEqual([]);
   });
 
   it("marks a Person citation linkable only when the matching local segment is present", async () => {
@@ -3078,7 +3534,7 @@ describe("DateCompanionSessionController", () => {
     await expect(controller.ask("Ta 以前说过什么？")).resolves.toBeNull();
     expect(controller.getSnapshot().qaState).toMatchObject({
       status: "failed",
-      message: "人物设置已经变化，请重新确认后再试。"
+      outcome: "ineligible", message: "人物或材料资格已经变化，请重新核对后再问。"
     });
     expect(controller.getSnapshot().qaHistory).toEqual([]);
   });

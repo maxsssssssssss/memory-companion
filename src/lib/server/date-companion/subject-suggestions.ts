@@ -5,6 +5,7 @@ import {
   DcSubjectSuggestionBatchSchema,
   DcSubjectSuggestionStatusResponseSchema,
   type DcMemorySubject,
+  type DcSubjectDraftPreview,
   type DcSubjectSuggestion,
   type DcSubjectSuggestionBatch,
   type DcSubjectSuggestionConfirmation,
@@ -16,6 +17,7 @@ export type { DcSubjectSuggestionConfirmation } from "@/lib/domain/date-companio
 
 import { DcConflictError, DcNotFoundError, DcRetryableError } from "./errors";
 import { dateCompanionEvidenceDigest, stableBridgeDigest } from "./memory-bridge-digest";
+import { assertUploadCanBeAuthorized, getInteractionGrantGeneration } from "./memory-grant-ledger";
 import {
   DateCompanionSubjectSuggestionRepository,
   type DateCompanionSubjectSuggestionBatchKey,
@@ -43,6 +45,15 @@ type SubjectEvidenceRow = {
   recap_text: string;
 };
 
+type ReviewableEvidenceRow = SubjectEvidenceRow & {
+  disposition: "pending" | "kept" | "excluded";
+  same_upload: number;
+  individual_review: number | null;
+  reviewed_role: "self" | "companion" | "unresolved" | null;
+  reviewed_by: string | null;
+  reviewed_at: string | null;
+};
+
 type SubjectContextRow = {
   relationship_id: string;
   version: number;
@@ -52,6 +63,7 @@ type SubjectContextRow = {
   mapping_version: number | null;
   mapping_status: "confirmed" | "needs_review" | "archived" | null;
   retention_enabled: 0 | 1 | null;
+  relationship_status: string;
 };
 
 type CanonicalSubjectSource = {
@@ -79,23 +91,26 @@ function stableId(prefix: string, values: string[]) {
 function interactionContext(
   database: Database.Database,
   userId: string,
-  interactionId: string
+  interactionId: string,
+  alreadySubmitted = false
 ) {
   const row = database.prepare(`
     SELECT i.relationship_id, i.version, i.status, i.source_state,
            i.confirmation_fingerprint, m.version AS mapping_version,
-           m.status AS mapping_status, s.enabled AS retention_enabled
+           m.status AS mapping_status, s.enabled AS retention_enabled, rel.status AS relationship_status
     FROM dc_interactions i
+    JOIN dc_relationships rel ON rel.user_id = i.user_id AND rel.id = i.relationship_id
     LEFT JOIN dc_relationship_person_mappings m
       ON m.user_id = i.user_id AND m.relationship_id = i.relationship_id
     LEFT JOIN dc_memory_retention_settings s ON s.user_id = i.user_id
     WHERE i.user_id = ? AND i.id = ?
   `).get(userId, interactionId) as SubjectContextRow | undefined;
   if (!row) throw new DcNotFoundError("Interaction not found");
+  if (row.relationship_status !== "active") throw new DcConflictError("relationship_archived");
   if (row.source_state === "explicitly_deleted") {
     throw new DcConflictError("subject_suggestion_source_deleted");
   }
-  if (row.retention_enabled === 0) {
+  if (row.retention_enabled === 0 && !alreadySubmitted) {
     throw new DcConflictError("memory_retention_disabled");
   }
   if (row.mapping_status !== "confirmed" || !row.mapping_version) {
@@ -107,19 +122,73 @@ function interactionContext(
 function interactionEvidence(
   database: Database.Database,
   userId: string,
-  interactionId: string
+  interactionId: string,
+  preview?: DcSubjectDraftPreview
 ) {
+  const selected = preview && new Set(preview.itemIds);
+  const choices = new Map(preview?.assignments.map(choice => [choice.speakerId, choice]));
+  if (preview && (selected?.size !== preview.itemIds.length || choices.size !== preview.assignments.length)) {
+    throw new DcConflictError("subject_suggestion_preview_invalid");
+  }
   const rows = database.prepare(`
     SELECT e.id, e.recap_item_id, e.upload_id, e.source_segment_id,
            e.start_seconds, e.end_seconds, e.speaker_id, e.quote,
-           e.content_digest, r.kind, r.proposed_text AS recap_text
+           e.content_digest, r.kind, r.proposed_text AS recap_text, r.disposition,
+           e.upload_id = i.source_upload_id AS same_upload, p.review_by_segment AS individual_review,
+           v.role AS reviewed_role, v.confirmed_by AS reviewed_by, v.confirmed_at AS reviewed_at
     FROM dc_evidence_snapshots e
     INNER JOIN dc_recap_items r ON r.id = e.recap_item_id AND r.user_id = e.user_id
+    INNER JOIN dc_interactions i ON i.id = r.interaction_id AND i.user_id = e.user_id
+    LEFT JOIN dc_participant_assignments p ON p.user_id=e.user_id AND p.interaction_id=i.id AND p.speaker_id=e.speaker_id
+    LEFT JOIN dc_evidence_speaker_reviews v ON v.user_id=e.user_id AND v.interaction_id=i.id AND v.evidence_id=e.id
     WHERE e.user_id = ? AND r.interaction_id = ?
+      AND (r.disposition='kept' OR (?=1 AND r.disposition='pending'))
     ORDER BY e.upload_id, e.source_segment_id, e.content_digest, e.id
-  `).all(userId, interactionId) as SubjectEvidenceRow[];
-  if (rows.length === 0) throw new DcConflictError("subject_suggestion_evidence_empty");
-  return rows;
+  `).all(userId, interactionId, preview ? 1 : 0) as ReviewableEvidenceRow[];
+  const candidates = selected ? rows.filter(row => selected.has(row.recap_item_id)) : rows;
+  const ineligibleItems = new Set<string>();
+  for (const row of candidates) {
+    let role = row.reviewed_by === userId && row.reviewed_at ? row.reviewed_role : null;
+    const choice = row.speaker_id && choices.get(row.speaker_id);
+    if (choice) {
+      if (choice.reviewedSegments) {
+        role = choice.reviewedSegments.find(segment => segment.sourceSegmentId === row.source_segment_id
+          && segment.contentDigest === row.content_digest)?.role ?? null;
+      } else {
+        role = row.individual_review === 0 ? choice.role : null;
+      }
+    }
+    if (!row.same_upload || row.individual_review === null || (role !== "self" && role !== "companion")
+      || (row.kind === "mentioned" && role !== "companion") || (row.kind === "promise" && role !== "self")) {
+      ineligibleItems.add(row.recap_item_id);
+    }
+  }
+  // A recap context can summarize every attached source. Drop the whole item's
+  // context if one of its supporting lines still has an unknown speaker.
+  return candidates.filter(row => !ineligibleItems.has(row.recap_item_id));
+}
+
+type SubjectScopeInput = { database: Database.Database; memoryDatabase?: Database.Database; userId: string; interactionId: string; draftPreview?: DcSubjectDraftPreview };
+
+function grantEvidenceDigest(input: SubjectScopeInput, sources: CanonicalSubjectSource[]) {
+  const generation = getInteractionGrantGeneration(input.database, input.userId, input.interactionId);
+  const evidenceDigest = dateCompanionSubjectEvidenceDigest(sources);
+  return generation === 1 ? evidenceDigest : stableBridgeDigest({ generation, evidenceDigest });
+}
+
+function subjectScope(input: SubjectScopeInput) {
+  const context = interactionContext(input.database, input.userId, input.interactionId);
+  const preview = input.draftPreview;
+  if (context.status === "draft" && !preview) throw new DcConflictError("subject_suggestion_draft_preview_required");
+  if (preview && (context.status !== "draft" || preview.version !== context.version)) {
+    throw new DcConflictError("subject_suggestion_batch_stale");
+  }
+  const sources = buildDateCompanionCanonicalSubjectSources({
+    userId: input.userId, evidenceRows: interactionEvidence(input.database, input.userId, input.interactionId, preview)
+  });
+  if (sources.length === 0) throw new DcConflictError("subject_suggestion_evidence_empty");
+  if (input.memoryDatabase) assertUploadCanBeAuthorized(input.memoryDatabase, input.userId, sources[0].uploadId);
+  return { context, sources, evidenceDigest: grantEvidenceDigest(input, sources) };
 }
 
 export function buildDateCompanionCanonicalSubjectSources(input: {
@@ -342,16 +411,13 @@ async function waitForOwnedBatch(input: {
 
 export function getDateCompanionSubjectSuggestionBatchStatus(input: {
   database: Database.Database;
+  memoryDatabase?: Database.Database;
   userId: string;
   interactionId: string;
   now?: string;
+  draftPreview?: DcSubjectDraftPreview;
 }): DcSubjectSuggestionStatusResponse {
-  const context = interactionContext(input.database, input.userId, input.interactionId);
-  const sources = buildDateCompanionCanonicalSubjectSources({
-    userId: input.userId,
-    evidenceRows: interactionEvidence(input.database, input.userId, input.interactionId)
-  });
-  const evidenceDigest = dateCompanionSubjectEvidenceDigest(sources);
+  const { context, evidenceDigest } = subjectScope(input);
   const key: DateCompanionSubjectSuggestionBatchKey = {
     userId: input.userId,
     interactionId: input.interactionId,
@@ -384,18 +450,23 @@ export function getDateCompanionSubjectSuggestionBatchStatus(input: {
 
 export async function getOrCreateDateCompanionSubjectSuggestionBatch(input: {
   database: Database.Database;
+  memoryDatabase?: Database.Database;
   userId: string;
   interactionId: string;
   provider?: DateCompanionSubjectSuggestionProvider;
   signal?: AbortSignal;
   singleflight?: SubjectSuggestionSingleflightOptions;
+  draftPreview?: DcSubjectDraftPreview;
 }): Promise<DcSubjectSuggestionBatch> {
-  const context = interactionContext(input.database, input.userId, input.interactionId);
-  const sources = buildDateCompanionCanonicalSubjectSources({
-    userId: input.userId,
-    evidenceRows: interactionEvidence(input.database, input.userId, input.interactionId)
-  });
-  const evidenceDigest = dateCompanionSubjectEvidenceDigest(sources);
+  const { context, sources, evidenceDigest } = subjectScope(input);
+  function assertCurrentScope() {
+    if (input.signal?.aborted) throw abortedError(input.signal);
+    const current = subjectScope(input);
+    if (current.evidenceDigest !== evidenceDigest || current.context.version !== context.version
+      || current.context.mapping_version !== context.mapping_version) {
+      throw new DcConflictError("subject_suggestion_batch_stale");
+    }
+  }
   const repository = new DateCompanionSubjectSuggestionRepository(input.database);
   const key: DateCompanionSubjectSuggestionBatchKey = {
     userId: input.userId,
@@ -428,7 +499,10 @@ export async function getOrCreateDateCompanionSubjectSuggestionBatch(input: {
       now: new Date(nowMs).toISOString(),
       leaseExpiresAt: new Date(nowMs + claimLeaseMs).toISOString()
     });
-    if (claim.kind === "completed") return parseBatchRow(claim.row);
+    if (claim.kind === "completed") {
+      assertCurrentScope();
+      return parseBatchRow(claim.row);
+    }
     if (claim.kind === "owner") {
       claimToken = claim.claimToken;
       break;
@@ -441,6 +515,7 @@ export async function getOrCreateDateCompanionSubjectSuggestionBatch(input: {
 
   let merged: ReturnType<typeof mergeProviderSuggestions>;
   try {
+    assertCurrentScope();
     const provider = input.provider ?? createQwenDateCompanionSubjectSuggestionProvider();
     const proposed = await provider.suggest(sources.map((source) => ({
       canonicalSourceKey: source.canonicalSourceKey,
@@ -461,6 +536,7 @@ export async function getOrCreateDateCompanionSubjectSuggestionBatch(input: {
   }
 
   try {
+    assertCurrentScope();
     const proposalDigest = stableBridgeDigest(merged.suggestions);
     const confirmationFingerprint = stableBridgeDigest({
       userId: input.userId,
@@ -508,13 +584,15 @@ export async function getOrCreateDateCompanionSubjectSuggestionBatch(input: {
       }
     });
     if (completed.kind === "completed") return parseBatchRow(completed.row);
-    return await waitForOwnedBatch({
+    const ownerBatch = await waitForOwnedBatch({
       repository,
       key,
       waitTimeoutMs: claimWaitMs,
       pollIntervalMs: claimPollMs,
       signal: input.signal
     });
+    assertCurrentScope();
+    return ownerBatch;
   } catch (error) {
     repository.releaseGeneration(key, claimToken);
     throw error;
@@ -530,6 +608,7 @@ export function validateDateCompanionSubjectSuggestionConfirmation(input: {
   confirmation: DcSubjectSuggestionConfirmation;
   selections: Array<{ evidenceSnapshotId: string; subject: DcMemorySubject }>;
   keptEvidenceSnapshotIds: string[];
+  alreadySubmitted?: boolean;
 }) {
   const row = input.database.prepare(`
     SELECT id, payload_json FROM dc_subject_suggestion_batches
@@ -551,7 +630,7 @@ export function validateDateCompanionSubjectSuggestionConfirmation(input: {
   ) {
     throw new DcConflictError("subject_suggestion_batch_stale");
   }
-  const context = interactionContext(input.database, input.userId, input.interactionId);
+  const context = interactionContext(input.database, input.userId, input.interactionId, input.alreadySubmitted);
   if (context.version !== batch.interactionVersion || context.mapping_version !== batch.mappingVersion) {
     throw new DcConflictError("subject_suggestion_batch_stale");
   }
@@ -559,7 +638,7 @@ export function validateDateCompanionSubjectSuggestionConfirmation(input: {
     userId: input.userId,
     evidenceRows: interactionEvidence(input.database, input.userId, input.interactionId)
   });
-  if (dateCompanionSubjectEvidenceDigest(currentSources) !== batch.evidenceDigest) {
+  if (grantEvidenceDigest(input, currentSources) !== batch.evidenceDigest) {
     throw new DcConflictError("subject_suggestion_evidence_stale");
   }
   const proposedSubjects = new Map<string, DcMemorySubject>();

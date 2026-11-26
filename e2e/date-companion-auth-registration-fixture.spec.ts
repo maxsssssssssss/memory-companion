@@ -42,7 +42,7 @@ test("registers, restores, logs out, logs in, and restores again through the for
   progress(1, 8, "login and registration modes are both reachable");
 
   await page.getByRole("tab", { name: "注册" }).click();
-  await expect(page.getByRole("heading", { name: "创建你的空间" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "创建你的账号" })).toBeVisible();
   await expect(page.getByLabel("昵称（可选）")).toBeVisible();
   await expect(page.getByLabel("邀请码")).toBeVisible();
   await page.screenshot({ path: resolve(artifactDir, "registration-1920x1080.png"), fullPage: true });
@@ -67,28 +67,31 @@ test("registers, restores, logs out, logs in, and restores again through the for
   await page.getByLabel("昵称（可选）").fill("Fixture User");
   await page.getByLabel("邮箱").fill(email);
   await page.getByLabel("密码").fill(password);
-  await page.getByLabel("邀请码").fill("date-e2e");
+  await page.getByLabel("邀请码").fill(process.env.DATE_COMPANION_E2E_INVITE_CODE ?? "date-e2e");
   await page.getByRole("button", { name: "注册并进入" }).click();
-  await expect(page).toHaveURL(/\/date-companion\/modules$/u);
-  await expect(page.getByRole("heading", { name: "今天，你想从哪里开始？" })).toBeVisible();
-  progress(4, 8, "successful registration established the real session and entered modules");
+  await expect(page).toHaveURL("/");
+  await expect(page.getByRole("heading", { name: "选择一个空间" })).toBeVisible();
+  progress(4, 8, "successful registration opened the global space chooser");
 
   await page.reload();
-  await expect(page).toHaveURL(/\/date-companion\/modules$/u);
-  await expect(page.getByText("Fixture User", { exact: true })).toBeVisible();
+  await expect(page).toHaveURL("/");
+  const accountMenu = page.getByRole("button", { name: "账号菜单，当前账号Fixture User" });
+  await expect(accountMenu).toBeVisible();
   progress(5, 8, "registration session restored after refresh");
 
-  await page.getByRole("button", { name: "退出" }).click();
+  await accountMenu.click();
+  await page.getByRole("button", { name: "退出登录" }).click();
   await expect(page).toHaveURL(/\/date-companion$/u);
   await expect(page.getByRole("tab", { name: "登录" })).toHaveAttribute("aria-selected", "true");
   progress(6, 8, "logout returned to the formal login and registration boundary");
 
   await page.getByLabel("邮箱").fill(email);
   await page.getByLabel("密码").fill(password);
-  await page.getByRole("button", { name: "登录" }).click();
-  await expect(page).toHaveURL(/\/date-companion\/modules$/u);
+  await page.getByRole("button", { name: "登录", exact: true }).click();
+  await expect(page).toHaveURL("/");
   await page.reload();
-  await expect(page.getByText("Fixture User", { exact: true })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "选择一个空间" })).toBeVisible();
+  await expect(accountMenu).toBeVisible();
   progress(7, 8, "real login and refresh restored the registered account");
 
   expect(authRequests.filter((request) => request.path === "/api/auth/register" && request.method === "POST"))

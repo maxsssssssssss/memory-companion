@@ -5,6 +5,10 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const answerQuestionWithAIMock = vi.hoisted(() => vi.fn());
 const answerQuestionStreamMock = vi.hoisted(() => vi.fn());
 const trustedEvidenceResolverMock = vi.hoisted(() => vi.fn());
+const readCatalogMock = vi.hoisted(() => vi.fn());
+vi.mock("@/lib/server/date-companion/person-source-catalog", () => ({
+  resolveProductionDateCompanionPersonSourceCatalog: readCatalogMock
+}));
 const state = vi.hoisted(() => ({
   builder: null as unknown as { buildRelationshipContext(input: {
     accountId: string;
@@ -225,6 +229,37 @@ beforeEach(() => {
 });
 
 describe("POST /api/people/[personId]/qa", () => {
+  it.each(["sentence", "final"])("fences the next %s after an in-flight grant change", async (phase) => {
+    const source = { sourceSegmentId: "segment_old", uploadId: "upload_old", quote: "蓝色笔记本在里斯本。" };
+    const catalog = { relationshipId: "rel_a", mappingVersion: 2, companionPersonId: "person_confirmed", status: "ready", sources: [source] };
+    readCatalogMock.mockReturnValue(catalog);
+    answerQuestionStreamMock.mockImplementation(async function* (input) {
+      expect(input.conversation).toEqual([{ role: "assistant", content: "上轮使用的已核实依据：" + source.quote }]);
+      expect(JSON.stringify(input)).not.toContain("其他关系中的摘要");
+      yield { type: "stream_started", streamId: trace.streamId, timestamp: trace.timestamps.stream_started };
+      if (phase === "sentence") readCatalogMock.mockReturnValue({ ...catalog, mappingVersion: 3 });
+      yield {
+        type: "sentence_completed", sequence: 1, sentence: source.quote, text: source.quote, citationIds: ["E1"],
+        supportIds: ["segment_old"], citedSegmentIds: ["segment_old"], status: "committed",
+        validated: true, groundingValidated: true
+      };
+      readCatalogMock.mockReturnValue({ ...catalog, sources: [] });
+      yield { type: "final", answer: citedAnswer, source: "provider_stream", trace };
+    });
+    const body = { question: "蓝色笔记本在哪里？", scope: { type: "date_companion_relationship", relationshipId: "rel_a", mappingVersion: 2 },
+      conversation: [{ role: "assistant", content: "其他关系中的摘要" }],
+      priorCitations: [{ sourceSegmentId: "segment_old", excerpt: source.quote },
+        { sourceSegmentId: "someone_else", excerpt: "其他关系中的摘要" }] };
+    const result = await request("person_confirmed", body, { stream: true });
+    const events = (await result.text()).trim().split("\n").map(line => JSON.parse(line));
+    expect(events.map(event => event.type)).toEqual(phase === "sentence"
+      ? ["meta", "error", "complete"] : ["meta", "sentence", "error", "complete"]);
+    expect(events.at(-2).code).toBe("qa_scope_changed");
+    expect(events.at(-1).status).toBe("failed");
+    expect(readCatalogMock).toHaveBeenCalledWith({ accountId: "account_a", relationshipId: "rel_a" });
+    expect(answerQuestionStreamMock).toHaveBeenCalledOnce();
+  });
+
   it("requires auth and returns the same 404 for cross-account, candidate, archived, and unknown People", async () => {
     const unauthenticated = await request("person_confirmed", { question: "问题" }, { userId: "" });
     expect(unauthenticated.status).toBe(401);

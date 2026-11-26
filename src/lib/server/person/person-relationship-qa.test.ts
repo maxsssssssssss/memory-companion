@@ -719,6 +719,43 @@ describe("Person-scoped Relationship QA Evidence allowlist", () => {
     expect(JSON.stringify(regular)).not.toMatch(/Cross-account|ambiguous|Deleted/u);
   });
 
+  it("retrieves scoped verbatim promises and denials without a structured commitment", async () => {
+    const quote = evidence({ id: "raw", text: "我答应周五晚8点前把蓝色书签的样图发给你。至于印厂报价，我没答应去问。" });
+    const unrelated = evidence({ id: "tea", text: "咱们今天试了桂花乌龙。" });
+    const otherRelationship = evidence({ id: "elsewhere", text: "我答应明天给另一个人寄橘子。" });
+    const store = new CanonicalTranscriptStore();
+    [quote, unrelated, otherRelationship].forEach(row => store.put(row));
+    const opts = {
+      sourceContext: sourceContext({ activeFacts: [fact({ id: "memory", evidence: [quote, unrelated, otherRelationship] })] }),
+      conversation: [], settingsStore: store, admitsEvidence: (row: PersonEvidence) => row.id !== otherRelationship.id
+    };
+    for (const question of ["周砚禾答应了什么，又明确没答应做什么？", "周砚禾明确没答应做什么？", "周砚禾答应了什么？"]) {
+      const result = await buildPersonRelationshipQaContext({ ...opts, question });
+      expect(result.segments.map(s => [s.id, s.text])).toEqual([[quote.sourceSegmentId, quote.quote]]);
+    }
+    const unscoped = await buildPersonRelationshipQaContext({ ...opts, admitsEvidence: undefined, question: "周砚禾答应了什么？" });
+    expect(unscoped.segments).toHaveLength(0);
+  });
+
+  it("supplements structured promises with a scoped denial when the question asks for both", async () => {
+    const promise = evidence({ id: "promise", text: "下周三我会把样图发来。" });
+    const extra = evidence({ id: "raw", text: "我答应把展览单发过去。" });
+    const denial = evidence({ id: "denial", text: "我没有答应去问印厂报价。" });
+    const stale = evidence({ id: "stale", text: "过期承诺记录。" });
+    const store = new CanonicalTranscriptStore();
+    [promise, extra, denial].forEach(row => store.put(row));
+    const ctx = (row: PersonEvidence) => sourceContext({
+      relationshipEvidence: [denial, extra],
+      activeCommitments: [commitment({ evidence: [row], transitionEvidence: row })]
+    });
+    const opts = { settingsStore: store, conversation: [], admitsEvidence: () => true };
+    const ask = async (question: string, row = promise) =>
+      (await buildPersonRelationshipQaContext({ ...opts, question, sourceContext: ctx(row) })).eligibleSourceSegmentIds;
+    expect(await ask("周砚禾答应了什么？")).toEqual([promise.sourceSegmentId]);
+    expect(await ask("周砚禾答应了什么，又明确没答应做什么？")).toEqual([denial.sourceSegmentId, promise.sourceSegmentId]);
+    expect(await ask("周砚禾答应了什么？", stale)).toContain(extra.sourceSegmentId);
+  });
+
   it("builds a multi-recording exact allowlist only from the selected Person", async () => {
     const olderEvidence = evidence({
       id: "older_preference",

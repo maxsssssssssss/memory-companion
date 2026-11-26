@@ -1,4 +1,5 @@
 import { QuestionAnswerSchema, type QuestionAnswer } from "@/lib/domain/types";
+import { mapUnquotedQaText, projectQaCitationText, qaQuotedRanges } from "@/lib/domain/qa-citation-text";
 
 const DEFAULT_MAX_BUFFERED_CHARACTERS = 256_000;
 const STRICT_CITATION_ID_PATTERN = /^E[1-9]\d*$/u;
@@ -115,7 +116,7 @@ function isCitationSuffixToken(token: string) {
 }
 
 function normalizeUnit(value: string) {
-  return value.replace(/\s+/gu, " ").trim();
+  return mapUnquotedQaText(value, prose => prose.replace(/\s+/gu, " ")).trim();
 }
 
 function scanSentenceUnits(text: string, includeRemainder: boolean): SplitResult {
@@ -128,6 +129,8 @@ function scanSentenceUnits(text: string, includeRemainder: boolean): SplitResult
   let boundaryHasCitation = false;
   let pendingWhitespace = "";
   let hasUnresolvedCitationSuffix = false;
+  const quotes = qaQuotedRanges(normalized);
+  let quoteIndex = 0;
 
   const flush = () => {
     const sentence = normalizeUnit(buffer);
@@ -139,6 +142,20 @@ function scanSentenceUnits(text: string, includeRemainder: boolean): SplitResult
   };
 
   for (let index = 0; index < normalized.length; index += 1) {
+    // A verbatim quotation may span punctuation, paragraphs and literal [E1]s.
+    // Interpret its attribution only after leaving the quotation.
+    const quote = quotes[quoteIndex];
+    if (quote?.start === index) {
+      if (pendingBoundary === "hard" || boundaryHasCitation || isBlankParagraph(pendingWhitespace)) flush();
+      buffer += pendingWhitespace + normalized.slice(quote.start, quote.end);
+      pendingWhitespace = "";
+      index = quote.end - 1;
+      let last = index;
+      while (last > quote.start && SENTENCE_CLOSERS.has(normalized[last])) last--;
+      pendingBoundary = sentenceBoundaryKind(normalized, last) ?? "soft";
+      quoteIndex++;
+      continue;
+    }
     const character = normalized[index] ?? "";
     if (pendingBoundary === null) {
       if (character === "\n") {
@@ -165,7 +182,12 @@ function scanSentenceUnits(text: string, includeRemainder: boolean): SplitResult
 
     if (!isBlankParagraph(pendingWhitespace) && (character === "[" || character === "［")) {
       const closingCharacter = character === "[" ? "]" : "］";
-      const closingIndex = normalized.indexOf(closingCharacter, index + 1);
+      let closingIndex = normalized.indexOf(closingCharacter, index + 1);
+      let nextQuote = quoteIndex;
+      while (closingIndex >= 0 && nextQuote < quotes.length && quotes[nextQuote].start < closingIndex) {
+        const span = quotes[nextQuote++];
+        if (span.end > closingIndex) closingIndex = normalized.indexOf(closingCharacter, span.end);
+      }
       if (closingIndex < 0) {
         hasUnresolvedCitationSuffix = true;
         if (includeRemainder) buffer += pendingWhitespace + normalized.slice(index);
@@ -173,11 +195,12 @@ function scanSentenceUnits(text: string, includeRemainder: boolean): SplitResult
         break;
       }
       const token = normalized.slice(index + 1, closingIndex);
-      if (isCitationSuffixToken(token)) {
+      if (isCitationSuffixToken(nextQuote === quoteIndex ? token : textOutsideQaQuotes(token))) {
         buffer += pendingWhitespace + normalized.slice(index, closingIndex + 1);
         boundaryHasCitation = true;
         pendingWhitespace = "";
         index = closingIndex;
+        quoteIndex = nextQuote;
         continue;
       }
     }
@@ -264,10 +287,24 @@ function extractPartialJsonMode(buffer: string) {
     : null;
 }
 
+/** Mask quoted text without joining token fragments or hiding malformed outer brackets. */
+export function textOutsideQaQuotes(text: string): string {
+  const ranges = qaQuotedRanges(text);
+  if (!ranges.length) return text;
+  const parts: string[] = [];
+  let start = 0;
+  for (const quote of ranges) {
+    parts.push(text.slice(start, quote.start));
+    start = quote.end;
+  }
+  parts.push(text.slice(start));
+  return parts.join("\uFFFC");
+}
+
 function citationTokens(sentence: string) {
   const valid: string[] = [];
   let invalid = false;
-  for (const match of sentence.matchAll(/(\[([^\]\r\n]{1,80})\]|［([^］\r\n]{1,80})］)/gu)) {
+  for (const match of textOutsideQaQuotes(sentence).matchAll(/(\[([^\]\r\n]{1,80})\]|［([^］\r\n]{1,80})］)/gu)) {
     const token = (match[2] ?? match[3] ?? "").trim();
     const usesAsciiBrackets = match[0]?.startsWith("[") && match[0]?.endsWith("]");
     if (usesAsciiBrackets && STRICT_CITATION_ID_PATTERN.test(token)) {
@@ -283,12 +320,9 @@ function citationTokens(sentence: string) {
   return { citationIds: uniqueStrings(valid), invalid };
 }
 
-function citationFreeSentence(sentence: string) {
-  return sentence
-    .replace(/\s*\[E[1-9]\d*\]/gu, "")
-    .replace(/\s+([，。！？；：,.!?;:])/gu, "$1")
-    .replace(/\s+/gu, " ")
-    .trim();
+function citationFreeSentence(sentence: string, ids: readonly string[]) {
+  const projected = projectQaCitationText(sentence, new Set(ids));
+  return mapUnquotedQaText(projected, prose => prose.replace(/\s+([，。！？；：,.!?;:])/gu, "$1")).trim();
 }
 
 function sameStringSet(left: readonly string[], right: readonly string[]) {
@@ -390,7 +424,7 @@ export function createSentenceCommitManager(options: {
     if (mode === "memory_answer" && candidates.length > processedCandidateCount) {
       for (const candidate of candidates.slice(processedCandidateCount)) {
         const tokenResult = citationTokens(candidate.sentence);
-        const sentence = citationFreeSentence(candidate.sentence);
+        const sentence = citationFreeSentence(candidate.sentence, tokenResult.citationIds);
         let reason: SentenceCommitReason = "grounded";
         const supportIds: string[] = [];
 
@@ -484,7 +518,7 @@ export function createSentenceCommitManager(options: {
 
     const localResults = citedSentences.map((citedSentence, index) => {
       const tokenResult = sentenceTokenResults[index] ?? { citationIds: [], invalid: false };
-      const spokenSentence = citationFreeSentence(citedSentence);
+      const spokenSentence = citationFreeSentence(citedSentence, tokenResult.citationIds);
       let reason: SentenceCommitReason = "grounded";
       const supportIds: string[] = [];
 

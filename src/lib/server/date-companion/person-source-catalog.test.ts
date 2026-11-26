@@ -1,4 +1,8 @@
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+// @vitest-environment node
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { randomUUID } from "node:crypto";
 import type Database from "better-sqlite3";
 
 import { openMemoryDatabase } from "@/lib/server/memory/db";
@@ -11,6 +15,14 @@ import { createDateCompanionMemoryBridgeRepository } from "./memory-bridge-repos
 import { resolveDateCompanionPersonSourceCatalog } from "./person-source-catalog";
 import { DateCompanionRepository } from "./repository";
 import { getOrCreateDateCompanionSubjectSuggestionBatch } from "./subject-suggestions";
+import { openDateCompanionPersonQaScope } from "./person-qa-scope";
+import { getDateCompanionWithdrawalPreview, purgeDateCompanionRetainedMemory } from "./memory-bridge-purge";
+import { verifiedPriorSources } from "./qa-prior-sources";
+import { createRelationshipContextBuilder } from "@/lib/server/person/relationship-context";
+import { answerPersonRelationshipQuestionStream, buildPersonRelationshipQaInput } from "@/lib/server/person/person-relationship-qa";
+import { resolveTrustedPersonQaEvidence } from "@/lib/server/person/person-relationship-qa-evidence-resolver";
+import { JsonStore } from "@/lib/server/storage/json-store";
+import { createTextQaBrowserStream } from "@/lib/server/retrieval/text-qa-stream";
 
 const NOW = "2026-08-11T00:00:00.000Z";
 
@@ -63,6 +75,8 @@ describe("Date Companion relationship Person source catalog", () => {
   });
 
   afterEach(() => {
+    vi.unstubAllEnvs();
+    vi.unstubAllGlobals();
     dateCompanionDatabase.close();
     memoryDatabase.close();
   });
@@ -71,6 +85,7 @@ describe("Date Companion relationship Person source catalog", () => {
     uploadId: string;
     recordingDate: string;
     sources: SourceInput[];
+    beforeConsume?: (interactionId: string) => void;
   }) {
     const speakers = [...new Set(input.sources.map((source) => source.speakerId ?? "speaker_1"))];
     const imported = repository.importInteraction({
@@ -104,6 +119,11 @@ describe("Date Companion relationship Person source catalog", () => {
       database: dateCompanionDatabase,
       userId: "user_a",
       interactionId: imported.interactionId,
+      draftPreview: {
+        version: interaction.version,
+        itemIds: interaction.recapItems.filter((_, i) => input.sources[i]?.disposition !== "excluded").map(item => item.id),
+        assignments: speakers.map(speakerId => ({ speakerId, role: "companion" }))
+      },
       provider: {
         model: "Qwen/Qwen3.6-27B",
         suggest: async (sources) => {
@@ -170,6 +190,7 @@ describe("Date Companion relationship Person source catalog", () => {
       finalize: true
     });
     repository.markUploadSourceState("user_a", input.uploadId, "server_cleaned");
+    input.beforeConsume?.(imported.interactionId);
     await processDateCompanionMemoryBridgeInteraction({
       dateCompanionDatabase,
       memoryDatabase,
@@ -190,6 +211,164 @@ describe("Date Companion relationship Person source catalog", () => {
       relationshipId
     });
   }
+
+  it("distinguishes a verified mapping awaiting its first projection from a failed lookup, admitting neither", () => {
+    expect(resolve()).toMatchObject({status: "unlinked", mappingVersion, sources: []});
+    const identity = {accountId: "user_a", relationshipId, personId: "person_ta", mappingVersion};
+    expect(() => openDateCompanionPersonQaScope(identity, () => resolve())).toThrow();
+    memoryDatabase.exec("ALTER TABLE dc_person_relationship_links RENAME TO temporarily_unreadable");
+    expect(resolve()).toMatchObject({status: "unavailable", sources: []});
+  });
+
+  it("keeps a saved recap pending until the consumer has admitted its source", async () => {
+    const review = () => createDateCompanionMemoryBridgeRepository(dateCompanionDatabase).getMemoryReview("user_a", relationshipId);
+    expect(review().interactions).toEqual([]);
+    await completeInteraction({
+      uploadId: "upload_first_recap", recordingDate: "2026-08-11",
+      sources: [{segmentId: "seg_first", quote: "我喜欢这里的树影。", subject: "companion"}],
+      beforeConsume: interactionId => {
+        expect(review().interactions).toMatchObject([{interactionId, status: "pending"}]);
+        expect(resolve()).toMatchObject({status: "unlinked", sources: []});
+      }
+    });
+    expect(review().interactions).toMatchObject([{status: "completed"}]);
+    expect(resolve()).toMatchObject({status: "ready", sources: [{sourceSegmentId: "seg_first"}]});
+  });
+
+  it("keeps a second relationship for the same person out of the real provider prompt, browser sentences and final", async () => {
+    const otherQuote = "另一段关系的屏风暗号是灰鲸。";
+    const currentQuote = "画册封面采用蓝色水彩。";
+    await completeInteraction({ uploadId: "old_upload", recordingDate: "2026-08-01",
+      sources: [{ segmentId: "old_other", quote: otherQuote, subject: "companion" }] });
+    const oldRelationshipId = relationshipId;
+    // Production allows only one active relationship per account. Retain the
+    // previous record and its projection while explicitly choosing the new one.
+    dateCompanionDatabase.prepare("UPDATE dc_relationships SET status = 'archived' WHERE id = ?").run(oldRelationshipId);
+    relationshipId = repository.createOrGetRelationship("user_a", "同一位 Ta").relationship.id;
+    mappingVersion = createDateCompanionMemoryBridgeRepository(dateCompanionDatabase).putPersonMapping({
+      userId: "user_a", relationshipId, selfPersonId: "person_self", companionPersonId: "person_ta",
+      relationshipType: "dating", expectedVersion: 0
+    }).version;
+    await completeInteraction({ uploadId: "current_upload", recordingDate: "2026-08-12",
+      sources: [{ segmentId: "current_seg", quote: currentQuote, subject: "companion" }] });
+    const read = (ids: { accountId: string; relationshipId: string }) =>
+      resolveDateCompanionPersonSourceCatalog({ ...ids, dateCompanionDatabase, memoryDatabase });
+    const identity = { accountId: "user_a", relationshipId, personId: "person_ta", mappingVersion };
+    const scope = openDateCompanionPersonQaScope(identity, read);
+    for (const changed of [{ accountId: "user_b" }, { personId: "person_other" },
+      { relationshipId: oldRelationshipId }, { mappingVersion: mappingVersion + 1 }]) {
+      expect(() => openDateCompanionPersonQaScope({ ...identity, ...changed }, read)).toThrow("qa_scope_changed");
+    }
+    const sourceContext = createRelationshipContextBuilder(memoryDatabase).buildRelationshipContext(identity);
+    const qa = await buildPersonRelationshipQaInput({
+      userId: identity.accountId, personId: identity.personId, sourceContext,
+      // A missing local upload makes the resolver use its authorized, digest-checked snapshot.
+      settingsStore: new JsonStore(join(tmpdir(), randomUUID())), question: "画册封面是什么颜色？",
+      conversation: [], admitsEvidence: scope.includes,
+      trustedEvidenceResolver: input => resolveTrustedPersonQaEvidence({ ...input, dateCompanionDatabase, memoryDatabase })
+    });
+    expect(qa.segments.map(s => s.id)).toEqual(["current_seg"]);
+    qa.requireExplicitRetry = true;
+    qa.disableHybridRetrieval = true;
+    qa.assertSourceScope = () => scope.assertCurrent(["current_seg"]);
+    qa.conversation = verifiedPriorSources(qa.segments, [
+      { sourceSegmentId: "old_other", excerpt: otherQuote },
+      { sourceSegmentId: "current_seg", excerpt: "旧内容已变" },
+      { sourceSegmentId: "current_seg", excerpt: currentQuote }
+    ], scope.matchesRevision);
+    expect(qa.conversation).toEqual([{ role: "assistant", content: "上轮使用的已核实依据：" + currentQuote }]);
+    vi.stubEnv("LLM_PROVIDER", "qwen-vllm");
+    vi.stubEnv("VLLM_BASE_URL", "http://127.0.0.1:1/v1");
+    let prompt = "";
+    // Intercept exactly at the OpenAI-compatible HTTP transport. All prompt
+    // construction, retrieval, JSON parsing and browser projection remain real.
+    const provider = vi.fn(async (_url: unknown, init: RequestInit) => {
+      prompt = JSON.parse(String(init.body)).messages.at(-1).content;
+      const frame = { choices: [{ delta: { content: JSON.stringify({
+        mode: "memory_answer", answer: currentQuote + "[E1]", citationIds: ["E1"]
+      }) }, finish_reason: "stop" }] };
+      return new Response("data: " + JSON.stringify(frame) + "\n\ndata: [DONE]\n\n", { headers: { "Content-Type": "text/event-stream" } });
+    });
+    vi.stubGlobal("fetch", provider);
+    const events = (await new Response(createTextQaBrowserStream({ input: qa, dependencies: {
+      answerQuestionStream: input => answerPersonRelationshipQuestionStream(input, ["current_seg"])
+    } })).text()).trim().split("\n").map(line => JSON.parse(line));
+    expect(provider, JSON.stringify(events)).toHaveBeenCalledTimes(1);
+    expect(prompt).toContain(currentQuote);
+    expect(prompt).not.toContain(otherQuote);
+    expect(prompt).not.toContain("旧内容已变");
+    expect(events.map(event => event.type)).toEqual(["meta", "sentence", "final", "complete"]);
+    expect(events[1].citedSegmentIds).toEqual(["current_seg"]);
+    expect(events[2].answer.citedSegmentIds).toEqual(["current_seg"]);
+    expect(JSON.stringify(events)).not.toContain(otherQuote);
+
+    dateCompanionDatabase.prepare("UPDATE dc_evidence_snapshots SET quote = '同 ID 的新文本' WHERE source_segment_id = ?").run("current_seg");
+    expect(qa.assertSourceScope).toThrow("qa_scope_changed");
+    expect(read(identity).sources).toHaveLength(0);
+  });
+
+  it.each(["before dispatch", "before first sentence", "before final"] as const)(
+    "stops a real relationship QA scope withdrawn %s", async phase => {
+      const quote = "画册封面采用蓝色水彩。";
+      const uploadId = "isolated_book", segmentId = "bookmark";
+      await completeInteraction({uploadId, recordingDate: "2026-11-24",
+        sources: [{segmentId, quote, subject: "both"}]});
+      const identity = {accountId: "user_a", relationshipId, personId: "person_ta", mappingVersion};
+      const scope = openDateCompanionPersonQaScope(identity, () => resolve());
+      const qa = await buildPersonRelationshipQaInput({
+        userId: identity.accountId, personId: identity.personId, question: "画册封面是什么颜色？", conversation: [],
+        admitsEvidence: scope.includes, settingsStore: new JsonStore(join(tmpdir(), randomUUID())),
+        sourceContext: createRelationshipContextBuilder(memoryDatabase).buildRelationshipContext(identity),
+        trustedEvidenceResolver: input => resolveTrustedPersonQaEvidence({...input, relationshipId, dateCompanionDatabase, memoryDatabase})
+      });
+      expect(qa.segments.map(s => s.id)).toEqual([segmentId]);
+      qa.requireExplicitRetry = true;
+      qa.disableHybridRetrieval = true;
+      qa.assertSourceScope = () => scope.assertCurrent([segmentId]);
+      const withdraw = () => {
+        const input = {dateCompanionDatabase, memoryDatabase, userId: identity.accountId, relationshipId};
+        const {preview} = getDateCompanionWithdrawalPreview(input);
+        expect(purgeDateCompanionRetainedMemory({...input, previewVersion: preview.version})).toMatchObject({usageStopped: true, completedCount: 1});
+      };
+      vi.stubEnv("LLM_PROVIDER", "qwen-vllm");
+      vi.stubEnv("VLLM_BASE_URL", "http://127.0.0.1:1/v1");
+      const provider = vi.fn(async () => {
+        if (phase === "before first sentence") withdraw();
+        const chunk = {choices: [{delta: {content: JSON.stringify({mode: "memory_answer", answer: quote + "[E1]", citationIds: ["E1"]})}, finish_reason: "stop"}]};
+        return new Response("data: " + JSON.stringify(chunk) + "\n\ndata: [DONE]\n\n", {headers: {"Content-Type": "text/event-stream"}});
+      });
+      vi.stubGlobal("fetch", provider);
+      if (phase === "before dispatch") withdraw();
+      const text = await new Response(createTextQaBrowserStream({input: qa,
+        ...(phase === "before final" ? {onFinal: async () => withdraw()} : {}),
+        dependencies: {answerQuestionStream: input => answerPersonRelationshipQuestionStream(input, [segmentId])}
+      })).text();
+      const events = text.trim().split("\n").map(line => JSON.parse(line));
+      expect(provider).toHaveBeenCalledTimes(phase === "before dispatch" ? 0 : 1);
+      expect(events.slice(-2)).toEqual([expect.objectContaining({type: "error", code: "qa_scope_changed"}), {type:"complete",status:"failed"}]);
+      expect(events.filter(e => e.type === "final")).toHaveLength(0);
+      expect(events.filter(e => e.type === "sentence")).toHaveLength(phase === "before final" ? 1 : 0);
+      expect(resolve()).toMatchObject({status: "withdrawn", mappingVersion, sources: []});
+    }
+  );
+
+  it("requires the new authorization binding even when an older verified quote is identical", async () => {
+    await completeInteraction({uploadId:"upload_renewal",recordingDate:"2026-11-24",sources:[{segmentId:"blue",quote:"蓝色书签",subject:"both"}]});
+    const catalog = resolve();
+    const [source] = catalog.sources;
+    const revision = "a".repeat(64);
+    const identity = {accountId:"user_a",relationshipId,personId:"person_ta",mappingVersion};
+    const withdrawalVersion = randomUUID();
+    const read = () => ({...catalog,withdrawalVersion,sources:[{...source,authorizationRevision:revision}]});
+    expect(() => openDateCompanionPersonQaScope(identity, read)).toThrow("qa_scope_changed");
+    const scope = openDateCompanionPersonQaScope({...identity,withdrawalVersion}, read);
+    const citation = {sourceSegmentId:"blue",uploadId:source.uploadId,excerpt:source.quote};
+    const segments = [{id:"blue",uploadId:source.uploadId,startSeconds:0,endSeconds:4,text:source.quote,confidence:1,sceneLabels:[],valueLabels:[]}];
+    const prior = (bindings: Parameters<typeof verifiedPriorSources>[1]) =>
+      verifiedPriorSources(segments, bindings, scope.matchesRevision, scope.requiresRevision);
+    expect(prior([citation,{...citation,revision:source.contentDigest}])).toEqual([]);
+    expect(prior([{...citation,revision:source.contentDigest,authorizationRevision:revision}])).toHaveLength(1);
+  });
 
   it("returns formally admitted companion/both snapshots in stable order", async () => {
     await completeInteraction({

@@ -488,6 +488,19 @@ describe("answerQuestionStream", () => {
     expect(chatCreateMock).toHaveBeenCalledTimes(2);
   });
 
+  it.each(["refused", "interrupted"])("requires an explicit retry after a companion provider turn is %s", async (mode) => {
+    if (mode === "refused") {
+      chatCreateMock.mockRejectedValueOnce(Object.assign(new Error("controlled refusal"), { status: 503 }));
+    } else {
+      chatCreateMock.mockResolvedValueOnce(asyncStream([{ choices: [{ delta: { content: '{"answer":"未完成' } }] }]));
+    }
+    await expect(collect(input({ requireExplicitRetry: true }))).rejects.toMatchObject({
+      code: mode === "refused" ? "qa_provider_failed" : "qa_result_unconfirmed"
+    });
+    expect(chatCreateMock).toHaveBeenCalledOnce();
+    expect(createOpenAIClientMock).toHaveBeenCalledWith(expect.objectContaining({ maxRetries: 0 }));
+  });
+
   it("falls back after a partial provider failure without releasing its unvalidated sentence", async () => {
     chatCreateMock.mockImplementation(async (request: { stream?: boolean }) =>
       request.stream

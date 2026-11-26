@@ -1,0 +1,13 @@
+.edge {
+  position: absolute;
+  inset: 2px;
+  z-index: 3;
+  border: 1px solid #b58f7859;
+  border-inline-end: 4px solid #dfc5b5;
+  box-shadow: 7px 9px 0 -5px #d5b9aa99, 0 18px 35px -16px #4c302650;
+  pointer-events: none;
+  opacity: 0;
+}
+@media (prefers-reduced-motion: reduce) {
+  .edge { opacity: 0; }
+}

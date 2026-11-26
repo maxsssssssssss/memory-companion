@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
 
-import { ProductDialog, ProductState } from "@/components/product-system/product-primitives";
+import { ProductState } from "@/components/product-system/product-primitives";
 import type {
   DateCompanionConfirmedPerson,
   DateCompanionMemoryBridgeState,
@@ -11,9 +11,13 @@ import type {
   DateCompanionRelationshipType
 } from "@/lib/domain/date-companion";
 
+import { CompanionWithdrawal } from "./companion-withdrawal";
+import type { WithdrawalImpact, WithdrawalReceipt } from "@/lib/client/date-companion-api";
 import styles from "./date-companion.module.css";
 
 type CompanionPeopleProps = {
+  titleForRecord?: (interactionId: string) => string | null;
+  hrefFor?: (path: string) => string;
   state: DateCompanionMemoryBridgeState;
   mutationState: DateCompanionMemoryMutationState;
   onCreatePerson(displayName: string): Promise<void>;
@@ -23,7 +27,8 @@ type CompanionPeopleProps = {
     relationshipType: DateCompanionRelationshipType;
   }): Promise<void>;
   onSetRetention(enabled: boolean): Promise<void>;
-  onPurge(): Promise<void>;
+  onPreviewWithdrawal(signal: AbortSignal): Promise<WithdrawalImpact>;
+  onPurge(version: string): Promise<WithdrawalReceipt>;
   onRetry(interactionId: string): Promise<void>;
   onRefresh(): Promise<void>;
 };
@@ -62,11 +67,6 @@ function formatDate(value: string | null | undefined) {
   return `${parts.year} 年 ${parts.month} 月 ${parts.day} 日`;
 }
 
-function initials(person: DateCompanionConfirmedPerson) {
-  const name = person.displayName?.trim() || "未命名人物";
-  return [...name].slice(0, 2).join("");
-}
-
 function personLabel(
   person: DateCompanionConfirmedPerson,
   people: DateCompanionConfirmedPerson[]
@@ -78,11 +78,14 @@ function personLabel(
 }
 
 export function CompanionPeople({
+  titleForRecord,
+  hrefFor = (path: string) => path,
   state,
   mutationState,
   onCreatePerson,
   onSaveMapping,
   onSetRetention,
+  onPreviewWithdrawal,
   onPurge,
   onRetry,
   onRefresh
@@ -91,19 +94,57 @@ export function CompanionPeople({
   const [companionPersonId, setCompanionPersonId] = useState("");
   const [relationshipType, setRelationshipType] = useState<DateCompanionRelationshipType | "">("");
   const [newPersonName, setNewPersonName] = useState("");
-  const [query, setQuery] = useState("");
-  const [trustOpen, setTrustOpen] = useState(false);
-  const [purgeOpen, setPurgeOpen] = useState(false);
+  const [trustOpen, setTrustOpen] = useState(true);
+  const [mappingEntry, setMappingEntry] = useState(false);
   const [localError, setLocalError] = useState<string | null>(null);
-  const newPersonInputRef = useRef<HTMLInputElement>(null);
+  const mappingEdited = useRef(false);
 
   const mapping = state.status === "ready" ? state.mapping : null;
   useEffect(() => {
-    if (state.status !== "ready") return;
+    if (state.status !== "ready" || mappingEdited.current) return;
     setSelfPersonId(state.mapping?.selfPersonId ?? state.selfBinding?.personId ?? "");
     setCompanionPersonId(state.mapping?.companionPersonId ?? "");
     setRelationshipType(state.mapping?.relationshipType ?? "");
   }, [state]);
+
+  useEffect(() => {
+    if (state.status !== "ready") return;
+    let frame = 0;
+    const revealMapping = () => {
+      const anchor = window.location.hash.slice(1);
+      if (anchor === "retention-title" || anchor === "new-person-name") {
+        setTrustOpen(true);
+        window.cancelAnimationFrame(frame);
+        frame = window.requestAnimationFrame(() => {
+          const target = document.getElementById(anchor);
+          target?.focus({preventScroll: true});
+          target?.scrollIntoView({block: "nearest", behavior: "instant"});
+        });
+        return;
+      }
+      if (window.location.hash !== "#people-mapping-title") return;
+      setTrustOpen(true);
+      setMappingEntry(true);
+      window.cancelAnimationFrame(frame);
+      frame = window.requestAnimationFrame(() => {
+        const heading = document.getElementById("people-mapping-title");
+        if (!heading) return;
+        const section = heading.closest("section");
+        const chrome = heading.closest("main")?.querySelector<HTMLElement>(`.${styles.companionChrome}`);
+        const chromePosition = chrome ? window.getComputedStyle(chrome).position : "";
+        const chromeHeight = chrome && ["sticky", "fixed"].includes(chromePosition) ? chrome.getBoundingClientRect().height : 0;
+        const sectionInset = section ? heading.getBoundingClientRect().top - section.getBoundingClientRect().top : 0;
+        // The hash and our explicit reveal share one offset, including the return
+        // link above the title. Neither path may tuck the form under the shell.
+        heading.style.scrollMarginTop = `${Math.ceil(chromeHeight + sectionInset + 16)}px`;
+        heading?.focus({preventScroll:true});
+        heading?.scrollIntoView({block:"start",behavior:"instant"});
+      });
+    };
+    revealMapping();
+    window.addEventListener("hashchange", revealMapping);
+    return () => { window.cancelAnimationFrame(frame); window.removeEventListener("hashchange",revealMapping); };
+  }, [state.status]);
 
   const saving = mutationState.status === "saving";
   const run = async (action: () => Promise<void>) => {
@@ -135,93 +176,14 @@ export function CompanionPeople({
     );
   }
 
-  const selfId = state.mapping?.selfPersonId ?? state.selfBinding?.personId ?? null;
-  const confirmedPeople = state.people
-    .filter((person) => person.id !== selfId)
-    .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt) || left.id.localeCompare(right.id));
-  const normalizedQuery = query.normalize("NFKC").trim().toLocaleLowerCase("zh-CN");
-  const visiblePeople = normalizedQuery
-    ? confirmedPeople.filter((person) => (person.displayName?.trim() || "未命名人物").toLocaleLowerCase("zh-CN").includes(normalizedQuery))
-    : confirmedPeople;
-  const activePersonId = mapping?.status === "confirmed" ? mapping.companionPersonId : null;
-  const latestCurrentRecord = state.review.interactions
-    .filter((interaction) => interaction.sourceState !== "explicitly_deleted" && interaction.status !== "cancelled")
-    .sort((left, right) => right.recordingDate.localeCompare(left.recordingDate))[0];
   const mappingUsable = Boolean(
     mapping?.status === "confirmed" && mapping.selfPersonId !== mapping.companionPersonId
   );
   const mutationError = mutationState.status === "error" ? mutationState.message : null;
 
-  const openTrustControls = (focusNewPerson = false) => {
-    setTrustOpen(true);
-    window.requestAnimationFrame(() => {
-      const reduceMotion = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false;
-      document.getElementById("trust-controls")?.scrollIntoView({ block: "start", behavior: reduceMotion ? "auto" : "smooth" });
-      if (focusNewPerson) newPersonInputRef.current?.focus();
-    });
-  };
-
   return (
     <div className={styles.peoplePage}>
-      <header className={styles.peopleDirectoryHeader}>
-        <div>
-          <p className={styles.eyebrow}>约会陪伴</p>
-          <h1>人物</h1>
-          <p>这里是你亲自确认过的人物。姓名和原话来源不会替你判断关系。</p>
-        </div>
-        <button className={styles.secondaryButton} onClick={() => openTrustControls(true)} type="button">新增人物</button>
-      </header>
-
       {(localError || mutationError) ? <p className={styles.inlineError} role="alert">{localError || mutationError}</p> : null}
-
-      {confirmedPeople.length > 0 ? (
-        <section className={styles.peopleDirectory} aria-labelledby="people-directory-title">
-          <div className={styles.peopleDirectoryTools}>
-            <div>
-              <h2 id="people-directory-title">已确认的人物</h2>
-              <span>{confirmedPeople.length} 位</span>
-            </div>
-            <label className={styles.peopleSearch}>
-              <span className={styles.visuallyHidden}>搜索人物</span>
-              <input autoComplete="off" name="people-search" onChange={(event) => setQuery(event.currentTarget.value)} placeholder="搜索人物" type="search" value={query} />
-            </label>
-          </div>
-
-          {visiblePeople.length === 0 ? (
-            <ProductState description="换一个称呼试试；未确认的人物不会出现在这里。" title={`没有找到“${query.trim()}”`} tone="empty" />
-          ) : (
-            <ul className={styles.peopleList}>
-              {visiblePeople.map((person) => {
-                const active = person.id === activePersonId;
-                return (
-                  <li key={person.id}>
-                    <Link href={`/date-companion/a/people/${encodeURIComponent(person.id)}`}>
-                      <span aria-hidden="true" className={styles.personAvatar}>{initials(person)}</span>
-                      <span className={styles.personListContent}>
-                        <span className={styles.personListHeading}>
-                          <b>{personLabel(person, confirmedPeople)}</b>
-                          {active ? <small>当前 Ta</small> : null}
-                        </span>
-                        <span>{active && latestCurrentRecord
-                          ? `最近相关记录 · ${formatDate(latestCurrentRecord.recordingDate)}`
-                          : `由你确认 · ${formatDate(person.confirmedAt)}`}</span>
-                      </span>
-                      <span aria-hidden="true" className={styles.personListArrow}>→</span>
-                    </Link>
-                  </li>
-                );
-              })}
-            </ul>
-          )}
-        </section>
-      ) : (
-        <ProductState
-          action={<button className={styles.secondaryButton} onClick={() => openTrustControls(true)} type="button">新增并确认人物</button>}
-          description="人物只会在你明确确认后出现；系统不会根据名字或对话自动创建。"
-          title="还没有已确认的人物"
-          tone="empty"
-        />
-      )}
 
       <details className={styles.peopleTrustDisclosure} id="trust-controls" onToggle={(event) => setTrustOpen(event.currentTarget.open)} open={trustOpen}>
         <summary>
@@ -230,16 +192,17 @@ export function CompanionPeople({
         </summary>
         <div className={styles.peopleTrustBody}>
           <section aria-labelledby="people-mapping-title" className={styles.peopleTrustSection}>
+            {mappingEntry && <Link className={styles.textButton} href={hrefFor("/date-companion/a")}>返回首页</Link>}
             <div className={styles.peoplePanelHeading}>
               <div>
                 <p className={styles.eyebrow}>人物确认</p>
-                <h2 id="people-mapping-title">确认当前这段关系</h2>
+                <h2 id="people-mapping-title" tabIndex={-1}>确认当前这段关系</h2>
                 <p>这项设置只作用于当前 Date Companion 关系，不会按名字自动匹配其他人物。</p>
               </div>
               <span className={styles.mappingStatus} data-active={mappingUsable}>{mappingUsable ? "已确认" : "需要确认"}</span>
             </div>
 
-            <div className={styles.peopleMappingGrid}>
+            <div className={styles.peopleMappingGrid} onChange={() => { mappingEdited.current = true; }}>
               <label>
                 <span>我</span>
                 <select disabled={saving} onChange={(event) => setSelfPersonId(event.currentTarget.value)} value={selfPersonId}>
@@ -269,7 +232,10 @@ export function CompanionPeople({
               <button
                 className={styles.primaryButton}
                 disabled={saving || !selfPersonId || !companionPersonId || !relationshipType || selfPersonId === companionPersonId}
-                onClick={() => relationshipType && void run(() => onSaveMapping({ selfPersonId, companionPersonId, relationshipType }))}
+                onClick={() => relationshipType && void run(async () => {
+                  await onSaveMapping({ selfPersonId, companionPersonId, relationshipType });
+                  mappingEdited.current = false;
+                })}
                 type="button"
               ><span>{mutationState.status === "saving" && mutationState.operation === "mapping" ? "正在保存…" : "确认当前人物"}</span><span aria-hidden="true">✓</span></button>
               <small>修改这里不会自动创建新的长期记忆。</small>
@@ -277,7 +243,7 @@ export function CompanionPeople({
 
             <div className={styles.createPersonRow}>
               <label htmlFor="new-person-name">新增人物</label>
-              <input autoComplete="off" id="new-person-name" maxLength={500} name="new-person-display-name" onChange={(event) => setNewPersonName(event.currentTarget.value)} placeholder="输入你能认出的称呼" ref={newPersonInputRef} value={newPersonName} />
+              <input autoComplete="off" id="new-person-name" maxLength={500} name="new-person-display-name" onChange={(event) => setNewPersonName(event.currentTarget.value)} placeholder="输入你能认出的称呼" value={newPersonName} />
               <button
                 disabled={saving || !newPersonName.trim()}
                 onClick={() => void run(async () => {
@@ -293,14 +259,14 @@ export function CompanionPeople({
             <div className={styles.retentionRow}>
               <div>
                 <p className={styles.eyebrow}>长期使用</p>
-                <h2 id="retention-title">允许未来使用已确认内容</h2>
+                <h2 id="retention-title" tabIndex={-1}>允许未来使用已确认内容</h2>
                 <p>只有你明确保留、确认人物和内容归属后，才会进入长期关系记忆。</p>
               </div>
-              <button aria-checked={state.setting.enabled} className={styles.retentionSwitch} data-enabled={state.setting.enabled} disabled={saving || (!mappingUsable && !state.setting.enabled)} onClick={() => void run(() => onSetRetention(!state.setting.enabled))} role="switch" type="button">
+              <button aria-checked={state.setting.enabled} className={styles.retentionSwitch} data-enabled={state.setting.enabled} disabled={saving} onClick={() => void run(() => onSetRetention(!state.setting.enabled))} role="switch" type="button">
                 <span aria-hidden="true" /><b>{state.setting.enabled ? "已开启" : "已关闭"}</b>
               </button>
             </div>
-            <p className={styles.boundaryNote}>关闭只会停止未来新增，不会删除以前已经保留的内容。</p>
+            <p className={styles.boundaryNote}>这个开关适用于整个账号。关闭后，已提交的整理继续，已纳入的资料保留。再次开启时，由你选择新的内容。</p>
           </section>
 
           <section aria-labelledby="sync-title" className={styles.peopleTrustSection}>
@@ -311,15 +277,18 @@ export function CompanionPeople({
             {state.review.interactions.length === 0 ? <p className={styles.contentIntro}>还没有需要整理的已确认记录。</p> : (
               <ul className={styles.syncList}>
                 {state.review.interactions.map((interaction) => {
+                  const title = titleForRecord?.(interaction.interactionId);
+                  const date = formatDate(interaction.recordingDate);
+                  const recordLabel = title ? `${title} · ${date}` : date;
                   const retryable = interaction.status === "retryable_failed";
                   return (
                     <li key={interaction.interactionId}>
-                      <div><b>{formatDate(interaction.recordingDate)}</b><span>{STATUS_COPY[interaction.status]}</span></div>
+                      <div><b>{title || date}</b><span>{title && <><time dateTime={interaction.recordingDate}>{date}</time> · </>}{STATUS_COPY[interaction.status]}</span></div>
                       {retryable ? (
-                        <button disabled={saving} onClick={() => void run(() => onRetry(interaction.interactionId))} type="button">
+                        <button aria-label={`重新整理 · ${recordLabel}`} disabled={saving} onClick={() => void run(() => onRetry(interaction.interactionId))} type="button">
                           {mutationState.status === "saving" && mutationState.targetId === interaction.interactionId ? "正在重试…" : "重新整理"}
                         </button>
-                      ) : interaction.status === "needs_review" ? <Link href={`/date-companion/a/recap?interaction=${encodeURIComponent(interaction.interactionId)}`}>去重新确认</Link> : null}
+                      ) : interaction.status === "needs_review" ? <Link aria-label={`去重新确认 · ${recordLabel}`} href={hrefFor(`/date-companion/a/recap?interaction=${encodeURIComponent(interaction.interactionId)}`)}>去重新确认</Link> : null}
                     </li>
                   );
                 })}
@@ -327,30 +296,9 @@ export function CompanionPeople({
             )}
           </section>
 
-          <section aria-labelledby="purge-title" className={`${styles.peopleTrustSection} ${styles.peopleDangerZone}`}>
-            <p className={styles.eyebrow}>删除长期内容</p>
-            <h2 id="purge-title">删除当前关系已保留的内容</h2>
-            <p>这会删除当前人物映射下、由这段关系进入长期使用的内容。人物本身和原始单次复盘不会因此被删除。</p>
-            <button className={styles.dangerButton} disabled={saving || !mappingUsable} onClick={() => setPurgeOpen(true)} type="button">查看删除影响</button>
-          </section>
+          <CompanionWithdrawal busy={saving} read={onPreviewWithdrawal} submit={onPurge} />
         </div>
       </details>
-
-      <ProductDialog
-        footer={(
-          <>
-            <button disabled={saving} onClick={() => setPurgeOpen(false)} type="button">取消</button>
-            <button className={styles.dangerButton} disabled={saving} onClick={() => void run(async () => { await onPurge(); setPurgeOpen(false); })} type="button">
-              {mutationState.status === "saving" && mutationState.operation === "purge" ? "正在删除…" : "确认删除长期内容"}
-            </button>
-          </>
-        )}
-        onClose={() => { if (!saving) setPurgeOpen(false); }}
-        open={purgeOpen}
-        title="删除当前关系的长期内容？"
-      >
-        <p>删除后，这些内容不再出现在人物页和见面前准备中。人物设置与原始复盘仍会保留。</p>
-      </ProductDialog>
     </div>
   );
 }

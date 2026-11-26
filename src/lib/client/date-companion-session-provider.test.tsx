@@ -3,6 +3,7 @@ import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { parseDayPayload, type DayPayload } from "@/lib/domain/day-payload";
+import { QA_INSUFFICIENT_EVIDENCE_ANSWER } from "@/lib/domain/qa-copy";
 import type { DcRelationshipView } from "@/lib/domain/date-companion-stage2";
 import type { QuestionAnswer } from "@/lib/domain/types";
 
@@ -83,7 +84,7 @@ function completedAnswer(): QuestionAnswer {
     id: "answer_1",
     uploadId: "person_ta",
     question: "这次聊了什么？",
-    answer: "聊到了周末的安排。",
+    answer: QA_INSUFFICIENT_EVIDENCE_ANSWER,
     citedSegmentIds: [],
     citations: [],
     createdAt: "2026-08-04T12:00:00.000Z"
@@ -190,6 +191,7 @@ function createApi(view: DcRelationshipView) {
     getPersonSourceCatalog,
     getPersonRetainedSources,
     syncInteractionMemory: async () => null,
+    previewRetainedMemory: async () => ({preview: {version: "scope-v1", totalCount: 2, retainedCount: 1, processingCount: 1}}),
     purgeRetainedMemory: async () => { throw new Error("unexpected purge"); }
   };
 
@@ -255,7 +257,7 @@ describe("DateCompanionSessionProvider", () => {
       })
     );
     window.localStorage.setItem(
-      "daily-brief:user_1:date-companion:person-qa:relationship_1:person_ta:mapping-3:v1",
+      "daily-brief:user_1:date-companion:person-qa:relationship_1:person_ta:mapping-3:v2",
       JSON.stringify([completedAnswer()])
     );
     const initialize = vi.spyOn(DateCompanionSessionController.prototype, "initialize");

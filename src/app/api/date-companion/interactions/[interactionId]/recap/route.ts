@@ -6,6 +6,7 @@ import {
   DcUpdateRecapRequestSchema
 } from "@/lib/domain/date-companion-stage2";
 import { getDateCompanionRepository } from "@/lib/server/date-companion";
+import { getMemoryDatabase } from "@/lib/server/memory";
 import { isDateCompanionVoiceEnrollmentRuntimeAvailable } from "@/lib/server/date-companion/voice-enrollment";
 import {
   dateCompanionAuth,
@@ -39,6 +40,7 @@ export async function PUT(
     );
     repository.updateRecap({
       userId: auth.authContext.user.id,
+      ...(body.data.finalize && !body.data.skipMemoryAdmission ? {memoryDatabase: getMemoryDatabase()} : {}),
       interactionId: interactionId.data,
       version: body.data.version,
       ...(body.data.assignments ? { assignments: body.data.assignments } : {}),
@@ -49,6 +51,7 @@ export async function PUT(
       ...(body.data.memoryAdmission
         ? { memoryAdmission: body.data.memoryAdmission }
         : {}),
+      ...(body.data.skipMemoryAdmission ? { skipMemoryAdmission: true } : {}),
       voiceEnrollmentEnabled: isDateCompanionVoiceEnrollmentRuntimeAvailable(),
       finalize: body.data.finalize
     });

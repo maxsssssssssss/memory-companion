@@ -259,6 +259,7 @@ export async function resolveQaLlmProvider(input: {
   environment?: NodeJS.ProcessEnv;
   providerId?: QaLlmProviderId;
   allowQwenInProduction?: boolean;
+  maxRetries?: number;
 } = {}): Promise<QaLlmProvider> {
   const environment = input.environment ?? process.env;
   const qwenSelected = input.providerId === "qwen-vllm" ||
@@ -270,7 +271,8 @@ export async function resolveQaLlmProvider(input: {
     return new VLLMQwenProvider({
       client: createOpenAIClient({
         openAiApiKey: config.apiKey,
-        openAiBaseUrl: config.baseUrl
+        openAiBaseUrl: config.baseUrl,
+        maxRetries: input.maxRetries
       }),
       model: config.model,
       reasoningEnabled: config.reasoningEnabled,
@@ -290,7 +292,7 @@ export async function resolveQaLlmProvider(input: {
         runtimeConfig.openRouterBaseUrl ??
         "https://api.openai.com/v1";
   return new GPT55Provider({
-    client: createOpenAIClient(runtimeConfig),
+    client: createOpenAIClient(input.maxRetries === undefined ? runtimeConfig : { ...runtimeConfig, maxRetries: input.maxRetries }),
     model,
     wireApi: getQaWireApi(),
     logProvider,

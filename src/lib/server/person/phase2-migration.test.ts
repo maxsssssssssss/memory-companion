@@ -84,6 +84,7 @@ describe("Memory schema v5 to v6 People Relationship migration", () => {
 
     database.exec(`
       DROP TRIGGER IF EXISTS dc_memory_bridge_candidate_receipts_immutable;
+      DROP TABLE dc_memory_withdrawn_projections;
       DROP TABLE dc_memory_bridge_candidate_receipts;
       DROP TRIGGER IF EXISTS memory_daily_reflection_candidate_receipts_immutable;
       DROP TABLE memory_daily_reflection_candidate_revocations;

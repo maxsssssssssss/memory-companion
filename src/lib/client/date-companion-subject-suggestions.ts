@@ -6,6 +6,7 @@ import {
   DcSubjectSuggestionResponseSchema,
   DcSubjectSuggestionStatusResponseSchema,
   type DcMemorySubject,
+  type DcSubjectDraftPreview,
   type DcSubjectSuggestionBatch,
   type DcSubjectSuggestionConfirmation,
   type DcSubjectSuggestionStatusResponse
@@ -44,24 +45,30 @@ async function parsedJson(response: Response) {
 
 export async function requestDateCompanionSubjectSuggestions(
   interactionId: string,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  draftPreview?: DcSubjectDraftPreview
 ): Promise<DcSubjectSuggestionBatch> {
   const id = DcIdSchema.parse(interactionId);
   const response = await fetch(
     `/api/date-companion/interactions/${encodeURIComponent(id)}/subject-suggestions`,
-    { method: "POST", signal }
+    { method: "POST", signal, ...(draftPreview && {
+      headers: { "Content-Type": "application/json" }, body: JSON.stringify(draftPreview)
+    }) }
   );
   return DcSubjectSuggestionResponseSchema.parse(await parsedJson(response)).batch;
 }
 
 export async function getDateCompanionSubjectSuggestionStatus(
   interactionId: string,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  draftPreview?: DcSubjectDraftPreview
 ): Promise<DcSubjectSuggestionStatusResponse> {
   const id = DcIdSchema.parse(interactionId);
   const response = await fetch(
-    `/api/date-companion/interactions/${encodeURIComponent(id)}/subject-suggestions`,
-    { method: "GET", signal }
+    `/api/date-companion/interactions/${encodeURIComponent(id)}/subject-suggestions${draftPreview ? "?read=status" : ""}`,
+    draftPreview ? {
+      method: "POST", signal, headers: { "Content-Type": "application/json" }, body: JSON.stringify(draftPreview)
+    } : { method: "GET", signal }
   );
   return DcSubjectSuggestionStatusResponseSchema.parse(await parsedJson(response));
 }
@@ -141,6 +148,7 @@ function canRecoverSubjectSuggestionGenerationWithStatusRead(error: unknown) {
 
 export async function loadDateCompanionSubjectSuggestions(input: {
   interactionId: string;
+  draftPreview?: DcSubjectDraftPreview;
   interactionVersion: number;
   mappingVersion: number;
   signal?: AbortSignal;
@@ -153,7 +161,7 @@ export async function loadDateCompanionSubjectSuggestions(input: {
   let initial: DcSubjectSuggestionStatusResponse | null = null;
   for (let attempt = 0; attempt < initialReadAttempts; attempt += 1) {
     try {
-      initial = await getDateCompanionSubjectSuggestionStatus(input.interactionId, input.signal);
+      initial = await getDateCompanionSubjectSuggestionStatus(input.interactionId, input.signal, input.draftPreview);
       break;
     } catch (error) {
       if (
@@ -167,6 +175,7 @@ export async function loadDateCompanionSubjectSuggestions(input: {
   if (!initial) {
     throw new DateCompanionSubjectSuggestionClientError(408, "subject_suggestion_status_timeout");
   }
+  if (input.signal?.aborted) throw new DOMException("Aborted", "AbortError");
   assertSubjectSuggestionFence({ response: initial, ...input });
   if (initial.status === "ready") {
     assertBatchFence({ batch: initial.batch, evidenceDigest: initial.evidenceDigest, ...input });
@@ -175,7 +184,7 @@ export async function loadDateCompanionSubjectSuggestions(input: {
 
   const evidenceDigest = initial.evidenceDigest;
   let generation: Promise<SubjectSuggestionGenerationOutcome> | null = initial.status === "idle"
-    ? requestDateCompanionSubjectSuggestions(input.interactionId, input.signal).then(
+    ? requestDateCompanionSubjectSuggestions(input.interactionId, input.signal, input.draftPreview).then(
         (batch) => ({ kind: "ready" as const, batch }),
         (error: unknown) => ({ kind: "error" as const, error })
       )
@@ -205,7 +214,7 @@ export async function loadDateCompanionSubjectSuggestions(input: {
 
     let status: DcSubjectSuggestionStatusResponse;
     try {
-      status = await getDateCompanionSubjectSuggestionStatus(input.interactionId, input.signal);
+      status = await getDateCompanionSubjectSuggestionStatus(input.interactionId, input.signal, input.draftPreview);
     } catch (error) {
       if (input.signal?.aborted || !canRetrySubjectSuggestionStatusRead(error)) throw error;
       continue;

@@ -14,6 +14,8 @@ import type { PersonEvidence } from "@/lib/server/person/types";
 
 import { getDateCompanionDatabase } from "./db";
 import { DcNotFoundError } from "./errors";
+import { relationshipWithdrawalVersion } from "./memory-grant-ledger";
+import { stableBridgeDigest } from "./memory-bridge-digest";
 
 type RelationshipRow = {
   status: string;
@@ -67,13 +69,15 @@ type SnapshotPresentationRow = {
   speaker_id: string | null;
   quote: string;
   content_digest: string | null;
+  grant_key: string;
+  grant_generation: number | null;
   subject: "companion" | "both" | "self" | "unknown";
 };
 
 function emptyCatalog(input: {
   relationshipId: string;
   mapping?: MappingRow | null;
-  status: "needs_review" | "unavailable";
+  status: "needs_review" | "unavailable" | "unlinked" | "withdrawn";
 }): DateCompanionPersonSourceCatalog {
   return DateCompanionPersonSourceCatalogSchema.parse({
     relationshipId: input.relationshipId,
@@ -84,13 +88,22 @@ function emptyCatalog(input: {
   });
 }
 
-function mappingIsCurrent(input: {
+function participantsAreCurrent(input: {
   mapping: MappingRow;
-  relationshipLink: RelationshipLinkRow;
   people: PersonStateRow[];
   selfBinding: SelfBindingRow | undefined;
 }) {
   const peopleById = new Map(input.people.map((person) => [person.id, person.status]));
+  return input.mapping.status === "confirmed"
+    && Boolean(input.mapping.confirmed_at)
+    && input.mapping.self_person_id !== input.mapping.companion_person_id
+    && peopleById.get(input.mapping.self_person_id) === "confirmed"
+    && peopleById.get(input.mapping.companion_person_id) === "confirmed"
+    && input.selfBinding?.status === "active"
+    && input.selfBinding.person_id === input.mapping.self_person_id;
+}
+
+function mappingIsCurrent(input: {mapping: MappingRow; relationshipLink: RelationshipLinkRow}) {
   const expectedEndpoints = [
     input.mapping.self_person_id,
     input.mapping.companion_person_id
@@ -99,14 +112,7 @@ function mappingIsCurrent(input: {
     input.relationshipLink.person_a_id,
     input.relationshipLink.person_b_id
   ].sort();
-  return input.mapping.status === "confirmed"
-    && Boolean(input.mapping.confirmed_at)
-    && input.mapping.self_person_id !== input.mapping.companion_person_id
-    && peopleById.get(input.mapping.self_person_id) === "confirmed"
-    && peopleById.get(input.mapping.companion_person_id) === "confirmed"
-    && input.selfBinding?.status === "active"
-    && input.selfBinding.person_id === input.mapping.self_person_id
-    && input.relationshipLink.status === "active"
+  return input.relationshipLink.status === "active"
     && input.relationshipLink.person_relationship_status === "confirmed"
     && input.relationshipLink.explicitly_confirmed === 1
     && Boolean(input.relationshipLink.confirmed_at)
@@ -149,7 +155,8 @@ function presentationRow(input: {
            e.upload_id, e.source_segment_id, i.recording_date,
            e.start_seconds, e.end_seconds, e.speaker_id, e.quote,
            e.content_digest,
-           s.subject
+           s.subject, o.idempotency_key AS grant_key,
+           json_extract(o.payload_json, '$.grantGeneration') AS grant_generation
     FROM dc_evidence_snapshots e
     INNER JOIN dc_recap_items r
       ON r.id = e.recap_item_id AND r.user_id = e.user_id
@@ -157,6 +164,9 @@ function presentationRow(input: {
       ON i.id = r.interaction_id AND i.user_id = r.user_id
     INNER JOIN dc_memory_subject_selections s
       ON s.evidence_snapshot_id = e.id AND s.user_id = e.user_id
+    INNER JOIN dc_memory_bridge_outbox o
+      ON o.user_id = i.user_id AND o.relationship_id = i.relationship_id
+      AND o.interaction_id = i.id AND o.status = 'completed'
     WHERE e.id = ? AND e.user_id = ? AND i.relationship_id = ?
   `).get(
     input.evidenceSnapshotId,
@@ -209,19 +219,17 @@ export function resolveDateCompanionPersonSourceCatalog(input: {
   }
 
   try {
+    const withdrawalVersion = relationshipWithdrawalVersion(input.dateCompanionDatabase, input.accountId, input.relationshipId);
     const relationshipLink = input.memoryDatabase.prepare(`
       SELECT l.mapping_version, l.self_person_id, l.companion_person_id,
              l.relationship_type, l.status,
              r.status AS person_relationship_status, r.explicitly_confirmed,
              r.confirmed_at, r.person_a_id, r.person_b_id
       FROM dc_person_relationship_links l
-      INNER JOIN person_relationships r
+      LEFT JOIN person_relationships r
         ON r.id = l.person_relationship_id AND r.account_id = l.account_id
       WHERE l.account_id = ? AND l.dc_relationship_id = ?
     `).get(input.accountId, input.relationshipId) as RelationshipLinkRow | undefined;
-    if (!relationshipLink) {
-      return emptyCatalog({ relationshipId: input.relationshipId, mapping, status: "unavailable" });
-    }
     const people = input.memoryDatabase.prepare(`
       SELECT id, status FROM person_entities
       WHERE account_id = ? AND id IN (?, ?)
@@ -234,8 +242,13 @@ export function resolveDateCompanionPersonSourceCatalog(input: {
     const selfBinding = input.memoryDatabase.prepare(`
       SELECT person_id, status FROM person_self_bindings WHERE account_id = ?
     `).get(input.accountId) as SelfBindingRow | undefined;
-    if (!mappingIsCurrent({ mapping, relationshipLink, people, selfBinding })) {
+    if (!participantsAreCurrent({ mapping, people, selfBinding })
+      || (relationshipLink && !mappingIsCurrent({ mapping, relationshipLink }))) {
       return emptyCatalog({ relationshipId: input.relationshipId, mapping, status: "needs_review" });
+    }
+    if (!relationshipLink) {
+      return { ...emptyCatalog({ relationshipId: input.relationshipId, mapping, status: withdrawalVersion ? "withdrawn" : "unlinked" }),
+        ...(withdrawalVersion ? {withdrawalVersion} : {}) };
     }
 
     const candidateLinks = candidateEvidenceRows(input);
@@ -256,8 +269,12 @@ export function resolveDateCompanionPersonSourceCatalog(input: {
       dateCompanionDatabase: input.dateCompanionDatabase,
       accountId: input.accountId,
       personId: mapping.companion_person_id,
+      relationshipId: input.relationshipId,
       evidence: [...evidenceById.values()]
     });
+    if (resolution.readFailed) {
+      return emptyCatalog({ relationshipId: input.relationshipId, mapping, status: "unavailable" });
+    }
     if (resolution.activeSelfPersonId !== mapping.self_person_id) {
       return emptyCatalog({ relationshipId: input.relationshipId, mapping, status: "needs_review" });
     }
@@ -298,6 +315,9 @@ export function resolveDateCompanionPersonSourceCatalog(input: {
         ...(row.speaker_id ? { speakerId: row.speaker_id } : {}),
         quote: row.quote,
         ...(row.content_digest ? { contentDigest: row.content_digest } : {}),
+        ...(row.grant_generation && row.grant_generation > 1 ? {
+          authorizationRevision: stableBridgeDigest([row.grant_key, row.content_digest, row.evidence_snapshot_id])
+        } : {}),
         subject: row.subject as "companion" | "both"
       });
     }
@@ -323,11 +343,19 @@ export function resolveDateCompanionPersonSourceCatalog(input: {
       });
     }
 
+    // A second process may have withdrawn these grants while the two databases
+    // were being read. Never publish the earlier projection under a newer receipt.
+    const latestWithdrawal = relationshipWithdrawalVersion(input.dateCompanionDatabase, input.accountId, input.relationshipId);
+    if (withdrawalVersion !== latestWithdrawal) {
+      return { ...emptyCatalog({relationshipId: input.relationshipId, mapping, status: "unavailable"}),
+        ...(latestWithdrawal ? {withdrawalVersion: latestWithdrawal} : {}) };
+    }
     return DateCompanionPersonSourceCatalogSchema.parse({
       relationshipId: input.relationshipId,
       companionPersonId: mapping.companion_person_id,
       mappingVersion: mapping.version,
-      status: "ready",
+      ...(withdrawalVersion ? {withdrawalVersion} : {}),
+      status: sources.size === 0 && withdrawalVersion ? "withdrawn" : "ready",
       sources: [...sources.values()].sort((left, right) =>
         left.recordingDate.localeCompare(right.recordingDate)
         || left.startSeconds - right.startSeconds

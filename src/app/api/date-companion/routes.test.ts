@@ -6,6 +6,7 @@ import type Database from "better-sqlite3";
 
 const state = vi.hoisted(() => ({
   repository: null as unknown,
+  memory: null as unknown as Database.Database,
   store: null as unknown,
   deleteVoiceprintCandidates: vi.fn(async () => 0),
   deleteOwnerReviewCandidates: vi.fn(async () => 0),
@@ -17,6 +18,10 @@ const state = vi.hoisted(() => ({
     memoryDeleted: true,
     indexRefresh: "not_required" as const
   }))
+}));
+vi.mock("@/lib/server/memory", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/server/memory")>()),
+  getMemoryDatabase: () => state.memory
 }));
 
 vi.mock("@/lib/server/auth/request-context", () => ({
@@ -63,6 +68,7 @@ vi.mock("@/lib/server/memory/upload-deletion", async (importOriginal) => ({
 }));
 
 import { openDateCompanionDatabase } from "@/lib/server/date-companion/db";
+import { openMemoryDatabase } from "@/lib/server/memory/db";
 import { DateCompanionRepository } from "@/lib/server/date-companion/repository";
 import { JsonStore } from "@/lib/server/storage/json-store";
 import { MemoryUploadDeletionError } from "@/lib/server/memory/upload-deletion";
@@ -84,6 +90,7 @@ describe("Date Companion API isolation", () => {
 
   beforeEach(() => {
     database = openDateCompanionDatabase({ filePath: ":memory:" });
+    state.memory = openMemoryDatabase({ filePath: ":memory:" });
     repository = new DateCompanionRepository(database);
     state.repository = repository;
     state.store = {
@@ -117,6 +124,7 @@ describe("Date Companion API isolation", () => {
 
   afterEach(async () => {
     database.close();
+    state.memory.close();
     await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
   });
 
@@ -433,8 +441,11 @@ describe("Date Companion API isolation", () => {
       version: 0,
       assignments: [{ speakerId: "speaker_0", role: "self" }],
       items: [{ id: recapItem.id, version: 0, disposition: "kept" }],
+      skipMemoryAdmission: true,
       finalize: true
     };
+    expect((await recapRequest("user_a", {...finalizeBody,memoryAdmission:{mappingVersion:1,selections:[]}}))!.status).toBe(400);
+    expect((await recapRequest("user_a", {version:0,items:finalizeBody.items,skipMemoryAdmission:true}))!.status).toBe(400);
     const finalized = (await recapRequest("user_a", finalizeBody))!;
     expect(finalized.status).toBe(200);
     const finalizedPayload = await finalized.json() as {
@@ -445,6 +456,8 @@ describe("Date Companion API isolation", () => {
 
     const repeated = (await recapRequest("user_a", finalizeBody))!;
     expect(repeated.status).toBe(200);
+    const legacyReplay = {version:0,assignments:finalizeBody.assignments,items:finalizeBody.items,finalize:true};
+    expect((await recapRequest("user_a",legacyReplay))!.status).toBe(409);
     await expect(repeated.json()).resolves.toMatchObject({ view: { promises: [{ id: promise.id }] } });
     const mismatchedReplay = (await recapRequest(
       "user_a",

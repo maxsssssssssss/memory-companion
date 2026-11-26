@@ -74,6 +74,7 @@ export type ToyAudioSyncProps = Readonly<{
   accountId: string;
   busy?: boolean;
   className?: string;
+  paperLoading?: boolean;
   destination?: ToySyncDestination;
   mode?: "upload" | "select";
   relationshipId?: string;
@@ -139,6 +140,7 @@ export function ToyAudioSync({
   accountId,
   busy = false,
   className,
+  paperLoading = false,
   destination = DEFAULT_TOY_SYNC_DESTINATION,
   mode = "upload",
   relationshipId,
@@ -643,7 +645,7 @@ export function ToyAudioSync({
     ? {
         eyebrow: "玩偶录音",
         title: "从玩偶选择这次相处",
-        scope: "这里只选择录音并带回当前上传表单，不会自动上传，也不会判断人物、自我、对方或说话人身份。"
+        scope: "选好的录音由你确认上传。选择文件不会确认人物或说话人身份。"
       }
     : {
         eyebrow: "玩偶录音",
@@ -656,8 +658,9 @@ export function ToyAudioSync({
       id="reflection-capture-toy"
       className={`${styles.uploadCard} ${styles.toySyncCard}${className ? ` ${className}` : ""}`}
       aria-labelledby={titleId}
+      data-toy-sync-state={viewState}
     >
-      <div className={styles.toySyncHeader}>
+      <div className={styles.toySyncHeader} data-toy-header="">
         <div>
           <p className={styles.eyebrow}>{presentation.eyebrow}</p>
           <h2 id={titleId}>{presentation.title}</h2>
@@ -665,13 +668,18 @@ export function ToyAudioSync({
         {viewState === "connected" ? <span className={styles.toyConnectedBadge}>已连接玩偶</span> : null}
       </div>
       <p className={styles.cardLead}>
-        第一次由你选择玩偶录音文件夹。以后打开本页时，只在已有授权仍有效时检查新录音；关闭页面后不会继续同步。
+        {selectionMode ? "文件夹授权有效时，打开面板会检查新录音，关闭即停止。" : "第一次由你选择玩偶录音文件夹。以后打开本页时，只在已有授权仍有效时检查新录音；关闭页面后不会继续同步。"}
       </p>
       <p className={styles.toyScopeNote}>
         {presentation.scope}
       </p>
 
-      {viewState === "checking" ? <p role="status">正在检查是否连接过玩偶…</p> : null}
+      {paperLoading && (viewState === "checking" || viewState === "scanning") ? <div data-toy-loading="">
+        <span aria-hidden="true"><i /><i /><i /></span>
+        <span aria-hidden="true"><i /><i /><i /></span>
+        <p role="status">{viewState === "checking" ? "正在检查是否连接过玩偶…" : "正在检查新的录音…"}</p>
+      </div> : null}
+      {!paperLoading && viewState === "checking" ? <p role="status">正在检查是否连接过玩偶…</p> : null}
       {viewState === "unsupported" ? (
         <div className={styles.toyCompatibility} role="status">
           <b>当前浏览器暂不支持连接玩偶。</b>
@@ -686,10 +694,10 @@ export function ToyAudioSync({
       ) : null}
       {["disconnected", "permission_required", "error"].includes(viewState) ? (
         <button className={styles.primaryButton} disabled={busy} onClick={() => void connect()} type="button">
-          {viewState === "permission_required" ? "重新连接玩偶" : "连接玩偶"}
+          {selectionMode ? viewState === "permission_required" ? "重新授权录音文件夹" : "选择录音文件夹" : viewState === "permission_required" ? "重新连接玩偶" : "连接玩偶"}
         </button>
       ) : null}
-      {viewState === "scanning" ? <p role="status">正在检查新的录音…</p> : null}
+      {!paperLoading && viewState === "scanning" ? <p role="status">正在检查新的录音…</p> : null}
       {message ? <p className={styles.inlineError} role="alert">{message}</p> : null}
 
       {viewState === "connected" && scanResult ? (
@@ -797,6 +805,7 @@ export function ToyAudioSync({
                         selectionMode ? (
                           <button
                             className={styles.primaryButton}
+                            data-toy-action="select"
                             disabled={busy || !date || !onSelect}
                             onClick={() => selectRecording(recording)}
                             type="button"
