@@ -8,6 +8,7 @@ import { dateCompanionRetainedEvidenceDigest } from "@/lib/server/memory/retenti
 import type { MemoryWriteInput } from "@/lib/server/memory/types";
 import type { MemoryOwnerResolution } from "@/lib/server/memory/owner-attribution/types";
 import { DcConflictError } from "./errors";
+import { detachDateCompanionPersonLinks, pruneDetachedDateCompanionEvidence } from "./memory-grant-projection";
 import { reviewedSpeakerText } from "./recap-speaker-text";
 import {
   createDateCompanionMemoryBridgeRepository,
@@ -509,6 +510,7 @@ function ensurePersonEvidence(input: {
   relationshipId: string;
   interactionId: string;
   grantGeneration?: number;
+  detachedOwnership: ReadonlyMap<string, number>;
   snapshot: {
     id: string;
     upload_id: string;
@@ -569,7 +571,7 @@ function ensurePersonEvidence(input: {
     input.snapshot.id,
     input.snapshot.content_digest,
     input.now,
-    existing ? priorLink?.independent ?? 1 : 0
+    existing ? input.detachedOwnership.get(id) ?? priorLink?.independent ?? 1 : 0
   );
   return id;
 }
@@ -1002,97 +1004,6 @@ function persistFormalDateCompanionMemories(input: {
   return { admittedRecapIds, candidateMemoryIds };
 }
 
-function clearLegacyDateCompanionPersonProjection(input: {
-  database: Database.Database;
-  accountId: string;
-  relationshipId: string;
-  interactionId: string;
-}) {
-  const linkedEvidence = input.database.prepare(`
-    SELECT DISTINCT person_evidence_id
-    FROM person_evidence_dc_links
-    WHERE account_id = ? AND dc_relationship_id = ? AND dc_interaction_id = ?
-    ORDER BY person_evidence_id
-  `).all(input.accountId, input.relationshipId, input.interactionId) as Array<{
-    person_evidence_id: string;
-  }>;
-  const relationshipLink = input.database.prepare(`
-    SELECT person_relationship_id
-    FROM dc_person_relationship_links
-    WHERE account_id = ? AND dc_relationship_id = ?
-  `).get(input.accountId, input.relationshipId) as {
-    person_relationship_id: string;
-  } | undefined;
-  const deleteBridgeSubjects = input.database.prepare(`
-    DELETE FROM person_subject_observations
-    WHERE account_id = ? AND evidence_id = ? AND source = 'manual_review'
-      AND reason IN (
-        'date_companion_explicit_subject_v1',
-        'date_companion_qwen_batch_review_v1'
-      )
-  `);
-  const deleteRelationshipEvidence = input.database.prepare(`
-    DELETE FROM person_relationship_evidence
-    WHERE account_id = ? AND relationship_id = ? AND evidence_id = ?
-  `);
-  for (const row of linkedEvidence) {
-    deleteBridgeSubjects.run(input.accountId, row.person_evidence_id);
-    if (relationshipLink) {
-      deleteRelationshipEvidence.run(
-        input.accountId,
-        relationshipLink.person_relationship_id,
-        row.person_evidence_id
-      );
-    }
-  }
-  input.database.prepare(`
-    DELETE FROM person_evidence_dc_links
-    WHERE account_id = ? AND dc_relationship_id = ? AND dc_interaction_id = ?
-  `).run(input.accountId, input.relationshipId, input.interactionId);
-  const hasRemainingReference = input.database.prepare(`
-    SELECT (
-      EXISTS(SELECT 1 FROM person_names
-        WHERE account_id = @accountId AND evidence_id = @evidenceId)
-      OR EXISTS(SELECT 1 FROM person_identity_links
-        WHERE account_id = @accountId AND evidence_id = @evidenceId)
-      OR EXISTS(SELECT 1 FROM person_subject_observations
-        WHERE account_id = @accountId AND evidence_id = @evidenceId)
-      OR EXISTS(SELECT 1 FROM person_subject_resolution_audits
-        WHERE account_id = @accountId AND evidence_id = @evidenceId)
-      OR EXISTS(SELECT 1 FROM person_relationship_evidence
-        WHERE account_id = @accountId AND evidence_id = @evidenceId)
-      OR EXISTS(SELECT 1 FROM person_fact_evidence
-        WHERE account_id = @accountId AND evidence_id = @evidenceId)
-      OR EXISTS(SELECT 1 FROM person_fact_transitions
-        WHERE account_id = @accountId AND evidence_id = @evidenceId)
-      OR EXISTS(SELECT 1 FROM person_commitment_evidence
-        WHERE account_id = @accountId AND evidence_id = @evidenceId)
-      OR EXISTS(SELECT 1 FROM person_commitment_transitions
-        WHERE account_id = @accountId AND evidence_id = @evidenceId)
-      OR EXISTS(SELECT 1 FROM person_subject_admissions
-        WHERE account_id = @accountId AND evidence_id = @evidenceId)
-      OR EXISTS(SELECT 1 FROM person_admission_audits
-        WHERE account_id = @accountId AND evidence_id = @evidenceId)
-      OR EXISTS(SELECT 1 FROM person_evidence_dc_links
-        WHERE account_id = @accountId AND person_evidence_id = @evidenceId)
-      OR EXISTS(SELECT 1 FROM memory_daily_reflection_candidate_person_sources
-        WHERE user_id = @accountId AND person_evidence_id = @evidenceId)
-    ) AS referenced
-  `);
-  const deleteOrphanEvidence = input.database.prepare(`
-    DELETE FROM person_evidence WHERE account_id = ? AND id = ?
-  `);
-  for (const row of linkedEvidence) {
-    const remaining = hasRemainingReference.get({
-      accountId: input.accountId,
-      evidenceId: row.person_evidence_id
-    }) as { referenced: number };
-    if (remaining.referenced === 0) {
-      deleteOrphanEvidence.run(input.accountId, row.person_evidence_id);
-    }
-  }
-  return relationshipLink?.person_relationship_id ?? null;
-}
 
 function archiveUnreferencedDateCompanionRelationship(input: {
   database: Database.Database;
@@ -1177,14 +1088,16 @@ function applyBridgeToMemory(input: {
       companionPersonId: mapping.companionPersonId
     });
     const now = new Date().toISOString();
-    const legacyRelationshipId = input.legacyProjectionReplay
-      ? clearLegacyDateCompanionPersonProjection({
-          database: input.database,
-          accountId: input.accountId,
-          relationshipId: input.payload.relationshipId,
-          interactionId: input.payload.interactionId
-        })
-      : null;
+    const legacyRelationship = input.legacyProjectionReplay
+      ? input.database.prepare(`SELECT person_relationship_id FROM dc_person_relationship_links
+          WHERE account_id=? AND dc_relationship_id=?`).get(input.accountId, input.payload.relationshipId) as
+          { person_relationship_id: string } | undefined
+      : undefined;
+    const detached = input.legacyProjectionReplay ? detachDateCompanionPersonLinks(input.database, {
+      userId: input.accountId, relationshipId: input.payload.relationshipId,
+      interactionId: input.payload.interactionId, uploadId: input.payload.sourceUploadId
+    }) : [];
+    const priorOwnership = new Map(detached.map(source => [source.id, source.independentEvidence]));
     const formalProjection = persistFormalDateCompanionMemories({
       database: input.database,
       accountId: input.accountId,
@@ -1250,6 +1163,7 @@ function applyBridgeToMemory(input: {
         relationshipId: input.payload.relationshipId,
         interactionId: input.payload.interactionId,
         grantGeneration: input.payload.grantGeneration,
+        detachedOwnership: priorOwnership,
         snapshot,
         now
       });
@@ -1287,11 +1201,12 @@ function applyBridgeToMemory(input: {
       }
     }
     if (input.legacyProjectionReplay) {
+      pruneDetachedDateCompanionEvidence(input.database, input.accountId, detached);
       archiveUnreferencedDateCompanionRelationship({
         database: input.database,
         accountId: input.accountId,
         relationshipId: input.payload.relationshipId,
-        personRelationshipId: legacyRelationshipId,
+        personRelationshipId: legacyRelationship?.person_relationship_id ?? null,
         now
       });
     }

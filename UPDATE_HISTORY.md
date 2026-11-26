@@ -16037,3 +16037,8 @@ src/components/date-companion/companion-preparation.tsx、companion-preparation.
 正式新版和配套业务回归提交为 21eeaaa4708b365b0fdfeadf83b2b2efea7b5825（feat(date-companion): ship the default book interface），接手指南和运行说明提交为 cc076e036cdb5ee29c2fba013aa0c02975dd4463（docs(date-companion): document the official book entry）。2026-11-25 已推送至 origin/preview/date-return-round-one，已建立跟踪关系，未合并 main、未部署。首次推送后未观察到 Actions、提交检查或部署记录。
 
 干净检出精确验证的是 cc076e036cdb5ee29c2fba013aa0c02975dd4463。生产构建 QLR6l1gBGNFY2EGG1VGIz、TypeScript 及 188 份追踪清单校验通过，准备手帐 195/195、关键回归 129/129、Chrome 定向检查 8/8，九份公开素材 HTTP 200 且内容与提交一致。首次启动的隔离夹具目录错误在独立脚本修正后通过，应用源码无变化。本轮补记不含运行时代码。验证使用隔离合成资料，真实 LLM 与 ASR 调用为零。既有 ASR 混声、真实模型抽样、手机复盘偶发未返焦及未验设备边界继续保留。
+
+## 2026-11-26　约会陪伴 PR #3 撤回归属修复
+
+在旧版正式准入、复盘授权与 Worker 整理产生的两库副本上复现并修复误删。撤回后独立朋友关系保留原证据与边，仅由本授权支持的材料清除。既有 v15 库直接适用修复，Date Companion 和 Memory 均维持 v15。修正旧库迁移夹具及版本、索引、约束断言。
+原数据专项 144/144，相邻回归 71/71，类型检查及隔离生产构建通过。维护窗口须停写后重查旧未完成撤回回执，并完成配对备份与恢复演练。开发修复完成，待独立复验。[逐项证据与复跑方法](docs/deployment/companion-withdrawal-verification.md)

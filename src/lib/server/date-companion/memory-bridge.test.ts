@@ -5,6 +5,8 @@ import { MEMORY_SCHEMA_VERSION, migrateMemorySchema } from "@/lib/server/memory/
 import { createMemoryRepository } from "@/lib/server/memory/repository";
 import { createDailyReflectionMemoryPublicationRepository } from "@/lib/server/memory/daily-reflection-publication";
 import { validatePersonTranscriptEvidence } from "@/lib/server/person/evidence";
+import { createPersonAdmissionRepository } from "@/lib/server/person/admission-repository";
+import { createTemporalFactRepository } from "@/lib/server/person/temporal-facts";
 import { captureRetainedMemoryEvidenceProvenance } from "@/lib/server/memory/retention-provenance";
 import { deleteMemoryUploadAndRefreshIndex } from "@/lib/server/memory/upload-deletion";
 import { createPersonMemoryRepository } from "@/lib/server/person/memory-repository";
@@ -565,6 +567,153 @@ describe("Memory-Date Companion bridge", () => {
     cleanupDateCompanionGrantProjection(memoryDatabase, grant);
     cleanupDateCompanionGrantProjection(memoryDatabase, grant);
     expect(getCards().map((card) => card.id)).toEqual(["standalone_memory"]);
+  });
+
+  it.each(["friend", "dating"] as const)(
+    "preserves independently admitted %s evidence with v15 migration defaults", async type => {
+      seedPeople();
+      const admission = createPersonAdmissionRepository(memoryDatabase);
+      const evidence = await validatePersonTranscriptEvidence({
+        store: transcriptStore() as unknown as Pick<JsonStore, "read">,
+        authenticatedAccountId: "user_a", accountId: "user_a", uploadId: "upload_1",
+        sourceSegmentId: "segment_companion", quote: "我最近想去看展"
+      });
+      const candidate = admission.createRelationshipCandidate({
+        accountId: "user_a", personAId: "person_self", personBId: "person_ta",
+        type, expectedVersion: 0, evidence, now: NOW
+      });
+      admission.transitionRelationship({ accountId: "user_a", relationshipId: candidate.id,
+        action: "confirm", expectedVersion: candidate.version, now: NOW });
+      const { relationship } = await completeRetainedBridge(undefined, true);
+      // Migrated pre-v15 links have neither of the newer ownership hints.
+      memoryDatabase.prepare(`UPDATE person_evidence_dc_links
+        SET independent_person_evidence=0, independent_relationship_edge=0 WHERE account_id=?`).run("user_a");
+      const scope = { dateCompanionDatabase: dcDatabase, memoryDatabase, userId: "user_a", relationshipId: relationship.id };
+      const { preview } = getDateCompanionWithdrawalPreview(scope);
+      expect(purgeDateCompanionRetainedMemory({ ...scope, previewVersion: preview.version }))
+        .toMatchObject({ status: "completed", completedCount: 1 });
+      expect(memoryDatabase.prepare(`SELECT relationship_id, evidence_id FROM person_relationship_evidence
+        WHERE account_id=?`).all("user_a")).toEqual([{ relationship_id: candidate.id, evidence_id: evidence.id }]);
+      expect(memoryDatabase.prepare("SELECT quote FROM person_evidence WHERE account_id=? AND id=?")
+        .get("user_a", evidence.id)).toEqual({ quote: evidence.quote });
+      expect(memoryDatabase.prepare(`SELECT entity_id FROM person_admission_audits WHERE account_id=?
+        AND evidence_id=? AND action='relationship_candidate'`).get("user_a", evidence.id)).toEqual({ entity_id: candidate.id });
+      expect(memoryDatabase.prepare("SELECT id FROM person_subject_observations WHERE evidence_id=?").all(evidence.id)).toEqual([]);
+      expect(memoryDatabase.prepare("SELECT id FROM person_evidence_dc_links WHERE account_id=?").all("user_a")).toEqual([]);
+    }
+  );
+
+  it("keeps a shared canon and edge until the last supporting bridge grant is withdrawn", async () => {
+    const { imported, relationship } = await completeRetainedBridge();
+    const { id: outboxId } = dcDatabase.prepare("SELECT id FROM dc_memory_bridge_outbox WHERE interaction_id=?")
+      .get(imported.interactionId) as { id: string };
+    const first = { userId: "user_a", uploadId: "upload_1", interactionId: imported.interactionId,
+      relationshipId: relationship.id, outboxId, generation: 1 };
+    const second = { ...first, interactionId: "other_interaction", relationshipId: "other_relationship", outboxId: "other_outbox" };
+    // The current Date UI binds an upload to one interaction. Model a second durable
+    // grant on the Memory side using its own relationship mapping, receipt and source link.
+    memoryDatabase.prepare(`INSERT INTO dc_person_relationship_links
+      SELECT account_id, ?, person_relationship_id, mapping_version, self_person_id, companion_person_id,
+        relationship_type, status, created_at, updated_at, relationship_epoch
+      FROM dc_person_relationship_links WHERE account_id=? AND dc_relationship_id=?`)
+      .run(second.relationshipId, first.userId, first.relationshipId);
+    memoryDatabase.prepare(`INSERT INTO person_evidence_dc_links
+      (id,account_id,person_evidence_id,dc_relationship_id,dc_interaction_id,dc_evidence_snapshot_id,snapshot_digest,created_at)
+      SELECT 'second_link',account_id,person_evidence_id,?,?,'second_snapshot',snapshot_digest,created_at
+      FROM person_evidence_dc_links WHERE account_id=? AND dc_interaction_id=?`)
+      .run(second.relationshipId, second.interactionId, first.userId, first.interactionId);
+    memoryDatabase.prepare(`INSERT INTO dc_memory_bridge_receipts
+      (id,account_id,idempotency_key,payload_digest,dc_relationship_id,dc_interaction_id,dc_outbox_id,mapping_version,committed_at)
+      VALUES ('second_receipt',?,'second_key','second_digest',?,?,?,1,?)`)
+      .run(second.userId, second.relationshipId, second.interactionId, second.outboxId, NOW);
+    const counts = () => memoryDatabase.prepare(`SELECT
+      (SELECT COUNT(*) FROM person_evidence_dc_links WHERE account_id=@userId) AS links,
+      (SELECT COUNT(*) FROM person_relationship_evidence WHERE account_id=@userId) AS edges,
+      (SELECT COUNT(*) FROM person_subject_observations WHERE account_id=@userId) AS subjects,
+      (SELECT COUNT(*) FROM person_evidence WHERE account_id=@userId) AS evidence`).get(first);
+    expect(counts()).toEqual({ links: 2, edges: 1, subjects: 1, evidence: 1 });
+    fenceDateCompanionGrantProjection(memoryDatabase, first);
+    cleanupDateCompanionGrantProjection(memoryDatabase, first);
+    fenceDateCompanionGrantProjection(memoryDatabase, first);
+    expect(hasDateCompanionGrantProjection(memoryDatabase, second)).toBe(true);
+    expect(counts()).toEqual({ links: 1, edges: 1, subjects: 1, evidence: 1 });
+    fenceDateCompanionGrantProjection(memoryDatabase, second);
+    cleanupDateCompanionGrantProjection(memoryDatabase, second);
+    expect(counts()).toEqual({ links: 0, edges: 0, subjects: 0, evidence: 0 });
+  });
+
+  it.each([
+    { sourceType: "transcript", quote: "我最近想去看展", survives: true },
+    { sourceType: "transcript", quote: "同一编号的另一段文字", survives: false },
+    { sourceType: "brief", quote: "我最近想去看展", survives: false }
+  ] as const)("checks the type and verbatim content of a surviving Memory source: $sourceType / $quote", async source => {
+    const { relationship } = await completeRetainedBridge();
+    const userId = "user_a";
+    const uploadId = "upload_1";
+    const memory = createMemoryRepository(memoryDatabase);
+    memory.replaceUploadMemories({ userId, uploadId, memories: [{
+      id: "unrelated_memory", title: "另一份已保存资料", summary: "另一份已保存资料",
+      type: "event", importance: 0.8, date: "2026-08-11", createdAt: NOW, updatedAt: NOW,
+      evidence: [{ id: "unrelated_evidence", sourceId: "segment_companion", sourceType: "transcript",
+        uploadId, date: "2026-08-11", quote: source.quote, createdAt: NOW }]
+    }] });
+    // Old Memory DBs can contain a non-transcript source at the same locator.
+    memoryDatabase.prepare("UPDATE memory_evidence SET source_type=? WHERE id='unrelated_evidence'").run(source.sourceType);
+    const scope = { dateCompanionDatabase: dcDatabase, memoryDatabase, userId, relationshipId: relationship.id };
+    const { preview } = getDateCompanionWithdrawalPreview(scope);
+    expect(purgeDateCompanionRetainedMemory({ ...scope, previewVersion: preview.version }).status).toBe("completed");
+    expect(memoryDatabase.prepare("SELECT quote FROM person_evidence WHERE account_id=?").all(userId))
+      .toEqual(source.survives ? [{ quote: source.quote }] : []);
+    expect(memory.getRelevantMemories({ userId, uploadId }).flatMap(item => item.evidence))
+      .toEqual([expect.objectContaining({ id: "unrelated_evidence", quote: source.quote })]);
+  });
+
+  it("rechecks fact support after repair or withdrawal while preserving an independent relationship and fact", async () => {
+    const { relationship, imported } = await completeRetainedBridge();
+    const accountId = "user_a";
+    const subjectPersonId = "person_ta";
+    const store = transcriptStore() as unknown as Pick<JsonStore, "read">;
+    const source = { store, accountId, authenticatedAccountId: accountId, uploadId: "upload_1" };
+    const evidence = await validatePersonTranscriptEvidence({ ...source, sourceSegmentId: "segment_companion", quote: "我最近想去看展" });
+    const otherEvidence = await validatePersonTranscriptEvidence({ ...source, sourceSegmentId: "segment_unknown", quote: "这件事还不确定" });
+    const people = createPersonAdmissionRepository(memoryDatabase);
+    const friend = people.createRelationshipCandidate({ accountId, personAId: "person_self", personBId: subjectPersonId,
+      type: "friend", expectedVersion: 0, evidence });
+    people.transitionRelationship({ accountId, relationshipId: friend.id, action: "confirm", expectedVersion: friend.version });
+    people.recordSubjectAdmission({ accountId, personId: subjectPersonId, disposition: "confirmed", expectedVersion: 0,
+      evidence: otherEvidence });
+    const facts = createTemporalFactRepository(memoryDatabase);
+    const fields = { accountId, subjectPersonId, kind: "preference", observedAt: NOW, validFrom: NOW };
+    const dateFact = facts.createFact({ ...fields, factKey: "exhibition", derivedText: "想去看展", evidence });
+    const otherFact = facts.createFact({ ...fields, factKey: "undecided", derivedText: "还没有决定", evidence: otherEvidence });
+    // Multiple source edges for one fact are supported by the Memory schema.
+    memoryDatabase.prepare(`INSERT INTO person_fact_evidence(id,account_id,fact_id,evidence_id,created_at)
+      VALUES ('additional_fact_evidence',?,?,?,?)`).run(accountId, otherFact.id, evidence.id, NOW);
+    const later = "2026-08-12T12:00:00.000Z";
+    facts.resolveFact({ accountId, factId: otherFact.id, observedAt: later, occurredAt: later, expectedVersion: 1, evidence });
+
+    // Replay the formal Worker from the legacy, pre-candidate-receipt shape.
+    const { id, idempotency_key: legacyKey } = dcDatabase.prepare(`SELECT id,idempotency_key FROM dc_memory_bridge_outbox
+      WHERE user_id=? AND interaction_id=?`).get(accountId, imported.interactionId) as { id: string; idempotency_key: string };
+    memoryDatabase.prepare("DELETE FROM dc_memory_bridge_candidate_receipts WHERE account_id=? AND dc_outbox_id=?").run(accountId, id);
+    memoryDatabase.prepare("UPDATE dc_memory_bridge_receipts SET id='legacy_operation',idempotency_key=? WHERE account_id=? AND dc_outbox_id=?")
+      .run(legacyKey, accountId, id);
+    expect(requeueCompletedLegacyMemoryProjections({ dateCompanionDatabase: dcDatabase, memoryDatabase }).requeued).toBe(1);
+    await expect(processDateCompanionMemoryBridgeInteraction({ dateCompanionDatabase: dcDatabase,
+      memoryDatabase, userId: accountId, interactionId: imported.interactionId })).resolves.toMatchObject({ completed: true });
+    expect(facts.getFact(accountId, dateFact.id)?.evidence.map(item => item.id)).toEqual([evidence.id]);
+    expect(facts.getFact(accountId, otherFact.id)).toMatchObject({ status: "resolved", version: 2 });
+
+    const scope = { dateCompanionDatabase: dcDatabase, memoryDatabase, userId: accountId, relationshipId: relationship.id };
+    const { preview } = getDateCompanionWithdrawalPreview(scope);
+    expect(purgeDateCompanionRetainedMemory({ ...scope, previewVersion: preview.version }).status).toBe("completed");
+    expect(memoryDatabase.prepare("SELECT evidence_id FROM person_relationship_evidence WHERE account_id=? AND relationship_id=?")
+      .all(accountId, friend.id)).toEqual([{ evidence_id: evidence.id }]);
+    expect(facts.getFact(accountId, dateFact.id)).toBeNull();
+    expect(facts.getFact(accountId, otherFact.id)).toMatchObject({
+      evidence: [expect.objectContaining({ id: otherEvidence.id })], status: "active", version: 1, transitions: []
+    });
+    expect(facts.listFactsForPerson(accountId, subjectPersonId).map(fact => fact.id)).toEqual([otherFact.id]);
   });
 
   it("R14 preserves the same person's grant from another relationship and another account's card", async () => {

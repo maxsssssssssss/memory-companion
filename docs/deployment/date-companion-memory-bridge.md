@@ -13,7 +13,7 @@ npm run memory-bridge:migrate
 
 - 不创建目录或 SQLite；
 - 不执行 migration；
-- 精确要求 Date Companion migration 序列为 `1..6`、Memory 为 `1..9`；
+- 本次候选精确要求 Date Companion 和 Memory 的 migration 序列各为 `1..15`；
 - 对两库分别执行 `foreign_key_check` 和完整 `integrity_check`；
 - 只输出结构状态、计数和稳定错误码，不输出数据路径、用户正文或 SQLite 原始错误。
 
@@ -49,7 +49,9 @@ Worker consumer 的默认值与安全范围为：
 
 Date Companion v6 会在同一 SQLite transaction 中增加 Bridge/outbox/retention 表，并为已有 Evidence 回填 provenance digest。如果同一来源出现冲突正文，migration 会回滚并返回稳定冲突码。Memory v9 增加 provenance、Person link 和幂等 receipt 表。
 
-两份 SQLite 不能组成一个跨库 transaction。因此必须让 consumer 保持关闭，在生产数据副本上先演练，再于维护窗口单进程迁移；不能让 Web 和 Worker 首次并发触发自动 migration。
+本次发布从 Date Companion v13 和 Memory v14 分别升级到 v15。Date 的 v14 支持逐段说话人核对，v15 记录分关系、分代次的撤回；Memory 的 v15 增加撤回围栏及来源归属字段。本次修复在撤回时核对仍然存在的来源，已经连续迁移到 v15 的库直接适用。两个库沿用原迁移，无需重跑 v15 或批量更新旧归属。
+
+两份 SQLite 各自提交迁移。因此必须让 consumer 保持关闭，在完整备份副本上先演练，再于维护窗口停写并单进程迁移。如只完成一库，两个服务继续停用，保全现场，从同一冻结点恢复或在副本核实可续跑的前缀后再继续。
 
 ## 上线前演练
 
@@ -60,7 +62,7 @@ Date Companion v6 会在同一 SQLite transaction 中增加 Bridge/outbox/retent
 3. 保持 `DATE_COMPANION_MEMORY_BRIDGE_CONSUMER_ENABLED=false`。
 4. 在数据副本运行 `npm run memory-bridge:preflight`，记录迁移前 schema 和 integrity 状态。
 5. 运行 `npm run memory-bridge:migrate`。
-6. 再运行 `npm run memory-bridge:preflight`，必须得到 v6/v9、两库 FK=ok、integrity=ok。
+6. 再运行 `npm run memory-bridge:preflight`，必须得到 v15/v15、两库 FK=ok、integrity=ok。用原版预检确认旧 Worker 会拒绝打开该版本。
 7. 在副本上演练启动唯一 Worker、健康检查、代码回滚和完整数据恢复。
 
 测试成功只能证明副本演练通过，不能描述为生产迁移完成。
@@ -71,7 +73,7 @@ Date Companion v6 会在同一 SQLite transaction 中增加 Bridge/outbox/retent
 2. 保持 Bridge consumer flag 关闭。
 3. 停止 Web，阻止新上传。
 4. 让唯一 Worker 完成 active Pipeline job；确认 Queue active=0 后 graceful stop Worker。
-5. 备份完整 `APP_DATA_DIR`，包括 SQLite `-wal/-shm` 和所有 JsonStore/索引文件。
+5. 停写后再次核对旧撤回回执和逐项清理状态。若有 pending、processing、retryable_failed 等未完成回执或项目，先用旧服务安全完成已授权的清理，再停写复查；仍未解决则暂缓升级。新版保留旧行，但没有从旧回执续办的协议。随后备份完整 `APP_DATA_DIR`，包括 SQLite `-wal/-shm` 和所有 JsonStore/索引文件。
 6. 备份同一时间点的项目 Redis AOF/RDB/卷，并记录旧 release、环境摘要和恢复命令。
 7. 验证备份可列出、大小合理，并在备份副本运行 SQLite 检查。
 8. 在新 release、同一生产环境中运行 `npm run memory-bridge:migrate`。
@@ -82,6 +84,13 @@ Date Companion v6 会在同一 SQLite transaction 中增加 Bridge/outbox/retent
 12. Worker 健康后再启动 Web，并再次执行 queue health 和站点验收。
 
 注意：现有 queue storage probe 在 marker 缺失时会进行受控写入，而且 matched 依赖运行中的 Worker Redis summary。因此 storage marker 不能在“Web/Worker 都停止”的离线 migration 阶段证明；它必须在唯一 Worker 启动后验证。
+
+维护窗口第 5 步在停写后的 Date Companion 库上只读核对这两个计数。两个结果都为零才可继续。
+
+```sql
+SELECT count(*) AS unfinished_receipts FROM dc_retained_memory_purges WHERE status <> 'completed';
+SELECT count(*) AS unfinished_items FROM dc_retained_memory_purge_items WHERE status <> 'completed';
+```
 
 ## 结果判定
 
@@ -104,9 +113,9 @@ preflight 的核心结构为：
 
 ## 回滚
 
-v6/v9 只增加列、表、索引和 outbox/receipt；普通代码回滚默认保留这些 additive 结构，不删表、不清空 outbox，也不手工撤销有效 lease。
+本次升级后，旧发布的精确版本门禁只接受 v13/v14。恢复写入之前可以在停写点用完整备份和配对 Redis 恢复旧服务。新 Worker 也可能先于 Web 写入；一旦发生新写入，须先保存 v15/v15 和队列增量，再以前向修复或已演练的无损兼容方案恢复。
 
-如果新版本已经处理真实 Bridge 数据、出现数据损坏，或旧代码不能读取新状态，则必须：
+以下旧版恢复步骤限已确认快照后没有新写入的维护窗口：
 
 ```text
 停 Web/Worker
@@ -118,4 +127,4 @@ v6/v9 只增加列、表、索引和 outbox/receipt；普通代码回滚默认�
 → 启动旧 Web
 ```
 
-不能只回滚代码，也不能混用新数据和旧 Redis 快照。未经单独授权，不在回滚中删除 v6/v9 表或 Bridge outbox。
+回切时两库、完整文件存储和 Redis 必须来自同一冻结点。保留原撤回回执、outbox 与历史删除标记。

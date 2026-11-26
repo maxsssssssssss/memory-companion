@@ -1,4 +1,5 @@
 import type Database from "better-sqlite3";
+import { isIndependentDateEvidence } from "@/lib/server/memory/projection-visibility";
 import { createMemoryRepository } from "@/lib/server/memory/repository";
 import { recalculatePersonLifecycle } from "@/lib/server/person/lifecycle-recalculation";
 import { DcConflictError } from "./errors";
@@ -43,7 +44,17 @@ export function hasDateCompanionGrantProjection(db: Database.Database, grant: Gr
     `).get(grant));
 }
 
-function detachPersonProjection(db: Database.Database, grant: Grant) {
+type PersonScope = Pick<Grant, "userId" | "relationshipId" | "interactionId" | "uploadId">;
+
+type DetachedPersonSource = {
+  id: string;
+  independentEvidence: number;
+  removedSubjects: string[];
+};
+
+// Removing a link and deciding whether its canonical evidence is orphaned are
+// separate steps: a Worker repairing a projection can reattach the same source.
+export function detachDateCompanionPersonLinks(db: Database.Database, scope: PersonScope): DetachedPersonSource[] {
   const links = db.prepare(`
     SELECT l.person_evidence_id AS id, MAX(l.independent_person_evidence) AS independentEvidence,
       MAX(l.independent_relationship_edge) AS independentEdge FROM person_evidence_dc_links l
@@ -51,52 +62,57 @@ function detachPersonProjection(db: Database.Database, grant: Grant) {
     WHERE l.account_id = @userId AND l.dc_relationship_id = @relationshipId
       AND l.dc_interaction_id = @interactionId AND e.upload_id = @uploadId
     GROUP BY l.person_evidence_id
-  `).all(grant) as Array<{ id: string; independentEvidence: number; independentEdge: number }>;
+  `).all(scope) as Array<{ id: string; independentEvidence: number; independentEdge: number }>;
 
   db.prepare(`DELETE FROM person_evidence_dc_links
     WHERE account_id = @userId AND dc_relationship_id = @relationshipId
       AND dc_interaction_id = @interactionId
       AND EXISTS (SELECT 1 FROM person_evidence e WHERE e.account_id = @userId
-        AND e.id = person_evidence_dc_links.person_evidence_id AND e.upload_id = @uploadId)`).run(grant);
+        AND e.id = person_evidence_dc_links.person_evidence_id AND e.upload_id = @uploadId)`).run(scope);
 
-  let removed = false;
-  for (const { id, independentEvidence, independentEdge } of links) {
-    const params = { ...grant, id, independentEdge };
-    if (!independentEvidence && !db.prepare(`
-      SELECT 1 FROM person_evidence_dc_links WHERE account_id = @userId AND person_evidence_id = @id
-      UNION ALL
-      SELECT 1 FROM memory_daily_reflection_candidate_person_sources
-      WHERE user_id = @userId AND person_evidence_id = @id AND status = 'active'
-      UNION ALL
-      SELECT 1 FROM person_evidence person JOIN memory_evidence evidence
-        ON evidence.source_id = person.source_segment_id AND evidence.upload_id = person.upload_id
-      JOIN memory_items memory ON memory.id = evidence.memory_id AND memory.user_id = person.account_id
-      WHERE person.account_id = @userId AND person.id = @id
-    `).get(params)) {
-      // All references to this source were derivatives of the withdrawn grant.
-      // Foreign keys remove its observations, fact/commitment evidence and audits.
-      db.prepare("DELETE FROM person_evidence WHERE account_id = ? AND id = ?").run(grant.userId, id);
-      removed = true;
-      continue;
-    }
-    // The canonical source is independently supported. Detach only this
-    // relationship edge and the bridge's observations if no other grant uses them.
+  return links.map(({ id, independentEvidence, independentEdge }) => {
+    const params = { ...scope, id, independentEdge };
+    // Person admission and Date can produce the same edge ID. The Person
+    // candidate audit identifies its independent support even on migrated v15 rows.
     db.prepare(`
       DELETE FROM person_relationship_evidence WHERE account_id = @userId AND evidence_id = @id
         AND @independentEdge = 0
         AND relationship_id IN (SELECT person_relationship_id FROM dc_person_relationship_links
           WHERE account_id = @userId AND dc_relationship_id = @relationshipId)
         AND NOT EXISTS (
+          SELECT 1 FROM person_admission_audits a
+          WHERE a.account_id = @userId AND a.entity_type = 'relationship' AND a.action = 'relationship_candidate'
+            AND a.entity_id = person_relationship_evidence.relationship_id AND a.evidence_id = @id
+        )
+        AND NOT EXISTS (
           SELECT 1 FROM person_evidence_dc_links l
-          JOIN dc_person_relationship_links r ON r.account_id = l.account_id
-            AND r.dc_relationship_id = l.dc_relationship_id
+          JOIN dc_person_relationship_links r ON r.account_id = l.account_id AND r.dc_relationship_id = l.dc_relationship_id
           WHERE l.account_id = @userId AND l.person_evidence_id = @id
             AND r.person_relationship_id = person_relationship_evidence.relationship_id
         )
     `).run(params);
-    // A second product can have its own current admission while holding a
-    // snapshot of the old observation to restore when *its* grant ends.
-    // Drop that restoration only when it points at this bridge's old grant.
+    const removed = db.prepare(`
+      DELETE FROM person_subject_observations WHERE account_id = @userId AND evidence_id = @id
+        AND source = 'manual_review' AND status = 'confirmed' AND person_id IS NOT NULL
+        AND reason IN ('date_companion_explicit_subject_v1','date_companion_qwen_batch_review_v1')
+        AND NOT EXISTS (SELECT 1 FROM person_evidence_dc_links
+          WHERE account_id = @userId AND person_evidence_id = @id)
+        AND NOT EXISTS (SELECT 1 FROM memory_daily_reflection_candidate_person_sources
+          WHERE user_id = @userId AND subject_observation_id = person_subject_observations.id AND status = 'active')
+      RETURNING person_id
+    `).all(params) as Array<{ person_id: string }>;
+    return { id, independentEvidence, removedSubjects: removed.map(row => row.person_id) };
+  });
+}
+
+export function pruneDetachedDateCompanionEvidence(
+  db: Database.Database, userId: string, sources: DetachedPersonSource[]
+) {
+  let lifecycleChanged = false;
+  for (const { id, independentEvidence, removedSubjects } of sources) {
+    const params = { userId, id };
+    // Another product may restore its predecessor when its own grant ends.
+    // Wait until a repair has had a chance to reestablish that predecessor.
     db.prepare(`
       UPDATE memory_daily_reflection_candidate_person_sources
       SET previous_subject_admission_json = NULL, previous_subject_observation_json = NULL,
@@ -106,17 +122,58 @@ function detachPersonProjection(db: Database.Database, grant: Grant) {
           'date_companion_explicit_subject_v1', 'date_companion_qwen_batch_review_v1')
         AND NOT EXISTS (SELECT 1 FROM person_evidence_dc_links WHERE account_id = @userId AND person_evidence_id = @id)
     `).run(params);
-    db.prepare(`
-      DELETE FROM person_subject_observations WHERE account_id = @userId AND evidence_id = @id
-        AND source = 'manual_review'
-        AND reason IN ('date_companion_explicit_subject_v1','date_companion_qwen_batch_review_v1')
-        AND NOT EXISTS (SELECT 1 FROM person_evidence_dc_links
-          WHERE account_id = @userId AND person_evidence_id = @id)
-        AND NOT EXISTS (SELECT 1 FROM memory_daily_reflection_candidate_person_sources
-          WHERE user_id = @userId AND subject_observation_id = person_subject_observations.id AND status = 'active')
-    `).run(params);
+    // Only original source support counts. Facts and commitments derived from
+    // that source cannot establish its independent admission.
+    if (!independentEvidence && !db.prepare(`
+      SELECT 1 FROM person_evidence_dc_links WHERE account_id = @userId AND person_evidence_id = @id
+      UNION ALL
+      SELECT 1 FROM person_relationship_evidence WHERE account_id = @userId AND evidence_id = @id
+      UNION ALL
+      SELECT 1 FROM person_names WHERE account_id = @userId AND evidence_id = @id
+      UNION ALL
+      SELECT 1 FROM person_identity_links WHERE account_id = @userId AND evidence_id = @id
+      UNION ALL
+      SELECT 1 FROM person_subject_observations WHERE account_id = @userId AND evidence_id = @id
+      UNION ALL
+      SELECT 1 FROM memory_daily_reflection_candidate_person_sources
+      WHERE user_id = @userId AND person_evidence_id = @id AND status = 'active'
+      UNION ALL
+      SELECT 1 FROM person_evidence person JOIN memory_evidence evidence
+        ON evidence.source_id = person.source_segment_id AND evidence.upload_id = person.upload_id
+        AND evidence.source_type = 'transcript' AND evidence.quote = person.quote
+      JOIN memory_items memory ON memory.id = evidence.memory_id AND memory.user_id = person.account_id
+      WHERE person.account_id = @userId AND person.id = @id AND NOT ${isIndependentDateEvidence("evidence")}
+        AND NOT EXISTS (
+          SELECT 1 FROM memory_daily_reflection_publications reflection WHERE reflection.user_id = memory.user_id
+            AND reflection.upload_id = evidence.upload_id AND reflection.status <> 'published'
+        )
+    `).get(params)) {
+      // Foreign keys remove the unsupported source's dependent edges and audits.
+      db.prepare("DELETE FROM person_evidence WHERE account_id = ? AND id = ?").run(userId, id);
+      lifecycleChanged = true;
+      continue;
+    }
+    for (const personId of removedSubjects) {
+      // The Worker may have re-confirmed this same subject during its repair.
+      if (db.prepare(`SELECT 1 FROM person_subject_observations WHERE account_id=?
+        AND evidence_id=? AND person_id=? AND status='confirmed'`).get(userId, id, personId)) continue;
+      // Admission of a fact or commitment requires these exact subjects on
+      // this specific source. Keep its other supporting sources and transitions.
+      const subject = { userId, id, personId };
+      for (const table of ["person_fact_evidence", "person_fact_transitions"]) {
+        const result = db.prepare(`DELETE FROM ${table} WHERE account_id=@userId AND evidence_id=@id
+          AND fact_id IN (SELECT id FROM person_facts WHERE account_id=@userId AND subject_person_id=@personId)`).run(subject);
+        if (result.changes) lifecycleChanged = true;
+      }
+      for (const table of ["person_commitment_evidence", "person_commitment_transitions"]) {
+        const result = db.prepare(`DELETE FROM ${table} WHERE account_id=@userId AND evidence_id=@id
+          AND commitment_id IN (SELECT id FROM person_commitments WHERE account_id=@userId
+            AND (promisor_person_id=@personId OR promisee_person_id=@personId))`).run(subject);
+        if (result.changes) lifecycleChanged = true;
+      }
+    }
   }
-  if (removed) recalculatePersonLifecycle(db, { accountId: grant.userId, now: new Date().toISOString() });
+  if (lifecycleChanged) recalculatePersonLifecycle(db, { accountId: userId, now: new Date().toISOString() });
 }
 
 export function getFencedDateCompanionGrantCategory(db: Database.Database, grant: Grant) {
@@ -154,7 +211,10 @@ export function fenceDateCompanionGrantProjection(db: Database.Database, grant: 
     const legacyPersonReceipt = db.prepare(`SELECT 1 FROM dc_memory_bridge_receipts
       WHERE account_id = @userId AND dc_outbox_id = @outboxId
         AND dc_relationship_id = @relationshipId AND dc_interaction_id = @interactionId`).get(grant);
-    if (retained || legacyPersonReceipt) detachPersonProjection(db, grant);
+    if (retained || legacyPersonReceipt) {
+      const detached = detachDateCompanionPersonLinks(db, grant);
+      pruneDetachedDateCompanionEvidence(db, grant.userId, detached);
+    }
   }).immediate();
 }
 

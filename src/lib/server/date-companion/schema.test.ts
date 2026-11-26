@@ -9,6 +9,7 @@ import {
   openDateCompanionDatabase
 } from "./db";
 import { DateCompanionRepository } from "./repository";
+import { createDateCompanionMemoryBridgeRepository } from "./memory-bridge-repository";
 import { DATE_COMPANION_SCHEMA_VERSION, migrateDateCompanionSchema } from "./schema";
 
 const roots: string[] = [];
@@ -17,10 +18,38 @@ afterEach(async () => {
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
 });
 
+function versionsThrough(version: number) {
+  return Array.from({ length: version }, (_, index) => index + 1);
+}
+
+// Each migration and its ledger insert share a transaction. Stop that transaction
+// at the first newer version so the fixture contains only the historical schema.
+function createLegacySchema(db: Database.Database, version: 1 | 12) {
+  db.exec(`
+    CREATE TABLE dc_schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL);
+    CREATE TEMP TRIGGER fixture_stop_migrations BEFORE INSERT ON dc_schema_migrations
+    WHEN NEW.version > ${version}
+    BEGIN SELECT RAISE(ABORT, 'fixture_target_version_reached'); END;
+  `);
+  expect(() => migrateDateCompanionSchema(db)).toThrow(/^fixture_target_version_reached$/);
+  db.exec("DROP TRIGGER fixture_stop_migrations");
+  expect(db.prepare("SELECT version FROM dc_schema_migrations ORDER BY version").pluck().all())
+    .toEqual(versionsThrough(version));
+}
+
 describe("date-companion SQLite schema", () => {
-  it("upgrades version 12 through segment review without altering existing evidence, roles, preparations or grants", () => {
-    const db = openDateCompanionDatabase({ filePath: ":memory:" });
+  it("upgrades V12 with its saved meeting, speaker identity and evidence intact", () => {
+    const db = new Database(":memory:");
     try {
+      db.pragma("foreign_keys = ON");
+      createLegacySchema(db, 12);
+      const newTables = [
+        "dc_preparations", "dc_preparation_operations", "dc_reviewed_speaker_segments",
+        "dc_memory_withdrawals", "dc_memory_withdrawn_grants"
+      ];
+      for (const name of newTables) {
+        expect(db.prepare("SELECT name FROM sqlite_schema WHERE name = ?").get(name)).toBeUndefined();
+      }
       const repo = new DateCompanionRepository(db);
       const userId = "migration-user", relationship = repo.createOrGetRelationship(userId).relationship;
       const upload = "migration-fixture", { interactionId } = repo.importInteraction({
@@ -28,13 +57,21 @@ describe("date-companion SQLite schema", () => {
         participants: [{ speakerId: "self" }], recapCandidates: [{ kind: "promise", proposedText: "把书名发给你", sortOrder: 0,
           evidence: [{ uploadId: upload, sourceSegmentId: "migration-segment", startSeconds: 0, endSeconds: 2, speakerId: "self", quote: "我把书名发给你。" }] }],
       });
-      const item = repo.getInteractionDetail(userId, relationship.id, interactionId).recapItems[0];
-      repo.updateRecap({ userId, interactionId, version: 0, assignments: [{ speakerId: "self", role: "self" }],
-        mutations: [{ id: item.id, version: 0, disposition: "kept" }], finalize: true });
-      // Seed a saved meeting, then reproduce the V12 schema before reapplying migrations.
-      db.exec(`DROP VIEW dc_evidence_speaker_reviews; DROP TABLE dc_reviewed_speaker_segments;
-        ALTER TABLE dc_participant_assignments DROP COLUMN review_by_segment;
-        DROP TABLE dc_preparation_operations; DROP TABLE dc_preparations; DELETE FROM dc_schema_migrations WHERE version>=13;`);
+      // Finalized V12 records have a label-level assignment and no segment-review column.
+      const now = "2026-11-03T12:00:00.000Z";
+      db.prepare("UPDATE dc_interactions SET status='confirmed', version=1, confirmed_at=? WHERE id=?")
+        .run(now, interactionId);
+      db.prepare("UPDATE dc_participant_assignments SET role='self', confirmed_by=?, confirmed_at=? WHERE interaction_id=?")
+        .run(userId, now, interactionId);
+      db.prepare("UPDATE dc_recap_items SET disposition='kept', version=1 WHERE interaction_id=?").run(interactionId);
+      db.prepare(`
+        INSERT INTO dc_promises (id, user_id, relationship_id, originating_recap_item_id, text, status, created_at, updated_at)
+        SELECT 'promise', user_id, ?, id, proposed_text, 'open', ?, ? FROM dc_recap_items WHERE interaction_id=?
+      `).run(relationship.id, now, now, interactionId);
+      createDateCompanionMemoryBridgeRepository(db).putPersonMapping({
+        userId, relationshipId: relationship.id, selfPersonId: "person_a", companionPersonId: "person_b",
+        relationshipType: "dating", expectedVersion: 0
+      });
       const tables = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'dc_%' AND name!='dc_schema_migrations' ORDER BY name").all() as { name: string }[];
       const originalColumns = tables.map(({name}) => ({
         name, columns: (db.pragma(`table_info("${name}")`) as Array<{name:string}>).map(c => c.name).join(",")
@@ -49,11 +86,36 @@ describe("date-companion SQLite schema", () => {
       migrateDateCompanionSchema(db);
       expect(rows()).toEqual(before);
       expect(db.prepare("SELECT * FROM dc_schema_migrations WHERE version<13 ORDER BY version").all()).toEqual(migrations);
-      expect(db.prepare("SELECT COUNT(*) AS n FROM dc_schema_migrations WHERE version=13").get()).toEqual({n:1});
+      expect(db.prepare("SELECT version FROM dc_schema_migrations WHERE version>12 ORDER BY version").pluck().all())
+        .toEqual(versionsThrough(DATE_COMPANION_SCHEMA_VERSION).slice(12));
       expect(db.prepare("SELECT review_by_segment FROM dc_participant_assignments").get()).toEqual({review_by_segment:0});
-      for (const table of ["dc_preparations", "dc_preparation_operations","dc_reviewed_speaker_segments"])
+      expect(db.prepare("SELECT role, confirmed_by FROM dc_evidence_speaker_reviews").get())
+        .toEqual({ role: "self", confirmed_by: userId });
+      expect(db.prepare("SELECT self_person_id, companion_person_id, status, version FROM dc_relationship_person_mappings").get())
+        .toEqual({ self_person_id: "person_a", companion_person_id: "person_b", status: "confirmed", version: 1 });
+      for (const table of newTables) {
         expect(db.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get()).toEqual({n:0});
+      }
+      expect(db.pragma("index_info(idx_dc_withdrawn_grants_receipt)")).toEqual([
+        expect.objectContaining({ name: "withdrawal_id" })
+      ]);
+      const insertReceipt = db.prepare(`
+        INSERT INTO dc_memory_withdrawals (id, user_id, relationship_id, preview_version, created_at, updated_at)
+        VALUES (?, ?, ?, 'preview', ?, ?)
+      `);
+      expect(() => insertReceipt.run("wrong-owner", "other-user", relationship.id, now, now)).toThrow(/FOREIGN KEY/);
+      insertReceipt.run("receipt", userId, relationship.id, now, now);
+      expect(() => insertReceipt.run("duplicate", userId, relationship.id, now, now)).toThrow(/UNIQUE/);
+      const insertGrant = db.prepare(`
+        INSERT INTO dc_memory_withdrawn_grants (withdrawal_id, user_id, relationship_id, interaction_id, upload_id,
+          generation, outbox_id, idempotency_key, payload_digest, category, status)
+        VALUES ('receipt', ?, ?, ?, ?, ?, 'outbox', 'key', 'digest', ?, 'pending')
+      `);
+      expect(() => insertGrant.run(userId, relationship.id, interactionId, upload, 0, "retained")).toThrow(/CHECK/);
+      expect(() => insertGrant.run(userId, relationship.id, interactionId, upload, 1, "unclassified")).toThrow(/CHECK/);
+      insertGrant.run(userId, relationship.id, interactionId, upload, 1, "retained");
       expect(db.pragma("foreign_key_check")).toEqual([]);
+      expect(db.pragma("integrity_check", { simple: true })).toBe("ok");
     } finally { db.close(); }
   });
 
@@ -248,47 +310,27 @@ describe("date-companion SQLite schema", () => {
     roots.push(root);
     const filePath = getDateCompanionDatabasePath(root);
     const legacyDatabase = new Database(filePath);
-    legacyDatabase.exec(`
-      CREATE TABLE dc_schema_migrations (
-        version INTEGER PRIMARY KEY,
-        applied_at TEXT NOT NULL
-      );
-      INSERT INTO dc_schema_migrations (version, applied_at)
-      VALUES (1, '2026-08-04T00:00:00.000Z');
-      CREATE TABLE dc_interactions (
-        id TEXT PRIMARY KEY,
-        user_id TEXT NOT NULL,
-        UNIQUE (id, user_id)
-      );
-      CREATE TABLE dc_relationships (
-        id TEXT NOT NULL,
-        user_id TEXT NOT NULL,
-        UNIQUE (id, user_id)
-      );
-      CREATE TABLE dc_participant_assignments (
-        user_id TEXT NOT NULL,
-        interaction_id TEXT NOT NULL,
-        speaker_id TEXT NOT NULL,
-        PRIMARY KEY (user_id, interaction_id, speaker_id)
-      );
-      CREATE TABLE dc_evidence_snapshots (
-        id TEXT PRIMARY KEY,
-        user_id TEXT NOT NULL,
-        recap_item_id TEXT NOT NULL,
-        upload_id TEXT NOT NULL,
-        source_segment_id TEXT NOT NULL,
-        start_seconds REAL NOT NULL,
-        end_seconds REAL NOT NULL,
-        speaker_id TEXT,
-        quote TEXT NOT NULL,
-        created_at TEXT NOT NULL,
-        UNIQUE (id, user_id),
-        UNIQUE (user_id, recap_item_id, upload_id, source_segment_id)
-      );
-    `);
-    legacyDatabase.close();
+    try {
+      legacyDatabase.pragma("foreign_keys = ON");
+      createLegacySchema(legacyDatabase, 1);
+      expect(legacyDatabase.prepare(
+        "SELECT name FROM pragma_table_info('dc_interactions') WHERE name='confirmation_fingerprint'"
+      ).get()).toBeUndefined();
+      legacyDatabase.exec(`
+        INSERT INTO dc_relationships (id, user_id, status, created_at, updated_at)
+          VALUES ('relation', 'owner', 'active', '2026-08-04', '2026-08-04');
+        INSERT INTO dc_interactions (id, user_id, relationship_id, source_upload_id, recording_date,
+          original_name, status, source_state, created_at, updated_at)
+          VALUES ('meeting', 'owner', 'relation', 'upload', '2026-08-04',
+            'synthetic.wav', 'draft', 'available', '2026-08-04', '2026-08-04');
+      `);
+    } finally {
+      legacyDatabase.close();
+    }
 
     const database = openDateCompanionDatabase({ filePath });
+    const ledger = "SELECT version, applied_at FROM dc_schema_migrations ORDER BY version";
+    let migratedLedger: unknown[];
     try {
       const columns = database.prepare(
         "PRAGMA table_info(dc_interactions)"
@@ -296,27 +338,25 @@ describe("date-companion SQLite schema", () => {
       expect(columns.map((column) => column.name)).toContain("confirmation_fingerprint");
       expect(database.prepare(
         "SELECT version FROM dc_schema_migrations ORDER BY version"
-      ).all()).toEqual([
-        { version: 1 },
-        { version: 2 },
-        { version: 3 },
-        { version: 4 },
-        { version: 5 },
-        { version: 6 },
-        { version: 7 },
-        { version: 8 },
-        { version: 9 },
-        { version: 10 },
-        { version: 11 },
-        { version: 12 },
-        { version: 13 }, { version: 14 }
-      ]);
-      migrateDateCompanionSchema(database);
-      expect(database.prepare(
-        "SELECT COUNT(*) AS count FROM dc_schema_migrations"
-      ).get()).toEqual({ count: DATE_COMPANION_SCHEMA_VERSION });
+      ).pluck().all()).toEqual(versionsThrough(DATE_COMPANION_SCHEMA_VERSION));
+      migratedLedger = database.prepare(ledger).all();
     } finally {
       database.close();
+    }
+    const reopened = openDateCompanionDatabase({ filePath });
+    try {
+      expect(reopened.prepare(ledger).all()).toEqual(migratedLedger);
+      expect(reopened.prepare(`
+        SELECT user_id, relationship_id, source_upload_id, status, confirmation_fingerprint
+        FROM dc_interactions WHERE id='meeting'
+      `).get()).toEqual({
+        user_id: "owner", relationship_id: "relation", source_upload_id: "upload",
+        status: "draft", confirmation_fingerprint: null
+      });
+      expect(reopened.pragma("foreign_key_check")).toEqual([]);
+      expect(reopened.pragma("integrity_check", { simple: true })).toBe("ok");
+    } finally {
+      reopened.close();
     }
   });
 
